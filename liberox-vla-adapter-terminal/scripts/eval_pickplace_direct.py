@@ -25,7 +25,8 @@ from trajectory_utils import (
 )
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = WORKSPACE_ROOT / "configs" / "config.yaml"
 VALID_LEVELS = frozenset({"LEVEL1", "LEVEL2", "LEVEL3", "LEVEL4"})
 VLA_VIDEO_VIEW = "vla_views"
 VLA_OBSERVATION_CAMERAS = ("agentview", "robot0_eye_in_hand")

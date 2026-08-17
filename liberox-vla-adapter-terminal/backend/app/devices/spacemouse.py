@@ -19,7 +19,9 @@ import numpy as np
 import yaml
 
 
-DEFAULT_SPACEMOUSE_CONFIG = Path(__file__).resolve().parents[3] / "spacemouse_test_config.yaml"
+DEFAULT_SPACEMOUSE_CONFIG = (
+    Path(__file__).resolve().parents[4] / "configs" / "spacemouse_test_config.yaml"
+)
 AXIS_NAMES = ("x", "y", "z", "roll", "pitch", "yaw")
 VALID_MODES = frozenset({"device", "simulation"})
 # This is the convention produced by *our* axis_order / axis_signs transform,

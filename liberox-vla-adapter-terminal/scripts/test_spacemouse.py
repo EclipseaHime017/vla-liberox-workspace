@@ -21,6 +21,7 @@ import numpy as np
 import eval_pickplace_direct as direct
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = PROJECT_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -37,7 +38,7 @@ from trajectory_utils import TrajectoryRecorder, save_trajectory_bundle
 
 
 LOGGER = logging.getLogger("spacemouse_test")
-EVAL_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+EVAL_CONFIG_PATH = WORKSPACE_ROOT / "configs" / "config.yaml"
 
 
 def validate_command_line() -> None:

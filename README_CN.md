@@ -105,7 +105,7 @@ sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev libgl
 export MUJOCO_GL=egl
 ```
 
-评测脚本默认还会从 `config.yaml` 设置 `MUJOCO_GL=egl`；上面的 `export` 适用于其他 MuJoCo 程序，或在配置中将 `mujoco_gl` 设为 `null` 时使用。
+评测脚本默认还会从 `configs/config.yaml` 设置 `MUJOCO_GL=egl`；上面的 `export` 适用于其他 MuJoCo 程序，或在配置中将 `mujoco_gl` 设为 `null` 时使用。
 
 先检查关键版本：
 
@@ -123,7 +123,7 @@ PY
 
 ## 3. 分阶段跑通
 
-评测参数集中在本模板根目录的 `config.yaml`。配置文件内部的相对路径均以该 YAML 所在目录为基准；下文的相对脚本命令则假设当前目录为 `vla-liberox-workspace`。先进入工作区：
+评测参数集中在仓库根目录的 `configs/config.yaml`。配置文件内部的相对路径均以 `configs/` 为基准；下文的相对脚本命令则假设当前目录为 `vla-liberox-workspace`。先进入工作区：
 
 ```bash
 cd vla-liberox-workspace
@@ -179,7 +179,7 @@ mujoco_gl: egl
 
 也可以把 `video_camera` 改为 `frontview`、`birdview`、`sideview` 或 `galleryview`，此时 `video_width`/`video_height` 是该单相机的渲染分辨率。`birdview` 覆盖范围最大，`frontview` 更适合观察机械臂整体运动；宽高有效范围均为 `64..2048`。
 
-脚本强制读取 `liberox-vla-adapter-terminal/config.yaml`，不接受其他配置地址或运行参数。需要调整实验时直接编辑该文件，运行命令只有一行：
+脚本强制读取 `configs/config.yaml`，不接受其他配置地址或运行参数。需要调整实验时直接编辑该文件，运行命令只有一行：
 
 ```bash
 python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
@@ -187,7 +187,7 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 
 ### 3.1 只验证场景、初始状态和观察量
 
-在 `config.yaml` 中设置：
+在 `configs/config.yaml` 中设置：
 
 ```yaml
 env_only: true
@@ -212,7 +212,7 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 
 ### 3.2 单次模型 rollout
 
-在 `config.yaml` 中设置：
+在 `configs/config.yaml` 中设置：
 
 ```yaml
 env_only: false
@@ -237,7 +237,7 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 
 ### 3.3 扩大评测
 
-需要扩大到 10 回合时，把 `config.yaml` 改为：
+需要扩大到 10 回合时，把 `configs/config.yaml` 改为：
 
 ```yaml
 env_only: false
@@ -283,7 +283,7 @@ Action 图的下横轴单位是控制帧 `[frame]`，上横轴单位是仿真时
 
 ### 3.5 回溯、重新推理与人工接管
 
-先至少重新运行一次 3.2 或 3.3，生成上述 `trajectory_*.npz`。然后编辑固定的 `intervention_config.yaml`：
+先至少重新运行一次 3.2 或 3.3，生成上述 `trajectory_*.npz`。然后编辑固定的 `configs/intervention_config.yaml`：
 
 ```yaml
 source_trajectory: ../runs/liberox_pickplace_l1_config/trajectory_000.npz
@@ -299,16 +299,16 @@ output_root: ../runs/liberox_interventions
 
 干预脚本不再单独设置运行长度。假设源轨迹共有 `N` 个动作，从 `resume_step=K` 回溯后会自动执行 `N-K` 个新动作，因此合并后的轨迹仍然严格包含 `N` 个动作，视频帧数和源轨迹保持一致。例如 300 步源轨迹从 step 50 回溯，会重新生成后 250 步，最终仍是 300 步。
 
-两个 YAML 都使用 `open_loop_steps` 表示“每次 VLA 预测 8 个 action 后，实际连续执行其中多少个”。字段名称和有效范围 `1..8` 完全一致，但两个文件的值彼此独立：`config.yaml` 控制原始评测，`intervention_config.yaml` 控制回溯后的分支推理。
+两个 YAML 都使用 `open_loop_steps` 表示“每次 VLA 预测 8 个 action 后，实际连续执行其中多少个”。字段名称和有效范围 `1..8` 完全一致，但两个文件的值彼此独立：`configs/config.yaml` 控制原始评测，`configs/intervention_config.yaml` 控制回溯后的分支推理。
 
-干预结束后会根据完整 state 序列流式生成两份视频，播放帧率统一继承 `config.yaml` 的 `video_fps`，并与 `control_hz` 相等：
+干预结束后会根据完整 state 序列流式生成两份视频，播放帧率统一继承 `configs/config.yaml` 的 `video_fps`，并与 `control_hz` 相等：
 
-- `intervention.mp4`：沿用 `config.yaml` 的 `video_camera`、`video_width` 和 `video_height`；默认是未经缩放的 `512×256` VLA 双视角拼接，左主视角、右腕部视角；
+- `intervention.mp4`：沿用 `configs/config.yaml` 的 `video_camera`、`video_width` 和 `video_height`；默认是未经缩放的 `512×256` VLA 双视角拼接，左主视角、右腕部视角；
 - `intervention_agentview_hd.mp4`：沿用 `main_view_video_width` 和 `main_view_video_height`，使用与推理主图相同、位置更高的 `agentview` 相机，默认 `1024×1024`。
 
 两份视频的原轨迹前缀和新分支都依据保存的 MuJoCo state 在控制结束后重新渲染，因此帧数、回溯点和相机位姿严格对齐。视频采用流式编码，不会把两组高清帧同时堆积在内存中，也不会在人工/VLA 控制期间阻塞 20 Hz 循环。
 
-intervention 同样读取 `config.yaml` 的 `headless`：为 `false` 时打开 MuJoCo 原生 Viewer，并从 `resume_step` 恢复点开始同步当前新分支，不会把回溯点之前的历史前缀快速播放一遍；历史前缀仍会正常写入两份最终视频。
+intervention 同样读取 `configs/config.yaml` 的 `headless`：为 `false` 时打开 MuJoCo 原生 Viewer，并从 `resume_step` 恢复点开始同步当前新分支，不会把回溯点之前的历史前缀快速播放一遍；历史前缀仍会正常写入两份最终视频。
 
 运行命令同样不接受配置地址：
 
@@ -318,7 +318,7 @@ python liberox-vla-adapter-terminal/scripts/intervene_pickplace.py
 
 脚本会恢复指定 state，而不是从头近似执行旧动作。恢复后清空旧 action chunk，并按以下模式产生一条新分支：
 
-- `policy`：从指定点重新查询 VLA。`open_loop_steps` 与 `config.yaml` 中的字段同名；设为 `1` 时每一步都重新规划；
+- `policy`：从指定点重新查询 VLA。`open_loop_steps` 与 `configs/config.yaml` 中的字段同名；设为 `1` 时每一步都重新规划；
 - `manual_stdin`：人或外部程序通过标准输入逐条发送动作；
 - `manual_jsonl`：从 `manual_action_file` 读取可复现的人工动作；
 - `manual_udp`：外部手柄/控制器程序通过 UDP 实时发送动作，默认监听 `127.0.0.1:5555`。
@@ -368,7 +368,7 @@ sudo install -m 0644 \
 sudo udevadm control --reload-rules
 ```
 
-随后拔下并重新插入 SpaceMouse（只 reload 规则不会修改已经存在的 hidraw 节点）。测试脚本固定读取模板根目录的 `spacemouse_test_config.yaml`，不接受配置地址：
+随后拔下并重新插入 SpaceMouse（只 reload 规则不会修改已经存在的 hidraw 节点）。测试脚本固定读取 `configs/spacemouse_test_config.yaml`，不接受配置地址：
 
 ```bash
 cd vla-liberox-workspace
@@ -378,13 +378,13 @@ python liberox-vla-adapter-terminal/scripts/test_spacemouse.py
 
 首次诊断时设置 `mode: device`，只验证 HID，不导入 MuJoCo、LIBERO 或 VLA。静止校准期间不要触摸帽盖；设备在完全静止时不发送新报告属于正常情况，此时使用已初始化的零状态，随后的覆盖测试仍会验证真实 HID 报告。倒计时后依次让六个轴向正负两个方向运动并按下左右键。终端显示 raw 输入和最终 OSC_POSE command，运行结束后检查 `summary.json` 的 `functional_check_complete` / `acceptance_passed` 与 `device_summary.json` 的轴/按钮覆盖率。未完成覆盖或性能验收时脚本以状态码 `2` 结束，运行错误使用状态码 `1`。
 
-确认设备读取正确后，将 `spacemouse_test_config.yaml` 改为：
+确认设备读取正确后，将 `configs/spacemouse_test_config.yaml` 改为：
 
 ```yaml
 mode: simulation
 ```
 
-再次运行相同命令即可在当前 `config.yaml` 的 LEVEL、任务、seed 和第一个 benchmark init state 中控制机械臂。该模式不加载 VLA：
+再次运行相同命令即可在当前 `configs/config.yaml` 的 LEVEL、任务、seed 和第一个 benchmark init state 中控制机械臂。该模式不加载 VLA：
 
 - SpaceMouse 独立线程以约 1 ms 间隔非阻塞读取 HID，20 Hz 控制环在每个控制边界只取最新快照；
 - PySpaceMouse 2.0.0 固定输出 legacy 轴；本项目再显式映射为 ROS 右手 Z-up normalized OSC_POSE `[X,Y,Z,Rx,Ry,Rz,gripper]`，默认映射是 `[legacy_y,-legacy_x,legacy_z,legacy_roll,legacy_pitch,-legacy_yaw]`；当前位移/旋转增益分别为 `0.25 / 0.08`；
@@ -419,7 +419,7 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 
 然后浏览器打开 `http://127.0.0.1:8000`。
 
-UI 仍读取 `config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。任务目录默认包含 `config.yaml` 的黑碗任务，并由 `ui_config.yaml` 追加两个 LEVEL1 Franka 任务：
+UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。任务目录默认包含该配置的黑碗任务，并由 `configs/ui_config.yaml` 追加两个 LEVEL1 Franka 任务：
 
 - `place the black bowl on the flat stove`；
 - `open the top drawer of the wooden cabinet`；
@@ -432,7 +432,7 @@ UI 仍读取 `config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设�
 - `max_steps`：本次总控制步数；
 - `open_loop_steps`：每次 VLA 预测 8 个 action 后实际执行的数量，有效范围 `1..8`。
 
-UI 专属参数固定从 `ui_config.yaml` 读取，启动命令不接受配置地址：
+UI 专属参数固定从 `configs/ui_config.yaml` 读取，启动命令不接受配置地址：
 
 ```yaml
 host: 127.0.0.1
@@ -463,7 +463,7 @@ LOADING → READY（人工接管倒计时）→ RUNNING → STOPPING → POSTPRO
 
 “停止”在下一个控制边界生效；若 GPU 正在同步推理，会先显示 `STOPPING`，等待这次 CUDA 调用自然返回，不会强行中断模型。停止和异常都尽量保存已经产生的部分轨迹及可诊断的 `run.json`。
 
-实时预览不打开 MuJoCo 原生 Viewer。控制线程只写入最新 MuJoCo state，一个由固定线程长期持有的只读 MuJoCo 环境跨会话复用，并以 `agentview 512×512 / 10 fps` 渲染 JPEG；过期预览帧直接丢弃，因此不占用 20 Hz 控制循环。分支创建后先从父视频提取回溯帧作为 `resume_preview.jpg`，实时预览首帧产生前持续显示它，避免准备阶段黑屏。现有两个 CLI 仍遵循 `config.yaml` 的 `headless`，行为不变。
+实时预览不打开 MuJoCo 原生 Viewer。控制线程只写入最新 MuJoCo state，一个由固定线程长期持有的只读 MuJoCo 环境跨会话复用，并以 `agentview 512×512 / 10 fps` 渲染 JPEG；过期预览帧直接丢弃，因此不占用 20 Hz 控制循环。分支创建后先从父视频提取回溯帧作为 `resume_preview.jpg`，实时预览首帧产生前持续显示它，避免准备阶段黑屏。现有两个 CLI 仍遵循 `configs/config.yaml` 的 `headless`，行为不变。
 
 预览容器严格使用 `preview_width:preview_height` 的宽高比，默认与方形 `agentview` 完全匹配，不再用 `16:9` 裁剪或拉伸；桌面页面中的显示宽高按原容器的 50% 等比例缩小并居中，窄屏设备恢复为 100% 宽度。会话完成后，预览区自动切换为已保存的 `agentview` 视频播放器；拖动回溯时间轴会 seek 到对应视频时刻，播放或拖动视频也会同步时间轴和该帧的轨迹数值，不再为每次拖动跨线程调用 EGL 重渲染。
 
@@ -475,7 +475,7 @@ UI 启动后只探测控制器，不占用动作输出。连接设备后顶部�
 
 点击 SpaceMouse 接管后，后端依次显示“读取轨迹、加载环境、恢复状态、准备预览”，取得有效首帧后进入 `READY`，显示清晰的 `3、2、1` 倒计时；倒计时结束前控制器保持 disarmed，机械臂不会运动。开始接管后左键张开夹爪，右键闭合；位移和旋转增益可在创建分支前调整，也可在运行时通过 `0.05..1.0` 的滑杆实时更新。顶部控制器 pill 显示输入样本年龄：绿色 `<50 ms`，黄色 `50–249 ms`，红色 `≥250 ms`、断连或读取错误；红色状态下六维运动自动归零。接管会话的 WebSocket 断开会安全停止分支并保存已有轨迹。
 
-`ui_config.yaml` 的 `legacy_scan_roots` 会在启动时递归索引已有 `trajectory_*.npz`：
+`configs/ui_config.yaml` 的 `legacy_scan_roots` 会在启动时递归索引已有 `trajectory_*.npz`：
 
 - 现有 CLI 原始轨迹如果任务和 LEVEL 能映射到上述任务目录，可在 UI 中查看并创建一级分支；
 - 现有 intervention 轨迹识别为分支，只读展示；
@@ -593,7 +593,7 @@ cd VLA-Adapter
 git apply ../liberox-vla-adapter-terminal/patches/vla_adapter_liberox_registry.patch
 ```
 
-先用 1 条 episode 构建小型 TFDS 数据集并初始化 `RLDSDataset`；通过后再转换全部数据。数据统计会由 `finetune.py` 写入 checkpoint，评测自训练模型时在 `config.yaml` 中改为：
+先用 1 条 episode 构建小型 TFDS 数据集并初始化 `RLDSDataset`；通过后再转换全部数据。数据统计会由 `finetune.py` 写入 checkpoint，评测自训练模型时在 `configs/config.yaml` 中改为：
 
 ```yaml
 checkpoint: /path/to/your/merged/checkpoint

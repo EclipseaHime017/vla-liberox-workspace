@@ -1,6 +1,6 @@
 # Data layout
 
-`dataset_root` and `project_id` in `ui_config.yaml` produce:
+`dataset_root` and `project_id` in `configs/ui_config.yaml` produce:
 
 ```text
 dataset-root/

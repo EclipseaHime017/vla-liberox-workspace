@@ -27,8 +27,8 @@ from trajectory_utils import (
 )
 
 
-SCRIPT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INTERVENTION_CONFIG_PATH = SCRIPT_ROOT / "intervention_config.yaml"
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_INTERVENTION_CONFIG_PATH = WORKSPACE_ROOT / "configs" / "intervention_config.yaml"
 VALID_CONTROL_MODES = frozenset({"policy", "manual_stdin", "manual_jsonl", "manual_udp"})
 LOGGER = logging.getLogger("liberox_intervention")
 

@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 
-DEFAULT_UI_CONFIG = Path(__file__).resolve().parents[3] / "ui_config.yaml"
+DEFAULT_UI_CONFIG = Path(__file__).resolve().parents[4] / "configs" / "ui_config.yaml"
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
