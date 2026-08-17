@@ -1,0 +1,3 @@
+# New-generation 3Dconnexion SpaceMouse Wireless (USB cable / Bluetooth SKU).
+# Grant the locally logged-in user access without exposing unrelated HID nodes.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="256f", ATTRS{idProduct}=="c63a", TAG+="uaccess", MODE="0660"

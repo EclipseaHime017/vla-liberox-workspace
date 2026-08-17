@@ -1,0 +1,53 @@
+# This repository stores only the LIBERO-X VLA terminal source code.
+# Upstream checkouts and generated experiment data stay local.
+/LIBERO-X/
+/VLA-Adapter/
+/dataset-root/
+/runs/
+
+# Python
+**/__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Frontend
+**/node_modules/
+**/frontend/dist/
+**/frontend/*.tsbuildinfo
+**/frontend/vite.config.js
+**/frontend/vite.config.d.ts
+
+# Local configuration and caches
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite3-wal
+*.sqlite3-shm
+.cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Large model checkpoints should be downloaded separately.
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+

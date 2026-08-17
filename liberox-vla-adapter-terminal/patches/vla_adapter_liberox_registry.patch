@@ -1,0 +1,41 @@
+diff --git a/prismatic/vla/datasets/rlds/oxe/configs.py b/prismatic/vla/datasets/rlds/oxe/configs.py
+--- a/prismatic/vla/datasets/rlds/oxe/configs.py
++++ b/prismatic/vla/datasets/rlds/oxe/configs.py
+@@ -663,6 +663,13 @@ OXE_DATASET_CONFIGS = {
+         "state_encoding": StateEncoding.POS_EULER,
+         "action_encoding": ActionEncoding.EEF_POS,
+     },
++    "liberox_pickplace_no_noops": {
++        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": ["EEF_state", "gripper_state"],
++        "state_encoding": StateEncoding.POS_EULER,
++        "action_encoding": ActionEncoding.EEF_POS,
++    },
+     "libero_10_no_noops": {
+         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": "wrist_image"},
+         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+diff --git a/prismatic/vla/datasets/rlds/oxe/mixtures.py b/prismatic/vla/datasets/rlds/oxe/mixtures.py
+--- a/prismatic/vla/datasets/rlds/oxe/mixtures.py
++++ b/prismatic/vla/datasets/rlds/oxe/mixtures.py
+@@ -203,6 +203,9 @@ OXE_NAMED_MIXTURES = {
+     "libero_goal_no_noops": [
+         ("libero_goal_no_noops", 1.0),
+     ],
++    "liberox_pickplace_no_noops": [
++        ("liberox_pickplace_no_noops", 1.0),
++    ],
+     "libero_10_no_noops": [
+         ("libero_10_no_noops", 1.0),
+     ],
+diff --git a/prismatic/vla/datasets/rlds/oxe/transforms.py b/prismatic/vla/datasets/rlds/oxe/transforms.py
+--- a/prismatic/vla/datasets/rlds/oxe/transforms.py
++++ b/prismatic/vla/datasets/rlds/oxe/transforms.py
+@@ -951,6 +951,7 @@ OXE_STANDARDIZATION_TRANSFORMS = {
+     "libero_spatial_no_noops": libero_dataset_transform,
+     "libero_object_no_noops": libero_dataset_transform,
+     "libero_goal_no_noops": libero_dataset_transform,
++    "liberox_pickplace_no_noops": libero_dataset_transform,
+     "libero_10_no_noops": libero_dataset_transform,
+     "libero_4_task_suites_no_noops": libero_dataset_transform,
+     "calvin_abc_rlds": calvin_dataset_transform,

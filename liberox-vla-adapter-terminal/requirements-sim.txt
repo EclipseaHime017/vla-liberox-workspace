@@ -1,0 +1,20 @@
+# Install VLA-Adapter itself first. Do not install LIBERO-X/requirements.txt in the same environment.
+imageio[ffmpeg]
+numpy==1.26.4
+opencv-python==4.11.0.86
+numba==0.59.1
+robosuite==1.4.1
+mujoco==2.3.7
+bddl
+easydict
+cloudpickle
+gym
+natsort
+tyro==0.8.5
+typeguard==2.13.3
+tensorflow-metadata==1.15.0
+wandb==0.16.3
+setuptools==69.5.1
+msgpack-numpy==0.4.8
+PyYAML==6.0.3
+matplotlib==3.10.9

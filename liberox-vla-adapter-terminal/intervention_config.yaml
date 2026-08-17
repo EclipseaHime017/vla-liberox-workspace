@@ -1,0 +1,33 @@
+# The intervention script always loads this file and the adjacent config.yaml.
+# Run eval_pickplace_direct.py once with save_trajectory: true before using it.
+source_trajectory: ../runs/liberox_pickplace_l1/trajectory_000.npz
+
+# Select exactly one resume location. At 20 Hz, step 50 is 2.5 seconds.
+resume_step: 40
+resume_time_seconds: null
+
+# policy: restore the state, clear the old action queue, and query the VLA again.
+# manual_stdin: read human/external-controller actions from stdin.
+# manual_jsonl: replay actions from manual_action_file.
+# manual_udp: receive JSON actions over UDP and return the new robot state.
+control_mode: policy
+# Number of actions executed from each 8-action VLA prediction after resuming.
+open_loop_steps: 1
+
+# Manual actions are normalized LIBERO OSC_POSE commands:
+# [dx, dy, dz, dRx, dRy, dRz, gripper], each in [-1, 1].
+# The gripper value is -1 for open and +1 for close.
+manual_action_file: null
+udp_bind_host: 127.0.0.1
+udp_bind_port: 5555
+controller_timeout_seconds: 120.0
+
+# Every intervention gets a new timestamped child directory under this root.
+output_root: ../runs/liberox_interventions
+save_video: true
+# Both video layouts, sizes, and the headless/live-window mode come from config.yaml.
+# Each run writes intervention.mp4 plus intervention_agentview_hd.mp4. Their
+# playback rate also comes from config.yaml and equals its control_hz.
+# Manual modes may expose this temporary frame to an external controller.
+# It is removed automatically when the intervention finishes.
+save_latest_frame: true

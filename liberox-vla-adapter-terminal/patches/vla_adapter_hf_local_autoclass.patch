@@ -1,0 +1,69 @@
+diff --git a/experiments/robot/openvla_utils.py b/experiments/robot/openvla_utils.py
+index f1d512f..6af19df 100644
+--- a/experiments/robot/openvla_utils.py
++++ b/experiments/robot/openvla_utils.py
+@@ -38,6 +38,7 @@ DATE = time.strftime("%Y_%m_%d")
+ DATE_TIME = time.strftime("%Y_%m_%d-%H_%M_%S")
+ DEVICE = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+ OPENVLA_IMAGE_SIZE = 224  # Standard image size expected by OpenVLA
++_OPENVLA_AUTO_CLASSES_REGISTERED = False
+ 
+ # Configure NumPy print settings
+ np.set_printoptions(formatter={"float": lambda x: "{0:0.8f}".format(x)})
+@@ -58,6 +59,23 @@ def model_is_on_hf_hub(model_path: str) -> bool:
+         return False
+ 
+ 
++def register_openvla_auto_classes() -> None:
++    """Register the repository's audited OpenVLA classes with Transformers.
++
++    Hub checkpoints advertise these classes through ``auto_map``. Registering
++    the checked-out local implementations lets Transformers resolve
++    ``model_type=openvla`` while keeping ``trust_remote_code=False``.
++    """
++    global _OPENVLA_AUTO_CLASSES_REGISTERED
++    if _OPENVLA_AUTO_CLASSES_REGISTERED:
++        return
++    AutoConfig.register("openvla", OpenVLAConfig)
++    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
++    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
++    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
++    _OPENVLA_AUTO_CLASSES_REGISTERED = True
++
++
+ def update_auto_map(pretrained_checkpoint: str) -> None:
+     """
+     Update the AutoMap configuration in the checkpoint config.json file.
+@@ -286,18 +304,16 @@ def get_vla(cfg: Any) -> torch.nn.Module:
+     """
+     print("Instantiating pretrained VLA policy...")
+ 
++    # Always use the implementation from this pinned VLA-Adapter checkout. Hub
++    # checkpoints otherwise require executing their auto_map Python modules.
++    register_openvla_auto_classes()
++
+     # If loading a locally stored pretrained checkpoint, check whether config or model files
+     # need to be synced so that any changes the user makes to the VLA modeling code will
+     # actually go into effect
+-    # If loading a pretrained checkpoint from Hugging Face Hub, we just assume that the policy
+-    # will be used as is, with its original modeling logic
++    # Hub checkpoints use the local classes registered above; local directories
++    # additionally need their config/model helper files synchronized.
+     if not model_is_on_hf_hub(cfg.pretrained_checkpoint):
+-        # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+-        AutoConfig.register("openvla", OpenVLAConfig)
+-        AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+-        AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+-        AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+-
+         # Update config.json and sync model files
+         update_auto_map(cfg.pretrained_checkpoint)
+         check_model_logic_mismatch(cfg.pretrained_checkpoint)
+@@ -411,6 +427,7 @@ def get_processor(cfg: Any) -> AutoProcessor:
+     Returns:
+         AutoProcessor: The model's processor
+     """
++    register_openvla_auto_classes()
+     return AutoProcessor.from_pretrained(cfg.pretrained_checkpoint, trust_remote_code=False)
+ 
+ 

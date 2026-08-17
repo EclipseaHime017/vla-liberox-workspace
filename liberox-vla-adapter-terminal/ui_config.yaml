@@ -1,0 +1,18 @@
+# Local-only Web UI. Paths are resolved relative to this file.
+host: 127.0.0.1
+port: 8000
+dataset_root: ../dataset-root
+project_id: libero_x_vla
+legacy_scan_roots:
+  - ../runs
+preview_width: 512
+preview_height: 512
+preview_fps: 10
+jpeg_quality: 85
+manual_translation_gain: 0.25
+manual_rotation_gain: 0.08
+additional_tasks:
+  - level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+  - level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl

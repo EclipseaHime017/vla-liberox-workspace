@@ -1,0 +1,50 @@
+# Paths are resolved relative to this file, so the command can run from any directory.
+vla_root: ../VLA-Adapter
+liberox_root: ../LIBERO-X
+output: ../runs/liberox_pickplace_l1
+
+# Hugging Face repository ID, or an explicit local path beginning with ./, ../, ~, or /.
+checkpoint: VLA-Adapter/LIBERO-Object-Pro
+use_pro_version: null  # null infers Pro from the checkpoint name
+stats_key: libero_object
+
+# LIBERO-X task.
+level: LEVEL1
+task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+
+# Evaluation.
+trials: 1
+max_steps: 300
+seed: 0
+# LIBERO control period is exactly 50 ms of simulated time per action.
+control_hz: 20
+# Prevent wall-clock execution from running faster than simulated time.
+# Slow VLA queries can still make the effective rate lower than 20 Hz.
+realtime_control: true
+# VLA observation cameras remain square at this resolution.
+env_resolution: 256
+# Replay video joins the raw VLA camera observations without resizing:
+# agentview on the left, wrist camera on the right (2 * env_resolution by env_resolution).
+video_camera: vla_views
+video_width: 512
+video_height: 256
+# The standard episode_000_{status}.mp4 re-renders the higher agentview pose
+# used by inference. This does not replace or resize the policy observation tensor.
+main_view_video_width: 1024
+main_view_video_height: 1024
+# One frame is saved per control step, so this must equal control_hz.
+video_fps: 20
+# Number of actions executed from each 8-action VLA prediction.
+open_loop_steps: 8
+# false opens MuJoCo's native interactive viewer on the live simulation.
+# VLA observations and both recorded videos continue using their offscreen cameras.
+headless: false
+env_only: false
+no_video: false
+save_trajectory: true
+save_observation_images: true
+trajectory_plot: true
+
+# Applied before PyTorch and MuJoCo are imported. Use null to preserve the shell environment.
+cuda_visible_devices: "0"
+mujoco_gl: egl

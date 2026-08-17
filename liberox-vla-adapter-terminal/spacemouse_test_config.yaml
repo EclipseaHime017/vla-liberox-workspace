@@ -1,0 +1,45 @@
+# This file is always loaded by scripts/test_spacemouse.py.
+# Start with "device". Change to "simulation" only after all six axes and both
+# buttons have been verified in the terminal diagnostic.
+mode: simulation
+
+# This physical newer SpaceMouse Wireless enumerates as "SpaceMouse Wireless
+# BT" even when its USB data cable is connected. PySpaceMouse names its device
+# specification SpaceMouseWirelessNew.
+device_name: SpaceMouseWirelessNew
+device_index: 0
+device_path: null
+expected_vendor_id: 0x256f
+expected_product_id: 0xc63a
+
+# ROS is a right-handed frame: +X forward, +Y left, +Z up.
+# PySpaceMouse 2.0.0 emits its legacy convention. axis_order/signs convert it
+# into LIBERO OSC_POSE [X,Y,Z,Rx,Ry,Rz] in ROS right-handed coordinates:
+# ROS = [legacy_y, -legacy_x, legacy_z, legacy_roll, legacy_pitch, -legacy_yaw].
+axis_convention: ros
+axis_order: [y, x, z, roll, pitch, yaw]
+axis_signs: [1, -1, 1, 1, 1, -1]
+translation_gain: 0.25
+rotation_gain: 0.08
+deadzone: 0.05
+# 1.0 disables filtering so the first diagnostic measures the device directly.
+smoothing_alpha: 1.0
+
+# Keep the cap untouched during neutral calibration.
+neutral_calibration_seconds: 2.0
+# UI calibration waits for one continuous stable window and fails after this
+# total duration. Moving the cap resets progress instead of failing immediately.
+neutral_calibration_timeout_seconds: 30.0
+neutral_max_abs: 0.15
+poll_interval_ms: 1.0
+stale_timeout_ms: 250
+
+# device mode duration and simulation mode horizon.
+test_duration_seconds: 30.0
+max_steps: 600
+countdown_seconds: 3
+
+# Simulation video is reconstructed after the realtime loop, never inside it.
+save_video: true
+trajectory_plot: true
+output_root: ../runs/spacemouse_tests
