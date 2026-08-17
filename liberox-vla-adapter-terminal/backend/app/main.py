@@ -21,6 +21,7 @@ from .api.models import (
 )
 from .core.config import DEFAULT_UI_CONFIG, UIConfig, load_ui_config
 from .services.run_service import RunService
+from .services.dataset_service import DatasetService
 from .workers.simulation_worker import SimulationManager
 
 
@@ -42,6 +43,7 @@ def create_app(
         worker = manager or SimulationManager(ui_config, eval_config)
         app.state.manager = worker  # compatibility for local diagnostics
         app.state.run_service = RunService(worker)
+        app.state.dataset_service = DatasetService(app.state.run_service)
         try:
             yield
         finally:

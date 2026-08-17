@@ -3,6 +3,7 @@
 from fastapi import HTTPException, Request
 
 from ..services.run_service import RunService
+from ..services.dataset_service import DatasetService
 
 
 def service(request: Request) -> RunService:
@@ -10,6 +11,14 @@ def service(request: Request) -> RunService:
     if current is None:
         current = RunService(request.app.state.manager)
         request.app.state.run_service = current
+    return current
+
+
+def dataset_service(request: Request) -> DatasetService:
+    current = getattr(request.app.state, "dataset_service", None)
+    if current is None:
+        current = DatasetService(service(request))
+        request.app.state.dataset_service = current
     return current
 
 

@@ -7,6 +7,7 @@ Local-first simulation, VLA evaluation, trajectory rewind, and SpaceMouse takeov
 - Storage: portable run directories plus a rebuildable SQLite catalog.
 - Compatibility: the existing evaluation, intervention, and SpaceMouse CLI scripts remain available.
 - Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
+- Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
 
 Start from `vla-liberox-workspace/` after activating `vla-liberox`:
 

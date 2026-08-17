@@ -297,6 +297,11 @@ def test_ui_manifest_and_summary_are_compact(tmp_path: Path):
         simulated_duration_seconds=15.0,
         trajectory=str(tmp_path / "trajectory.npz"),
     )
+    record.preparation_timing = {
+        "total_seconds": 12.5,
+        "model_load_seconds": 9.75,
+        "model_cache_hit": 0.0,
+    }
     manager._persist_manifest(record)
     manifest = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
     assert manifest["managed_by"] == "liberox_data_studio"
@@ -330,6 +335,8 @@ def test_ui_manifest_and_summary_are_compact(tmp_path: Path):
         "error": None,
     }
     assert summary["timing"]["mean_control_interval_ms"] == pytest.approx(50.2)
+    assert summary["timing"]["model_load_seconds"] == pytest.approx(9.75)
+    assert summary["timing"]["model_cache_hit"] is False
     assert summary["branch"]["resume_step"] == 40
     assert summary["controller"]["sample_count"] == 260
     for duplicate_key in ("artifacts", "output_dir", "state_count", "action_count"):

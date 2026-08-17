@@ -1,10 +1,45 @@
 import { useEffect, useState } from "react";
-import { getDatasetSummary } from "../features/run-control/api";
-import type { DatasetSummary } from "../features/run-control/types";
+import { datasetExportUrl, getBootstrap, getDatasetSummary, listDatasetRuns } from "../features/run-control/api";
+import type { Bootstrap, DatasetSummary, Session } from "../features/run-control/types";
 import { SuccessRateChart } from "../features/metrics/SuccessRateChart";
+import { RunTable } from "../features/dataset/RunTable";
 
 export function DatasetPage() {
   const [summary, setSummary] = useState<DatasetSummary | null>(null);
-  useEffect(() => { void getDatasetSummary().then(setSummary); }, []);
-  return <section className="content-page"><div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>SQLite 负责索引，run 目录仍是可移植的事实来源。</p></div>{summary && <><div className="dataset-overview surface"><SuccessRateChart rate={summary.success_rate} /><div className="dataset-stats"><div><strong>{summary.runs}</strong><span>运行</span></div><div><strong>{summary.successes}</strong><span>成功</span></div><div><strong>{summary.errors}</strong><span>错误</span></div><div><strong>{summary.legacy_indexed}</strong><span>旧数据（只读）</span></div></div></div><div className="surface task-summary"><h2>按任务统计</h2>{summary.tasks.map((task) => <div key={task.task_id}><span>{task.task_name}</span><strong>{task.successes}/{task.runs} · {(task.success_rate * 100).toFixed(1)}%</strong></div>)}</div><div className="path-card"><span>数据根目录</span><code>{summary.dataset_root}</code><span>目录索引</span><code>{summary.catalog}</code></div></>}</section>;
+  const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  const [taskId, setTaskId] = useState("");
+  const [runs, setRuns] = useState<Session[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    void Promise.all([getDatasetSummary(), getBootstrap()])
+      .then(([nextSummary, nextBootstrap]) => {
+        setSummary(nextSummary);
+        setBootstrap(nextBootstrap);
+        setTaskId(nextBootstrap.task.task_id);
+      })
+      .catch((reason) => setError(String(reason)));
+  }, []);
+  useEffect(() => {
+    if (!taskId) return;
+    void listDatasetRuns(taskId).then(setRuns).catch((reason) => setError(String(reason)));
+  }, [taskId]);
+  const taskStats = summary?.tasks.find((task) => task.task_id === taskId);
+  return <section className="content-page">
+    <div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>按任务检索运行记录，并导出轻量、可移植的数据包。</p></div>
+    {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
+    {summary && <>
+      <div className="dataset-overview surface"><SuccessRateChart rate={taskStats?.success_rate ?? 0} /><div className="dataset-stats"><div><strong>{taskStats?.runs ?? 0}</strong><span>当前任务运行</span></div><div><strong>{taskStats?.successes ?? 0}</strong><span>当前任务成功</span></div><div><strong>{summary.errors}</strong><span>全部错误</span></div><div><strong>{summary.legacy_indexed}</strong><span>旧数据（只读）</span></div></div></div>
+      <div className="surface dataset-browser">
+        <div className="dataset-toolbar">
+          <label>任务<select value={taskId} onChange={(event) => setTaskId(event.target.value)}>{bootstrap?.task_catalog.map((task) => <option value={task.task_id} key={task.task_id}>{task.prompt}</option>)}</select></label>
+          <span>{runs.length} 条记录</span>
+          <a className="export-button" href={taskId ? datasetExportUrl(taskId) : undefined} download aria-disabled={!taskId}>导出当前任务 ZIP</a>
+        </div>
+        <RunTable runs={runs} />
+        <p className="export-note">ZIP 包含运行清单、run/config/summary 和 trajectory.csv；视频、NPZ、observation 与图表默认不导出。</p>
+      </div>
+      <div className="surface task-summary"><h2>按任务统计</h2>{summary.tasks.map((task) => <button key={task.task_id} className={task.task_id === taskId ? "selected-task" : ""} onClick={() => setTaskId(task.task_id)}><span>{task.task_name}</span><strong>{task.successes}/{task.runs} · {(task.success_rate * 100).toFixed(1)}%</strong></button>)}</div>
+      <div className="path-card"><span>数据根目录</span><code>{summary.dataset_root}</code><span>目录索引</span><code>{summary.catalog}</code></div>
+    </>}
+  </section>;
 }

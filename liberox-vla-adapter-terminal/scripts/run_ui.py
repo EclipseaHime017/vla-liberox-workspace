@@ -34,7 +34,10 @@ def main() -> int:
         host=ui_config.host,
         port=ui_config.port,
         log_level="info",
-        access_log=True,
+        # The UI intentionally polls lightweight status endpoints. Keep
+        # warnings, errors, and application milestones without printing one
+        # access line per poll in the terminal.
+        access_log=False,
     )
     return 0
 

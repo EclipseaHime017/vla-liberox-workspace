@@ -126,9 +126,8 @@ class PreviewService:
                         )
                         env_task_id = task_id
                     self.manager.simulator.restore(env, state)
-                    frame = self.manager.simulator.render(
+                    frame = self.manager.simulator.render_operator_preview(
                         env,
-                        direct.MAIN_VIEW_CAMERA,
                         self.manager.ui_config.preview_width,
                         self.manager.ui_config.preview_height,
                     )
@@ -312,6 +311,16 @@ class SimulationManager:
                     "width": self.ui_config.preview_width,
                     "height": self.ui_config.preview_height,
                     "fps": self.ui_config.preview_fps,
+                    "layout": "2x2",
+                    "stream_width": self.ui_config.preview_width * 2,
+                    "stream_height": self.ui_config.preview_height * 2,
+                    "cameras": [
+                        {"id": "agentview", "label": "主视角", "policy_input": True},
+                        {"id": "robot0_eye_in_hand", "label": "腕部视角", "policy_input": True},
+                        {"id": "oblique_minus_45", "label": "−45° 斜视角", "policy_input": False},
+                        {"id": "oblique_plus_45", "label": "+45° 斜视角", "policy_input": False},
+                    ],
+                    "recorded_cameras": ["agentview", "robot0_eye_in_hand"],
                 },
                 "manual": {
                     "translation_gain": self.ui_config.manual_translation_gain,
@@ -982,7 +991,11 @@ class SimulationManager:
             "preparation_message": result.get("error"),
             "countdown_remaining": None,
             "preview_ready": False,
-            "preparation_timing": {},
+            "preparation_timing": {
+                "total_seconds": timing.get("preparation_seconds"),
+                "model_load_seconds": timing.get("model_load_seconds"),
+                "model_cache_hit": float(bool(timing.get("model_cache_hit", False))),
+            },
         }
 
     def _set_status(self, record: SimulationSession, status: str) -> None:
@@ -1141,7 +1154,19 @@ class SimulationManager:
             phase("loading_source", "读取轨迹与初始状态")
             if record.control_mode == "policy":
                 phase("loading_model", "加载策略模型")
-                self.provider.load(record.open_loop_steps)
+                model_was_loaded = self.provider.loaded
+                model_load_started = time.monotonic()
+                try:
+                    self.provider.load(record.open_loop_steps)
+                finally:
+                    with self.lock:
+                        record.preparation_timing["model_load_seconds"] = (
+                            time.monotonic() - model_load_started
+                        )
+                        record.preparation_timing["model_cache_hit"] = float(
+                            model_was_loaded
+                        )
+                        self._persist_manifest(record)
             if record.kind == "original":
                 initial_state = self.catalog.initial_state(record.task_id)
                 recorder = self.recorder_factory.original(float(self.eval_config.control_hz))
@@ -1192,7 +1217,7 @@ class SimulationManager:
             record.current_step = recorder.action_count
             record.state_count = recorder.state_count
             record.action_count = recorder.action_count
-            phase("preparing_preview", "准备实时主视角")
+            phase("preparing_preview", "准备实时四视角")
             record.preview_event.clear()
             record.preview_error = None
             self.preview.submit(record, env.get_sim_state())
@@ -1519,6 +1544,10 @@ class SimulationManager:
                     timing.get("control_interval_max_seconds")
                 ),
                 "preparation_seconds": record.preparation_timing.get("total_seconds"),
+                "model_load_seconds": record.preparation_timing.get("model_load_seconds"),
+                "model_cache_hit": bool(
+                    record.preparation_timing.get("model_cache_hit", 0.0)
+                ),
             },
         }
         if record.kind == "branch":

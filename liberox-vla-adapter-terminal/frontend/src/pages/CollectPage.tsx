@@ -6,10 +6,12 @@ import {
 } from "../features/simulation-view/controls";
 import { api } from "../api/client";
 import { sessionWebSocket } from "../api/websocket";
-import { ACTIVE, TERMINAL, type Bootstrap, type ControllerStatus, type Draft, type FrameState, type Session, type TaskInfo } from "../features/run-control/types";
+import { ACTIVE, TERMINAL, type Bootstrap, type ControllerStatus, type Draft, type FrameState, type PolicyBranchDraft, type Session, type TaskInfo } from "../features/run-control/types";
 import { Gain, Info, Metric } from "../features/metrics/MetricsPanel";
 import { RunConfigForm } from "../features/run-config/RunConfigForm";
 import { RunStatus } from "../features/run-control/RunStatus";
+import { SessionMonitor } from "../features/run-control/SessionMonitor";
+import { formatComputeDevice } from "../features/run-control/formatters";
 import { useSimulationStream } from "../features/simulation-view/useSimulationStream";
 
 function fixed(values: number[] | null, digits = 4): string {
@@ -19,6 +21,7 @@ function fixed(values: number[] | null, digits = 4): string {
 function CollectPage() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [policyBranchDraft, setPolicyBranchDraft] = useState<PolicyBranchDraft | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [selectedStep, setSelectedStep] = useState(0);
@@ -287,17 +290,38 @@ function CollectPage() {
     } catch (reason) { setError(String(reason)); }
   };
 
+  const configurePolicyBranch = () => {
+    if (!selected) return;
+    setError("");
+    trajectoryVideo.current?.pause();
+    setPolicyBranchDraft({
+      parent_session_id: selected.id,
+      task_prompt: selected.task ?? "该历史轨迹没有任务提示词",
+      source_episode: "episode_000 · " + selected.id,
+      resume_step: selectedStep,
+      end_step: selected.action_count,
+      open_loop_steps: selected.open_loop_steps,
+    });
+  };
+
   const branch = async (controlMode: "policy" | "manual") => {
     if (!selected) return;
+    const parentSessionId = controlMode === "policy" && policyBranchDraft
+      ? policyBranchDraft.parent_session_id
+      : selected.id;
     setBusy(true);
     setError("");
     try {
-      const session = await api<Session>("/api/sessions/" + selected.id + "/branches", {
+      const session = await api<Session>("/api/sessions/" + parentSessionId + "/branches", {
         method: "POST",
         body: JSON.stringify({
-          resume_step: selectedStep,
+          resume_step: controlMode === "policy" && policyBranchDraft
+            ? policyBranchDraft.resume_step
+            : selectedStep,
           control_mode: controlMode,
-          open_loop_steps: openLoop,
+          open_loop_steps: controlMode === "policy" && policyBranchDraft
+            ? policyBranchDraft.open_loop_steps
+            : openLoop,
           ...(controlMode === "manual" ? {
             translation_gain: translationGain,
             rotation_gain: rotationGain,
@@ -305,6 +329,7 @@ function CollectPage() {
         }),
       });
       setSessions((current) => [session, ...current]);
+      setPolicyBranchDraft(null);
       setSelectedId(session.id);
       setSelectedStep(session.current_step);
     } catch (reason) {
@@ -356,7 +381,10 @@ function CollectPage() {
   const videoArtifactUrl = selected && mainVideoName
     ? "/api/sessions/" + selected.id + "/artifacts/" + encodeURIComponent(mainVideoName)
     : null;
-  const viewerAspectRatio = bootstrap.config.preview.width + " / " + bootstrap.config.preview.height;
+  const livePreview = Boolean(draft || (selected && ACTIVE.has(selected.status)));
+  const viewerAspectRatio = livePreview
+    ? bootstrap.config.preview.stream_width + " / " + bootstrap.config.preview.stream_height
+    : bootstrap.config.preview.width + " / " + bootstrap.config.preview.height;
   const controllerReady = controller?.state === "READY";
   const controllerPillText = controller?.state === "ARMED"
     ? (controller.latency_ms === null ? "控制器 · 等待样本" : `控制器 · ${controller.latency_ms.toFixed(1)} ms`)
@@ -392,25 +420,25 @@ function CollectPage() {
         <Info label="Checkpoint" value={bootstrap.model.checkpoint} note="当前后端暂不支持切换" />
         <Info label="任务难度" value={displayTask.level} />
         <Info label="任务提示词" value={displayTask.prompt} />
-        <Info label="计算设备" value={bootstrap.model.gpu} />
+        <Info label="计算设备" value={formatComputeDevice(bootstrap.model.gpu)} />
         <Info label="控制与预测" value={bootstrap.config.control_hz + " Hz / " + bootstrap.model.action_schema.predicted_chunk_size + " 步预测"} />
       </section>
 
       <section className="workspace">
         <aside className="panel session-panel">
           <div className="panel-title"><h2>会话</h2><span>{sessions.length}</span></div>
-          <RunConfigForm draft={draft} tasks={bootstrap.task_catalog} active={Boolean(active)} busy={busy} taskId={taskId} maxSteps={maxSteps} openLoop={openLoop} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); void updateDraft({ task_id: value }); }} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} />
+          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} active={Boolean(active)} busy={busy} taskId={taskId} maxSteps={maxSteps} openLoop={openLoop} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); void updateDraft({ task_id: value }); }} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
           <div className="session-list">
             {sessions.map((session) => (
               <div key={session.id} className={"session-entry " + (selectedId === session.id ? "selected" : "")}>
-                <button className="session-item" onClick={() => { setSelectedId(session.id); setSelectedStep(0); }}>
+                <button className="session-item" onClick={() => { setPolicyBranchDraft(null); setSelectedId(session.id); setSelectedStep(0); }}>
                   <RunStatus run={session} />
                 </button>
                 {session.managed && <button
                   className="delete-icon"
                   title="永久删除此 UI 会话"
                   aria-label={"删除会话 " + session.id}
-                  disabled={Boolean(active) || controller?.state === "CALIBRATING" || busy}
+                  disabled={Boolean(active) || Boolean(policyBranchDraft) || controller?.state === "CALIBRATING" || busy}
                   onClick={() => setDeleteTarget(session)}
                 >🗑</button>}
               </div>
@@ -420,16 +448,16 @@ function CollectPage() {
 
         <section className="main-column">
           <div className="panel viewer-panel">
-            <div className="panel-title"><h2>{draft ? "仿真草稿 · 初始状态预览" : timelineReady ? "主视角录像 · 帧 " + selectedStep : "实时主视角"}</h2>{draft ? <span>{draft.id}</span> : selected && <span>{selected.id}</span>}</div>
-            <div className="viewer" style={{ aspectRatio: viewerAspectRatio }}>
+            <div className="panel-title"><h2>{draft ? "仿真草稿 · 四视角初始状态" : timelineReady ? "主视角录像 · 帧 " + selectedStep : "四视角实时预览"}</h2>{draft ? <span>{draft.id}</span> : selected && <span>{selected.id}</span>}</div>
+            <div className={"viewer " + (livePreview ? "multi-camera" : "")} style={{ aspectRatio: viewerAspectRatio }}>
               {draft ? (
                 !draft.preview_available ? <div className="viewer-empty">正在加载初始状态预览…</div> : <img
                   key={draft.preview_revision + "-" + draft.preview_status}
                   src={"/api/draft/preview.jpg?revision=" + draft.preview_revision + "&status=" + draft.preview_status}
-                  alt="草稿初始状态 agentview"
+                  alt="草稿初始状态四视角"
                 />
               ) : selected && ACTIVE.has(selected.status) ? (
-                <img src={liveStreamUrl ?? undefined} alt="实时 agentview" />
+                <img src={liveStreamUrl ?? undefined} alt="主视角、腕部、左侧和右侧实时画面" />
               ) : timelineReady && selected && videoArtifactUrl ? (
                 <video
                   key={selected.id + "-" + mainVideoName}
@@ -472,9 +500,11 @@ function CollectPage() {
             </>}
           </div>
 
+          {!draft && <SessionMonitor session={selected} />}
+
           {!draft && selected && <div className="panel timeline-panel">
             <div className="panel-title"><h2>回溯与分支</h2><span>{timelineReady ? "0 — " + (selected.state_count - 1) : "结束后启用"}</span></div>
-            <input className="timeline" type="range" min={0} max={Math.max(0, selected.state_count - 1)} value={selectedStep} disabled={!timelineReady} onChange={(event) => setSelectedStep(Number(event.target.value))} />
+            <input className="timeline" type="range" min={0} max={Math.max(0, selected.state_count - 1)} value={selectedStep} disabled={!timelineReady || Boolean(policyBranchDraft)} onChange={(event) => setSelectedStep(Number(event.target.value))} />
             <div className="frame-grid">
               <Metric label="仿真时间" value={frameState ? frameState.time_seconds.toFixed(3) + " s" : "—"} />
               <Metric label="EEF 位置 [m]" value={fixed(frameState?.eef_position_m ?? null)} />
@@ -484,9 +514,9 @@ function CollectPage() {
               <Metric label="环境 action [-]" value={fixed(frameState?.env_action ?? null, 3)} />
             </div>
             <div className="button-row branch-buttons">
-              <button className="primary" disabled={!selected.branchable || Boolean(active) || busy || selectedStep >= selected.action_count} onClick={() => branch("policy")}>从此帧重新推理</button>
+              <button className="primary" disabled={!selected.branchable || Boolean(active) || busy || Boolean(policyBranchDraft) || selectedStep >= selected.action_count} onClick={configurePolicyBranch}>{policyBranchDraft ? "正在配置二次推理" : "从此帧重新推理"}</button>
               <button
-                disabled={!selected.branchable || Boolean(active) || busy || selectedStep >= selected.action_count || !controllerReady}
+                disabled={!selected.branchable || Boolean(active) || busy || Boolean(policyBranchDraft) || selectedStep >= selected.action_count || !controllerReady}
                 title={controllerReady ? "从所选帧开始 SpaceMouse 接管" : "请先连接并校准 SpaceMouse"}
                 onClick={() => branch("manual")}
               >SpaceMouse 接管</button>

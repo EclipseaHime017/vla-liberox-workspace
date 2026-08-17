@@ -9,7 +9,12 @@ export type TaskInfo = {
 export type Bootstrap = {
   config: {
     max_steps: number; open_loop_steps: number; control_hz: number; video_fps: number;
-    preview: { width: number; height: number; fps: number };
+    preview: {
+      width: number; height: number; fps: number; layout: "2x2";
+      stream_width: number; stream_height: number;
+      cameras: Array<{ id: string; label: string; policy_input: boolean }>;
+      recorded_cameras: string[];
+    };
     manual: { translation_gain: number; rotation_gain: number };
     spacemouse: {
       configured: boolean; dependency_version: string | null; config_error: string | null;
@@ -30,6 +35,15 @@ export type Draft = {
   error: string | null; task: TaskInfo;
 };
 
+export type PolicyBranchDraft = {
+  parent_session_id: string;
+  task_prompt: string;
+  source_episode: string;
+  resume_step: number;
+  end_step: number;
+  open_loop_steps: number;
+};
+
 export type Session = {
   id: string; kind: "original" | "branch"; task_id: string | null; level: string | null;
   task_name: string | null; task: string | null; parent_session_id: string | null;
@@ -43,7 +57,8 @@ export type Session = {
   stopped_reason: string | null; measured_control_hz: number | null;
   simulated_duration_seconds: number; branchable: boolean; legacy: boolean; managed: boolean;
   preparation_phase: string | null; preparation_message: string | null;
-  countdown_remaining: number | null; preview_ready: boolean; artifacts: Record<string, string>;
+  countdown_remaining: number | null; preview_ready: boolean;
+  preparation_timing: Record<string, number | null>; artifacts: Record<string, string>;
 };
 
 export type ControllerStatus = {
