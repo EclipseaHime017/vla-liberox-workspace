@@ -483,7 +483,7 @@ UI 启动后只探测控制器，不占用动作输出。连接设备后顶部�
 
 新会话按 `dataset-root/projects/libero_x_vla/runs/<task_name>/<YYYY-MM-DD>/<时间>__<session_id>/` 分组，不覆盖历史结果。`catalog.sqlite3` 只保存可重建的检索和成功率索引；run 目录仍是事实来源。`run.json` 是生命周期和安全删除所需的极简清单，`config.yaml` 固化任务、模型和控制参数，`summary.json` 只记录用户关心的结果与关键时序；轨迹、视频、图表和 SpaceMouse 采样统一放在 `episodes/episode_000/`。不再重复生成 `results.jsonl`、`trajectory.json`、`source_trajectory.json` 或 `spacemouse_device_summary.json`。完整回放 metadata 已内嵌在 `trajectory.npz`，逐步可读数据保留在 `trajectory.csv`。
 
-数据集页面可按三个任务分别列出运行记录，并导出当前任务的轻量 ZIP。导出包包含 `runs.csv`、导出说明、可用的 `run.json/config.yaml/summary.json` 和逐步 `trajectory.csv`；视频、`trajectory.npz`、observation 图像和图表默认排除，避免浏览器生成超大下载。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。监视器固定显示三行高度：停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置，可查看完整历史。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
+采集主界面的会话侧栏提供“全部任务数据”和三个具体任务的检索选项，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。`trajectory.npz`、observation NPZ、图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。详细 transition 对齐、视频拆分和接管分段规则见 `docs/DATA_LAYOUT.md`。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
 
 创建分支时会立即把父轨迹控制数据物理复制为子目录中的 `source_trajectory.npz`，但不复制父 observations、视频或图表；因此父会话被删除后，子分支仍能独立恢复状态和绘制对比。原始会话生成轨迹图和 7 张 action 图；回溯分支不生成只包含二次推理的单独图表，只生成 7 张“完整原始轨迹 + 从回溯帧开始的二次推理/人工接管”action 对比图。若准备阶段尚未执行新动作就失败，仅保存精简轨迹、清单和 summary，不再重建整段视频、observations 或对比图。已有历史目录不会自动删除或迁移。
 
@@ -549,112 +549,6 @@ npm run build
 
 ## 5. 使用 LIBERO-X 训练数据微调
 
-这一步不是跑预训练基线所必需的。官方 LIBERO-X 训练集是 LeRobot v2.1：2,520 条轨迹、889,277 帧、Parquet 数据，图像为 256×256，状态 8 维、动作 7 维、频率 10 Hz。VLA-Adapter 的 `finetune.py` 默认只接收 TFDS/RLDS，所以需要格式桥接。
-
-### 5.1 下载并检查 LeRobot 数据
-
-```bash
-huggingface-cli download meituan/LIBERO-X \
-  --repo-type dataset \
-  --local-dir ./data/liberox_lerobot
-
-pip install pyarrow  # 仅数据 schema 检查需要，仿真评测不依赖
-python liberox-vla-adapter-terminal/scripts/inspect_lerobot_schema.py \
-  ./data/liberox_lerobot
-```
-
-完整数据约 102 GB。先确认磁盘空间；若只做现成任务的仿真评测，不需要下载它。
-
-### 5.2 转为 RLDS 时的目标 schema
-
-每条 RLDS episode 应包含 `steps`，每个 step 至少含：
-
-```text
-observation.image          uint8[256,256,3]
-observation.wrist_image    uint8[256,256,3]
-observation.state          float32[8]
-action                     float32[7]
-language_instruction       string
-is_first/is_last/is_terminal
-```
-
-转换规则：
-
-1. 以 `episode_index` 分组，并按 `frame_index` 排序；
-2. 通过 `task_index` 从 `meta/tasks.jsonl` 取语言指令；
-3. 保留 `[Δx, Δy, Δz, Δrx, Δry, Δrz, gripper]`；
-4. 若要与标准 LIBERO 配方一致，过滤前 6 维接近零且夹爪不变的 no-op 帧；
-5. 将数据集命名为 `liberox_pickplace_no_noops`；
-6. 输出目录必须形如 `data/liberox/liberox_pickplace_no_noops/1.0.0/*.tfrecord`；
-7. 在 VLA-Adapter 的 `configs.py`、`transforms.py` 和 `mixtures.py` 注册新名称；本模板的 `patches/vla_adapter_liberox_registry.patch` 提供最小补丁。
-
-应用注册补丁：
-
-```bash
-cd VLA-Adapter
-git apply ../liberox-vla-adapter-terminal/patches/vla_adapter_liberox_registry.patch
-```
-
-先用 1 条 episode 构建小型 TFDS 数据集并初始化 `RLDSDataset`；通过后再转换全部数据。数据统计会由 `finetune.py` 写入 checkpoint，评测自训练模型时在 `configs/config.yaml` 中改为：
-
-```yaml
-checkpoint: /path/to/your/merged/checkpoint
-stats_key: liberox_pickplace_no_noops
-use_pro_version: true
-```
-
-### 5.3 微调命令骨架
-
-```bash
-cd VLA-Adapter
-CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 \
-  vla-scripts/finetune.py \
-  --vlm_path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
-  --config_file_path pretrained_models/configs \
-  --data_root_dir ../data/liberox \
-  --dataset_name liberox_pickplace_no_noops \
-  --run_root_dir outputs \
-  --use_film False \
-  --num_images_in_input 2 \
-  --use_proprio True \
-  --use_lora True \
-  --use_fz False \
-  --use_minivlm True \
-  --image_aug True \
-  --batch_size 1 \
-  --grad_accumulation_steps 8 \
-  --learning_rate 2e-4 \
-  --lora_rank 64 \
-  --use_pro_version True \
-  --max_steps 20005 \
-  --num_steps_before_decay 20000 \
-  --save_freq 5000
-```
-
-`20k` 只是小规模验证起点，不是论文复现配置。先确认 loss、动作统计和 1 个任务 rollout 正常，再根据数据子集大小与显存调整。
-
-## 6. 常见故障
-
-| 现象 | 最可能原因 | 处理 |
-|---|---|---|
-| `eglQueryString` / 无法创建 offscreen context | EGL 库或 `MUJOCO_GL` 缺失 | 安装 Mesa/EGL 包并设置 `MUJOCO_GL=egl` |
-| `torch` 被降到 1.11 | 安装了 LIBERO-X 全量 requirements | 重建环境；LIBERO-X 用 `pip install -e ... --no-deps` |
-| checkpoint 能加载，但动作全零或乱跳 | 图像方向、prompt、`norm_stats` 不匹配 | 保持本模板预处理，并核对 `stats_key` |
-| `proprio` 不是 8 维 | 状态拼接错或环境包导入错 | 检查是否导入 LIBERO-X 的 `libero` 包 |
-| action 不是 7 维 | 常量误识别为 ALOHA/双臂 | 启动脚本名需含 `libero`，日志应显示 action dim 7 |
-| 成功率低但 rollout 正常 | 标准 LIBERO checkpoint 对 LIBERO-X 有分布偏移 | 这是预期的鲁棒性差距；再做 LIBERO-X 微调 |
-| 结果不稳定 | 初始状态、seed、依赖版本不一致 | 固定 `.init`、seed、commit 和环境版本 |
-
-## 7. 建议的验收顺序
-
-1. `env_only: true` 通过；
-2. 单次 rollout 无异常并生成视频；
-3. 10 次固定初始状态得到基线成功率；
-4. 将同一任务复制到 LEVEL2/3/4，保持 checkpoint 和随机种子不变；
-5. 最后才做 LeRobot→RLDS 转换和微调；
-6. 对比微调前后各 Level 成功率，避免只报告训练分布上的结果。
-
-## 8. 对应上游
 
 - VLA-Adapter：https://github.com/OpenHelix-Team/VLA-Adapter
 - LIBERO-X：https://github.com/meituan/LIBERO-X

@@ -12,6 +12,7 @@ import { RunConfigForm } from "../features/run-config/RunConfigForm";
 import { RunStatus } from "../features/run-control/RunStatus";
 import { SessionMonitor } from "../features/run-control/SessionMonitor";
 import { formatComputeDevice } from "../features/run-control/formatters";
+import { ALL_TASKS, filterSessionsByTask } from "../features/run-control/sessionFilters";
 import { useSimulationStream } from "../features/simulation-view/useSimulationStream";
 
 function fixed(values: number[] | null, digits = 4): string {
@@ -29,6 +30,7 @@ function CollectPage() {
   const [maxSteps, setMaxSteps] = useState(300);
   const [openLoop, setOpenLoop] = useState(8);
   const [taskId, setTaskId] = useState("");
+  const [sessionTaskFilter, setSessionTaskFilter] = useState(ALL_TASKS);
   const [translationGain, setTranslationGain] = useState(0.25);
   const [rotationGain, setRotationGain] = useState(0.08);
   const [controller, setController] = useState<ControllerStatus | null>(null);
@@ -43,6 +45,10 @@ function CollectPage() {
     () => sessions.find((session) => session.id === selectedId) ?? null,
     [sessions, selectedId],
   );
+  const visibleSessions = useMemo(
+    () => filterSessionsByTask(sessions, sessionTaskFilter),
+    [sessions, sessionTaskFilter],
+  );
   const active = sessions.find((session) => ACTIVE.has(session.status)) ?? null;
   const manualSessionActive = Boolean(
     selected?.control_mode === "manual" && ACTIVE.has(selected.status) && !selected.legacy,
@@ -55,7 +61,7 @@ function CollectPage() {
   );
 
   const syncVideoToStep = useCallback((step: number) => {
-    if (!selected || !bootstrap || !trajectoryVideo.current) return;
+    if (!selected?.action_count || !bootstrap?.config.video_fps || !trajectoryVideo.current) return;
     const target = stepToVideoTime(
       step,
       selected.action_count,
@@ -65,7 +71,7 @@ function CollectPage() {
         > 0.5 / bootstrap.config.video_fps) {
       trajectoryVideo.current.currentTime = target;
     }
-  }, [bootstrap, selected]);
+  }, [bootstrap?.config.video_fps, selected?.action_count]);
 
   useEffect(() => {
     api<{ discarded: boolean }>("/api/draft", { method: "DELETE" })
@@ -200,10 +206,6 @@ function CollectPage() {
   }, [selected?.id, selected?.status, selected?.current_step]);
 
   useEffect(() => {
-    if (timelineReady && mainVideoName) syncVideoToStep(selectedStep);
-  }, [mainVideoName, selectedStep, syncVideoToStep, timelineReady]);
-
-  useEffect(() => {
     gainRef.current = { translationGain, rotationGain };
   }, [translationGain, rotationGain]);
 
@@ -275,6 +277,7 @@ function CollectPage() {
       const session = await api<Session>("/api/draft/start", { method: "POST" });
       setDraft(null);
       setSessions((current) => [session, ...current]);
+      setSessionTaskFilter(session.task_id ?? ALL_TASKS);
       setSelectedId(session.id);
       setSelectedStep(0);
     } catch (reason) { setError(String(reason)); }
@@ -358,12 +361,20 @@ function CollectPage() {
       const remaining = sessions.filter((item) => item.id !== deleteTarget.id);
       setSessions(remaining);
       if (selectedId === deleteTarget.id) {
-        setSelectedId(remaining[0]?.id ?? "");
+        setSelectedId(filterSessionsByTask(remaining, sessionTaskFilter)[0]?.id ?? "");
         setSelectedStep(0);
       }
       setDeleteTarget(null);
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
+  };
+
+  const changeSessionTaskFilter = (value: string) => {
+    setSessionTaskFilter(value);
+    setPolicyBranchDraft(null);
+    const next = filterSessionsByTask(sessions, value)[0] ?? null;
+    setSelectedId(next?.id ?? "");
+    setSelectedStep(0);
   };
 
   if (!bootstrap) return <div className="loading">正在初始化 LIBERO-X 控制台…</div>;
@@ -426,10 +437,18 @@ function CollectPage() {
 
       <section className="workspace">
         <aside className="panel session-panel">
-          <div className="panel-title"><h2>会话</h2><span>{sessions.length}</span></div>
+          <div className="panel-title"><h2>会话</h2><span>{visibleSessions.length}/{sessions.length}</span></div>
           <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} active={Boolean(active)} busy={busy} taskId={taskId} maxSteps={maxSteps} openLoop={openLoop} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); void updateDraft({ task_id: value }); }} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
+          <div className="session-filter">
+            <label>数据检索
+              <select value={sessionTaskFilter} disabled={Boolean(active)} onChange={(event) => changeSessionTaskFilter(event.target.value)}>
+                <option value={ALL_TASKS}>全部任务数据</option>
+                {bootstrap.task_catalog.map((task) => <option key={task.task_id} value={task.task_id}>{task.prompt}</option>)}
+              </select>
+            </label>
+          </div>
           <div className="session-list">
-            {sessions.map((session) => (
+            {visibleSessions.map((session) => (
               <div key={session.id} className={"session-entry " + (selectedId === session.id ? "selected" : "")}>
                 <button className="session-item" onClick={() => { setPolicyBranchDraft(null); setSelectedId(session.id); setSelectedStep(0); }}>
                   <RunStatus run={session} />
@@ -443,11 +462,13 @@ function CollectPage() {
                 >🗑</button>}
               </div>
             ))}
+            {!visibleSessions.length && <p className="session-empty">当前任务暂无可预览数据。</p>}
           </div>
         </aside>
 
         <section className="main-column">
-          <div className="panel viewer-panel">
+          <div className={"viewer-monitor-layout " + (!draft && selected ? "has-monitor" : "") }>
+            <div className="panel viewer-panel">
             <div className="panel-title"><h2>{draft ? "仿真草稿 · 四视角初始状态" : timelineReady ? "主视角录像 · 帧 " + selectedStep : "四视角实时预览"}</h2>{draft ? <span>{draft.id}</span> : selected && <span>{selected.id}</span>}</div>
             <div className={"viewer " + (livePreview ? "multi-camera" : "")} style={{ aspectRatio: viewerAspectRatio }}>
               {draft ? (
@@ -498,13 +519,17 @@ function CollectPage() {
                 <Metric label="成功" value={selected.success ? "是" : "否"} />
               </div>
             </>}
+            </div>
+            {!draft && <SessionMonitor session={selected} />}
           </div>
-
-          {!draft && <SessionMonitor session={selected} />}
 
           {!draft && selected && <div className="panel timeline-panel">
             <div className="panel-title"><h2>回溯与分支</h2><span>{timelineReady ? "0 — " + (selected.state_count - 1) : "结束后启用"}</span></div>
-            <input className="timeline" type="range" min={0} max={Math.max(0, selected.state_count - 1)} value={selectedStep} disabled={!timelineReady || Boolean(policyBranchDraft)} onChange={(event) => setSelectedStep(Number(event.target.value))} />
+            <input className="timeline" type="range" min={0} max={Math.max(0, selected.state_count - 1)} value={selectedStep} disabled={!timelineReady || Boolean(policyBranchDraft)} onChange={(event) => {
+              const step = Number(event.target.value);
+              setSelectedStep(step);
+              syncVideoToStep(step);
+            }} />
             <div className="frame-grid">
               <Metric label="仿真时间" value={frameState ? frameState.time_seconds.toFixed(3) + " s" : "—"} />
               <Metric label="EEF 位置 [m]" value={fixed(frameState?.eef_position_m ?? null)} />

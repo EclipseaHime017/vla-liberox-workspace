@@ -506,3 +506,9 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - React 拆为 app/pages/features/components/api/styles，新增运行记录、数据集和设置页面；采集页常驻以避免页面切换中断 SpaceMouse；
 - UI 改为浅灰背景、半透明白色面板和系统字体的简洁样式，删除原深蓝渐变主题；
 - 新增架构、数据目录、SQLite repository 测试和英文入口说明；旧扁平后端目录已删除。
+
+## 2026-08-18：主视角录像播放抽动
+
+- 定位到视频与回溯时间轴的双向同步反馈：视频 `timeupdate` 更新 `selectedStep` 后，通用 effect 又把离散帧时间写回 `currentTime`；每秒会话轮询替换 `selected` 对象时还会重复触发 seek，使浏览器短暂进入 `seeking/waiting`；
+- 删除播放过程中由 `selectedStep` 自动反向 seek 视频的 effect。正常播放现在只执行“视频 → 时间轴/轨迹数值”；仅用户拖动时间轴、视频首次加载或切换会话时执行“时间轴 → 视频”；
+- seek 回调依赖从整个会话对象收窄为稳定的 `action_count` 与 `video_fps`，会话状态轮询不再干预播放器。
