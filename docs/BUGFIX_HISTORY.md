@@ -512,3 +512,11 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 定位到视频与回溯时间轴的双向同步反馈：视频 `timeupdate` 更新 `selectedStep` 后，通用 effect 又把离散帧时间写回 `currentTime`；每秒会话轮询替换 `selected` 对象时还会重复触发 seek，使浏览器短暂进入 `seeking/waiting`；
 - 删除播放过程中由 `selectedStep` 自动反向 seek 视频的 effect。正常播放现在只执行“视频 → 时间轴/轨迹数值”；仅用户拖动时间轴、视频首次加载或切换会话时执行“时间轴 → 视频”；
 - seek 回调依赖从整个会话对象收窄为稳定的 `action_count` 与 `video_fps`，会话状态轮询不再干预播放器。
+
+## 2026-08-18：拉取新代码后仍显示旧版 UI
+
+- 根因是 `frontend/dist` 属于被 Git 忽略的本机构建产物：`git pull` 更新 React/CSS 源码时不会更新或删除另一台电脑已有的旧 `dist`，FastAPI 因而继续托管旧版三行监视器页面；
+- 新增前端源码指纹，覆盖 `src/`、入口 HTML、Vite/TypeScript 配置和 npm 清单。`run_ui.py` 启动时发现指纹缺失或变化会先显示完整构建目录与命令，再自动执行一次 `npm run build`；未变化时不重复构建，并显示当前指纹已是最新版本；
+- 新电脑缺少 `node_modules` 或 npm 时不再静默加载旧页面，而是停止启动并给出 `npm ci` 的明确处理命令；
+- 前端入口 HTML 增加 `Cache-Control: no-store`，避免构建已更新但浏览器仍复用旧入口；Vite 的哈希资源文件继续正常使用文件名版本隔离；
+- 新增自动构建、无变化跳过、源码变化重建、依赖缺失提示和 HTML 缓存头测试。

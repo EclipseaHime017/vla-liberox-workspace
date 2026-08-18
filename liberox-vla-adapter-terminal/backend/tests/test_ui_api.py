@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
+from backend.app import main as main_module
 from backend.app.main import (
     CreateBranchRequest,
     DraftRequest,
@@ -260,3 +261,22 @@ def test_request_validation(tmp_path: Path):
             "open_loop_steps": 1,
             "manual_source": "spacemouse",
         })
+
+
+def test_frontend_entry_is_never_served_from_browser_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    frontend_dist = tmp_path / "dist"
+    frontend_dist.mkdir()
+    (frontend_dist / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    monkeypatch.setattr(main_module, "FRONTEND_DIST", frontend_dist)
+    app = create_app(ui_config=object(), eval_config=object(), manager=FakeManager(tmp_path))
+    route = next(
+        route for route in app.routes
+        if getattr(route, "path", None) == "/{path:path}"
+    )
+
+    response = asyncio.run(route.endpoint(""))
+
+    assert response.headers["cache-control"] == "no-store"

@@ -16,9 +16,7 @@ for path in (PROJECT_ROOT, SCRIPTS_ROOT):
 
 import uvicorn
 
-import eval_pickplace_direct as direct
-from backend.app.main import create_app
-from backend.app.core.config import DEFAULT_UI_CONFIG, load_ui_config
+from backend.app.core.frontend import FrontendBuildError, ensure_frontend_build
 
 
 def main() -> int:
@@ -26,6 +24,16 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    try:
+        ensure_frontend_build(PROJECT_ROOT / "frontend")
+    except FrontendBuildError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        return 2
+
+    import eval_pickplace_direct as direct
+    from backend.app.main import create_app
+    from backend.app.core.config import DEFAULT_UI_CONFIG, load_ui_config
+
     ui_config = load_ui_config(DEFAULT_UI_CONFIG)
     eval_config = direct.load_config(direct.DEFAULT_CONFIG_PATH.resolve())
     app = create_app(ui_config=ui_config, eval_config=eval_config)

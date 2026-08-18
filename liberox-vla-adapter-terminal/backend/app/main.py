@@ -70,7 +70,7 @@ def create_app(
             raise HTTPException(status_code=404)
         index = FRONTEND_DIST / "index.html"
         if index.is_file():
-            return FileResponse(index)
+            return FileResponse(index, headers={"Cache-Control": "no-store"})
         return HTMLResponse(
             "<h1>LIBERO-X frontend is not built</h1>"
             "<p>Run npm install && npm run build in frontend/.</p>",

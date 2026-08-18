@@ -25,6 +25,7 @@ env/
 
 # Frontend
 **/node_modules/
+# Vite output stays machine-local; run_ui.py rebuilds it when sources change.
 **/frontend/dist/
 **/frontend/*.tsbuildinfo
 **/frontend/vite.config.js

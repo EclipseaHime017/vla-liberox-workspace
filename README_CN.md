@@ -73,7 +73,7 @@ pip install -r ../liberox-vla-adapter-terminal/requirements-ui.txt
 sudo apt-get install -y libhidapi-dev
 pip install -r ../liberox-vla-adapter-terminal/requirements-spacemouse.txt
 
-# 构建由 FastAPI 托管的前端静态资源。之后日常启动不再需要 npm。
+# 安装前端依赖并完成首次构建。之后 run_ui.py 会在源码变化时自动重建。
 cd ../liberox-vla-adapter-terminal/frontend
 npm ci
 npm run build
@@ -418,6 +418,26 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 ```
 
 然后浏览器打开 `http://127.0.0.1:8000`。
+
+`frontend/dist` 是被 Git 忽略的本机构建产物。`run_ui.py` 会记录前端源码指纹：执行 `git pull` 后若 React、CSS、Vite 配置或依赖清单发生变化，启动时会先在终端显示即将执行的完整目录和 `npm run build` 命令，再自动更新静态资源；没有变化时也会显示当前源码指纹和“已是最新版本”。新电脑仍需先在 `frontend/` 执行一次 `npm ci`；如果依赖缺失，启动脚本会直接给出该命令并停止，而不会静默使用旧页面。入口 HTML 使用 `Cache-Control: no-store`，重启后普通刷新即可取得新构建。
+
+前端有三种明确的更新途径：
+
+```bash
+# 1. 日常自动更新：拉取代码后直接重启，源码变化时自动构建
+git pull
+python liberox-vla-adapter-terminal/scripts/run_ui.py
+
+# 2. 手动重建：只重新生成 frontend/dist，不更新 npm 依赖
+cd liberox-vla-adapter-terminal/frontend
+npm run build
+
+# 3. 新电脑或 package-lock.json 已变化：严格按锁文件重装并构建
+npm ci
+npm run build
+```
+
+`npm run build` 和 `npm test` 不会安装或升级依赖；只有 `npm ci` 会根据已提交的 `package-lock.json` 重建本机 `node_modules`。项目不使用隐式 `npm update`。
 
 UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。任务目录默认包含该配置的黑碗任务，并由 `configs/ui_config.yaml` 追加两个 LEVEL1 Franka 任务：
 
