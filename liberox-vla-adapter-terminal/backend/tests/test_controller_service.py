@@ -98,3 +98,35 @@ def test_latency_levels_match_ui_contract():
     assert latency_level(250.0, connected=True, stale=False, error=None) == "red"
     assert latency_level(1.0, connected=False, stale=False, error=None) == "red"
     assert latency_level(1.0, connected=True, stale=True, error=None) == "red"
+
+
+def test_disconnected_status_explains_dependency_and_expected_usb_id():
+    config = load_spacemouse_config()
+    missing_dependency = SpaceMouseControllerService(
+        config,
+        probe=lambda _config: {
+            "connected": False,
+            "error": "pyspacemouse is not installed",
+        },
+        start_monitor=False,
+    )
+    try:
+        status = missing_dependency.status()
+        assert status["state"] == "DISCONNECTED"
+        assert "pyspacemouse" in status["message"]
+        assert status["error"] == "pyspacemouse is not installed"
+    finally:
+        missing_dependency.close()
+
+    absent = SpaceMouseControllerService(
+        config,
+        probe=lambda _config: {"connected": False, "error": None},
+        start_monitor=False,
+    )
+    try:
+        status = absent.status()
+        expected = f"{config.expected_vendor_id:04x}:{config.expected_product_id:04x}"
+        assert expected in status["message"]
+        assert status["error"] is None
+    finally:
+        absent.close()

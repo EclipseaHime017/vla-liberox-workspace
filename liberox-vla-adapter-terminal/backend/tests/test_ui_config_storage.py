@@ -21,6 +21,7 @@ VALID = """\
 host: 127.0.0.1
 port: 8000
 dataset_root: ./data
+policy_registry: ./policies
 project_id: test_project
 legacy_scan_roots: [./runs]
 preview_width: 512
@@ -54,6 +55,7 @@ def test_ui_paths_are_relative_to_yaml(tmp_path: Path):
     path.write_text(VALID, encoding="utf-8")
     config = load_ui_config(path)
     assert config.dataset_root == (tmp_path / "data").resolve()
+    assert config.policy_registry == (tmp_path / "policies").resolve()
     assert config.output_root == (tmp_path / "data/projects/test_project/runs").resolve()
     assert config.legacy_scan_roots == ((tmp_path / "runs").resolve(),)
 

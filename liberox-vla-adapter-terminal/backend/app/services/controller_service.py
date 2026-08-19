@@ -35,6 +35,21 @@ def latency_level(
     return "green"
 
 
+def _probe_message(config: SpaceMouseTestConfig, details: dict[str, Any]) -> str:
+    error = str(details.get("error") or "")
+    lowered = error.lower()
+    if "pyspacemouse is not installed" in lowered:
+        return "缺少 pyspacemouse，无法检测控制器"
+    if "permission" in lowered or "access denied" in lowered:
+        return "HID 权限不足，请检查 udev 规则并重新插拔"
+    if error:
+        return "HID 探测失败，查看状态详情"
+    return (
+        "未发现 HID 设备 "
+        f"{config.expected_vendor_id:04x}:{config.expected_product_id:04x}"
+    )
+
+
 @dataclass(frozen=True)
 class CalibrationSnapshot:
     id: str
@@ -107,9 +122,8 @@ class SpaceMouseControllerService:
                 self._state = "DISCONNECTED"
                 self._calibration = None
                 self._armed_session_id = None
-                self._message = "控制器未连接"
-                if details.get("error"):
-                    self._error = str(details["error"])
+                self._message = _probe_message(self.config, details)
+                self._error = str(details["error"]) if details.get("error") else None
             elif self._state == "DISCONNECTED" or not was_connected:
                 self._state = "UNCALIBRATED"
                 self._error = None

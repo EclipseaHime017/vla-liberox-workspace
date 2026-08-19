@@ -30,6 +30,7 @@ function CollectPage() {
   const [maxSteps, setMaxSteps] = useState(300);
   const [openLoop, setOpenLoop] = useState(8);
   const [taskId, setTaskId] = useState("");
+  const [policyId, setPolicyId] = useState("base");
   const [sessionTaskFilter, setSessionTaskFilter] = useState(ALL_TASKS);
   const [translationGain, setTranslationGain] = useState(0.25);
   const [rotationGain, setRotationGain] = useState(0.08);
@@ -87,6 +88,7 @@ function CollectPage() {
         setMaxSteps(boot.config.max_steps);
         setOpenLoop(boot.config.open_loop_steps);
         setTaskId(boot.task.task_id);
+        setPolicyId("base");
         setTranslationGain(boot.config.manual.translation_gain);
         setRotationGain(boot.config.manual.rotation_gain);
         setController(controllerStatus);
@@ -103,6 +105,7 @@ function CollectPage() {
           setDraft(value);
           if (value) {
             setTaskId(value.task_id);
+            setPolicyId(value.policy_id);
             setMaxSteps(value.max_steps);
             setOpenLoop(value.open_loop_steps);
           }
@@ -226,7 +229,7 @@ function CollectPage() {
     try {
       const value = await api<Draft>("/api/draft", {
         method: "POST",
-        body: JSON.stringify({ task_id: taskId, max_steps: maxSteps, open_loop_steps: openLoop }),
+        body: JSON.stringify({ task_id: taskId, policy_id: policyId, max_steps: maxSteps, open_loop_steps: openLoop }),
       });
       setDraft(value);
     } catch (reason) {
@@ -234,7 +237,7 @@ function CollectPage() {
     } finally { setBusy(false); }
   };
 
-  const updateDraft = async (patch: Partial<Pick<Draft, "task_id" | "max_steps" | "open_loop_steps">>) => {
+  const updateDraft = async (patch: Partial<Pick<Draft, "task_id" | "policy_id" | "max_steps" | "open_loop_steps">>) => {
     if (!draft) return;
     setError("");
     try {
@@ -244,6 +247,7 @@ function CollectPage() {
       });
       setDraft(value);
       setTaskId(value.task_id);
+      setPolicyId(value.policy_id);
       setMaxSteps(value.max_steps);
       setOpenLoop(value.open_loop_steps);
     } catch (reason) { setError(String(reason)); }
@@ -268,6 +272,7 @@ function CollectPage() {
         method: "PATCH",
         body: JSON.stringify({
           task_id: taskId,
+          policy_id: policyId,
           max_steps: maxSteps,
           open_loop_steps: openLoop,
         }),
@@ -304,6 +309,8 @@ function CollectPage() {
       resume_step: selectedStep,
       end_step: selected.action_count,
       open_loop_steps: selected.open_loop_steps,
+      policy_id: selected.policy_id,
+      policy_label: selected.policy_label ?? selected.policy_id,
     });
   };
 
@@ -386,6 +393,11 @@ function CollectPage() {
     init_state_index: 0,
   } : null;
   const displayTask = draft?.task ?? selectedTask ?? bootstrap.task;
+  const displayPolicy = draft
+    ? bootstrap.policy_catalog.find((policy) => policy.policy_id === draft.policy_id)
+    : selected
+      ? bootstrap.policy_catalog.find((policy) => policy.policy_id === selected.policy_id)
+      : bootstrap.policy_catalog.find((policy) => policy.policy_id === "base");
   const progress = selected
     ? Math.min(100, (selected.current_step / Math.max(1, selected.max_steps)) * 100)
     : 0;
@@ -410,7 +422,7 @@ function CollectPage() {
           <p className="subtitle">单会话 · 20 Hz 实时控制 · 精确状态回溯</p>
         </div>
         <div className="state-pills">
-          <div className={"system-state controller-state " + (controller?.state === "ARMED" ? (controller.latency_level ?? "red") : "")}>
+          <div className={"system-state controller-state " + (controller?.state === "ARMED" ? (controller.latency_level ?? "red") : "")} title={controller?.error ?? controller?.message}>
             <span className="pulse" />{controllerPillText}
           </div>
           <div className={"system-state " + (active ? "running" : "")}>
@@ -428,7 +440,7 @@ function CollectPage() {
       {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
 
       <section className="metadata-grid">
-        <Info label="Checkpoint" value={bootstrap.model.checkpoint} note="当前后端暂不支持切换" />
+        <Info label="策略模型" value={displayPolicy?.label ?? selected?.policy_label ?? bootstrap.model.policy_label} note={displayPolicy?.base_checkpoint ?? bootstrap.model.checkpoint} />
         <Info label="任务难度" value={displayTask.level} />
         <Info label="任务提示词" value={displayTask.prompt} />
         <Info label="计算设备" value={formatComputeDevice(bootstrap.model.gpu)} />
@@ -438,7 +450,7 @@ function CollectPage() {
       <section className="workspace">
         <aside className="panel session-panel">
           <div className="panel-title"><h2>会话</h2><span>{visibleSessions.length}/{sessions.length}</span></div>
-          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} active={Boolean(active)} busy={busy} taskId={taskId} maxSteps={maxSteps} openLoop={openLoop} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); void updateDraft({ task_id: value }); }} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
+          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); void updateDraft({ task_id: value }); }} onPolicy={(value) => { setPolicyId(value); void updateDraft({ policy_id: value }); }} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
           <div className="session-filter">
             <label>数据检索
               <select value={sessionTaskFilter} disabled={Boolean(active)} onChange={(event) => changeSessionTaskFilter(event.target.value)}>

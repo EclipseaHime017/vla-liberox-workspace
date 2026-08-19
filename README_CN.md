@@ -439,6 +439,22 @@ npm run build
 
 `npm run build` 和 `npm test` 不会安装或升级依赖；只有 `npm ci` 会根据已提交的 `package-lock.json` 重建本机 `node_modules`。项目不使用隐式 `npm update`。
 
+如果更新后页面外观仍像旧版本，不要继续用强制刷新猜测。新界面顶部会显示 `UI <12位指纹>`，并可直接检查当前占用 8000 端口的后端实际提供了哪个目录和 bundle：
+
+```bash
+curl -s http://127.0.0.1:8000/api/build-info | python -m json.tool
+```
+
+如果该接口返回 `404`，说明端口上仍是旧后端进程；如果 `current` 不是 `true`，则源码与 `dist` 不一致。启动终端也会打印项目绝对目录、相同的 UI 指纹和具体静态资源文件名，便于发现从旧仓库目录启动的进程。
+
+`lsusb` 识别到正确的 `256f:c63a` 只证明 USB 层发现了设备，不等于运行 UI 的 Conda 环境能够通过 HIDAPI 读取它。以下接口会返回缺失依赖、HID 枚举错误和匹配到的 `hidraw` 节点；新版界面也会直接显示探测失败原因，而不再统一写成“未连接”：
+
+```bash
+curl -s http://127.0.0.1:8000/api/controller | python -m json.tool
+```
+
+确认 UI 使用的同一个环境安装了 `requirements-spacemouse.txt`，并按 3.6 节安装精确 udev 规则、重新加载规则后拔插设备。无需修改 VID/PID。
+
 UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。任务目录默认包含该配置的黑碗任务，并由 `configs/ui_config.yaml` 追加两个 LEVEL1 Franka 任务：
 
 - `place the black bowl on the flat stove`；
@@ -458,6 +474,7 @@ UI 专属参数固定从 `configs/ui_config.yaml` 读取，启动命令不接受
 host: 127.0.0.1
 port: 8000
 dataset_root: ../dataset-root
+policy_registry: ../policy-registry
 project_id: libero_x_vla
 legacy_scan_roots: [../runs]
 preview_width: 512
@@ -513,7 +530,7 @@ UI 启动后只探测控制器，不占用动作输出。连接设备后顶部�
 
 后端遵循 `API → RunService → SimulationWorker → Simulator / Policy / Recorder / Evaluator` 的单向依赖，React 不直接接触 MuJoCo，模拟器不写数据库，Recorder 不回调 UI。前端拆分为采集、运行记录、数据集与设置页面；采集页始终挂载，浏览数据时不会使活动 SpaceMouse WebSocket 意外断开。界面使用浅色半透明面板，不再使用深蓝渐变背景。详细边界见 `docs/ARCHITECTURE.md`，目录规则见 `docs/DATA_LAYOUT.md`。
 
-当前 bootstrap 返回 `model_switching=false`、`task_switching=true`；任务控件使用已验证的目录，模型仍只读。以后加入新的 provider 后即可启用模型控件，不需要重写会话状态机。
+当前 bootstrap 返回 `model_switching=true`、`task_switching=true`。这里的“模型切换”仅指在创建草稿时选择基础 Object-Pro 或与其兼容的 IQL policy overlay，不会更换视觉/语言 backbone；会话开始后策略锁定，分支继承父会话策略。缺失、被篡改、维度不符或基础 checkpoint 不兼容的 overlay 会在仿真开始前报错，不会静默回退到基础模型。
 
 主要接口：
 
@@ -553,7 +570,182 @@ npm run build
 
 这里禁用 pytest 外部插件自动加载，是为了避免系统 ROS `launch_testing` 插件把 Python 3.12 的包注入 Python 3.10 conda 环境；不影响本项目自身测试。
 
-## 4. 为什么这样适配
+## 4. RynnValue + IQL 独立后训练
+
+### 4.1 适用范围与处理流程
+
+离线后训练位于独立目录 `vla-adapter-rynn-iql/`，不修改 `liberox-vla-adapter-terminal/` 的采集数据，也不修改上游 `VLA-Adapter/` 源码。四个阶段为：只读导入数据、冻结 RynnValue 奖励标注、Pixel-IQL 后训练、独立 LIBERO-X 推理。训练只更新 Object-Pro 的连续 action head 和 proprio projector，视觉/语言 backbone 始终冻结。
+
+```text
+dataset-root（只读）
+        │
+        ├── 校验 20 Hz、N+1 状态/图像、动作和分支关系
+        ├── 原始轨迹完整导入；分支仅导入 resume_step 后的新后缀
+        ▼
+冻结的 RynnValue-4B
+        ├── agentview + BDDL 任务提示词
+        └── 剩余时间 → PBRS action-chunk 奖励
+        ▼
+Pixel-IQL
+        ├── 双 Q critic + expectile value + target network
+        └── advantage-weighted masked action-chunk L1
+        ▼
+action head + proprio projector overlay
+        ├── 独立 LIBERO-X 推理
+        └── policy-registry → Web UI 策略选择
+```
+
+RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本系统不包含 Robometer、在线 RL、奖励模型微调或真机控制。
+
+### 4.2 准备两个隔离环境
+
+RynnValue 与 VLA 需要不同版本的 Transformers，因此必须隔离环境。奖励环境按固定 commit 安装官方仓库；训练环境最稳妥的方式是克隆已经验证过的 `vla-liberox` 环境，再安装独立项目：
+
+```bash
+cd ~/eclipseaws/vla-liberox-workspace
+
+conda create -n rynnvalue-reward python=3.10 -y
+conda run -n rynnvalue-reward pip install -r vla-adapter-rynn-iql/requirements-reward.txt
+git clone https://github.com/alibaba-damo-academy/RynnValue.git RynnValue
+git -C RynnValue checkout 10e0d333f5f3811d0d130587e50f1faf48da49e5
+conda run -n rynnvalue-reward pip install -e ./RynnValue
+conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/verify_reward_environment.py
+
+conda create -n vla-rynn-iql --clone vla-liberox
+conda run -n vla-rynn-iql pip install -r vla-adapter-rynn-iql/requirements-train.txt
+conda run -n vla-rynn-iql pip install -e ./vla-adapter-rynn-iql
+```
+
+固定版本记录在 `vla-adapter-rynn-iql/configs/dependency-lock.yaml`。当前 RynnValue 源码 commit 为 `10e0d333f5f3811d0d130587e50f1faf48da49e5`，RynnValue-4B Hugging Face snapshot revision 为 `3f73b5d2b5e53b21f248c8791004dde6a8cf2b92`。奖励标注器导入本地固定版本的官方模型类，使用 `trust_remote_code=False` 加载 snapshot，并把代码版本、实际 snapshot 与模型文件 SHA-256 写入缓存元数据。
+
+### 4.3 YAML 配置
+
+默认配置固定 RynnValue-4B snapshot revision、Franka 的 `8×7` action chunk、8 维 proprio、20 Hz 数据、IQL 超参数和 16 GB profile。所有 YAML 内相对路径以该 YAML 所在目录为基准，重复键、未知键、维度错误和非 20 Hz 轨迹会立即拒绝。分阶段执行：
+
+- `configs/liberox_iql.yaml`：数据源、工作目录、RynnValue、PBRS、VLA、IQL、训练和 overlay registry。
+- `configs/inference.yaml`：基础策略/overlay 对比、LIBERO-X 任务、回合数、总步数、开环执行步数和评测输出。
+- `configs/dependency-lock.yaml`：RynnValue Git commit 与模型 snapshot，不作为实验超参数修改。
+
+常用配置项：
+
+```yaml
+paths:
+  dataset_sources:
+    - ../../dataset-root
+  policy_registry: ../../policy-registry
+
+data:
+  action_horizon: 8
+  action_dim: 7
+  proprio_dim: 8
+  control_hz: 20.0
+  allow_no_success: true
+
+reward:
+  model: Alibaba-DAMO-Academy/RynnValue-4B
+  max_frames: 64
+  gamma: 0.99
+  shaping_weight: 0.1
+
+vla:
+  base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
+  stats_key: libero_object
+  freeze_backbone: true
+
+iql:
+  expectile: 0.8
+  beta: 10.0
+  max_advantage_weight: 100.0
+  target_tau: 0.005
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+```
+
+`paths.dataset_sources` 中的每一项可以是当前 `dataset-root`，也可以是 UI 数据集页面导出的任务 ZIP。`reward.gamma` 同时用于 PBRS chunk 折扣与 IQL Bellman target。导入器不会改写源文件；训练/验证按 root trajectory 分组，父轨迹和它的全部分支不会被拆到不同集合。
+
+### 4.4 四阶段运行方法
+
+以下命令均从 `~/eclipseaws/vla-liberox-workspace` 执行：
+
+```bash
+conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
+  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
+  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/train_iql.py \
+  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/evaluate.py \
+  --config vla-adapter-rynn-iql/configs/inference.yaml
+```
+
+四个命令分别完成：
+
+1. `prepare_dataset.py`：校验源数据、动作 round-trip、分支前缀去重，并生成带源文件哈希的 replay manifest。
+2. `annotate_rewards.py`：冻结加载 RynnValue-4B，按 action-chunk 边界标注剩余时间并计算 PBRS 奖励；缓存支持断点续跑。
+3. `train_iql.py`：先预热 Q/V，再进行 advantage-weighted VLA 动作头训练；保存完整优化器、target、RNG 和 replay sampler 状态。
+4. `evaluate.py`：加载基础 Object-Pro，再校验并覆盖 action head/proprio projector，可配置同时评测 base 与 overlay。
+
+也可用编排脚本依次调度两个 Conda 环境：
+
+```bash
+python vla-adapter-rynn-iql/scripts/run_pipeline.py \
+  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml \
+  --inference-config vla-adapter-rynn-iql/configs/inference.yaml
+```
+
+需要从中断点恢复训练时，把 `iql.resume_checkpoint` 指向某个 `outputs/training/<run>/step_XXXXXXXX/`。保存间隔必须能被梯度累积步数整除，避免保存尚未提交的 actor 梯度。
+
+### 4.5 数据与奖励语义
+
+RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个边界按官方实现使用截至该点的均匀采样前缀并读取最后 value slot，超过 64 个边界时通过重叠窗口合并。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。原始轨迹完整进入 replay；分支只额外加入 `resume_step` 之后的 `human` 或 `policy_requery` 后缀，避免重复训练父轨迹前缀。
+
+设 RynnValue 预测的剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。长度为 `L` 的 action chunk 使用：
+
+```text
+R_t = Σ(h=0..L-1) γ^h r_sparse(t+h)
+      + κ(γ^L Φ(t+L) - Φ(t))
+```
+
+成功前的 sparse step cost 为 `-1`，成功终止步为 `0`；失败轨迹一直保留 step cost。末尾不足 8 步的 chunk 使用 mask，Bellman bootstrap 使用实际 `L`，而不是固定 8。
+
+主要中间结果：
+
+- `outputs/work/dataset_manifest.json`：只读 replay 索引、episode/chunk 数与数据哈希。
+- `outputs/work/rewards/`：时间价值、entropy、PBRS 奖励、诊断 Analysis 与缓存元数据。
+- `outputs/training/<run>/`：训练指标、effective config、Q/V/target、actor 组件、优化器和 RNG checkpoint。
+- `outputs/evaluation/<run>/`：轨迹、`agentview.mp4`、双视角 `vla_views.mp4`、逐回合结果和成功率。
+
+### 4.6 Overlay 推理与 Web UI
+
+训练完成后，`policy-registry/<policy_id>/policy.yaml` 只引用 action head 与 proprio projector，并包含组件 SHA-256 和兼容性哈希。刷新 UI 后即可在“创建仿真”的策略下拉框选择它；同一基础 checkpoint 复用已加载 backbone，只热切换两个小组件。完整设计、输出文件和断点恢复说明见 `vla-adapter-rynn-iql/README.md`。
+
+UI 只接受与当前基础 checkpoint、8×7 action、8 维 proprio 兼容且哈希有效的 overlay。会话开始后策略锁定，回溯分支继承父会话策略；overlay 缺失、被篡改或不兼容时会在仿真开始前报错，不会静默回退到基础模型。
+
+独立推理是否对比基础策略由 `configs/inference.yaml` 控制。每个策略仍使用 LIBERO-X 环境原本的 `done` 判断与成功率，不会使用 RynnValue 文本判断替代任务成功条件。
+
+### 4.7 测试、限制与参考资料
+
+当前已有数据即使全部失败也允许完成流程烟测，但会明确警告，不能据此预期策略提升。4B 奖励标注和 VLA/IQL 严格串行使用 GPU；任一阶段显存不足会报告具体阶段且不会自动回退 CPU。
+
+不下载模型的 CPU 回归测试：
+
+```bash
+cd ~/eclipseaws/vla-liberox-workspace/vla-adapter-rynn-iql
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-rynn-iql python -m pytest -q
+```
+
+完整 GPU 验收应至少包括：一条轨迹的 RynnValue 标注、20 个 IQL 更新步、overlay 导出、一次短 CLI rollout，以及在 Web UI 中选择该 overlay 创建仿真。流程跑通不等于策略已经提升；策略效果仍需独立验证集、多个随机初始状态和足够成功/接管数据评估。
+
+相关材料：
+
+- [RynnValue 论文：时间距离与 PBRS](https://arxiv.org/abs/2608.09853)
+- [RynnValue 官方实现](https://github.com/alibaba-damo-academy/RynnValue)
+- [Implicit Q-Learning 论文](https://arxiv.org/abs/2110.06169)
+- [VLA-Adapter 官方实现](https://github.com/OpenHelix-Team/VLA-Adapter)
+- [LIBERO-X 官方实现](https://github.com/meituan/LIBERO-X)
+- [本仓库的独立训练说明](vla-adapter-rynn-iql/README.md)
+
+## 5. 为什么这样适配
 
 | 接口 | LIBERO-X | VLA-Adapter | 本模板处理 |
 |---|---|---|---|
@@ -567,7 +759,7 @@ npm run build
 
 `stats_key` 必须和 checkpoint 的训练数据匹配。用 `LIBERO-Object-Pro` 时是 `libero_object`（加载器会自动尝试 `_no_noops` 后缀）。这不是 LIBERO-X 的场景名。
 
-## 5. 使用 LIBERO-X 训练数据微调
+## 6. 使用 LIBERO-X 训练数据微调
 
 
 - VLA-Adapter：https://github.com/OpenHelix-Team/VLA-Adapter

@@ -15,11 +15,15 @@ describe("policy branch configuration", () => {
         resume_step: 50,
         end_step: 300,
         open_loop_steps: 4,
+        policy_id: "base",
+        policy_label: "Object-Pro base",
       }}
       tasks={[]}
+      policies={[]}
       active={false}
       busy={false}
       taskId="task"
+      policyId="base"
       maxSteps={300}
       openLoop={8}
       onCreate={vi.fn()}
@@ -27,6 +31,7 @@ describe("policy branch configuration", () => {
       onCancel={vi.fn()}
       onStop={vi.fn()}
       onTask={vi.fn()}
+      onPolicy={vi.fn()}
       onMaxSteps={vi.fn()}
       onOpenLoop={vi.fn()}
       onBranchOpenLoop={onBranchOpenLoop}

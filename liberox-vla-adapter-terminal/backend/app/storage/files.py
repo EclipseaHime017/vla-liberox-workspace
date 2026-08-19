@@ -128,6 +128,15 @@ def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
                 "source_trajectory": source,
                 "resume_step": metadata.get("source_resume_step"),
                 "control_mode": metadata.get("control_mode", "policy"),
+                "policy_id": metadata.get("policy_id", "base"),
+                "policy_label": metadata.get("policy_label"),
+                "policy_base_checkpoint": metadata.get(
+                    "policy_base_checkpoint", metadata.get("checkpoint")
+                ),
+                "policy_overlay": metadata.get("policy_overlay"),
+                "policy_compatibility_sha256": metadata.get(
+                    "policy_compatibility_sha256"
+                ),
                 "manual_source": metadata.get("manual_source"),
                 "manual_translation_gain": metadata.get("manual_translation_gain"),
                 "manual_rotation_gain": metadata.get("manual_rotation_gain"),

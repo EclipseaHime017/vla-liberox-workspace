@@ -12,6 +12,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import cv2
@@ -35,6 +36,7 @@ from ..domain.run import (
 )
 from ..evaluation.libero_evaluator import LiberoEvaluator
 from ..policies.vla_adapter import VLAAdapterPolicyProvider
+from ..policies.catalog import PolicyCatalog
 from ..recording.episode_recorder import EpisodeRecorderFactory
 from ..services.controller_service import SpaceMouseControllerService
 from ..services.task_catalog import ConfiguredTaskCatalog
@@ -198,7 +200,14 @@ class SimulationManager:
             self.eval_config,
             self.ui_config.additional_tasks,
         )
-        self.provider = VLAAdapterPolicyProvider(self.runtime, self.eval_config)
+        self.policy_catalog = PolicyCatalog(
+            self.ui_config.policy_registry,
+            str(self.eval_config.checkpoint),
+            self.eval_config.stats_key,
+        )
+        self.provider = VLAAdapterPolicyProvider(
+            self.runtime, self.eval_config, self.policy_catalog
+        )
         try:
             self.spacemouse_config = load_spacemouse_config()
             self.spacemouse_config_error: str | None = None
@@ -346,10 +355,11 @@ class SimulationManager:
                 },
             },
             "model": self.provider.metadata(),
+            "policy_catalog": self.policy_catalog.list_policies(),
             "task": self.catalog.metadata(self.catalog.default_task_id),
             "task_catalog": self.catalog.list_tasks(),
             "capabilities": {
-                "model_switching": False,
+                "model_switching": True,
                 "task_switching": True,
                 "pause": False,
                 "step": False,
@@ -417,6 +427,7 @@ class SimulationManager:
         kind: str,
         max_steps: int,
         open_loop_steps: int,
+        policy_id: str = "base",
         task_id: str | None = None,
         parent: dict[str, Any] | None = None,
         resume_step: int | None = None,
@@ -428,8 +439,10 @@ class SimulationManager:
             task_id = parent.get("task_id")
             if not task_id:
                 raise ValueError("Source trajectory task is not available in the UI catalog")
+            policy_id = str(parent.get("policy_id") or "base")
         task_id = task_id or self.catalog.default_task_id
         task = self.catalog.metadata(task_id)
+        policy = self._policy_entry(policy_id)
         session_id = uuid.uuid4().hex[:12]
         now = datetime.now()
         stamp = now.strftime("%Y-%m-%d_%H%M%S")
@@ -448,6 +461,11 @@ class SimulationManager:
             output_dir=output_dir,
             max_steps=max_steps,
             open_loop_steps=open_loop_steps,
+            policy_id=policy.policy_id,
+            policy_label=policy.label,
+            policy_base_checkpoint=policy.base_checkpoint,
+            policy_overlay=None if policy.manifest is None else str(policy.manifest),
+            policy_compatibility_sha256=policy.compatibility_sha256,
             task_id=task_id,
             task_level=task["level"],
             task_name=task["task_name"],
@@ -493,6 +511,19 @@ class SimulationManager:
         if not 1 <= open_loop_steps <= 8:
             raise ValueError("open_loop_steps must be in [1, 8]")
 
+    def _policy_entry(self, policy_id: str):
+        catalog = getattr(self, "policy_catalog", None)
+        if catalog is not None:
+            return catalog.entry(policy_id)
+        if policy_id != "base":
+            raise ValueError(f"Unknown policy_id: {policy_id}")
+        checkpoint = str(getattr(getattr(self, "eval_config", None), "checkpoint", "unknown"))
+        return SimpleNamespace(
+            policy_id="base", label="VLA-Adapter · Object-Pro（基础模型）",
+            base_checkpoint=checkpoint, manifest=None,
+            compatibility_sha256=None,
+        )
+
     def _start_record(self, record: SimulationSession) -> dict[str, Any]:
         self._claim(record)
         record.thread = threading.Thread(
@@ -509,6 +540,7 @@ class SimulationManager:
         max_steps: int,
         open_loop_steps: int,
         task_id: str | None = None,
+        policy_id: str = "base",
         initial_jpeg: bytes | None = None,
     ) -> dict[str, Any]:
         self._validate_session_values(max_steps, open_loop_steps)
@@ -517,6 +549,7 @@ class SimulationManager:
             max_steps=max_steps,
             open_loop_steps=open_loop_steps,
             task_id=task_id,
+            policy_id=policy_id,
         )
         if initial_jpeg is not None:
             record.latest_jpeg = initial_jpeg
@@ -559,10 +592,11 @@ class SimulationManager:
         ).start()
 
     def create_draft(
-        self, task_id: str, max_steps: int, open_loop_steps: int
+        self, task_id: str, max_steps: int, open_loop_steps: int, policy_id: str = "base"
     ) -> dict[str, Any]:
         self._validate_session_values(max_steps, open_loop_steps)
         self.catalog.entry(task_id)
+        policy = self._policy_entry(policy_id)
         with self.lock:
             if self.active_session_id is not None:
                 raise RuntimeError("Cannot create a draft while a simulation is active")
@@ -571,6 +605,8 @@ class SimulationManager:
                 task_id=task_id,
                 max_steps=max_steps,
                 open_loop_steps=open_loop_steps,
+                policy_id=policy.policy_id,
+                policy_label=policy.label,
             )
             self.draft = draft
             public = self._draft_public(draft)
@@ -583,6 +619,7 @@ class SimulationManager:
         task_id: str | None = None,
         max_steps: int | None = None,
         open_loop_steps: int | None = None,
+        policy_id: str | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             if self.active_session_id is not None:
@@ -595,12 +632,16 @@ class SimulationManager:
             next_open_loop = (
                 open_loop_steps if open_loop_steps is not None else draft.open_loop_steps
             )
+            next_policy_id = policy_id if policy_id is not None else draft.policy_id
             self._validate_session_values(next_max_steps, next_open_loop)
             self.catalog.entry(next_task_id)
+            policy = self._policy_entry(next_policy_id)
             task_changed = next_task_id != draft.task_id
             draft.task_id = next_task_id
             draft.max_steps = next_max_steps
             draft.open_loop_steps = next_open_loop
+            draft.policy_id = policy.policy_id
+            draft.policy_label = policy.label
             if task_changed:
                 draft.preview_revision += 1
                 draft.preview_status = "PREPARING"
@@ -639,6 +680,7 @@ class SimulationManager:
                 draft.max_steps,
                 draft.open_loop_steps,
                 task_id=draft.task_id,
+                policy_id=draft.policy_id,
                 initial_jpeg=draft.latest_jpeg,
             )
         except Exception:
@@ -827,7 +869,11 @@ class SimulationManager:
                 },
                 "policy": {
                     "provider": "vla_adapter",
-                    "checkpoint": str(getattr(eval_config, "checkpoint", "unknown")),
+                    "policy_id": record.policy_id,
+                    "label": record.policy_label,
+                    "base_checkpoint": record.policy_base_checkpoint,
+                    "overlay": record.policy_overlay,
+                    "compatibility_sha256": record.policy_compatibility_sha256,
                     "stats_key": getattr(eval_config, "stats_key", None),
                 },
                 "simulation": {
@@ -867,6 +913,11 @@ class SimulationManager:
                 "root_session_id": record.root_session_id,
                 "resume_step": record.resume_step,
                 "control_mode": record.control_mode,
+                "policy_id": record.policy_id,
+                "policy_label": record.policy_label,
+                "policy_base_checkpoint": record.policy_base_checkpoint,
+                "policy_overlay": record.policy_overlay,
+                "policy_compatibility_sha256": record.policy_compatibility_sha256,
                 "current_step": record.current_step,
                 "max_steps": record.max_steps,
                 "open_loop_steps": record.open_loop_steps,
@@ -938,6 +989,15 @@ class SimulationManager:
             "resume_step": branch.get("resume_step", manifest.get("resume_step")),
             "control_mode": summary.get(
                 "control_mode", manifest.get("control_mode", "policy")
+            ),
+            "policy_id": manifest.get("policy_id", "base"),
+            "policy_label": manifest.get("policy_label"),
+            "policy_base_checkpoint": manifest.get(
+                "policy_base_checkpoint", manifest.get("checkpoint")
+            ),
+            "policy_overlay": manifest.get("policy_overlay"),
+            "policy_compatibility_sha256": manifest.get(
+                "policy_compatibility_sha256"
             ),
             "manual_source": (
                 "spacemouse" if controller else manifest.get("manual_source")
@@ -1157,7 +1217,7 @@ class SimulationManager:
                 model_was_loaded = self.provider.loaded
                 model_load_started = time.monotonic()
                 try:
-                    self.provider.load(record.open_loop_steps)
+                    self.provider.load(record.open_loop_steps, record.policy_id)
                 finally:
                     with self.lock:
                         record.preparation_timing["model_load_seconds"] = (
@@ -1487,6 +1547,11 @@ class SimulationManager:
             "checkpoint": str(self.eval_config.checkpoint)
             if record.control_mode == "policy"
             else None,
+            "policy_id": record.policy_id,
+            "policy_label": record.policy_label,
+            "policy_base_checkpoint": record.policy_base_checkpoint,
+            "policy_overlay": record.policy_overlay,
+            "policy_compatibility_sha256": record.policy_compatibility_sha256,
             "policy_device": provider_metadata["model_device"]
             if record.control_mode == "policy"
             else None,
@@ -1521,6 +1586,13 @@ class SimulationManager:
             "kind": record.kind,
             "status": record.status,
             "control_mode": record.control_mode,
+            "policy": {
+                "policy_id": record.policy_id,
+                "label": record.policy_label,
+                "base_checkpoint": record.policy_base_checkpoint,
+                "overlay": record.policy_overlay,
+                "compatibility_sha256": record.policy_compatibility_sha256,
+            },
             "task": record.task_prompt,
             "result": {
                 "success": record.success,

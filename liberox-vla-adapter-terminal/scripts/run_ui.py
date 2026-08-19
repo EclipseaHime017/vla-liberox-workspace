@@ -16,7 +16,11 @@ for path in (PROJECT_ROOT, SCRIPTS_ROOT):
 
 import uvicorn
 
-from backend.app.core.frontend import FrontendBuildError, ensure_frontend_build
+from backend.app.core.frontend import (
+    FrontendBuildError,
+    ensure_frontend_build,
+    frontend_build_info,
+)
 
 
 def main() -> int:
@@ -24,11 +28,20 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    logger = logging.getLogger(__name__)
+    logger.info("项目目录：%s", PROJECT_ROOT)
     try:
         ensure_frontend_build(PROJECT_ROOT / "frontend")
     except FrontendBuildError as exc:
         logging.getLogger(__name__).error("%s", exc)
         return 2
+    build = frontend_build_info(PROJECT_ROOT / "frontend")
+    logger.info(
+        "UI 构建：%s（current=%s, assets=%s）",
+        str(build["dist_fingerprint"])[:12],
+        build["current"],
+        ", ".join(str(value) for value in build["assets"]),
+    )
 
     import eval_pickplace_direct as direct
     from backend.app.main import create_app

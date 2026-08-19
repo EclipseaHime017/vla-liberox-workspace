@@ -58,6 +58,31 @@ def frontend_build_is_current(frontend_root: Path, fingerprint: str | None = Non
     return stamp.read_text(encoding="utf-8").strip() == expected
 
 
+def frontend_build_info(frontend_root: Path) -> dict[str, object]:
+    """Describe the exact source and generated bundle served by this process."""
+    root = frontend_root.resolve()
+    dist = root / "dist"
+    stamp = dist / BUILD_STAMP_NAME
+    source_fingerprint = frontend_source_fingerprint(root)
+    dist_fingerprint = (
+        stamp.read_text(encoding="utf-8").strip()
+        if stamp.is_file()
+        else None
+    )
+    assets = sorted(
+        path.name
+        for path in (dist / "assets").glob("*")
+        if path.is_file()
+    ) if (dist / "assets").is_dir() else []
+    return {
+        "frontend_root": str(root),
+        "source_fingerprint": source_fingerprint,
+        "dist_fingerprint": dist_fingerprint,
+        "current": dist_fingerprint == source_fingerprint and (dist / "index.html").is_file(),
+        "assets": assets,
+    }
+
+
 def ensure_frontend_build(
     frontend_root: Path,
     *,
@@ -106,6 +131,7 @@ __all__ = [
     "BUILD_STAMP_NAME",
     "FrontendBuildError",
     "ensure_frontend_build",
+    "frontend_build_info",
     "frontend_build_is_current",
     "frontend_source_fingerprint",
 ]

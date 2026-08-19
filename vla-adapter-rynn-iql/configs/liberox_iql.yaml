@@ -1,0 +1,55 @@
+schema_version: 1
+paths:
+  dataset_sources:
+    - ../../dataset-root
+  work_dir: ../outputs/work
+  output_dir: ../outputs/training
+  vla_adapter_root: ../../VLA-Adapter
+  libero_x_root: ../../LIBERO-X
+  policy_registry: ../../policy-registry
+data:
+  project_id: libero_x_vla
+  task_ids: []
+  action_horizon: 8
+  action_dim: 7
+  proprio_dim: 8
+  control_hz: 20.0
+  validation_fraction: 0.2
+  split_seed: 7
+  allow_no_success: true
+reward:
+  model: Alibaba-DAMO-Academy/RynnValue-4B
+  revision: 3f73b5d2b5e53b21f248c8791004dde6a8cf2b92
+  device: cuda:0
+  dtype: bfloat16
+  max_frames: 64
+  annotation_batch_size: 1
+  window_overlap: 8
+  gamma: 0.99
+  shaping_weight: 0.1
+  robot_description: Franka Emika Panda single-arm robot
+  camera_description: fixed third-person agent view
+vla:
+  base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
+  stats_key: libero_object
+  use_pro_version: true
+  freeze_backbone: true
+iql:
+  critic_image_size: 128
+  critic_lr: 0.0003
+  value_lr: 0.0003
+  policy_peak_lr: 0.00003
+  policy_final_lr: 0.000003
+  expectile: 0.8
+  beta: 10.0
+  max_advantage_weight: 100.0
+  target_tau: 0.005
+  critic_warmup_steps: 200
+  train_steps: 10000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+  checkpoint_interval: 512
+  resume_checkpoint: null
+  seed: 7
+  device: cuda:0
+  dtype: bfloat16

@@ -1,0 +1,17 @@
+schema_version: 1
+paths:
+  vla_adapter_root: ../../VLA-Adapter
+  libero_x_root: ../../LIBERO-X
+  output_dir: ../outputs/evaluation
+policy:
+  overlay: ../../policy-registry/latest/policy.yaml
+evaluation:
+  level: LEVEL1
+  task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+  trials: 1
+  max_steps: 300
+  open_loop_steps: 8
+  seed: 7
+  device: cuda:0
+  mujoco_gl: egl
+  compare_base: true

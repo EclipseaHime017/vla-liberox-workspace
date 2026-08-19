@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla-rynn-iql"
+version = "0.1.0"
+description = "Offline RynnValue reward annotation and IQL post-training for VLA-Adapter"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "numpy>=1.26,<2",
+  "PyYAML>=6,<7",
+  "Pillow>=10,<12",
+  "torch>=2.2",
+  "torchvision>=0.17",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

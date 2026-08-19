@@ -4,6 +4,10 @@
 /VLA-Adapter/
 /dataset-root/
 /runs/
+/policy-registry/*
+!/policy-registry/.gitkeep
+/vla-adapter-rynn-iql/outputs/
+/RynnValue/
 
 # Python
 **/__pycache__/

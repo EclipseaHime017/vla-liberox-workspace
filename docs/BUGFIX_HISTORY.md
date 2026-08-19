@@ -520,3 +520,13 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 新电脑缺少 `node_modules` 或 npm 时不再静默加载旧页面，而是停止启动并给出 `npm ci` 的明确处理命令；
 - 前端入口 HTML 增加 `Cache-Control: no-store`，避免构建已更新但浏览器仍复用旧入口；Vite 的哈希资源文件继续正常使用文件名版本隔离；
 - 新增自动构建、无变化跳过、源码变化重建、依赖缺失提示和 HTML 缓存头测试。
+- 新增 `/api/build-info`，返回实际服务目录、源码/构建指纹与 bundle 文件名；顶部常驻显示 12 位 UI 构建指纹，启动日志同时打印项目绝对路径，能够区分旧端口进程、旧目录和旧静态资源；
+- SpaceMouse 的 `DISCONNECTED` 状态不再隐藏探测错误：缺少 `pyspacemouse`、HID 权限问题、枚举异常和未发现配置中的精确 VID/PID 会给出不同提示，完整错误仍通过 `/api/controller` 返回。
+
+## 2026-08-19：RynnValue + IQL 独立后训练与 policy overlay
+
+- 新增独立 `vla-adapter-rynn-iql/` 项目，按 YAML 完成采集数据只读导入、固定版本 RynnValue-4B 时间价值标注、PyTorch Pixel-IQL 后训练和 LIBERO-X 推理；不引入 Robometer，也不修改 VLA-Adapter 上游源码；
+- 数据导入严格校验 N+1 状态/双视角对齐、20 Hz 时间网格、Franka 8D proprio、7D OSC action 和策略动作回放；原始轨迹完整入库，分支仅增加回溯点后的新后缀，父子轨迹按 root 分组切分；
+- RynnValue 按官方固定前缀采样方式预测每个 action-chunk 边界的剩余秒数，保存 entropy 与文本诊断，并用 `Φ=-v` 和 `γ^L` 构造 PBRS chunk reward；环境 `done` 仍是唯一成功依据；
+- IQL 实现 double-Q、expectile V、Polyak target、实际 chunk 长度折扣和 advantage-weighted masked L1，只训练连续 action head 与 proprio projector；checkpoint 保存优化器、目标网络、采样器与 RNG，可精确断点续跑；
+- 训练结果以带组件哈希和兼容性哈希的 `policy.yaml` 发布到 `policy-registry/`。UI 草稿新增基础模型/overlay 选择，会话和分支固化策略 ID，同一 Object-Pro backbone 上热切换两个组件；非法 overlay 明确拒绝且不回退。

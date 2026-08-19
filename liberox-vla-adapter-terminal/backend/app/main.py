@@ -20,12 +20,14 @@ from .api.models import (
     UpdateDraftRequest,
 )
 from .core.config import DEFAULT_UI_CONFIG, UIConfig, load_ui_config
+from .core.frontend import frontend_build_info
 from .services.run_service import RunService
 from .services.dataset_service import DatasetService
 from .workers.simulation_worker import SimulationManager
 
 
-FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+FRONTEND_ROOT = Path(__file__).resolve().parents[2] / "frontend"
+FRONTEND_DIST = FRONTEND_ROOT / "dist"
 
 
 def create_app(
@@ -60,6 +62,10 @@ def create_app(
     app.include_router(controller.router)
     app.include_router(datasets.router)
     app.include_router(websocket.router)
+
+    @app.get("/api/build-info", tags=["diagnostics"])
+    async def build_info():
+        return frontend_build_info(FRONTEND_ROOT)
 
     if (FRONTEND_DIST / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")

@@ -1,0 +1,9 @@
+schema_version: 1
+rynnvalue:
+  repository: https://github.com/alibaba-damo-academy/RynnValue.git
+  git_commit: 10e0d333f5f3811d0d130587e50f1faf48da49e5
+  model: Alibaba-DAMO-Academy/RynnValue-4B
+  hf_revision: 3f73b5d2b5e53b21f248c8791004dde6a8cf2b92
+vla_adapter:
+  base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
+  transformers: 4.40.1

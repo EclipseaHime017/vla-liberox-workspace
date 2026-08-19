@@ -83,12 +83,26 @@ class _DraftCatalog:
         }
 
 
+class _PolicyCatalog:
+    def entry(self, policy_id):
+        if policy_id not in {"base", "overlay"}:
+            raise ValueError(policy_id)
+        return SimpleNamespace(
+            policy_id=policy_id,
+            label="Base" if policy_id == "base" else "Rynn IQL",
+            base_checkpoint="VLA-Adapter/LIBERO-Object-Pro",
+            manifest=None if policy_id == "base" else Path("/registry/overlay/policy.yaml"),
+            compatibility_sha256=None if policy_id == "base" else "compat",
+        )
+
+
 def test_draft_does_not_create_output_until_start(tmp_path: Path):
     manager = object.__new__(SimulationManager)
     manager.lock = threading.RLock()
     manager.active_session_id = None
     manager.draft = None
     manager.catalog = _DraftCatalog()
+    manager.policy_catalog = _PolicyCatalog()
     manager.ui_config = SimpleNamespace(output_root=tmp_path)
     manager._launch_draft_preview = lambda draft: (
         setattr(draft, "latest_jpeg", b"jpeg"),
@@ -96,11 +110,14 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
     )
     started = {}
 
-    def create_original(max_steps, open_loop_steps, task_id=None, initial_jpeg=None):
+    def create_original(
+        max_steps, open_loop_steps, task_id=None, policy_id="base", initial_jpeg=None
+    ):
         started.update(
             max_steps=max_steps,
             open_loop_steps=open_loop_steps,
             task_id=task_id,
+            policy_id=policy_id,
             initial_jpeg=initial_jpeg,
         )
         return {"id": "started"}
@@ -122,5 +139,30 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
         "max_steps": 120,
         "open_loop_steps": 2,
         "task_id": "LEVEL1::task_b",
+        "policy_id": "base",
         "initial_jpeg": b"jpeg",
     }
+
+
+def test_branch_inherits_parent_policy(tmp_path: Path):
+    manager = object.__new__(SimulationManager)
+    manager.ui_config = SimpleNamespace(output_root=tmp_path)
+    manager.catalog = _DraftCatalog()
+    manager.policy_catalog = _PolicyCatalog()
+    manager._persist_effective_config = lambda _record: None
+    record = manager._new_record(
+        kind="branch",
+        max_steps=50,
+        open_loop_steps=2,
+        policy_id="base",
+        parent={
+            "id": "parent",
+            "root_session_id": "parent",
+            "trajectory": "/tmp/source.npz",
+            "task_id": "LEVEL1::task_a",
+            "policy_id": "overlay",
+        },
+        resume_step=10,
+    )
+    assert record.policy_id == "overlay"
+    assert record.policy_label == "Rynn IQL"

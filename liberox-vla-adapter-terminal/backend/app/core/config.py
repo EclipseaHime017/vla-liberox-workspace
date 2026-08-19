@@ -48,6 +48,7 @@ class UIConfig:
     host: str
     port: int
     dataset_root: Path
+    policy_registry: Path
     project_id: str
     legacy_scan_roots: tuple[Path, ...]
     preview_width: int
@@ -157,6 +158,7 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         host=_strict_string(raw, "host"),
         port=_strict_int(raw, "port"),
         dataset_root=_resolve(_strict_string(raw, "dataset_root"), base),
+        policy_registry=_resolve(_strict_string(raw, "policy_registry"), base),
         project_id=_strict_string(raw, "project_id"),
         legacy_scan_roots=tuple(_resolve(value, base) for value in scan_roots),
         preview_width=_strict_int(raw, "preview_width"),

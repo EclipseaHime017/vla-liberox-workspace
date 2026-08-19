@@ -9,18 +9,25 @@ class StrictModel(BaseModel):
 
 class DraftRequest(StrictModel):
     task_id: str = Field(min_length=1)
+    policy_id: str = Field(default="base", min_length=1)
     max_steps: int = Field(ge=1, le=10000)
     open_loop_steps: int = Field(ge=1, le=8)
 
 
 class UpdateDraftRequest(StrictModel):
     task_id: str | None = Field(default=None, min_length=1)
+    policy_id: str | None = Field(default=None, min_length=1)
     max_steps: int | None = Field(default=None, ge=1, le=10000)
     open_loop_steps: int | None = Field(default=None, ge=1, le=8)
 
     @model_validator(mode="after")
     def require_update(self):
-        if self.task_id is None and self.max_steps is None and self.open_loop_steps is None:
+        if (
+            self.task_id is None
+            and self.policy_id is None
+            and self.max_steps is None
+            and self.open_loop_steps is None
+        ):
             raise ValueError("At least one draft field must be provided")
         return self
 

@@ -29,6 +29,7 @@ SimulationManager / worker (backend/app/workers/simulation_worker.py)
 ## Extension points
 
 - Add a policy by implementing `policies/base.py` and registering it in the composition root.
+- The independent `vla-adapter-rynn-iql/` trainer publishes immutable component overlays to `policy-registry/`. The UI validates manifests and hashes but never imports training or RynnValue code; `VLAAdapterPolicyProvider` alone applies a selected overlay at the model boundary.
 - Add a simulator through `simulators/base.py`; simulator adapters must not write the catalog.
 - Add tasks through `configs/ui_config.yaml`; task identity is frozen into every run.
 - Add exporters under `recording/` without introducing UI dependencies.

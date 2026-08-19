@@ -30,6 +30,11 @@ class SimulationSession:
     output_dir: Path
     max_steps: int
     open_loop_steps: int
+    policy_id: str = "base"
+    policy_label: str | None = None
+    policy_base_checkpoint: str | None = None
+    policy_overlay: str | None = None
+    policy_compatibility_sha256: str | None = None
     task_id: str = ""
     task_level: str | None = None
     task_name: str | None = None
@@ -95,6 +100,11 @@ class SimulationSession:
             "source_trajectory": self.source_trajectory,
             "resume_step": self.resume_step,
             "control_mode": self.control_mode,
+            "policy_id": self.policy_id,
+            "policy_label": self.policy_label,
+            "policy_base_checkpoint": self.policy_base_checkpoint,
+            "policy_overlay": self.policy_overlay,
+            "policy_compatibility_sha256": self.policy_compatibility_sha256,
             "manual_source": self.manual_source,
             "manual_translation_gain": self.manual_translation_gain,
             "manual_rotation_gain": self.manual_rotation_gain,
@@ -139,6 +149,8 @@ class SimulationDraft:
     task_id: str
     max_steps: int
     open_loop_steps: int
+    policy_id: str = "base"
+    policy_label: str | None = None
     preview_status: str = "PREPARING"
     preview_revision: int = 1
     error: str | None = None
@@ -150,6 +162,8 @@ class SimulationDraft:
             "task_id": self.task_id,
             "max_steps": self.max_steps,
             "open_loop_steps": self.open_loop_steps,
+            "policy_id": self.policy_id,
+            "policy_label": self.policy_label,
             "preview_status": self.preview_status,
             "preview_revision": self.preview_revision,
             "preview_ready": self.preview_status == "READY",

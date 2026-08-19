@@ -6,6 +6,16 @@ export type TaskInfo = {
   init_state_index: number;
 };
 
+export type PolicyInfo = {
+  policy_id: string;
+  label: string;
+  base_checkpoint: string;
+  stats_key: string;
+  kind: "base" | "rynn_iql_overlay";
+  training_step: number | null;
+  compatibility_sha256: string | null;
+};
+
 export type Bootstrap = {
   config: {
     max_steps: number; open_loop_steps: number; control_hz: number; video_fps: number;
@@ -22,7 +32,8 @@ export type Bootstrap = {
       stale_timeout_ms: number | null;
     };
   };
-  model: { checkpoint: string; gpu: string; loaded: boolean; action_schema: { predicted_chunk_size: number } };
+  model: { checkpoint: string; gpu: string; loaded: boolean; policy_id: string; policy_label: string; action_schema: { predicted_chunk_size: number } };
+  policy_catalog: PolicyInfo[];
   task: TaskInfo;
   task_catalog: TaskInfo[];
   capabilities: { model_switching: boolean; task_switching: boolean };
@@ -30,6 +41,7 @@ export type Bootstrap = {
 
 export type Draft = {
   id: string; task_id: string; max_steps: number; open_loop_steps: number;
+  policy_id: string; policy_label: string;
   preview_status: "PREPARING" | "RENDERING" | "READY" | "ERROR";
   preview_revision: number; preview_ready: boolean; preview_available: boolean;
   error: string | null; task: TaskInfo;
@@ -42,12 +54,16 @@ export type PolicyBranchDraft = {
   resume_step: number;
   end_step: number;
   open_loop_steps: number;
+  policy_id: string;
+  policy_label: string;
 };
 
 export type Session = {
   id: string; kind: "original" | "branch"; task_id: string | null; level: string | null;
   task_name: string | null; task: string | null; parent_session_id: string | null;
   control_mode: string; manual_source: "browser" | "spacemouse" | null;
+  policy_id: string; policy_label: string | null; policy_base_checkpoint: string | null;
+  policy_overlay: string | null; policy_compatibility_sha256: string | null;
   manual_translation_gain: number | null; manual_rotation_gain: number | null;
   spacemouse_status: string | null; spacemouse_connected: boolean | null;
   spacemouse_stale: boolean | null; spacemouse_latency_ms: number | null;

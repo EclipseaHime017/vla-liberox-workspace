@@ -53,3 +53,22 @@ def test_stale_frontend_without_dependencies_has_actionable_error(
     with pytest.raises(frontend.FrontendBuildError, match="npm ci"):
         frontend.ensure_frontend_build(root)
 
+
+def test_frontend_build_info_identifies_exact_bundle(tmp_path: Path):
+    root = make_frontend(tmp_path / "frontend")
+    fingerprint = frontend.frontend_source_fingerprint(root)
+    (root / "dist" / "assets").mkdir(parents=True)
+    (root / "dist" / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (root / "dist" / "assets" / "index-abc.js").write_text("", encoding="utf-8")
+    (root / "dist" / frontend.BUILD_STAMP_NAME).write_text(
+        fingerprint + "\n",
+        encoding="utf-8",
+    )
+
+    info = frontend.frontend_build_info(root)
+
+    assert info["frontend_root"] == str(root.resolve())
+    assert info["source_fingerprint"] == fingerprint
+    assert info["dist_fingerprint"] == fingerprint
+    assert info["current"] is True
+    assert info["assets"] == ["index-abc.js"]

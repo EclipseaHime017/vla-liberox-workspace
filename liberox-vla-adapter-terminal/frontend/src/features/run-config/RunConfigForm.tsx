@@ -1,15 +1,17 @@
-import type { Draft, PolicyBranchDraft, TaskInfo } from "../run-control/types";
+import type { Draft, PolicyBranchDraft, PolicyInfo, TaskInfo } from "../run-control/types";
 import { canStartDraft } from "../simulation-view/controls";
 import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
 import { TaskSelector } from "./TaskSelector";
+import { PolicySelector } from "./PolicySelector";
 
 type Props = {
   draft: Draft | null; branchDraft: PolicyBranchDraft | null;
-  tasks: TaskInfo[]; active: boolean; busy: boolean;
-  taskId: string; maxSteps: number; openLoop: number;
+  tasks: TaskInfo[]; policies: PolicyInfo[]; active: boolean; busy: boolean;
+  taskId: string; policyId: string; maxSteps: number; openLoop: number;
   onCreate: () => void; onStart: () => void; onCancel: () => void; onStop: () => void;
   onTask: (value: string) => void; onMaxSteps: (value: number, commit: boolean) => void;
+  onPolicy: (value: string) => void;
   onOpenLoop: (value: number, commit: boolean) => void;
   onBranchOpenLoop: (value: number) => void;
   onStartBranch: () => void; onCancelBranch: () => void;
@@ -24,6 +26,9 @@ export function RunConfigForm(props: Props) {
       </div>
       <label className="locked-field">任务（继承源会话）
         <Input value={props.branchDraft.task_prompt} disabled />
+      </label>
+      <label className="locked-field">策略（继承源会话）
+        <Input value={props.branchDraft.policy_label} disabled />
       </label>
       <label className="locked-field">源 Episode
         <Input value={props.branchDraft.source_episode} disabled />
@@ -51,6 +56,7 @@ export function RunConfigForm(props: Props) {
       </div>
     </> : !props.draft ? <Button className="primary create-draft" disabled={props.active || props.busy} onClick={props.onCreate}>创建仿真</Button> : <>
       <label>任务场景<TaskSelector tasks={props.tasks} value={props.taskId} disabled={props.active || props.busy} onChange={props.onTask} /></label>
+      <label>策略模型<PolicySelector policies={props.policies} value={props.policyId} disabled={props.active || props.busy} onChange={props.onPolicy} /></label>
       <label>总控制步数<Input type="number" min={1} max={10000} value={props.maxSteps} disabled={props.active || props.busy} onChange={(event) => props.onMaxSteps(Number(event.target.value), false)} onBlur={() => props.onMaxSteps(props.maxSteps, true)} /></label>
       <label>每次预测执行步数<Input type="number" min={1} max={8} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>
       <div className="button-row">

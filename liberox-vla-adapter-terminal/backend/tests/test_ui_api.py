@@ -55,12 +55,13 @@ class FakeManager:
     def get_draft(self):
         return self.draft
 
-    def create_draft(self, task_id, max_steps, open_loop_steps):
+    def create_draft(self, task_id, max_steps, open_loop_steps, policy_id="base"):
         if self.active:
             raise RuntimeError("active")
         self.draft = {
             "id": "draft", "task_id": task_id, "max_steps": max_steps,
             "open_loop_steps": open_loop_steps, "preview_status": "READY",
+            "policy_id": policy_id, "policy_label": policy_id,
             "preview_ready": True, "preview_available": True,
         }
         return self.draft
@@ -175,9 +176,13 @@ def test_api_create_conflict_stop_branch_and_artifact(tmp_path: Path):
         assert await endpoint("/api/bootstrap")(request) == {"ok": True}
         assert (await endpoint("/api/controller")(request))["state"] == "READY"
         assert (await endpoint("/api/controller/calibrate", "POST")(request))["state"] == "CALIBRATING"
-        body = DraftRequest(task_id="LEVEL1::task", max_steps=20, open_loop_steps=4)
+        body = DraftRequest(
+            task_id="LEVEL1::task", policy_id="trained", max_steps=20,
+            open_loop_steps=4,
+        )
         draft = await endpoint("/api/draft", "POST")(body, request)
         assert draft["preview_ready"] is True
+        assert draft["policy_id"] == "trained"
         assert "new" not in manager.records
         updated = await endpoint("/api/draft", "PATCH")(
             UpdateDraftRequest(open_loop_steps=2), request
@@ -280,3 +285,30 @@ def test_frontend_entry_is_never_served_from_browser_cache(
     response = asyncio.run(route.endpoint(""))
 
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_build_info_endpoint_reports_the_served_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    frontend_root = tmp_path / "frontend"
+    (frontend_root / "src").mkdir(parents=True)
+    (frontend_root / "src" / "main.tsx").write_text("export {};\n", encoding="utf-8")
+    (frontend_root / "dist").mkdir()
+    (frontend_root / "dist" / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    fingerprint = main_module.frontend_build_info(frontend_root)["source_fingerprint"]
+    (frontend_root / "dist" / ".source-fingerprint").write_text(
+        str(fingerprint) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main_module, "FRONTEND_ROOT", frontend_root)
+    app = create_app(ui_config=object(), eval_config=object(), manager=FakeManager(tmp_path))
+    route = next(
+        route for route in app.routes
+        if getattr(route, "path", None) == "/api/build-info"
+    )
+
+    result = asyncio.run(route.endpoint())
+
+    assert result["dist_fingerprint"] == fingerprint
+    assert result["current"] is True
