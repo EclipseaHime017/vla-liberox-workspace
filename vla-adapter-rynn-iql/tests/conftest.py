@@ -11,7 +11,8 @@ from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, load_train_config
 
 
 def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | None = None,
-             action_source: str = "policy", action_count: int = 17, success: bool = False):
+             action_source: str = "policy", action_count: int = 17, success: bool = False,
+             success_from: int | None = None):
     run_dir = root / "projects" / "libero_x_vla" / "runs" / "task" / "2026-01-01" / run_id
     episode = run_dir / "episodes" / "episode_000"
     episode.mkdir(parents=True)
@@ -22,6 +23,12 @@ def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | N
     sources = np.asarray(["policy"] * action_count)
     if kind == "branch":
         sources[int(resume):] = action_source
+    done = np.zeros(action_count, dtype=bool)
+    if success:
+        terminal = action_count - 1 if success_from is None else success_from
+        if not 0 <= terminal < action_count:
+            raise ValueError("success_from must identify a recorded action")
+        done[terminal:] = True
     np.savez_compressed(
         episode / "trajectory.npz",
         time_seconds=np.arange(action_count + 1, dtype=np.float64) / 20.0,
@@ -30,7 +37,7 @@ def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | N
         gripper_qpos=np.zeros((action_count + 1, 2), np.float32),
         env_action=actions, raw_action=raw_actions,
         reward=np.zeros(action_count, np.float32),
-        done=np.asarray([False] * (action_count - 1) + [success]),
+        done=done,
         action_source=sources,
     )
     np.savez_compressed(
@@ -51,7 +58,10 @@ def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | N
 def configured(tmp_path: Path):
     dataset = tmp_path / "dataset"
     _episode(dataset, "root", action_count=17)
-    _episode(dataset, "branch", kind="branch", resume=5, action_source="human", action_count=17, success=True)
+    _episode(
+        dataset, "branch", kind="branch", resume=5, action_source="human",
+        action_count=17, success=True, success_from=13,
+    )
     raw = yaml.safe_load(DEFAULT_TRAIN_CONFIG.read_text(encoding="utf-8"))
     raw["paths"].update({
         "dataset_sources": [str(dataset)], "work_dir": str(tmp_path / "work"),

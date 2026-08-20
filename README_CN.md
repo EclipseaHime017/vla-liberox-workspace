@@ -702,7 +702,9 @@ python vla-adapter-rynn-iql/scripts/run_pipeline.py \
 
 ### 4.5 数据与奖励语义
 
-RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个边界按官方实现使用截至该点的均匀采样前缀并读取最后 value slot，超过 64 个边界时通过重叠窗口合并。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。原始轨迹完整进入 replay；分支只额外加入 `resume_step` 之后的 `human` 或 `policy_requery` 后缀，避免重复训练父轨迹前缀。
+RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个边界按官方实现使用截至该点的均匀采样前缀并读取最后 value slot，超过 64 个边界时通过重叠窗口合并。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。未成功的原始轨迹完整进入 replay；分支只额外加入 `resume_step` 之后的 `human` 或 `policy_requery` 后缀，避免重复训练父轨迹前缀。
+
+固定总时长的采集可能在任务成功后继续记录，并令 `done` 从首次成功开始一直保持 `True`。`prepare_dataset.py` 将第一个 `True` 对应的 action 作为唯一 terminal：保留该成功动作和它的 next observation，但在 replay、RynnValue 边界与 IQL 训练中排除其后的锁存尾段。源 `trajectory.npz` 不会被裁剪或改写；manifest 使用 `recorded_action_count` 记录原始长度、`action_count` 记录有效训练长度，并保存 `terminal_step` 与 `trailing_action_count` 供审计。若 `done` 在首次 `True` 后重新变为 `False`，则仍视为非单调数据错误并拒绝导入。
 
 设 RynnValue 预测的剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。长度为 `L` 的 action chunk 使用：
 

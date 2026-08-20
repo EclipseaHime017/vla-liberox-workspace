@@ -158,18 +158,18 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         missing = sorted(required - set(arrays.files))
         if missing:
             raise ValueError(f"{trajectory} is missing arrays: {missing}")
-        action_count = len(arrays["env_action"])
-        if action_count < 1:
+        recorded_action_count = len(arrays["env_action"])
+        if recorded_action_count < 1:
             raise ValueError(f"Trajectory must contain at least one action: {trajectory}")
-        if len(arrays["eef_position"]) != action_count + 1:
+        if len(arrays["eef_position"]) != recorded_action_count + 1:
             raise ValueError(f"N+1 state invariant failed: {trajectory}")
         for key, shape in {
-            "eef_axis_angle": (action_count + 1, 3),
-            "gripper_qpos": (action_count + 1, 2),
-            "raw_action": (action_count, 7),
-            "env_action": (action_count, 7),
-            "done": (action_count,),
-            "action_source": (action_count,),
+            "eef_axis_angle": (recorded_action_count + 1, 3),
+            "gripper_qpos": (recorded_action_count + 1, 2),
+            "raw_action": (recorded_action_count, 7),
+            "env_action": (recorded_action_count, 7),
+            "done": (recorded_action_count,),
+            "action_source": (recorded_action_count,),
         }.items():
             if arrays[key].shape != shape:
                 raise ValueError(
@@ -184,7 +184,7 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
                 raise ValueError(f"{key} contains NaN or Inf: {trajectory}")
         times = np.asarray(arrays["time_seconds"], dtype=np.float64)
         expected_period = 1.0 / float(data_cfg["control_hz"])
-        if times.shape != (action_count + 1,) or not np.allclose(
+        if times.shape != (recorded_action_count + 1,) or not np.allclose(
             np.diff(times), expected_period, rtol=0.0, atol=1e-6
         ):
             raise ValueError(
@@ -204,17 +204,24 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
             expected_gripper = -np.sign(2.0 * raw_action[:, 6] - 1.0)
             if not np.array_equal(expected_gripper, executed[:, 6]):
                 raise ValueError(f"Policy gripper round-trip mismatch: {trajectory}")
-        environment_success = bool(np.any(arrays["done"]))
-        done_indices = np.flatnonzero(arrays["done"])
-        if done_indices.size and (
-            done_indices.size != 1 or int(done_indices[0]) != action_count - 1
-        ):
-            raise ValueError(f"Trajectory contains actions after environment completion: {trajectory}")
+        done = np.asarray(arrays["done"], dtype=bool)
+        done_indices = np.flatnonzero(done)
+        environment_success = bool(done_indices.size)
+        terminal_step = int(done_indices[0]) if done_indices.size else None
+        if terminal_step is not None and not bool(np.all(done[terminal_step:])):
+            raise ValueError(
+                f"done must remain true after its first terminal step: {trajectory}"
+            )
+        # Fixed-duration collectors may keep stepping after success and latch done=True.
+        # Preserve the source arrays, but expose only the valid prefix through the replay
+        # manifest. The terminal action itself remains part of the effective trajectory.
+        action_count = terminal_step + 1 if terminal_step is not None else recorded_action_count
+        trailing_action_count = recorded_action_count - action_count
         if bool(run.get("success", False)) != environment_success:
             raise ValueError(f"run.success and environment done disagree: {run_json}")
     with np.load(observations, allow_pickle=False) as images:
         for key in ("agentview_image", "wrist_image"):
-            if key not in images or images[key].shape[0] != action_count + 1:
+            if key not in images or images[key].shape[0] != recorded_action_count + 1:
                 raise ValueError(f"Invalid {key} alignment: {observations}")
             if images[key].ndim != 4 or images[key].shape[-1] != 3:
                 raise ValueError(f"Invalid {key} image dimensions: {observations}")
@@ -224,8 +231,15 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
     resume = int(run.get("resume_step") or 0) if kind == "branch" else 0
     if not 0 <= resume < action_count:
         raise ValueError(f"Invalid resume_step={resume} for {run_json}")
-    if kind == "branch" and any(value not in {"human", "policy_requery"} for value in sources[resume:]):
+    if kind == "branch" and any(
+        value not in {"human", "policy_requery"} for value in sources[resume:action_count]
+    ):
         raise ValueError(f"Branch suffix contains unexpected action_source values: {run_json}")
+    if trailing_action_count:
+        LOG.info(
+            "Run %s reached terminal at action %d; excluding %d latched-done trailing actions",
+            run["id"], terminal_step, trailing_action_count,
+        )
     return {
         "run_id": str(run["id"]),
         "root_run_id": str(run.get("root_session_id") or run["id"]),
@@ -238,6 +252,9 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         "prompt": prompt.strip(),
         "success": bool(run.get("success", False)),
         "action_count": action_count,
+        "recorded_action_count": recorded_action_count,
+        "terminal_step": terminal_step,
+        "trailing_action_count": trailing_action_count,
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
@@ -302,7 +319,8 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
         "dataset_sha256": stable_hash([{k: ep[k] for k in (
             "run_id", "source_manifest_sha256", "trajectory_sha256",
             "observations_sha256", "task_id", "prompt", "resume_step",
-            "action_count", "split")}
+            "action_count", "recorded_action_count", "terminal_step",
+            "trailing_action_count", "split")}
             for ep in episodes]),
         "action_horizon": horizon,
         "action_dim": config.section("data")["action_dim"],

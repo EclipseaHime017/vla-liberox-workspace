@@ -537,3 +537,10 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 删除错误的 editable-install 步骤，新增严格 YAML 路径 `paths.rynnvalue_root`，奖励进程直接从固定的官方 checkout 导入 `rynn_value`，无需修改上游仓库或持久设置 `PYTHONPATH`；
 - 补齐官方模型源码实际需要的 `einops` 依赖；验证脚本现在输出真实 import 路径，并在执行官方 Python 代码前先检查 Git commit 与工作树洁净状态；
 - 在 `rynnvalue-reward` 实机环境验证通过：源码 commit 为 `10e0d333f5f3811d0d130587e50f1faf48da49e5`，模型 revision 为 `3f73b5d2b5e53b21f248c8791004dde6a8cf2b92`。
+
+## 2026-08-20：成功后锁存 `done=True` 导致数据准备失败
+
+- 根因是固定总时长的接管轨迹会在首次成功后继续记录，环境 `done` 因而在余下每一步保持 `True`；旧导入器错误地只允许最后一步出现一次 `True`，将合法的终止状态锁存误判为“终止后仍有动作”；
+- 数据准备现在以第一次 `done=True` 为唯一 terminal，保留成功动作及其 next observation，只在 replay、RynnValue 标注和 IQL chunk 中逻辑排除后续锁存尾段，不修改源轨迹；
+- manifest 同时保存原始 `recorded_action_count`、有效 `action_count`、`terminal_step` 与排除的 `trailing_action_count`，数据哈希也覆盖这些终止语义；
+- `done` 一旦为 `True` 后又变回 `False` 仍会被拒绝，避免把真正损坏或语义不一致的数据静默截断；回归测试覆盖成功尾段截断、terminal chunk 长度和源 NPZ 字节不变。

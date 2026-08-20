@@ -74,8 +74,13 @@ VLA checkpoint.
 
 Completed original trajectories enter replay once. A branch contributes only
 its `resume_step..end` suffix, so the copied parent prefix is never counted
-twice. The importer groups train/validation splits by root trajectory, validates
-the N+1 state/image invariant, and constructs masked 8×7 action chunks.
+twice. If a fixed-duration recording latches `done=True` after success, the
+importer keeps the first terminal action and excludes only the post-terminal
+tail from replay and reward annotation without changing the source NPZ. The
+manifest records both `recorded_action_count` and the effective `action_count`;
+a non-monotonic `done` sequence is rejected. The importer groups
+train/validation splits by root trajectory, validates the N+1 state/image
+invariant, and constructs masked 8×7 action chunks.
 
 RynnValue receives only upright `agentview` frames and the BDDL task prompt. At
 each action-chunk boundary, the adapter follows the pinned official inference

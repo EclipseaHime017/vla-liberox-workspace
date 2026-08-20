@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import zipfile
 
+import numpy as np
 import yaml
 
 import pytest
@@ -38,8 +39,40 @@ def test_branch_prefix_is_not_added_as_new_replay(configured):
     episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     assert [chunk["start"] for chunk in episodes["root"]["chunks"]] == [0, 8, 16]
     assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [5, 13]
-    assert episodes["branch"]["reward_boundaries"] == [5, 13, 17]
+    assert episodes["branch"]["reward_boundaries"] == [5, 13, 14]
     assert episodes["root"]["split"] == episodes["branch"]["split"]
+
+
+def test_latched_done_tail_is_excluded_from_replay_without_changing_source(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    original_bytes = trajectory.read_bytes()
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+
+    assert branch["recorded_action_count"] == 17
+    assert branch["terminal_step"] == 13
+    assert branch["action_count"] == 14
+    assert branch["trailing_action_count"] == 3
+    assert branch["chunks"][-1] == {"start": 13, "length": 1, "end": 14}
+    assert trajectory.read_bytes() == original_bytes
+
+
+def test_non_monotonic_done_is_rejected(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["done"] = arrays["done"].copy()
+    arrays["done"][15] = False
+    np.savez_compressed(trajectory, **arrays)
+
+    with pytest.raises(ValueError, match="done must remain true"):
+        prepare_dataset(configured)
 
 
 def test_ui_export_zip_is_imported_without_modifying_source(configured, tmp_path: Path):
