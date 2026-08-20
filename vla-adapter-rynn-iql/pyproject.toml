@@ -10,7 +10,7 @@ requires-python = ">=3.10,<3.11"
 dependencies = [
   "numpy>=1.26,<2",
   "PyYAML>=6,<7",
-  "Pillow>=10,<12",
+  "Pillow>=10,<13",
   "torch>=2.2",
   "torchvision>=0.17",
 ]

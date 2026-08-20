@@ -597,9 +597,9 @@ action head + proprio projector overlay
 
 RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本系统不包含 Robometer、在线 RL、奖励模型微调或真机控制。
 
-### 4.2 准备两个隔离环境
+### 4.2 复用 VLA 环境，只新建奖励环境
 
-RynnValue 与 VLA 需要不同版本的 Transformers，因此必须隔离环境。奖励环境按固定 commit 安装官方仓库；训练环境最稳妥的方式是克隆已经验证过的 `vla-liberox` 环境，再安装独立项目：
+RynnValue 与 VLA 需要不同版本的 Transformers，因此奖励标注必须隔离；但数据准备、IQL 训练和仿真推理与现有 VLA/LIBERO 运行栈完全一致，可以直接复用已经验证的 `vla-liberox`。因此只需要新建 `rynnvalue-reward`，然后把轻量的训练包安装到现有环境，不再克隆第二个 VLA 环境：
 
 ```bash
 cd ~/eclipseaws/vla-liberox-workspace
@@ -611,10 +611,12 @@ git -C RynnValue checkout 10e0d333f5f3811d0d130587e50f1faf48da49e5
 conda run -n rynnvalue-reward pip install -e ./RynnValue
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/verify_reward_environment.py
 
-conda create -n vla-rynn-iql --clone vla-liberox
-conda run -n vla-rynn-iql pip install -r vla-adapter-rynn-iql/requirements-train.txt
-conda run -n vla-rynn-iql pip install -e ./vla-adapter-rynn-iql
+# 复用原有环境，不执行 conda create。
+conda run -n vla-liberox pip install -r vla-adapter-rynn-iql/requirements-train.txt
+conda run -n vla-liberox pip install -e ./vla-adapter-rynn-iql
 ```
+
+这里不会把 RynnValue 安装进 `vla-liberox`，也不会升级其中的 Transformers。`requirements-train.txt` 保持 `transformers==4.40.1`，并兼容本项目已经验证的 Pillow 12.x 与 Accelerate 1.x。如果现有环境还没有按第 2 章完成 VLA-Adapter、LIBERO-X 和 GPU 配置，应先完成第 2 章，而不是用本节重新创建它。
 
 固定版本记录在 `vla-adapter-rynn-iql/configs/dependency-lock.yaml`。当前 RynnValue 源码 commit 为 `10e0d333f5f3811d0d130587e50f1faf48da49e5`，RynnValue-4B Hugging Face snapshot revision 为 `3f73b5d2b5e53b21f248c8791004dde6a8cf2b92`。奖励标注器导入本地固定版本的官方模型类，使用 `trust_remote_code=False` 加载 snapshot，并把代码版本、实际 snapshot 与模型文件 SHA-256 写入缓存元数据。
 
@@ -668,13 +670,13 @@ iql:
 以下命令均从 `~/eclipseaws/vla-liberox-workspace` 执行：
 
 ```bash
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/train_iql.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/evaluate.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
   --config vla-adapter-rynn-iql/configs/inference.yaml
 ```
 
@@ -731,7 +733,7 @@ UI 只接受与当前基础 checkpoint、8×7 action、8 维 proprio 兼容且�
 
 ```bash
 cd ~/eclipseaws/vla-liberox-workspace/vla-adapter-rynn-iql
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-rynn-iql python -m pytest -q
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-liberox python -m pytest -q
 ```
 
 完整 GPU 验收应至少包括：一条轨迹的 RynnValue 标注、20 个 IQL 更新步、overlay 导出、一次短 CLI rollout，以及在 Web UI 中选择该 overlay 创建仿真。流程跑通不等于策略已经提升；策略效果仍需独立验证集、多个随机初始状态和足够成功/接管数据评估。

@@ -6,18 +6,17 @@ is a frozen offline reward annotator; the deployed policy remains
 
 ## Environments
 
-Use separate Python 3.10 environments because RynnValue requires a recent
-Transformers release while the current VLA-Adapter checkout uses 4.40.1.
+Reuse the existing Python 3.10 `vla-liberox` environment for dataset preparation,
+IQL training and evaluation. RynnValue requires a newer Transformers stack, so
+only its reward annotator gets a new environment.
 
 ```bash
 conda create -n rynnvalue-reward python=3.10 -y
 conda run -n rynnvalue-reward pip install -r vla-adapter-rynn-iql/requirements-reward.txt
 
-# Clone the already verified VLA/LIBERO simulator environment so the new
-# trainer stays isolated without reinstalling incompatible upstream pins.
-conda create -n vla-rynn-iql --clone vla-liberox
-conda run -n vla-rynn-iql pip install -r vla-adapter-rynn-iql/requirements-train.txt
-conda run -n vla-rynn-iql pip install -e ./vla-adapter-rynn-iql
+# Add only the lightweight trainer package to the existing VLA/LIBERO environment.
+conda run -n vla-liberox pip install -r vla-adapter-rynn-iql/requirements-train.txt
+conda run -n vla-liberox pip install -e ./vla-adapter-rynn-iql
 ```
 
 Install the official RynnValue checkout at the commit pinned in
@@ -41,13 +40,13 @@ model-file SHA-256 hashes in the reward cache.
 Run from `vla-liberox-workspace/`:
 
 ```bash
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/train_iql.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/evaluate.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
   --config vla-adapter-rynn-iql/configs/inference.yaml
 ```
 
@@ -59,7 +58,7 @@ chunks.
 For a fast CPU test without model downloads:
 
 ```bash
-conda run -n vla-rynn-iql pytest -q vla-adapter-rynn-iql/tests
+conda run -n vla-liberox pytest -q vla-adapter-rynn-iql/tests
 ```
 
 The UI scans `policy-registry/` for exported `policy.yaml` overlays. An overlay

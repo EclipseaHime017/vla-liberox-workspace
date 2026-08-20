@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "liberox_iql.yaml")
     parser.add_argument("--inference-config", type=Path, default=ROOT / "configs" / "inference.yaml")
     parser.add_argument("--reward-env", default="rynnvalue-reward")
-    parser.add_argument("--train-env", default="vla-rynn-iql")
+    parser.add_argument("--train-env", default="vla-liberox")
     parser.add_argument("--skip-evaluation", action="store_true")
     args = parser.parse_args()
     run(args.train_env, "prepare_dataset.py", args.config.resolve())

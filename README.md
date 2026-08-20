@@ -64,18 +64,19 @@ as an offline reward annotator. The PyTorch trainer implements IQL with double-Q
 critics, expectile value regression and advantage-weighted behavior cloning; it
 does not perform online exploration or modify the upstream VLA-Adapter source.
 
-Use separate `rynnvalue-reward` and `vla-rynn-iql` Conda environments. After
+Reuse the existing `vla-liberox` environment for dataset preparation, IQL and
+evaluation; only RynnValue needs the additional `rynnvalue-reward` environment. After
 following the installation steps in the [standalone trainer guide](vla-adapter-rynn-iql/README.md),
 run from the workspace root:
 
 ```bash
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/train_iql.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-rynn-iql python vla-adapter-rynn-iql/scripts/evaluate.py \
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
   --config vla-adapter-rynn-iql/configs/inference.yaml
 ```
 
