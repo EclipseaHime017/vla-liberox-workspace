@@ -173,8 +173,11 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
         raise ValueError("reward.window_overlap must be smaller than max_frames")
     _number(reward, "gamma", low=0, high=1)
     _number(reward, "shaping_weight", low=0)
-    if reward["dtype"] not in {"bfloat16", "float16", "float32"}:
-        raise ValueError("reward.dtype must be bfloat16, float16, or float32")
+    if reward["dtype"] != "bfloat16":
+        raise ValueError(
+            "Version 1 requires reward.dtype=bfloat16 to match the pinned RynnValue-4B "
+            "checkpoint and the validated 16GB profile"
+        )
     _cuda_device(reward["device"], "reward.device")
     for key in ("base_checkpoint", "stats_key"):
         if not isinstance(vla[key], str) or not vla[key].strip():

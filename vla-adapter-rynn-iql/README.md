@@ -94,6 +94,14 @@ the sole success/terminal authority; language `Success` output is diagnostic
 only. Chunk reward is the discounted `-1`-until-success sparse return plus
 potential shaping `κ(γ^L Φ(s')-Φ(s))`, where `Φ=-remaining_seconds`.
 
+The pinned 4B checkpoint is a BF16 RynnValue model, not a separately quantized
+Qwen model. Its Qwen text hidden width is 2560; eight consecutive value-token
+states are concatenated into the dedicated value head's 20480-wide input. The
+upstream custom value-head constructors default to FP32, so this adapter casts
+the **complete** loaded model (backbone and value heads) to the configured BF16
+dtype and verifies every floating parameter before annotation. Value-bin
+decoding and entropy softmax still run in FP32 for numerical stability.
+
 Set `iql.resume_checkpoint` to a saved `step_XXXXXXXX` directory to resume Q/V,
 targets, actor components, optimizers, replay sampler and RNG state. Checkpoint
 intervals must be divisible by gradient accumulation so no partial actor

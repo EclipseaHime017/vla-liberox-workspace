@@ -545,3 +545,9 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - manifest 同时保存原始 `recorded_action_count`、有效 `action_count`、`terminal_step` 与排除的 `trailing_action_count`，数据哈希也覆盖这些终止语义；
 - 后续考虑到短暂进入成功区域不一定代表稳定完成，新增严格 YAML 参数 `data.success_consecutive_steps`，默认连续 5 步（20 Hz 下 250 ms）才确认成功；一次 `False` 会重置连续计数，第 5 个确认 action 才成为 terminal，未达到阈值的零散 `True` 按失败处理；
 - PBRS sparse reward 与 replay bootstrap 改为只使用去抖后的有效 terminal，不再直接读取可能波动的原始 `done`；manifest 同时保留源成功判定、去抖训练判定、连续区间、原始 True 数和终止后统计；回归测试覆盖锁存成功、`True → False → True` 重新计数、未确认脉冲、terminal chunk 长度和源 NPZ 字节不变。
+
+## 2026-08-20：RynnValue value head 与 Qwen backbone 精度不一致
+
+- 根因是官方 `LinearValueHead` 和 `BroValueHead` 构造函数显式默认 `torch.float32`；原标注器虽然用 BF16 参数加载 checkpoint，最后却只执行 `.to(device)`，无法保证自定义 value head 与 BF16 Qwen backbone 使用相同 dtype；
+- 标注器改为显式使用固定本地源码的 `RynnValueLangConfig/Processor/Model`，不允许错误回退到普通 Qwen language-model head；加载后按官方推理程序执行整模 `.to(device=..., dtype=torch.bfloat16)`；
+- 标注前校验 `2560 × 8 = 20480` 的 value-head 输入契约，并扫描全部浮点参数；任何残留 FP32/FP16 参数都立即报告具体名称。第一版配置固定 `reward.dtype: bfloat16`，value 解码与 entropy softmax 仍按官方实现使用 FP32 保持数值稳定。

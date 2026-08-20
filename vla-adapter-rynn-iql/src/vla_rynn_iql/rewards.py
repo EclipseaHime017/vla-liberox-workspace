@@ -23,6 +23,80 @@ from .io import atomic_json, sha256_file, stable_hash
 LOG = logging.getLogger(__name__)
 
 
+def validate_rynnvalue_config_contract(config: Any, processor: Any) -> dict[str, Any]:
+    """Validate the pinned RynnValue/Qwen value-head interface before loading weights."""
+    if getattr(config, "model_type", None) != "rynn_value_lang":
+        raise RuntimeError(
+            "The reward checkpoint is not a RynnValue language model: "
+            f"model_type={getattr(config, 'model_type', None)!r}"
+        )
+    head_config = getattr(config, "value_head_config", None)
+    if head_config is None:
+        raise RuntimeError(
+            "RynnValue checkpoint has no value_head_config; refusing to fall back to "
+            "the Qwen language-model head"
+        )
+    hidden_size = int(config.text_config.hidden_size)
+    repeat = int(config.value_token_repeat)
+    processor_repeat = int(processor.value_token_repeat)
+    if repeat < 1 or processor_repeat != repeat:
+        raise RuntimeError(
+            "RynnValue processor/model value-token repeat mismatch: "
+            f"processor={processor_repeat}, model={repeat}"
+        )
+    bins = int(config.value_tokenizer_config.bins)
+    if bins < 2:
+        raise RuntimeError(f"RynnValue value tokenizer has invalid bins={bins}")
+    return {
+        "model_type": config.model_type,
+        "qwen_hidden_size": hidden_size,
+        "value_token_repeat": repeat,
+        "value_head_input_size": hidden_size * repeat,
+        "value_head_type": str(head_config.head_type),
+        "value_bins": bins,
+        "value_head_count": int(config.num_value_heads),
+    }
+
+
+def validate_rynnvalue_runtime_dtype(
+    model: Any, requested_dtype: Any, expected_head_input_size: int
+) -> dict[str, Any]:
+    """Reject mixed FP32/BF16 models before the first expensive annotation call."""
+    heads = getattr(model, "value_heads", None)
+    if heads is None or len(heads) < 1:
+        raise RuntimeError("Loaded RynnValue model has no dedicated value head")
+    projection = heads[0].proj
+    input_layer = getattr(projection, "input_layer", projection)
+    weight = getattr(input_layer, "weight", None)
+    if weight is None or weight.ndim != 2:
+        raise RuntimeError("Loaded RynnValue value head has an unsupported input projection")
+    if int(weight.shape[1]) != int(expected_head_input_size):
+        raise RuntimeError(
+            "RynnValue value-head input does not match the Qwen hidden-state contract: "
+            f"loaded={int(weight.shape[1])}, expected={int(expected_head_input_size)}"
+        )
+
+    dtype_counts: dict[str, int] = defaultdict(int)
+    mismatches: list[str] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.is_floating_point():
+            continue
+        dtype_counts[str(parameter.dtype)] += parameter.numel()
+        if parameter.dtype != requested_dtype and len(mismatches) < 8:
+            mismatches.append(f"{name}={parameter.dtype}")
+    if mismatches:
+        raise RuntimeError(
+            "RynnValue contains floating parameters that were not converted to the requested "
+            f"dtype {requested_dtype}: {', '.join(mismatches)}"
+        )
+    return {
+        "runtime_dtype": str(requested_dtype),
+        "floating_parameter_dtypes": dict(dtype_counts),
+        "value_head_input_shape": list(weight.shape),
+        "value_head_dtype": str(weight.dtype),
+    }
+
+
 class TemporalValueAnnotator(Protocol):
     metadata: dict[str, Any]
 
@@ -94,9 +168,13 @@ class RynnValueAnnotator:
         sys.path.insert(0, str(checkout))
         try:
             import torch
-            import rynn_value  # noqa: F401 - registers local audited Auto classes
+            import rynn_value
+            from rynn_value import (
+                RynnValueLangConfig,
+                RynnValueLangModel,
+                RynnValueLangProcessor,
+            )
             from huggingface_hub import snapshot_download
-            from transformers import AutoConfig, AutoModel, AutoProcessor
         except ImportError as exc:
             raise RuntimeError(
                 "RynnValue dependencies are unavailable. Use the rynnvalue-reward environment "
@@ -113,15 +191,21 @@ class RynnValueAnnotator:
         # resolved Hub commit hash, even if the requested revision was 'main'.
         resolved_revision = snapshot.name
         dtype = getattr(torch, reward["dtype"])
-        hf_config = AutoConfig.from_pretrained(snapshot, trust_remote_code=False, local_files_only=True)
+        hf_config = RynnValueLangConfig.from_pretrained(snapshot, local_files_only=True)
         hf_config._attn_implementation = "pred_slot_isolated_eager"
-        self.processor = AutoProcessor.from_pretrained(
-            snapshot, trust_remote_code=False, local_files_only=True
-        )
-        self.model = AutoModel.from_pretrained(
-            snapshot, config=hf_config, torch_dtype=dtype, trust_remote_code=False,
+        self.processor = RynnValueLangProcessor.from_pretrained(snapshot, local_files_only=True)
+        model_contract = validate_rynnvalue_config_contract(hf_config, self.processor)
+        model = RynnValueLangModel.from_pretrained(
+            snapshot, config=hf_config, dtype=dtype,
             local_files_only=True, low_cpu_mem_usage=True,
-        ).to(reward["device"]).eval()
+        )
+        # The pinned upstream value-head constructors explicitly default to
+        # float32. Match the official inference program and cast the complete
+        # model so custom heads cannot remain FP32 beside a BF16 Qwen backbone.
+        self.model = model.to(device=reward["device"], dtype=dtype).eval()
+        runtime_contract = validate_rynnvalue_runtime_dtype(
+            self.model, dtype, model_contract["value_head_input_size"]
+        )
         self.torch = torch
         self.device = reward["device"]
         model_files = sorted(
@@ -144,6 +228,10 @@ class RynnValueAnnotator:
             "file_sha256": {path.name: sha256_file(path) for path in model_files},
             "dtype": reward["dtype"],
             "device": reward["device"],
+            "model_class": type(self.model).__name__,
+            "processor_class": type(self.processor).__name__,
+            "model_contract": model_contract,
+            "runtime_contract": runtime_contract,
             "package_versions": {
                 name: importlib.metadata.version(name)
                 for name in ("torch", "transformers", "huggingface-hub")
