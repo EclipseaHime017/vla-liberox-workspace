@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import torch
 
@@ -55,6 +57,21 @@ def test_reward_cache_resumes_without_reannotation(configured):
     annotate_manifest(configured, annotator)
     assert first_calls > 0
     assert annotator.calls == first_calls
+
+
+def test_sparse_reward_uses_only_debounced_terminal(configured):
+    configured.raw["reward"]["shaping_weight"] = 0.0
+    prepare_dataset(configured)
+    index_path = annotate_manifest(configured, FakeAnnotator())
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    branch = next(item for item in index["episodes"] if item["run_id"] == "branch")
+    with np.load(branch["annotation_path"], allow_pickle=False) as annotation:
+        rewards = annotation["chunk_reward"]
+    gamma = float(configured.section("reward")["gamma"])
+    # The final five-step chunk has four -1 costs followed by the confirmed
+    # terminal's zero cost. Raw done=True began four steps earlier.
+    expected = -sum(gamma ** offset for offset in range(4))
+    assert np.isclose(rewards[-1], expected)
 
 
 def test_official_prefix_shape_reduction_uses_last_slot():

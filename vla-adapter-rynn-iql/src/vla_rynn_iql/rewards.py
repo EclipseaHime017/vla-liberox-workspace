@@ -360,8 +360,11 @@ def annotate_manifest(config: LoadedConfig, annotator: TemporalValueAnnotator | 
                 analysis_frames = frames
             analysis = analyze(episode["prompt"], analysis_frames)
         value_lookup = {int(boundary): float(value) for boundary, value in zip(boundaries, values)}
-        with np.load(episode["trajectory_path"], allow_pickle=False) as trajectory:
-            done = trajectory["done"].astype(bool)
+        # Reward semantics use the debounced terminal from the prepared manifest,
+        # never transient raw done=True samples from the immutable source trajectory.
+        done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
+        if episode["terminal_step"] is not None:
+            done[int(episode["terminal_step"])] = True
         chunk_rewards = np.asarray([
             shaped_chunk_reward(
                 done, int(chunk["start"]), int(chunk["length"]),

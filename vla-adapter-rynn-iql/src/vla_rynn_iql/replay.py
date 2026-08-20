@@ -63,7 +63,9 @@ class ReplayDataset(Dataset):
         action_mask[:length] = True
         with np.load(annotation_path, allow_pickle=False) as rewards:
             reward = float(rewards["chunk_reward"][chunk_index])
-        terminal = bool(np.any(trajectory["done"][start:end])) or end == episode["action_count"]
+        # Raw done may flicker before the configured confirmation streak. Only the
+        # effective endpoint selected during preparation terminates a replay chunk.
+        terminal = end == episode["action_count"]
         return {
             "pixels": self._pixels(agent, wrist),
             "next_pixels": self._pixels(next_agent, next_wrist),

@@ -26,6 +26,18 @@ class PreparedPaths:
     reward_dir: Path
 
 
+def confirmed_terminal_step(done: np.ndarray, consecutive_steps: int) -> int | None:
+    """Return the action index that confirms a consecutive success streak."""
+    if consecutive_steps < 1:
+        raise ValueError("consecutive_steps must be positive")
+    streak = 0
+    for index, value in enumerate(np.asarray(done, dtype=bool)):
+        streak = streak + 1 if bool(value) else 0
+        if streak >= consecutive_steps:
+            return index
+    return None
+
+
 def _safe_extract(archive: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
@@ -205,19 +217,21 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
             if not np.array_equal(expected_gripper, executed[:, 6]):
                 raise ValueError(f"Policy gripper round-trip mismatch: {trajectory}")
         done = np.asarray(arrays["done"], dtype=bool)
-        done_indices = np.flatnonzero(done)
-        environment_success = bool(done_indices.size)
-        terminal_step = int(done_indices[0]) if done_indices.size else None
-        if terminal_step is not None and not bool(np.all(done[terminal_step:])):
-            raise ValueError(
-                f"done must remain true after its first terminal step: {trajectory}"
-            )
-        # Fixed-duration collectors may keep stepping after success and latch done=True.
-        # Preserve the source arrays, but expose only the valid prefix through the replay
-        # manifest. The terminal action itself remains part of the effective trajectory.
+        raw_done_true_count = int(np.count_nonzero(done))
+        raw_environment_success = raw_done_true_count > 0
+        required_success_steps = int(data_cfg["success_consecutive_steps"])
+        terminal_step = confirmed_terminal_step(done, required_success_steps)
+        environment_success = terminal_step is not None
+        # A single-frame goal crossing is not stable completion. Preserve actions until
+        # the configured consecutive-success threshold is met, and use the confirming
+        # action (the final True in that streak) as the terminal transition.
         action_count = terminal_step + 1 if terminal_step is not None else recorded_action_count
         trailing_action_count = recorded_action_count - action_count
-        if bool(run.get("success", False)) != environment_success:
+        post_terminal_false_count = (
+            int(np.count_nonzero(~done[action_count:])) if terminal_step is not None else 0
+        )
+        recorded_success = bool(run.get("success", False))
+        if recorded_success != raw_environment_success:
             raise ValueError(f"run.success and environment done disagree: {run_json}")
     with np.load(observations, allow_pickle=False) as images:
         for key in ("agentview_image", "wrist_image"):
@@ -237,8 +251,14 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         raise ValueError(f"Branch suffix contains unexpected action_source values: {run_json}")
     if trailing_action_count:
         LOG.info(
-            "Run %s reached terminal at action %d; excluding %d latched-done trailing actions",
-            run["id"], terminal_step, trailing_action_count,
+            "Run %s confirmed success at action %d; excluding %d post-terminal actions "
+            "(%d later done=False)",
+            run["id"], terminal_step, trailing_action_count, post_terminal_false_count,
+        )
+    elif raw_environment_success and not environment_success:
+        LOG.warning(
+            "Run %s contains %d done=True actions but no streak of %d; treating it as failure",
+            run["id"], raw_done_true_count, required_success_steps,
         )
     return {
         "run_id": str(run["id"]),
@@ -250,11 +270,18 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         "task_id": str(run.get("task_id") or ""),
         "task_name": str(run.get("task_name") or ""),
         "prompt": prompt.strip(),
-        "success": bool(run.get("success", False)),
+        "success": environment_success,
+        "recorded_success": recorded_success,
+        "raw_done_true_count": raw_done_true_count,
+        "success_consecutive_steps": required_success_steps,
+        "success_streak_start": (
+            terminal_step - required_success_steps + 1 if terminal_step is not None else None
+        ),
         "action_count": action_count,
         "recorded_action_count": recorded_action_count,
         "terminal_step": terminal_step,
         "trailing_action_count": trailing_action_count,
+        "post_terminal_false_count": post_terminal_false_count,
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
@@ -308,7 +335,10 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
                 episode["split"] = "train"
     successes = sum(int(ep["success"]) for ep in episodes)
     if successes == 0:
-        message = "Dataset contains no environment-confirmed success; pipeline may run but policy improvement is not expected"
+        message = (
+            "Dataset contains no success confirmed by the consecutive-step threshold; "
+            "pipeline may run but policy improvement is not expected"
+        )
         if config.section("data")["allow_no_success"]:
             LOG.warning(message)
         else:
@@ -320,12 +350,15 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             "run_id", "source_manifest_sha256", "trajectory_sha256",
             "observations_sha256", "task_id", "prompt", "resume_step",
             "action_count", "recorded_action_count", "terminal_step",
-            "trailing_action_count", "split")}
+            "trailing_action_count", "post_terminal_false_count", "recorded_success",
+            "raw_done_true_count", "success_consecutive_steps", "success_streak_start",
+            "split")}
             for ep in episodes]),
         "action_horizon": horizon,
         "action_dim": config.section("data")["action_dim"],
         "proprio_dim": config.section("data")["proprio_dim"],
         "control_hz": config.section("data")["control_hz"],
+        "success_consecutive_steps": config.section("data")["success_consecutive_steps"],
         "episode_count": len(episodes),
         "success_count": successes,
         "chunk_count": sum(len(ep["chunks"]) for ep in episodes),

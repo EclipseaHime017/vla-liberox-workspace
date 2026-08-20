@@ -543,4 +543,5 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 根因是固定总时长的接管轨迹会在首次成功后继续记录，环境 `done` 因而在余下每一步保持 `True`；旧导入器错误地只允许最后一步出现一次 `True`，将合法的终止状态锁存误判为“终止后仍有动作”；
 - 数据准备现在以第一次 `done=True` 为唯一 terminal，保留成功动作及其 next observation，只在 replay、RynnValue 标注和 IQL chunk 中逻辑排除后续锁存尾段，不修改源轨迹；
 - manifest 同时保存原始 `recorded_action_count`、有效 `action_count`、`terminal_step` 与排除的 `trailing_action_count`，数据哈希也覆盖这些终止语义；
-- `done` 一旦为 `True` 后又变回 `False` 仍会被拒绝，避免把真正损坏或语义不一致的数据静默截断；回归测试覆盖成功尾段截断、terminal chunk 长度和源 NPZ 字节不变。
+- 后续考虑到短暂进入成功区域不一定代表稳定完成，新增严格 YAML 参数 `data.success_consecutive_steps`，默认连续 5 步（20 Hz 下 250 ms）才确认成功；一次 `False` 会重置连续计数，第 5 个确认 action 才成为 terminal，未达到阈值的零散 `True` 按失败处理；
+- PBRS sparse reward 与 replay bootstrap 改为只使用去抖后的有效 terminal，不再直接读取可能波动的原始 `done`；manifest 同时保留源成功判定、去抖训练判定、连续区间、原始 True 数和终止后统计；回归测试覆盖锁存成功、`True → False → True` 重新计数、未确认脉冲、terminal chunk 长度和源 NPZ 字节不变。

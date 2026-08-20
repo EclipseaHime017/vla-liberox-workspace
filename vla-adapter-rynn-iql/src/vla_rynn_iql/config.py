@@ -42,7 +42,8 @@ TRAIN_SCHEMA = {
               "rynnvalue_root": None, "policy_registry": None},
     "data": {"project_id": None, "task_ids": None, "action_horizon": None,
              "action_dim": None, "proprio_dim": None, "control_hz": None,
-             "validation_fraction": None, "split_seed": None, "allow_no_success": None},
+             "success_consecutive_steps": None, "validation_fraction": None,
+             "split_seed": None, "allow_no_success": None},
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
                "window_overlap": None, "gamma": None,
@@ -157,6 +158,7 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     _number(data, "control_hz", low=1)
     if float(data["control_hz"]) != 20.0:
         raise ValueError("Version 1 requires data.control_hz=20")
+    _number(data, "success_consecutive_steps", low=1, high=100, integer=True)
     _number(data, "validation_fraction", low=0, high=0.9)
     _number(data, "split_seed", integer=True)
     if type(data["allow_no_success"]) is not bool:

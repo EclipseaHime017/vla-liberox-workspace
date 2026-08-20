@@ -15,6 +15,7 @@ data:
   action_dim: 7
   proprio_dim: 8
   control_hz: 20.0
+  success_consecutive_steps: 5
   validation_fraction: 0.2
   split_seed: 7
   allow_no_success: true

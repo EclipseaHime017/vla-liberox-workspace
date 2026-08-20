@@ -60,7 +60,7 @@ def configured(tmp_path: Path):
     _episode(dataset, "root", action_count=17)
     _episode(
         dataset, "branch", kind="branch", resume=5, action_source="human",
-        action_count=17, success=True, success_from=13,
+        action_count=22, success=True, success_from=13,
     )
     raw = yaml.safe_load(DEFAULT_TRAIN_CONFIG.read_text(encoding="utf-8"))
     raw["paths"].update({

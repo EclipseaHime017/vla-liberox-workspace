@@ -74,11 +74,14 @@ VLA checkpoint.
 
 Completed original trajectories enter replay once. A branch contributes only
 its `resume_step..end` suffix, so the copied parent prefix is never counted
-twice. If a fixed-duration recording latches `done=True` after success, the
-importer keeps the first terminal action and excludes only the post-terminal
-tail from replay and reward annotation without changing the source NPZ. The
-manifest records both `recorded_action_count` and the effective `action_count`;
-a non-monotonic `done` sequence is rejected. The importer groups
+twice. If a fixed-duration recording continues after success, `done` may stay
+latched or fluctuate as the object moves out of and back into the goal region.
+`data.success_consecutive_steps` debounces this signal (default 5 steps, or
+250 ms at 20 Hz). A false sample resets the streak; the action that reaches the
+threshold becomes the effective terminal. Unconfirmed pulses are treated as a
+failed trajectory. Later actions are excluded from replay and reward annotation
+without changing the source NPZ. The manifest retains both raw and debounced
+success diagnostics, recorded/effective lengths, and terminal metadata. The importer groups
 train/validation splits by root trajectory, validates the N+1 state/image
 invariant, and constructs masked 8×7 action chunks.
 

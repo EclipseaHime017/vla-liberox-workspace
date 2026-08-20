@@ -644,6 +644,7 @@ data:
   action_dim: 7
   proprio_dim: 8
   control_hz: 20.0
+  success_consecutive_steps: 5
   allow_no_success: true
 
 reward:
@@ -704,7 +705,9 @@ python vla-adapter-rynn-iql/scripts/run_pipeline.py \
 
 RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个边界按官方实现使用截至该点的均匀采样前缀并读取最后 value slot，超过 64 个边界时通过重叠窗口合并。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。未成功的原始轨迹完整进入 replay；分支只额外加入 `resume_step` 之后的 `human` 或 `policy_requery` 后缀，避免重复训练父轨迹前缀。
 
-固定总时长的采集可能在任务成功后继续记录，并令 `done` 从首次成功开始一直保持 `True`。`prepare_dataset.py` 将第一个 `True` 对应的 action 作为唯一 terminal：保留该成功动作和它的 next observation，但在 replay、RynnValue 边界与 IQL 训练中排除其后的锁存尾段。源 `trajectory.npz` 不会被裁剪或改写；manifest 使用 `recorded_action_count` 记录原始长度、`action_count` 记录有效训练长度，并保存 `terminal_step` 与 `trailing_action_count` 供审计。若 `done` 在首次 `True` 后重新变为 `False`，则仍视为非单调数据错误并拒绝导入。
+固定总时长的采集可能在任务成功后继续记录；此时 `done` 既可能一直保持 `True`，也可能因为物体继续移动、短暂离开成功区域而出现 `True → False → True`。`data.success_consecutive_steps` 是成功去抖阈值，默认要求连续 5 个控制步为 `True`（20 Hz 下为 250 ms；改为 10 即 500 ms）。短暂命中后出现一次 `False` 会清空计数，必须重新连续满足阈值。第 5 个确认 action 才作为 terminal，因此保持物体稳定的动作也会进入训练；若整条轨迹都没有达到连续阈值，则按失败轨迹处理，即使源会话曾记录过瞬时 `success=true`。
+
+确认 terminal 后的采集尾段不进入 replay、RynnValue 边界或 IQL 训练，无论尾段的 `done` 如何变化。源 `trajectory.npz` 不会被裁剪或改写；manifest 使用 `recorded_success` 保留源判定、`success` 保存去抖后的训练判定，并记录 `raw_done_true_count`、`success_streak_start`、`terminal_step`、`recorded_action_count`、有效 `action_count`、`trailing_action_count` 与 `post_terminal_false_count` 供审计。PBRS sparse reward 和 replay bootstrap 只使用这个确认后的 terminal，不会被确认前的单帧 `done=True` 提前截断。
 
 设 RynnValue 预测的剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。长度为 `L` 的 action chunk 使用：
 
