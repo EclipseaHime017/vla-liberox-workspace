@@ -2,6 +2,7 @@ torch>=2.7,<2.9
 transformers>=4.57,<5
 accelerate>=1,<2
 huggingface-hub>=0.34,<1
+einops>=0.8,<1
 PyYAML>=6,<7
 Pillow>=10,<12
 numpy>=1.26,<2

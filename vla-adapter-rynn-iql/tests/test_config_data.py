@@ -27,6 +27,11 @@ def test_unknown_config_key_is_rejected(configured, tmp_path: Path):
         load_train_config(path)
 
 
+def test_rynnvalue_checkout_path_is_resolved(configured):
+    expected = configured.path.parent / "RynnValue"
+    assert Path(configured.section("paths")["rynnvalue_root"]) == expected.resolve()
+
+
 def test_branch_prefix_is_not_added_as_new_replay(configured):
     prepare_dataset(configured)
     manifest = load_manifest(configured)

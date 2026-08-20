@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Protocol, Sequence
@@ -54,6 +55,43 @@ class RynnValueAnnotator:
 
     def __init__(self, config: LoadedConfig):
         reward = config.section("reward")
+        checkout = Path(config.section("paths")["rynnvalue_root"]).resolve()
+        package_init = checkout / "rynn_value" / "__init__.py"
+        if not package_init.is_file():
+            raise RuntimeError(
+                f"RynnValue source checkout is invalid; missing {package_init}. "
+                "Clone the pinned official repository instead of pip-installing it."
+            )
+        lock_path = Path(__file__).resolve().parents[2] / "configs" / "dependency-lock.yaml"
+        lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))["rynnvalue"]
+        revision = reward["revision"]
+        if revision != lock["hf_revision"]:
+            raise RuntimeError(
+                "RynnValue model request is not the pinned revision: "
+                f"requested={revision}, expected={lock['hf_revision']}"
+            )
+        try:
+            git_commit = subprocess.run(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            dirty = subprocess.run(
+                ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=all"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(f"Cannot verify RynnValue source checkout: {checkout}") from exc
+        if git_commit != lock["git_commit"]:
+            raise RuntimeError(
+                "Official RynnValue checkout is not the pinned audited revision: "
+                f"expected {lock['git_commit']}, got {git_commit}"
+            )
+        if dirty:
+            raise RuntimeError(
+                "Official RynnValue checkout has local modifications; restore a clean pinned "
+                f"checkout before annotation:\n{dirty}"
+            )
+        sys.path.insert(0, str(checkout))
         try:
             import torch
             import rynn_value  # noqa: F401 - registers local audited Auto classes
@@ -62,9 +100,14 @@ class RynnValueAnnotator:
         except ImportError as exc:
             raise RuntimeError(
                 "RynnValue dependencies are unavailable. Use the rynnvalue-reward environment "
-                "and install the official RynnValue checkout."
+                "and install requirements-reward.txt."
             ) from exc
-        revision = reward["revision"]
+        loaded_checkout = Path(rynn_value.__file__).resolve().parents[1]
+        if loaded_checkout != checkout:
+            raise RuntimeError(
+                "Imported RynnValue from an unexpected checkout: "
+                f"configured={checkout}, imported={loaded_checkout}"
+            )
         snapshot = Path(snapshot_download(repo_id=reward["model"], revision=revision)).resolve()
         # A snapshot directory is immutable and its final path component is the
         # resolved Hub commit hash, even if the requested revision was 'main'.
@@ -85,25 +128,10 @@ class RynnValueAnnotator:
             path for path in snapshot.iterdir()
             if path.is_file() and path.suffix in {".json", ".py", ".safetensors"}
         )
-        try:
-            git_commit = subprocess.run(
-                ["git", "-C", str(Path(rynn_value.__file__).resolve().parents[1]), "rev-parse", "HEAD"],
-                check=True, capture_output=True, text=True,
-            ).stdout.strip()
-        except Exception:
-            git_commit = "unknown"
-        lock_path = Path(__file__).resolve().parents[2] / "configs" / "dependency-lock.yaml"
-        lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))["rynnvalue"]
-        if git_commit != lock["git_commit"]:
-            raise RuntimeError(
-                "Official RynnValue checkout is not the pinned audited revision: "
-                f"expected {lock['git_commit']}, got {git_commit}"
-            )
-        if revision != lock["hf_revision"] or resolved_revision != lock["hf_revision"]:
+        if resolved_revision != lock["hf_revision"]:
             raise RuntimeError(
                 "RynnValue model snapshot is not the pinned revision: "
-                f"requested={revision}, resolved={resolved_revision}, "
-                f"expected={lock['hf_revision']}"
+                f"resolved={resolved_revision}, expected={lock['hf_revision']}"
             )
         self.metadata = {
             "provider": "rynnvalue",
@@ -112,12 +140,13 @@ class RynnValueAnnotator:
             "resolved_revision": resolved_revision,
             "official_code_commit": git_commit,
             "snapshot": str(snapshot),
+            "source_checkout": str(checkout),
             "file_sha256": {path.name: sha256_file(path) for path in model_files},
             "dtype": reward["dtype"],
             "device": reward["device"],
             "package_versions": {
                 name: importlib.metadata.version(name)
-                for name in ("rynnvalue", "torch", "transformers", "huggingface-hub")
+                for name in ("torch", "transformers", "huggingface-hub")
             },
         }
         self.robot_description = reward["robot_description"]

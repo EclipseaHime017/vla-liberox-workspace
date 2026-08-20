@@ -6,6 +6,7 @@ paths:
   output_dir: ../outputs/training
   vla_adapter_root: ../../VLA-Adapter
   libero_x_root: ../../LIBERO-X
+  rynnvalue_root: ../../RynnValue
   policy_registry: ../../policy-registry
 data:
   project_id: libero_x_vla

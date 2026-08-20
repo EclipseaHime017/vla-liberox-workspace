@@ -608,13 +608,15 @@ conda create -n rynnvalue-reward python=3.10 -y
 conda run -n rynnvalue-reward pip install -r vla-adapter-rynn-iql/requirements-reward.txt
 git clone https://github.com/alibaba-damo-academy/RynnValue.git RynnValue
 git -C RynnValue checkout 10e0d333f5f3811d0d130587e50f1faf48da49e5
-conda run -n rynnvalue-reward pip install -e ./RynnValue
-conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/verify_reward_environment.py
+conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/verify_reward_environment.py \
+  --checkout ./RynnValue
 
 # 复用原有环境，不执行 conda create。
 conda run -n vla-liberox pip install -r vla-adapter-rynn-iql/requirements-train.txt
 conda run -n vla-liberox pip install -e ./vla-adapter-rynn-iql
 ```
+
+不要执行 `pip install -e ./RynnValue`。固定 commit 的官方顶层 `pyproject.toml` 设置了 `tool.uv.package = false`，不是可由 setuptools editable-install 的发行包；新版 setuptools 会把 `assets`、`robometer`、`rynn_value` 和 `rynn_infer` 同时识别为顶层包并拒绝构建。这里仅安装 `requirements-reward.txt` 中的运行依赖，由配置项 `paths.rynnvalue_root` 将固定 checkout 加入标注进程的导入路径，既不修改上游仓库，也不依赖 shell 中持久设置 `PYTHONPATH`。
 
 这里不会把 RynnValue 安装进 `vla-liberox`，也不会升级其中的 Transformers。`requirements-train.txt` 保持 `transformers==4.40.1`，并兼容本项目已经验证的 Pillow 12.x 与 Accelerate 1.x。如果现有环境还没有按第 2 章完成 VLA-Adapter、LIBERO-X 和 GPU 配置，应先完成第 2 章，而不是用本节重新创建它。
 
@@ -634,6 +636,7 @@ conda run -n vla-liberox pip install -e ./vla-adapter-rynn-iql
 paths:
   dataset_sources:
     - ../../dataset-root
+  rynnvalue_root: ../../RynnValue
   policy_registry: ../../policy-registry
 
 data:

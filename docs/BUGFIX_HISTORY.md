@@ -530,3 +530,10 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - RynnValue 按官方固定前缀采样方式预测每个 action-chunk 边界的剩余秒数，保存 entropy 与文本诊断，并用 `Φ=-v` 和 `γ^L` 构造 PBRS chunk reward；环境 `done` 仍是唯一成功依据；
 - IQL 实现 double-Q、expectile V、Polyak target、实际 chunk 长度折扣和 advantage-weighted masked L1，只训练连续 action head 与 proprio projector；checkpoint 保存优化器、目标网络、采样器与 RNG，可精确断点续跑；
 - 训练结果以带组件哈希和兼容性哈希的 `policy.yaml` 发布到 `policy-registry/`。UI 草稿新增基础模型/overlay 选择，会话和分支固化策略 ID，同一 Object-Pro backbone 上热切换两个组件；非法 overlay 明确拒绝且不回退。
+
+## 2026-08-20：RynnValue 官方源码不可 editable-install
+
+- 根因是固定 commit 的官方顶层 `pyproject.toml` 设置 `tool.uv.package = false`，且没有限制 setuptools 的 flat-layout package discovery；`pip install -e ./RynnValue` 会同时发现 `assets/robometer/rynn_value/rynn_infer` 并拒绝构建，license 信息只是警告而不是失败原因；
+- 删除错误的 editable-install 步骤，新增严格 YAML 路径 `paths.rynnvalue_root`，奖励进程直接从固定的官方 checkout 导入 `rynn_value`，无需修改上游仓库或持久设置 `PYTHONPATH`；
+- 补齐官方模型源码实际需要的 `einops` 依赖；验证脚本现在输出真实 import 路径，并在执行官方 Python 代码前先检查 Git commit 与工作树洁净状态；
+- 在 `rynnvalue-reward` 实机环境验证通过：源码 commit 为 `10e0d333f5f3811d0d130587e50f1faf48da49e5`，模型 revision 为 `3f73b5d2b5e53b21f248c8791004dde6a8cf2b92`。

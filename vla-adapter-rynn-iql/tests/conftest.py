@@ -56,7 +56,9 @@ def configured(tmp_path: Path):
     raw["paths"].update({
         "dataset_sources": [str(dataset)], "work_dir": str(tmp_path / "work"),
         "output_dir": str(tmp_path / "output"), "vla_adapter_root": str(tmp_path / "vla"),
-        "libero_x_root": str(tmp_path / "libero"), "policy_registry": str(tmp_path / "registry"),
+        "libero_x_root": str(tmp_path / "libero"),
+        "rynnvalue_root": str(tmp_path / "RynnValue"),
+        "policy_registry": str(tmp_path / "registry"),
     })
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")

@@ -38,7 +38,8 @@ UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, 
 TRAIN_SCHEMA = {
     "schema_version": None,
     "paths": {"dataset_sources": None, "work_dir": None, "output_dir": None,
-              "vla_adapter_root": None, "libero_x_root": None, "policy_registry": None},
+              "vla_adapter_root": None, "libero_x_root": None,
+              "rynnvalue_root": None, "policy_registry": None},
     "data": {"project_id": None, "task_ids": None, "action_horizon": None,
              "action_dim": None, "proprio_dim": None, "control_hz": None,
              "validation_fraction": None, "split_seed": None, "allow_no_success": None},
@@ -139,7 +140,11 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     _validate_schema(raw, TRAIN_SCHEMA)
     if raw["schema_version"] != 1:
         raise ValueError("Only schema_version=1 is supported")
-    _resolve_paths(raw, path, ("work_dir", "output_dir", "vla_adapter_root", "libero_x_root", "policy_registry"))
+    _resolve_paths(
+        raw, path,
+        ("work_dir", "output_dir", "vla_adapter_root", "libero_x_root",
+         "rynnvalue_root", "policy_registry"),
+    )
     data, reward, vla, iql = raw["data"], raw["reward"], raw["vla"], raw["iql"]
     if not isinstance(data["project_id"], str) or not data["project_id"].strip():
         raise TypeError("data.project_id must be a non-empty string")

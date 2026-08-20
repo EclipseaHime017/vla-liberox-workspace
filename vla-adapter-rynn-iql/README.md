@@ -19,15 +19,20 @@ conda run -n vla-liberox pip install -r vla-adapter-rynn-iql/requirements-train.
 conda run -n vla-liberox pip install -e ./vla-adapter-rynn-iql
 ```
 
-Install the official RynnValue checkout at the commit pinned in
+Clone the official RynnValue source at the commit pinned in
 `configs/dependency-lock.yaml` (currently `10e0d333…`), then verify it:
 
 ```bash
 git clone https://github.com/alibaba-damo-academy/RynnValue.git ./RynnValue
 git -C ./RynnValue checkout 10e0d333f5f3811d0d130587e50f1faf48da49e5
-conda run -n rynnvalue-reward pip install -e ./RynnValue
-conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/verify_reward_environment.py
+conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/verify_reward_environment.py \
+  --checkout ./RynnValue
 ```
+
+Do not run `pip install -e ./RynnValue`: the pinned upstream project declares
+`tool.uv.package = false` and is intentionally not an editable setuptools
+distribution. `paths.rynnvalue_root` in `liberox_iql.yaml` points the annotator
+at this audited source checkout directly; no persistent `PYTHONPATH` is needed.
 
 `liberox_iql.yaml` pins the 4B Hugging Face snapshot to
 `3f73b5d2b5e53b21f248c8791004dde6a8cf2b92`. The annotator imports the audited
