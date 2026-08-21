@@ -324,7 +324,7 @@ function CollectPage() {
       task_prompt: selected.task ?? "该历史轨迹没有任务提示词",
       source_episode: "episode_000 · " + selected.id,
       resume_step: selectedStep,
-      end_step: selected.action_count,
+      target_steps: selected.max_steps,
       open_loop_steps: selected.open_loop_steps,
       policy_id: selected.policy_id,
       policy_label: selected.policy_label ?? selected.policy_id,

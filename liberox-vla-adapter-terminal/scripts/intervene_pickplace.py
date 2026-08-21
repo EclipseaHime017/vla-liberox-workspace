@@ -388,7 +388,15 @@ def main() -> int:
     _validate_source_against_eval(source_metadata, eval_config)
     resume_step = resolve_resume_step(intervention, trajectory, source_metadata)
     source_action_count = len(trajectory["env_action"])
-    remaining_steps = source_action_count - resume_step
+    target_total_steps = int(
+        source_metadata.get("target_total_steps", source_action_count)
+    )
+    if target_total_steps <= resume_step:
+        raise ValueError(
+            "Source target_total_steps must be greater than resume_step: "
+            f"target_total_steps={target_total_steps}, resume_step={resume_step}"
+        )
+    remaining_steps = target_total_steps - resume_step
     control_hz = float(source_metadata["control_hz"])
     recorder = TrajectoryRecorder.from_prefix(
         trajectory,
@@ -445,7 +453,7 @@ def main() -> int:
 
     success = False
     error: str | None = None
-    stopped_reason = "source_horizon"
+    stopped_reason = "max_steps"
     policy_queries = 0
     branch_steps = 0
     control_step_times: list[float] = []
@@ -535,7 +543,7 @@ def main() -> int:
                 env=env,
                 recorder=recorder,
                 initial_observation=observation,
-                target_action_count=source_action_count,
+                target_action_count=target_total_steps,
                 rate_limiter=rate_limiter,
                 action_source="policy_requery",
                 open_loop_steps=intervention.open_loop_steps,
@@ -546,7 +554,7 @@ def main() -> int:
                 ),
                 on_transition=after_transition,
                 stop_on_success=False,
-                horizon_reason="source_horizon",
+                horizon_reason="max_steps",
             )
         else:
             assert controller is not None
@@ -554,7 +562,7 @@ def main() -> int:
                 env=env,
                 recorder=recorder,
                 initial_observation=observation,
-                target_action_count=source_action_count,
+                target_action_count=target_total_steps,
                 rate_limiter=rate_limiter,
                 action_source="human",
                 manual_query=lambda _step: controller.next_action(
@@ -566,7 +574,7 @@ def main() -> int:
                 ),
                 on_transition=after_transition,
                 stop_on_success=False,
-                horizon_reason="source_horizon",
+                horizon_reason="max_steps",
             )
         success = loop_result.success
         branch_steps = loop_result.executed_steps
@@ -637,7 +645,7 @@ def main() -> int:
         "source_resume_step": resume_step,
         "source_resume_time_seconds": resume_step / control_hz,
         "source_action_count": source_action_count,
-        "target_total_steps": source_action_count,
+        "target_total_steps": target_total_steps,
         "planned_branch_steps": remaining_steps,
         "control_mode": intervention.control_mode,
         "open_loop_steps": intervention.open_loop_steps,

@@ -24,7 +24,11 @@ from .config import LoadedConfig
 from .data import load_manifest
 from .io import atomic_json, sha256_file, stable_hash
 from .iql import PixelIQL, advantage_weights, weighted_masked_l1
-from .monitoring import ACTION_NAMES, log_tensorboard_metric
+from .monitoring import (
+    ACTION_NAMES,
+    TrainingProgressReporter,
+    log_tensorboard_metric,
+)
 from .replay import ReplayDataset
 from .rewards import load_reward_index
 from .vla_adapter import (
@@ -267,6 +271,7 @@ def _restore_checkpoint(
 
 def train(config: LoadedConfig) -> Path:
     iql_cfg = config.section("iql")
+    logging_cfg = config.section("logging")
     seed = int(iql_cfg["seed"])
     random.seed(seed)
     np.random.seed(seed)
@@ -276,9 +281,13 @@ def train(config: LoadedConfig) -> Path:
     device = _device(iql_cfg["device"])
     if device.type == "cuda":
         torch.cuda.set_device(device)
+    LOG.info("Loading prepared replay manifest and RynnValue reward cache")
     manifest = load_manifest(config)
     reward_index = load_reward_index(config)
+    LOG.info("Loading frozen VLA backbone and trainable action components")
+    component_load_started = time.monotonic()
     components = load_components(config)
+    LOG.info("VLA components loaded in %.2f s", time.monotonic() - component_load_started)
     dataset = ReplayDataset(config, components.action_stats, components.proprio_stats, "train")
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
@@ -324,7 +333,25 @@ def train(config: LoadedConfig) -> Path:
     start_time = time.monotonic()
     latest_checkpoint: Path | None = None
     metrics_path = run_dir / "metrics.jsonl"
-    logging_cfg = config.section("logging")
+    progress = TrainingProgressReporter(
+        total_steps=total_steps,
+        start_step=start_step,
+        interval_steps=int(logging_cfg["console_interval_steps"]),
+        warmup_steps=warmup,
+    )
+    LOG.info(
+        "Training started: run=%s, replay_chunks=%d, steps=%d->%d, warmup=%d, "
+        "micro_batch=%d, actor_effective_batch=%d, checkpoint_interval=%d, device=%s",
+        run_id,
+        len(dataset),
+        start_step,
+        total_steps,
+        warmup,
+        int(iql_cfg["micro_batch_size"]),
+        int(iql_cfg["micro_batch_size"]) * accumulation,
+        int(iql_cfg["checkpoint_interval"]),
+        device,
+    )
     with ExitStack() as stack:
         metrics_file = stack.enter_context(metrics_path.open("w", encoding="utf-8"))
         writer = None
@@ -431,15 +458,15 @@ def train(config: LoadedConfig) -> Path:
                 "cuda_peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
                 **action_metrics,
             }
-            metric["steps_per_second"] = (metric["step"] - start_step) / max(
-                float(metric["elapsed_seconds"]), 1e-9
-            )
             metric["cuda_peak_memory_gib"] = float(
                 metric["cuda_peak_memory_bytes"]
             ) / (1024.0 ** 3)
+            should_report = progress.update(metric)
             metrics_file.write(json.dumps(metric, sort_keys=True) + "\n")
             metrics_file.flush()
             log_tensorboard_metric(writer, metric)
+            if should_report:
+                LOG.info(progress.format(metric))
             if (step + 1) % int(iql_cfg["checkpoint_interval"]) == 0 or step + 1 == total_steps:
                 latest_checkpoint = _save_checkpoint(
                     checkpoint_root, step + 1, components, agent, actor_optimizer,

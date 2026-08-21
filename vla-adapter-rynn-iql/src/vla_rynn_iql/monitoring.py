@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -23,8 +26,104 @@ TENSORBOARD_GROUPS = {
         "actor_gripper_target_mean",
         "actor_gripper_target_close_fraction",
     ),
-    "system": ("steps_per_second", "cuda_peak_memory_gib"),
+    "system": (
+        "steps_per_second",
+        "progress_percent",
+        "estimated_remaining_seconds",
+        "cuda_peak_memory_gib",
+    ),
 }
+
+
+def format_duration(seconds: float | int | None) -> str:
+    """Format a duration for stable, compact terminal progress output."""
+    if seconds is None or not isinstance(seconds, (int, float)) or seconds < 0:
+        return "--:--:--"
+    rounded = int(round(seconds))
+    hours, remainder = divmod(rounded, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours >= 24:
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _metric_number(metric: dict[str, Any], key: str, precision: int = 4) -> str:
+    value = metric.get(key)
+    if value is None or not isinstance(value, (int, float)):
+        return "--"
+    return f"{float(value):.{precision}g}"
+
+
+@dataclass
+class TrainingProgressReporter:
+    """Compute a rolling ETA and format periodic, log-friendly progress lines."""
+
+    total_steps: int
+    start_step: int
+    interval_steps: int
+    warmup_steps: int
+    window_steps: int = 100
+    _points: deque[tuple[int, float]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.total_steps <= self.start_step:
+            raise ValueError("total_steps must be larger than start_step")
+        if self.interval_steps <= 0 or self.window_steps <= 0:
+            raise ValueError("progress intervals must be positive")
+        self._points = deque(maxlen=self.window_steps + 1)
+
+    def update(self, metric: dict[str, Any]) -> bool:
+        """Add derived metrics and return whether this step should be printed."""
+        step = int(metric["step"])
+        elapsed = float(metric["elapsed_seconds"])
+        self._points.append((step, elapsed))
+        if len(self._points) >= 2:
+            old_step, old_elapsed = self._points[0]
+            rate = (step - old_step) / max(elapsed - old_elapsed, 1e-9)
+        else:
+            rate = (step - self.start_step) / max(elapsed, 1e-9)
+        remaining = max(self.total_steps - step, 0)
+        eta_seconds = remaining / rate if rate > 0 else None
+        metric["steps_per_second"] = rate
+        metric["progress_percent"] = 100.0 * step / self.total_steps
+        metric["estimated_remaining_seconds"] = eta_seconds
+        metric["estimated_completion_time"] = (
+            (datetime.now().astimezone() + timedelta(seconds=eta_seconds))
+            .isoformat(timespec="seconds")
+            if eta_seconds is not None else None
+        )
+        completed_this_run = step - self.start_step
+        return (
+            completed_this_run == 1
+            or step == self.total_steps
+            or completed_this_run % self.interval_steps == 0
+        )
+
+    def format(self, metric: dict[str, Any]) -> str:
+        step = int(metric["step"])
+        fraction = min(max(step / self.total_steps, 0.0), 1.0)
+        width = 20
+        complete = min(width, int(fraction * width))
+        bar = "#" * complete + "-" * (width - complete)
+        phase = "BC-warmup" if step <= self.warmup_steps else "IQL"
+        finish = metric.get("estimated_completion_time") or "unknown"
+        return (
+            f"TRAIN [{bar}] {step}/{self.total_steps} "
+            f"({metric['progress_percent']:6.2f}%) | phase={phase} | "
+            f"elapsed={format_duration(metric.get('elapsed_seconds'))} | "
+            f"ETA={format_duration(metric.get('estimated_remaining_seconds'))} "
+            f"(finish {finish}) | {metric['steps_per_second']:.3f} step/s | "
+            f"loss(q/v/actor)={_metric_number(metric, 'q_loss')}/"
+            f"{_metric_number(metric, 'value_loss')}/"
+            f"{_metric_number(metric, 'actor_loss')} | "
+            f"Q/V/A={_metric_number(metric, 'q_mean')}/"
+            f"{_metric_number(metric, 'value_mean')}/"
+            f"{_metric_number(metric, 'advantage_mean')} | "
+            f"weight={_metric_number(metric, 'advantage_weight_mean')} | "
+            f"lr={_metric_number(metric, 'actor_learning_rate', 3)} | "
+            f"VRAM={_metric_number(metric, 'cuda_peak_memory_gib', 3)} GiB"
+        )
 
 
 def log_tensorboard_metric(writer: Any, metric: dict[str, Any]) -> None:

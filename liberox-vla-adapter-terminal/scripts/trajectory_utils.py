@@ -611,10 +611,10 @@ def plot_action_comparison(
     """Plot the complete original curve and overlay the branch only from resume_step."""
     source_actions = source_trajectory["raw_action"]
     branch_actions = branch_trajectory["raw_action"]
-    end_step = min(len(source_actions), len(branch_actions))
+    end_step = len(branch_actions)
     if not 0 <= resume_step < end_step:
         raise ValueError(
-            f"Cannot compare actions at resume_step={resume_step}; overlapping action range ends at {end_step}"
+            f"Cannot compare actions at resume_step={resume_step}; branch action range ends at {end_step}"
         )
 
     cache_dir = Path(tempfile.gettempdir()) / "liberox-matplotlib-cache"

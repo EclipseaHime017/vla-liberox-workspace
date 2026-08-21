@@ -60,6 +60,18 @@ def test_tensorboard_logging_configuration_is_strict(configured, tmp_path: Path)
         load_train_config(path)
 
 
+@pytest.mark.parametrize("value", [0, 1.5, "10"])
+def test_console_progress_interval_is_a_positive_integer(
+    configured, tmp_path: Path, value
+):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["logging"]["console_interval_steps"] = value
+    path = tmp_path / "invalid-console-progress.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises((TypeError, ValueError), match="console_interval_steps"):
+        load_train_config(path)
+
+
 def test_branch_prefix_is_not_added_as_new_replay(configured):
     prepare_dataset(configured)
     manifest = load_manifest(configured)

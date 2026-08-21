@@ -1027,7 +1027,7 @@ def run_episode(
                 cfg.model_family,
             ),
             on_transition=lambda _observation, _step, _success: render_live_window(env),
-            stop_on_success=True,
+            stop_on_success=False,
             horizon_reason="max_steps",
         )
         success = loop_result.success
@@ -1237,6 +1237,7 @@ def main() -> int:
                 "resolved_stats_key": str(cfg.unnorm_key),
                 "success": success,
                 "steps": steps,
+                "target_total_steps": args.max_steps,
                 "policy_queries": queries,
                 "open_loop_steps": args.open_loop_steps,
                 **runtime_metadata,

@@ -541,7 +541,7 @@ def run_simulation_test(
             stop_requested=lambda: not controller.latest_snapshot().connected
             or _viewer_is_closed(env),
             on_transition=after_transition,
-            stop_on_success=True,
+            stop_on_success=False,
             horizon_reason="max_steps",
         )
         success = loop_result.success

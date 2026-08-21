@@ -53,7 +53,7 @@ def run_control_loop(
     manual_query: ManualQuery | None = None,
     stop_requested: StopPredicate | None = None,
     on_transition: TransitionCallback | None = None,
-    stop_on_success: bool = True,
+    stop_on_success: bool = False,
     horizon_reason: str = "horizon",
 ) -> ControlLoopResult:
     """Advance an environment while preserving recorder and timing semantics.

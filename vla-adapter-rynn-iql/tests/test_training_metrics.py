@@ -4,7 +4,9 @@ import numpy as np
 import torch
 
 from vla_rynn_iql.monitoring import (
+    TrainingProgressReporter,
     convert_run_metrics,
+    format_duration,
     log_tensorboard_metric,
     write_metrics_to_tensorboard,
 )
@@ -60,6 +62,39 @@ def test_tensorboard_groups_metrics_and_skips_missing_values():
     ) in writer.scalars
     assert ("optimization/action_head_parameter_norm", 4.2, 12) in writer.scalars
     assert not any(name == "optimization/actor_grad_norm" for name, _, _ in writer.scalars)
+
+
+def test_progress_reporter_uses_rolling_rate_and_reports_configured_steps():
+    reporter = TrainingProgressReporter(
+        total_steps=100,
+        start_step=20,
+        interval_steps=10,
+        warmup_steps=30,
+        window_steps=2,
+    )
+    first = {"step": 21, "elapsed_seconds": 2.0, "cuda_peak_memory_gib": 4.0}
+    assert reporter.update(first) is True
+    assert np.isclose(first["steps_per_second"], 0.5)
+    assert np.isclose(first["estimated_remaining_seconds"], 158.0)
+    assert "phase=BC-warmup" in reporter.format(first)
+
+    middle = {"step": 29, "elapsed_seconds": 10.0}
+    assert reporter.update(middle) is False
+    scheduled = {"step": 30, "elapsed_seconds": 11.0}
+    assert reporter.update(scheduled) is True
+    assert np.isclose(scheduled["steps_per_second"], 1.0)
+    assert np.isclose(scheduled["progress_percent"], 30.0)
+
+    complete = {"step": 100, "elapsed_seconds": 81.0}
+    assert reporter.update(complete) is True
+    assert complete["estimated_remaining_seconds"] == 0.0
+    assert "100/100" in reporter.format(complete)
+
+
+def test_format_duration_handles_hours_days_and_unknown_values():
+    assert format_duration(65) == "00:01:05"
+    assert format_duration(90061) == "1d 01:01:01"
+    assert format_duration(None) == "--:--:--"
 
 
 def test_existing_jsonl_metrics_can_be_imported(tmp_path):

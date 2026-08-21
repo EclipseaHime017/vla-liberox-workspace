@@ -824,9 +824,15 @@ class SimulationManager:
         action_count = int(parent["action_count"])
         if not 0 <= resume_step < action_count:
             raise ValueError(f"resume_step must be in [0, {max(0, action_count - 1)}]")
+        target_steps = int(parent["max_steps"])
+        if target_steps <= resume_step:
+            raise ValueError(
+                "The source target step count must be greater than resume_step: "
+                f"target_steps={target_steps}, resume_step={resume_step}"
+            )
         record = self._new_record(
             kind="branch",
-            max_steps=action_count,
+            max_steps=target_steps,
             open_loop_steps=open_loop_steps,
             parent=parent,
             resume_step=resume_step,
@@ -1456,8 +1462,8 @@ class SimulationManager:
                 open_loop_steps=record.open_loop_steps,
                 stop_requested=record.stop_event.is_set,
                 on_transition=on_transition,
-                stop_on_success=record.kind == "original",
-                horizon_reason="source_horizon" if record.kind == "branch" else "max_steps",
+                stop_on_success=False,
+                horizon_reason="max_steps",
             )
             if record.control_mode == "manual":
                 result = run_control_loop(

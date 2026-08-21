@@ -580,23 +580,51 @@ npm run build
 离线后训练位于独立目录 `vla-adapter-rynn-iql/`，不修改 `liberox-vla-adapter-terminal/` 的采集数据，也不修改上游 `VLA-Adapter/` 源码。四个阶段为：只读导入数据、冻结 RynnValue 奖励标注、Pixel-IQL 后训练、独立 LIBERO-X 推理。训练只更新 Object-Pro 的连续 action head 和 proprio projector，视觉/语言 backbone 始终冻结。
 
 ```text
-dataset-root（只读）
+采集数据 dataset-root（只读）
         │
-        ├── 校验 20 Hz、N+1 状态/图像、动作和分支关系
-        ├── 原始轨迹完整导入；分支仅导入 resume_step 后的新后缀
         ▼
-冻结的 RynnValue-4B
-        ├── agentview + BDDL 任务提示词
-        └── 剩余时间 → PBRS action-chunk 奖励
+prepare_dataset
+  ├── 校验轨迹、双视角图像、20 Hz 与成功状态
+  ├── 原始轨迹完整导入；分支仅保留 resume_step 后缀
+  ├── 按 root trajectory 划分训练集与验证集
+  └── 生成固定 8-step action chunk 与 dataset_manifest.json
+        │
         ▼
-Pixel-IQL
-        ├── 双 Q critic + expectile value + target network
-        └── advantage-weighted masked action-chunk L1
+冻结的 RynnValue-4B 离线标注
+  ├── 输入：agentview + BDDL 任务提示词
+  ├── 输出：各 action-chunk 边界的预计剩余时间
+  └── 剩余时间 + sparse step cost → PBRS chunk reward
+        │
         ▼
-action head + proprio projector overlay
-        ├── 独立 LIBERO-X 推理
-        └── policy-registry → Web UI 策略选择
+ReplayDataset
+  └── (s_t, action[t:t+L], R_t, s_{t+L}, mask, terminal)
+        │
+        ├──────────────────────────────┐
+        ▼                              ▼
+Pixel-IQL                         冻结的 VLA backbone
+  ├── 双 Q critic                agentview + wrist + prompt
+  ├── expectile value                    │
+  ├── target Q                           ▼
+  └── Advantage A             视觉/语言/action-query hidden
+        │                              │
+        └──── exp(beta * A) 权重 ──────┤
+                                       ▼
+                         advantage-weighted masked L1
+                                       │
+                                       ▼
+                      action head + proprio projector
+                                       │
+                                       ▼
+                              policy overlay
+                               ├── 独立 LIBERO-X 推理
+                               └── policy-registry → Web UI
 ```
+
+三个主要处理环节分别负责：
+
+1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始轨迹完整导入，接管或重新推理分支只加入 `resume_step` 后的新后缀；随后按 8 步切分 action chunk，并按 root trajectory 划分训练集与验证集。该阶段不运行模型、不计算奖励，也不修改源数据，输出 `outputs/work/dataset_manifest.json`。
+2. **Annotate（奖励标注）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 预测预计剩余时间，再与环境成功状态构造的 sparse step cost 合成为 PBRS chunk reward。该阶段不训练 RynnValue，也不更新 VLA；输出位于 `outputs/work/rewards/` 的逐轨迹 NPZ、元数据和 `reward_manifest.json`，相同数据与配置可命中缓存跳过重复标注。
+3. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已标注 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；VLA 视觉/语言 backbone 只做冻结的特征提取，反向传播仅更新 continuous action head 与 proprio projector。训练 checkpoint 会保留 Q/V、optimizer 和随机状态以便恢复，最终部署 overlay 只发布 action head、proprio projector 和兼容性清单。
 
 RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本系统不包含 Robometer、在线 RL、奖励模型微调或真机控制。
 
@@ -672,6 +700,7 @@ iql:
 logging:
   tensorboard: true
   flush_seconds: 5
+  console_interval_steps: 10
 ```
 
 `paths.dataset_sources` 中的每一项可以是当前 `dataset-root`，也可以是 UI 数据集页面导出的任务 ZIP。`reward.gamma` 同时用于 PBRS chunk 折扣与 IQL Bellman target。导入器不会改写源文件；训练/验证按 root trajectory 分组，父轨迹和它的全部分支不会被拆到不同集合。
@@ -812,6 +841,12 @@ iql:
   seed: 7
   device: cuda:0
   dtype: bfloat16
+
+logging:
+  tensorboard: true
+  flush_seconds: 5
+  # 首步、每 10 步以及最终一步在终端打印一次进度。
+  console_interval_steps: 10
 ```
 
 参数语义分为四组：
@@ -821,6 +856,7 @@ iql:
 - critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value optimizer。`expectile` 越高，value 越偏向高 Q 动作；actor 权重为 `exp(beta × advantage)`，再由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
 - actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。`critic_warmup_steps` 期间 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 并没有在前 200 步冻结。
 - 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
+- 终端进度：`logging.console_interval_steps` 控制打印间隔。无论间隔为何，首步和最终一步都会打印；每行包含当前/总 step、百分比、BC warmup/IQL 阶段、已用时间、基于最近 100 步的 ETA、预计完成时刻、step/s、Q/value/actor loss、Q/V/advantage 均值、advantage weight、actor 学习率及 CUDA 峰值显存。该设置只影响显示频率，不改变训练或 `metrics.jsonl` 的逐步记录。
 
 运行训练：
 
@@ -923,8 +959,9 @@ conda run -n vla-liberox python \
 - `value/q_mean`、`value/value_mean`、`value/advantage_mean`：判断 critic/value 是否漂移；
 - `optimization/actor_grad_norm`、`action_head_parameter_norm` 和 `proprio_projector_parameter_norm`：只在梯度累积真正提交 optimizer 的步骤出现，默认每 32 步一次，用于检查两个可训练组件是否获得梯度以及参数尺度是否异常漂移；
 - `system/steps_per_second` 与 `cuda_peak_memory_gib`：查看速度和显存峰值。
+- `system/progress_percent` 与 `estimated_remaining_seconds`：查看训练完成比例和滚动 ETA；checkpoint 保存期间的短暂停顿会暂时反映在 ETA 中，后续窗口更新后会恢复。
 
-可在 YAML 中把 `logging.tensorboard` 设为 `false` 关闭事件写入，`metrics.jsonl` 仍会保留。当前没有默认启用 W&B：它需要联网、账号登录和实验同步策略；若以后需要跨机器共享，可在不改变这些指标名称的前提下增加 W&B 后端。
+可在 YAML 中把 `logging.tensorboard` 设为 `false` 关闭事件写入，`metrics.jsonl` 仍会保留。`logging.console_interval_steps` 必须为正整数，例如设为 `1` 可逐步打印，长训练建议保持 `10` 或调大以减少终端日志。当前没有默认启用 W&B：它需要联网、账号登录和实验同步策略；若以后需要跨机器共享，可在不改变这些指标名称的前提下增加 W&B 后端。
 
 ### 4.5 数据与奖励语义
 

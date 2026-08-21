@@ -13,7 +13,7 @@ describe("policy branch configuration", () => {
         task_prompt: "place the black bowl on the flat stove",
         source_episode: "episode_000 · source-session",
         resume_step: 50,
-        end_step: 300,
+        target_steps: 300,
         open_loop_steps: 4,
         policy_id: "base",
         policy_label: "Object-Pro base",
@@ -46,7 +46,7 @@ describe("policy branch configuration", () => {
     expect((screen.getByLabelText(/任务（继承源会话）/) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText(/源 Episode/) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText(/回溯帧/) as HTMLInputElement).disabled).toBe(true);
-    expect((screen.getByLabelText(/原轨迹结束步/) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/目标总控制步数/) as HTMLInputElement).disabled).toBe(true);
 
     const stepInput = screen.getByLabelText(/每次预测执行步数/) as HTMLInputElement;
     expect(stepInput.disabled).toBe(false);

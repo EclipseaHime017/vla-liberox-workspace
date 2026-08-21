@@ -57,7 +57,11 @@ TRAIN_SCHEMA = {
             "critic_warmup_steps": None, "train_steps": None, "micro_batch_size": None,
             "gradient_accumulation_steps": None, "checkpoint_interval": None,
             "resume_checkpoint": None, "seed": None, "device": None, "dtype": None},
-    "logging": {"tensorboard": None, "flush_seconds": None},
+    "logging": {
+        "tensorboard": None,
+        "flush_seconds": None,
+        "console_interval_steps": None,
+    },
 }
 
 INFERENCE_SCHEMA = {
@@ -215,6 +219,7 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     if type(logging_cfg["tensorboard"]) is not bool:
         raise TypeError("logging.tensorboard must be boolean")
     _number(logging_cfg, "flush_seconds", low=1, high=3600)
+    _number(logging_cfg, "console_interval_steps", low=1, integer=True)
     return LoadedConfig(path, raw)
 
 

@@ -59,3 +59,5 @@ logging:
   # TensorBoard events are written beside metrics.jsonl for each training run.
   tensorboard: true
   flush_seconds: 5
+  # Print progress, rolling throughput, ETA, losses and VRAM every N train steps.
+  console_interval_steps: 10

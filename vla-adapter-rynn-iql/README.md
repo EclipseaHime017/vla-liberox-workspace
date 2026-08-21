@@ -70,7 +70,15 @@ controlled by the strict YAML section:
 logging:
   tensorboard: true
   flush_seconds: 5
+  console_interval_steps: 10
 ```
+
+The terminal prints the first step, every `console_interval_steps`, and the
+final step. Each line contains the progress bar, current/total steps, training
+phase, elapsed time, rolling ETA and estimated finish time, throughput, the
+Q/value/actor losses, Q/V/advantage means, advantage weight, actor learning
+rate, and peak allocated CUDA memory. The rolling ETA uses the most recent 100
+steps, so checkpoint pauses and early startup do not permanently distort it.
 
 Start the local viewer from the workspace root:
 
@@ -92,8 +100,8 @@ conda run -n vla-liberox python \
 
 The dashboards group Q/value/actor losses, IQL advantage weights, all seven
 action-axis L1 errors, gripper predictions and targets, actor learning rate and
-gradient/parameter norms, throughput, and CUDA peak memory. Legacy conversion can only
-show fields that existed in the old JSONL. W&B is intentionally not a required
+gradient/parameter norms, progress/ETA, throughput, and CUDA peak memory. Legacy
+conversion can only show fields that existed in the old JSONL. W&B is intentionally not a required
 dependency; TensorBoard keeps local runs usable without an account or network.
 
 For a fast CPU test without model downloads:

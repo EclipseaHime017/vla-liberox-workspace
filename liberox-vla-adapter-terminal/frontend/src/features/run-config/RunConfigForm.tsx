@@ -39,8 +39,8 @@ export function RunConfigForm(props: Props) {
       <label className="locked-field">回溯帧
         <Input value={props.branchDraft.resume_step} disabled />
       </label>
-      <label className="locked-field">原轨迹结束步
-        <Input value={props.branchDraft.end_step} disabled />
+      <label className="locked-field">目标总控制步数
+        <Input value={props.branchDraft.target_steps} disabled />
       </label>
       <label className="branch-step-field">每次预测执行步数
         <Input

@@ -33,7 +33,7 @@ class FakeLimiter:
         return time.monotonic()
 
 
-def test_policy_loop_chunks_and_stops_on_success():
+def test_policy_loop_latches_success_and_runs_to_target_steps():
     env = FakeEnv()
     recorder = TrajectoryRecorder(control_hz=20, capture_images=False)
     initial = observation(0)
@@ -48,7 +48,7 @@ def test_policy_loop_chunks_and_stops_on_success():
         env=env,
         recorder=recorder,
         initial_observation=initial,
-        target_action_count=20,
+        target_action_count=5,
         rate_limiter=FakeLimiter(),
         action_source="policy",
         open_loop_steps=2,
@@ -56,10 +56,11 @@ def test_policy_loop_chunks_and_stops_on_success():
         policy_action_transform=lambda value: value,
     )
     assert result.success
-    assert result.executed_steps == 3
-    assert result.policy_queries == 2
-    assert queries == [0, 2]
-    assert recorder.state_count == 4
+    assert result.executed_steps == 5
+    assert result.policy_queries == 3
+    assert result.stopped_reason == "horizon"
+    assert queries == [0, 2, 4]
+    assert recorder.state_count == 6
 
 
 def test_stop_is_checked_after_policy_query():

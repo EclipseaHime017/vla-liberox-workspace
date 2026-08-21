@@ -56,7 +56,7 @@ export type PolicyBranchDraft = {
   task_prompt: string;
   source_episode: string;
   resume_step: number;
-  end_step: number;
+  target_steps: number;
   open_loop_steps: number;
   policy_id: string;
   policy_label: string;

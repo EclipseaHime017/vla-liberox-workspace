@@ -179,3 +179,58 @@ def test_branch_inherits_parent_policy(tmp_path: Path):
     )
     assert record.policy_id == "overlay"
     assert record.policy_label == "Rynn IQL"
+
+
+def test_branch_inherits_target_steps_instead_of_parent_actual_end(
+    tmp_path: Path,
+    monkeypatch,
+):
+    manager = object.__new__(SimulationManager)
+    parent = {
+        "id": "parent",
+        "kind": "original",
+        "branchable": True,
+        "status": "COMPLETED",
+        "trajectory": None,
+        "action_count": 120,
+        "max_steps": 300,
+    }
+    captured: dict[str, int] = {}
+    output_dir = tmp_path / "branch"
+    output_dir.mkdir()
+
+    class _Record(SimpleNamespace):
+        def public(self, _artifacts):
+            return {"id": self.id, "max_steps": captured["max_steps"]}
+
+    class _Thread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    def new_record(**kwargs):
+        captured["max_steps"] = kwargs["max_steps"]
+        return _Record(id="branch", output_dir=output_dir, thread=None)
+
+    manager.get_public = lambda _parent_id: parent
+    manager._new_record = new_record
+    manager._copy_branch_source = lambda _record, _parent: None
+    manager._install_resume_preview = lambda _record, _parent: None
+    manager._claim = lambda _record: None
+    manager.controller = None
+    monkeypatch.setattr(
+        "backend.app.workers.simulation_worker.threading.Thread",
+        _Thread,
+    )
+
+    result = manager.create_branch(
+        "parent",
+        resume_step=50,
+        control_mode="policy",
+        open_loop_steps=4,
+    )
+
+    assert parent["action_count"] == 120
+    assert result["max_steps"] == 300
