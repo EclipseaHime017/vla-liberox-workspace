@@ -16,9 +16,12 @@ export type PolicyInfo = {
   compatibility_sha256: string | null;
 };
 
+export type PolicyCameraId = "agentview" | "robot0_eye_in_hand";
+
 export type Bootstrap = {
   config: {
-    max_steps: number; open_loop_steps: number; control_hz: number; video_fps: number;
+    max_steps: number; open_loop_steps: number; seed: number;
+    disabled_policy_cameras: PolicyCameraId[]; control_hz: number; video_fps: number;
     preview: {
       width: number; height: number; fps: number; layout: "2x2";
       stream_width: number; stream_height: number;
@@ -41,6 +44,7 @@ export type Bootstrap = {
 
 export type Draft = {
   id: string; task_id: string; max_steps: number; open_loop_steps: number;
+  seed: number; disabled_policy_cameras: PolicyCameraId[];
   policy_id: string; policy_label: string;
   preview_status: "PREPARING" | "RENDERING" | "READY" | "ERROR";
   preview_revision: number; preview_ready: boolean; preview_available: boolean;
@@ -69,6 +73,7 @@ export type Session = {
   spacemouse_stale: boolean | null; spacemouse_latency_ms: number | null;
   spacemouse_deadman_ms: number | null; status: string; created_at: string | null;
   max_steps: number; open_loop_steps: number; current_step: number; state_count: number;
+  seed: number; disabled_policy_cameras: PolicyCameraId[];
   action_count: number; policy_queries: number; success: boolean; error: string | null;
   stopped_reason: string | null; measured_control_hz: number | null;
   simulated_duration_seconds: number; branchable: boolean; legacy: boolean; managed: boolean;

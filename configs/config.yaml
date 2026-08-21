@@ -23,6 +23,10 @@ control_hz: 20
 realtime_control: true
 # VLA observation cameras remain square at this resolution.
 env_resolution: 256
+# Policy-input ablation only. Allowed: agentview, robot0_eye_in_hand.
+# A disabled slot becomes a black frame; previews and recordings remain unchanged.
+# At least one camera must remain enabled.
+disabled_policy_cameras: []
 # Replay video joins the raw VLA camera observations without resizing:
 # agentview on the left, wrist camera on the right (2 * env_resolution by env_resolution).
 video_camera: vla_views

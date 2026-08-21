@@ -30,6 +30,8 @@ class SimulationSession:
     output_dir: Path
     max_steps: int
     open_loop_steps: int
+    seed: int = 0
+    disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
     policy_label: str | None = None
     policy_base_checkpoint: str | None = None
@@ -118,6 +120,8 @@ class SimulationSession:
             "completed_at": self.completed_at,
             "max_steps": self.max_steps,
             "open_loop_steps": self.open_loop_steps,
+            "seed": self.seed,
+            "disabled_policy_cameras": list(self.disabled_policy_cameras),
             "current_step": self.current_step,
             "state_count": self.state_count,
             "action_count": self.action_count,
@@ -149,6 +153,8 @@ class SimulationDraft:
     task_id: str
     max_steps: int
     open_loop_steps: int
+    seed: int = 0
+    disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
     policy_label: str | None = None
     preview_status: str = "PREPARING"
@@ -162,6 +168,8 @@ class SimulationDraft:
             "task_id": self.task_id,
             "max_steps": self.max_steps,
             "open_loop_steps": self.open_loop_steps,
+            "seed": self.seed,
+            "disabled_policy_cameras": list(self.disabled_policy_cameras),
             "policy_id": self.policy_id,
             "policy_label": self.policy_label,
             "preview_status": self.preview_status,

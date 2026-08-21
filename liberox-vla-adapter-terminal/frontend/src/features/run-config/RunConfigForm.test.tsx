@@ -26,6 +26,8 @@ describe("policy branch configuration", () => {
       policyId="base"
       maxSteps={300}
       openLoop={8}
+      seed={0}
+      disabledPolicyCameras={[]}
       onCreate={vi.fn()}
       onStart={vi.fn()}
       onCancel={vi.fn()}
@@ -34,6 +36,8 @@ describe("policy branch configuration", () => {
       onPolicy={vi.fn()}
       onMaxSteps={vi.fn()}
       onOpenLoop={vi.fn()}
+      onSeed={vi.fn()}
+      onPolicyCamera={vi.fn()}
       onBranchOpenLoop={onBranchOpenLoop}
       onStartBranch={onStartBranch}
       onCancelBranch={vi.fn()}
@@ -52,5 +56,35 @@ describe("policy branch configuration", () => {
     fireEvent.click(screen.getByRole("button", { name: "开始二次推理" }));
     expect(onStartBranch).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "创建仿真" })).toBeNull();
+  });
+});
+
+describe("original simulation configuration", () => {
+  it("edits the random seed and policy camera selection in a draft", () => {
+    const onSeed = vi.fn();
+    const onPolicyCamera = vi.fn();
+    render(<RunConfigForm
+      draft={{
+        id: "draft", task_id: "task", max_steps: 300, open_loop_steps: 8,
+        seed: 7, disabled_policy_cameras: [], policy_id: "base", policy_label: "Base",
+        preview_status: "READY", preview_revision: 1, preview_ready: true,
+        preview_available: true, error: null,
+        task: { task_id: "task", level: "LEVEL1", task_name: "task", prompt: "pick", init_state_index: 0 },
+      }}
+      branchDraft={null}
+      tasks={[{ task_id: "task", level: "LEVEL1", task_name: "task", prompt: "pick", init_state_index: 0 }]}
+      policies={[{ policy_id: "base", label: "Base", base_checkpoint: "base", stats_key: "stats", kind: "base", training_step: null, compatibility_sha256: null }]}
+      active={false} busy={false} taskId="task" policyId="base"
+      maxSteps={300} openLoop={8} seed={7} disabledPolicyCameras={[]}
+      onCreate={vi.fn()} onStart={vi.fn()} onCancel={vi.fn()} onStop={vi.fn()}
+      onTask={vi.fn()} onPolicy={vi.fn()} onMaxSteps={vi.fn()} onOpenLoop={vi.fn()}
+      onSeed={onSeed} onPolicyCamera={onPolicyCamera}
+      onBranchOpenLoop={vi.fn()} onStartBranch={vi.fn()} onCancelBranch={vi.fn()}
+    />);
+
+    fireEvent.change(screen.getByLabelText("随机种子"), { target: { value: "42" } });
+    expect(onSeed).toHaveBeenCalledWith(42, false);
+    fireEvent.click(screen.getByLabelText("腕部视角"));
+    expect(onPolicyCamera).toHaveBeenCalledWith("robot0_eye_in_hand", false);
   });
 });

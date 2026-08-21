@@ -97,7 +97,7 @@ class PreviewService:
     def _run(self) -> None:
         config = self.manager.eval_config
         env = None
-        env_task_id: str | None = None
+        env_context: tuple[str, int] | None = None
         period = 1.0 / self.manager.ui_config.preview_fps
         try:
             last_render = 0.0
@@ -115,7 +115,8 @@ class PreviewService:
                     except queue.Empty:
                         break
                 try:
-                    if env is None or env_task_id != task_id:
+                    target_context = (task_id, int(target.seed))
+                    if env is None or env_context != target_context:
                         if env is not None:
                             self.manager.simulator.close(env)
                             env = None
@@ -124,9 +125,9 @@ class PreviewService:
                             bddl,
                             config,
                             max_steps=10000,
-                            seed=config.seed,
+                            seed=target.seed,
                         )
-                        env_task_id = task_id
+                        env_context = target_context
                     self.manager.simulator.restore(env, state)
                     frame = self.manager.simulator.render_operator_preview(
                         env,
@@ -314,6 +315,10 @@ class SimulationManager:
             "config": {
                 "max_steps": self.eval_config.max_steps,
                 "open_loop_steps": self.eval_config.open_loop_steps,
+                "seed": self.eval_config.seed,
+                "disabled_policy_cameras": list(
+                    self.eval_config.disabled_policy_cameras
+                ),
                 "control_hz": self.eval_config.control_hz,
                 "video_fps": self.eval_config.video_fps,
                 "preview": {
@@ -427,6 +432,8 @@ class SimulationManager:
         kind: str,
         max_steps: int,
         open_loop_steps: int,
+        seed: int | None = None,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
         policy_id: str = "base",
         task_id: str | None = None,
         parent: dict[str, Any] | None = None,
@@ -435,11 +442,29 @@ class SimulationManager:
         manual_translation_gain: float | None = None,
         manual_rotation_gain: float | None = None,
     ) -> SimulationSession:
+        eval_config = getattr(self, "eval_config", None)
+        default_seed = int(getattr(eval_config, "seed", 0))
+        default_disabled_cameras = tuple(
+            getattr(eval_config, "disabled_policy_cameras", ())
+        )
         if parent is not None:
             task_id = parent.get("task_id")
             if not task_id:
                 raise ValueError("Source trajectory task is not available in the UI catalog")
             policy_id = str(parent.get("policy_id") or "base")
+            seed = int(parent.get("seed", default_seed))
+            disabled_policy_cameras = parent.get(
+                "disabled_policy_cameras", default_disabled_cameras
+            )
+        seed = default_seed if seed is None else int(seed)
+        disabled_policy_cameras = tuple(
+            default_disabled_cameras
+            if disabled_policy_cameras is None
+            else disabled_policy_cameras
+        )
+        self._validate_session_values(
+            max_steps, open_loop_steps, seed, disabled_policy_cameras
+        )
         task_id = task_id or self.catalog.default_task_id
         task = self.catalog.metadata(task_id)
         policy = self._policy_entry(policy_id)
@@ -461,6 +486,8 @@ class SimulationManager:
             output_dir=output_dir,
             max_steps=max_steps,
             open_loop_steps=open_loop_steps,
+            seed=seed,
+            disabled_policy_cameras=disabled_policy_cameras,
             policy_id=policy.policy_id,
             policy_label=policy.label,
             policy_base_checkpoint=policy.base_checkpoint,
@@ -505,11 +532,26 @@ class SimulationManager:
             self._persist_manifest(record)
 
     @staticmethod
-    def _validate_session_values(max_steps: int, open_loop_steps: int) -> None:
+    def _validate_session_values(
+        max_steps: int,
+        open_loop_steps: int,
+        seed: int = 0,
+        disabled_policy_cameras: tuple[str, ...] | list[str] = (),
+    ) -> None:
         if not 1 <= max_steps <= 10000:
             raise ValueError("max_steps must be in [1, 10000]")
         if not 1 <= open_loop_steps <= 8:
             raise ValueError("open_loop_steps must be in [1, 8]")
+        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2147483647:
+            raise ValueError("seed must be an integer in [0, 2147483647]")
+        cameras = tuple(disabled_policy_cameras)
+        if len(cameras) != len(set(cameras)):
+            raise ValueError("disabled_policy_cameras must not contain duplicates")
+        unknown = sorted(set(cameras) - set(direct.VLA_OBSERVATION_CAMERAS))
+        if unknown:
+            raise ValueError(f"Unknown policy cameras: {unknown}")
+        if len(cameras) >= len(direct.VLA_OBSERVATION_CAMERAS):
+            raise ValueError("At least one VLA policy camera must remain enabled")
 
     def _policy_entry(self, policy_id: str):
         catalog = getattr(self, "policy_catalog", None)
@@ -542,14 +584,17 @@ class SimulationManager:
         task_id: str | None = None,
         policy_id: str = "base",
         initial_jpeg: bytes | None = None,
+        seed: int | None = None,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
-        self._validate_session_values(max_steps, open_loop_steps)
         record = self._new_record(
             kind="original",
             max_steps=max_steps,
             open_loop_steps=open_loop_steps,
             task_id=task_id,
             policy_id=policy_id,
+            seed=seed,
+            disabled_policy_cameras=disabled_policy_cameras,
         )
         if initial_jpeg is not None:
             record.latest_jpeg = initial_jpeg
@@ -592,9 +637,23 @@ class SimulationManager:
         ).start()
 
     def create_draft(
-        self, task_id: str, max_steps: int, open_loop_steps: int, policy_id: str = "base"
+        self,
+        task_id: str,
+        max_steps: int,
+        open_loop_steps: int,
+        policy_id: str = "base",
+        seed: int | None = None,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
-        self._validate_session_values(max_steps, open_loop_steps)
+        seed = self.eval_config.seed if seed is None else seed
+        disabled_policy_cameras = tuple(
+            self.eval_config.disabled_policy_cameras
+            if disabled_policy_cameras is None
+            else disabled_policy_cameras
+        )
+        self._validate_session_values(
+            max_steps, open_loop_steps, seed, disabled_policy_cameras
+        )
         self.catalog.entry(task_id)
         policy = self._policy_entry(policy_id)
         with self.lock:
@@ -605,6 +664,8 @@ class SimulationManager:
                 task_id=task_id,
                 max_steps=max_steps,
                 open_loop_steps=open_loop_steps,
+                seed=seed,
+                disabled_policy_cameras=disabled_policy_cameras,
                 policy_id=policy.policy_id,
                 policy_label=policy.label,
             )
@@ -620,6 +681,8 @@ class SimulationManager:
         max_steps: int | None = None,
         open_loop_steps: int | None = None,
         policy_id: str | None = None,
+        seed: int | None = None,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             if self.active_session_id is not None:
@@ -633,21 +696,31 @@ class SimulationManager:
                 open_loop_steps if open_loop_steps is not None else draft.open_loop_steps
             )
             next_policy_id = policy_id if policy_id is not None else draft.policy_id
-            self._validate_session_values(next_max_steps, next_open_loop)
+            next_seed = seed if seed is not None else draft.seed
+            next_disabled_cameras = tuple(
+                disabled_policy_cameras
+                if disabled_policy_cameras is not None
+                else draft.disabled_policy_cameras
+            )
+            self._validate_session_values(
+                next_max_steps, next_open_loop, next_seed, next_disabled_cameras
+            )
             self.catalog.entry(next_task_id)
             policy = self._policy_entry(next_policy_id)
-            task_changed = next_task_id != draft.task_id
+            preview_changed = next_task_id != draft.task_id or next_seed != draft.seed
             draft.task_id = next_task_id
             draft.max_steps = next_max_steps
             draft.open_loop_steps = next_open_loop
+            draft.seed = next_seed
+            draft.disabled_policy_cameras = next_disabled_cameras
             draft.policy_id = policy.policy_id
             draft.policy_label = policy.label
-            if task_changed:
+            if preview_changed:
                 draft.preview_revision += 1
                 draft.preview_status = "PREPARING"
                 draft.error = None
             public = self._draft_public(draft)
-        if task_changed:
+        if preview_changed:
             self._launch_draft_preview(draft)
         return public
 
@@ -682,6 +755,8 @@ class SimulationManager:
                 task_id=draft.task_id,
                 policy_id=draft.policy_id,
                 initial_jpeg=draft.latest_jpeg,
+                seed=draft.seed,
+                disabled_policy_cameras=draft.disabled_policy_cameras,
             )
         except Exception:
             with self.lock:
@@ -703,6 +778,19 @@ class SimulationManager:
             raise ValueError("Only a completed original trajectory may create one-level branches")
         if parent["status"] not in TERMINAL_STATES:
             raise ValueError("The source session must finish before branching")
+        if parent.get("trajectory"):
+            _, source_metadata = load_trajectory(Path(parent["trajectory"]))
+            parent = dict(parent)
+            fallback_seed = parent.get("seed")
+            if fallback_seed is None:
+                fallback_seed = self.eval_config.seed
+            parent["seed"] = int(source_metadata.get("seed", fallback_seed))
+            parent["disabled_policy_cameras"] = list(
+                source_metadata.get(
+                    "disabled_policy_cameras",
+                    parent.get("disabled_policy_cameras", ()),
+                )
+            )
         if control_mode not in {"policy", "manual"}:
             raise ValueError("control_mode must be 'policy' or 'manual'")
         if control_mode == "policy":
@@ -880,7 +968,10 @@ class SimulationManager:
                     "max_steps": record.max_steps,
                     "open_loop_steps": record.open_loop_steps,
                     "control_hz": getattr(eval_config, "control_hz", 20),
-                    "seed": getattr(eval_config, "seed", 0),
+                    "seed": record.seed,
+                    "disabled_policy_cameras": list(
+                        record.disabled_policy_cameras
+                    ),
                     "control_mode": record.control_mode,
                     "resume_step": record.resume_step,
                 },
@@ -921,6 +1012,8 @@ class SimulationManager:
                 "current_step": record.current_step,
                 "max_steps": record.max_steps,
                 "open_loop_steps": record.open_loop_steps,
+                "seed": record.seed,
+                "disabled_policy_cameras": list(record.disabled_policy_cameras),
                 "state_count": record.state_count,
                 "action_count": record.action_count,
                 "policy_queries": record.policy_queries,
@@ -1023,6 +1116,10 @@ class SimulationManager:
             "max_steps": int(result.get("target_steps", manifest.get("max_steps", action_count)) or 0),
             "open_loop_steps": summary.get(
                 "open_loop_steps", manifest.get("open_loop_steps")
+            ),
+            "seed": int(manifest.get("seed", context.get("seed", 0)) or 0),
+            "disabled_policy_cameras": list(
+                manifest.get("disabled_policy_cameras", []) or []
             ),
             "current_step": int(manifest.get("current_step", action_count) or 0),
             "state_count": state_count,
@@ -1199,7 +1296,7 @@ class SimulationManager:
         prep_started = time.monotonic()
         task = self.catalog.entry(record.task_id)
         bddl, _ = self.catalog.paths(record.task_id)
-        seed = self.eval_config.seed
+        seed = record.seed
 
         def phase(name: str, message: str) -> None:
             with self.lock:
@@ -1227,6 +1324,9 @@ class SimulationManager:
                             model_was_loaded
                         )
                         self._persist_manifest(record)
+                set_seed = getattr(self.runtime, "set_seed_everywhere", None)
+                if callable(set_seed):
+                    set_seed(seed)
             if record.kind == "original":
                 initial_state = self.catalog.initial_state(record.task_id)
                 recorder = self.recorder_factory.original(float(self.eval_config.control_hz))
@@ -1235,7 +1335,12 @@ class SimulationManager:
                 source_trajectory, source_metadata = load_trajectory(
                     Path(record.source_trajectory)
                 )
-                seed = int(source_metadata.get("seed", seed))
+                source_seed = int(source_metadata.get("seed", seed))
+                if source_seed != seed:
+                    raise ValueError(
+                        "Branch seed does not match its copied source trajectory: "
+                        f"session={seed}, source={source_seed}"
+                    )
                 initial_state = source_trajectory["sim_state"][record.resume_step]
                 recorder = self.recorder_factory.branch(
                     source_trajectory,
@@ -1249,6 +1354,8 @@ class SimulationManager:
                 open_loop_steps=record.open_loop_steps,
                 trials=1,
                 headless=True,
+                seed=seed,
+                disabled_policy_cameras=record.disabled_policy_cameras,
             )
             phase("warming_controller", "预热 MuJoCo 控制器")
             self.simulator.prewarm(bddl, initial_state, session_config)
@@ -1326,7 +1433,9 @@ class SimulationManager:
             def query_policy(current_observation: dict[str, Any], _step: int):
                 current_observation = self.simulator.observations(env, current_observation)
                 return current_observation, self.provider.predict(
-                    current_observation, task.prompt
+                    current_observation,
+                    task.prompt,
+                    record.disabled_policy_cameras,
                 )
 
             def on_transition(_observation: dict[str, Any], step: int, success: bool) -> None:
@@ -1555,7 +1664,8 @@ class SimulationManager:
             "policy_device": provider_metadata["model_device"]
             if record.control_mode == "policy"
             else None,
-            "seed": self.eval_config.seed,
+            "seed": record.seed,
+            "disabled_policy_cameras": list(record.disabled_policy_cameras),
             "open_loop_steps": record.open_loop_steps,
             "control_hz": self.eval_config.control_hz,
             "realtime_control": True,

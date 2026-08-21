@@ -81,6 +81,7 @@ class EvalConfig:
     control_hz: int
     realtime_control: bool
     env_resolution: int
+    disabled_policy_cameras: tuple[str, ...]
     video_camera: str
     video_width: int
     video_height: int
@@ -127,6 +128,24 @@ def _require_bool(config: dict[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"Config key '{key}' must be true or false")
     return value
+
+
+def _require_camera_list(config: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = config[key]
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise TypeError(f"Config key '{key}' must be a list of camera names")
+    cameras = tuple(value)
+    if len(cameras) != len(set(cameras)):
+        raise ValueError(f"Config key '{key}' must not contain duplicate camera names")
+    unknown = sorted(set(cameras) - set(VLA_OBSERVATION_CAMERAS))
+    if unknown:
+        raise ValueError(
+            f"Config key '{key}' contains unknown policy cameras: {unknown}; "
+            f"allowed: {list(VLA_OBSERVATION_CAMERAS)}"
+        )
+    if len(cameras) >= len(VLA_OBSERVATION_CAMERAS):
+        raise ValueError("At least one VLA policy camera must remain enabled")
+    return cameras
 
 
 def _resolve_path(value: str, config_dir: Path) -> Path:
@@ -200,6 +219,9 @@ def load_config(config_path: Path) -> EvalConfig:
         control_hz=_require_int(raw_config, "control_hz"),
         realtime_control=_require_bool(raw_config, "realtime_control"),
         env_resolution=_require_int(raw_config, "env_resolution"),
+        disabled_policy_cameras=_require_camera_list(
+            raw_config, "disabled_policy_cameras"
+        ),
         video_camera=_require_string(raw_config, "video_camera"),
         video_width=_require_int(raw_config, "video_width"),
         video_height=_require_int(raw_config, "video_height"),
@@ -883,8 +905,36 @@ def build_model(runtime: SimpleNamespace, args: EvalConfig):
     return cfg, components
 
 
-def checked_action_chunk(runtime: SimpleNamespace, cfg, components, obs: dict, prompt: str) -> list[np.ndarray]:
-    policy_obs, _ = runtime.prepare_observation(obs, components.resize_size)
+def mask_policy_camera_observations(
+    obs: dict[str, Any], disabled_policy_cameras: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Black out selected VLA inputs while preserving the two-image contract."""
+    if not disabled_policy_cameras:
+        return obs
+    if len(disabled_policy_cameras) >= len(VLA_OBSERVATION_CAMERAS):
+        raise ValueError("At least one VLA policy camera must remain enabled")
+    masked = dict(obs)
+    for camera in disabled_policy_cameras:
+        if camera not in VLA_OBSERVATION_CAMERAS:
+            raise ValueError(f"Unknown VLA policy camera: {camera}")
+        key = f"{camera}_image"
+        image = np.asarray(obs.get(key))
+        if image.ndim != 3 or image.shape[-1] != 3:
+            raise ValueError(f"Observation '{key}' must be an HxWx3 image")
+        masked[key] = np.zeros_like(image)
+    return masked
+
+
+def checked_action_chunk(
+    runtime: SimpleNamespace,
+    cfg,
+    components,
+    obs: dict,
+    prompt: str,
+    disabled_policy_cameras: tuple[str, ...] = (),
+) -> list[np.ndarray]:
+    policy_input = mask_policy_camera_observations(obs, disabled_policy_cameras)
+    policy_obs, _ = runtime.prepare_observation(policy_input, components.resize_size)
     actions = runtime.get_action(
         cfg,
         components.model,
@@ -960,6 +1010,7 @@ def run_episode(
                 components,
                 observation,
                 prompt,
+                args.disabled_policy_cameras,
             )
 
         loop_result = run_control_loop(
@@ -1059,6 +1110,7 @@ def evaluation_runtime_metadata(config: EvalConfig) -> dict[str, Any]:
         "vla_views_video_width": config.video_width,
         "vla_views_video_height": config.video_height,
         "video_fps": config.video_fps,
+        "disabled_policy_cameras": list(config.disabled_policy_cameras),
     }
 
 

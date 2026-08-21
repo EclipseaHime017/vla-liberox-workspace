@@ -55,13 +55,23 @@ class FakeManager:
     def get_draft(self):
         return self.draft
 
-    def create_draft(self, task_id, max_steps, open_loop_steps, policy_id="base"):
+    def create_draft(
+        self,
+        task_id,
+        max_steps,
+        open_loop_steps,
+        policy_id="base",
+        seed=0,
+        disabled_policy_cameras=None,
+    ):
         if self.active:
             raise RuntimeError("active")
         self.draft = {
             "id": "draft", "task_id": task_id, "max_steps": max_steps,
             "open_loop_steps": open_loop_steps, "preview_status": "READY",
             "policy_id": policy_id, "policy_label": policy_id,
+            "seed": seed,
+            "disabled_policy_cameras": list(disabled_policy_cameras or []),
             "preview_ready": True, "preview_available": True,
         }
         return self.draft
@@ -178,11 +188,14 @@ def test_api_create_conflict_stop_branch_and_artifact(tmp_path: Path):
         assert (await endpoint("/api/controller/calibrate", "POST")(request))["state"] == "CALIBRATING"
         body = DraftRequest(
             task_id="LEVEL1::task", policy_id="trained", max_steps=20,
-            open_loop_steps=4,
+            open_loop_steps=4, seed=19,
+            disabled_policy_cameras=["robot0_eye_in_hand"],
         )
         draft = await endpoint("/api/draft", "POST")(body, request)
         assert draft["preview_ready"] is True
         assert draft["policy_id"] == "trained"
+        assert draft["seed"] == 19
+        assert draft["disabled_policy_cameras"] == ["robot0_eye_in_hand"]
         assert "new" not in manager.records
         updated = await endpoint("/api/draft", "PATCH")(
             UpdateDraftRequest(open_loop_steps=2), request
@@ -245,6 +258,17 @@ def test_request_validation(tmp_path: Path):
         DraftRequest(task_id="task", max_steps=0, open_loop_steps=9)
     with pytest.raises(ValidationError):
         UpdateDraftRequest()
+    with pytest.raises(ValidationError):
+        DraftRequest(
+            task_id="task", max_steps=1, open_loop_steps=1, seed=-1
+        )
+    with pytest.raises(ValidationError):
+        DraftRequest(
+            task_id="task",
+            max_steps=1,
+            open_loop_steps=1,
+            disabled_policy_cameras=["agentview", "robot0_eye_in_hand"],
+        )
     with pytest.raises(ValidationError):
         CreateBranchRequest(
             resume_step=0,

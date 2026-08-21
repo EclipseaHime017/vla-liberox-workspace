@@ -57,6 +57,7 @@ TRAIN_SCHEMA = {
             "critic_warmup_steps": None, "train_steps": None, "micro_batch_size": None,
             "gradient_accumulation_steps": None, "checkpoint_interval": None,
             "resume_checkpoint": None, "seed": None, "device": None, "dtype": None},
+    "logging": {"tensorboard": None, "flush_seconds": None},
 }
 
 INFERENCE_SCHEMA = {
@@ -146,7 +147,9 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
         ("work_dir", "output_dir", "vla_adapter_root", "libero_x_root",
          "rynnvalue_root", "policy_registry"),
     )
-    data, reward, vla, iql = raw["data"], raw["reward"], raw["vla"], raw["iql"]
+    data, reward, vla, iql, logging_cfg = (
+        raw["data"], raw["reward"], raw["vla"], raw["iql"], raw["logging"]
+    )
     if not isinstance(data["project_id"], str) or not data["project_id"].strip():
         raise TypeError("data.project_id must be a non-empty string")
     if not isinstance(data["task_ids"], list) or any(not isinstance(x, str) for x in data["task_ids"]):
@@ -209,6 +212,9 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     _cuda_device(iql["device"], "iql.device")
     if iql["micro_batch_size"] != 1:
         raise ValueError("The validated 16GB profile requires iql.micro_batch_size=1")
+    if type(logging_cfg["tensorboard"]) is not bool:
+        raise TypeError("logging.tensorboard must be boolean")
+    _number(logging_cfg, "flush_seconds", low=1, high=3600)
     return LoadedConfig(path, raw)
 
 

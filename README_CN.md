@@ -146,6 +146,7 @@ seed: 0
 control_hz: 20
 realtime_control: true
 env_resolution: 256
+disabled_policy_cameras: []
 video_camera: vla_views
 video_width: 512
 video_height: 256
@@ -167,7 +168,7 @@ mujoco_gl: egl
 
 `control_hz: 20` 显式把 LIBERO 控制周期设为 `50 ms`；`realtime_control: true` 在每次 `env.step()` 前使用单调时钟限速，保证控制步不会快于 20 Hz，也不会在落后后突发“追帧”。正式 rollout 前会在一个随后销毁的临时环境中完成 robosuite 控制器的一次性初始化，再新建正式环境，因而不会用隐藏 action 污染正式初始状态。模型查询或系统调度如果超过 50 ms，有效频率仍只会低于 20 Hz；这是软实时仿真，不是具有硬实时保证的机器人控制器。每回合的实际 `measured_control_hz` 与控制周期最小值、平均值、最大值会写入 `results.jsonl`，汇总值和超期回合数写入 `summary.json`。每个控制步记录一帧，因此 `video_fps` 强制等于 `control_hz`：300 步对应 15 秒仿真时间和 15 秒视频，不再以 10 fps 播放成 30 秒。
 
-`env_resolution` 控制送给 VLA 和写入观测轨迹的 `agentview`/腕部相机，保持 `256×256` 以维持模型输入契约。默认录像模式 `vla_views` 会把这两路原始策略观测直接水平拼接：左侧是 `agentview`，右侧是 `robot0_eye_in_hand`，不做高清重渲染或缩放，最终保存为 `episode_000_{success|failure}_vla_views.mp4`（`512×256`）。按照 VLA-Adapter 官方训练契约，两路输入必须旋转 180°，因此它可能与 MuJoCo Viewer 的自然显示方向不同，不能为了观感而改动；模型内部仍会按原路径将每路图像处理为 `224×224`。
+`env_resolution` 控制送给 VLA 和写入观测轨迹的 `agentview`/腕部相机，保持 `256×256` 以维持模型输入契约。`disabled_policy_cameras` 默认为空；可填写 `[agentview]` 或 `[robot0_eye_in_hand]` 做单路输入消融，但不能同时关闭两路。禁用只在进入 VLA 前将该槽替换成同尺寸黑帧，录像与 observation 仍保留原图。默认录像模式 `vla_views` 会把这两路原始策略观测直接水平拼接：左侧是 `agentview`，右侧是 `robot0_eye_in_hand`，不做高清重渲染或缩放，最终保存为 `episode_000_{success|failure}_vla_views.mp4`（`512×256`）。按照 VLA-Adapter 官方训练契约，两路输入必须旋转 180°，因此它可能与 MuJoCo Viewer 的自然显示方向不同，不能为了观感而改动；模型内部仍会按原路径将每路图像处理为 `224×224`。
 
 每次评测的标准文件 `episode_000_{success|failure}.mp4` 固定为 `1024×1024` 高清主视角。它使用同一个 `agentview` 相机位姿，但只校正 OpenGL framebuffer 的上下方向，不应用 VLA 训练所需的额外水平翻转，因此是供人查看的自然方向。`main_view_video_width` 和 `main_view_video_height` 只控制录像，必须保持相等，不会改变模型观测。`results.jsonl` 中的 `video` 和 `main_view_video` 都指向该标准文件，`vla_views_video` 指向保持模型输入方向的双相机拼接文件。
 
@@ -466,7 +467,9 @@ UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz �
 新建原始仿真采用明确的两阶段流程：先点击“创建仿真”，在内存草稿中切换任务、调整以下参数并检查第一个 init state 的静态预览；只有预览就绪后，“开始仿真”才会创建唯一结果目录并加载策略：
 
 - `max_steps`：本次总控制步数；
-- `open_loop_steps`：每次 VLA 预测 8 个 action 后实际执行的数量，有效范围 `1..8`。
+- `open_loop_steps`：每次 VLA 预测 8 个 action 后实际执行的数量，有效范围 `1..8`；
+- `seed`：本次环境与策略随机种子，有效范围 `0..2147483647`。benchmark 的 init state 仍固定为所选任务的第 0 个，修改 seed 不等于切换 init state；
+- `VLA 摄像头输入`：可关闭 `agentview` 或 `robot0_eye_in_hand` 中的一个做视觉消融。关闭后对应的固定输入槽传入同尺寸黑帧，避免破坏 Object-Pro 的双图像结构；至少保留一个摄像头。四视角实时预览、轨迹 observation 和两路录像仍保存未经遮挡的原图。
 
 UI 专属参数固定从 `configs/ui_config.yaml` 读取，启动命令不接受配置地址：
 
@@ -490,7 +493,7 @@ additional_tasks:
     task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
 ```
 
-草稿不写入 `runs/`、不加载 VLA、也不推进物理仿真；切换任务只重建预览，修改步数不会重复渲染。点击“取消草稿”或刷新页面会丢弃草稿。活动仿真期间不能创建或修改草稿。模型权重仍跨会话复用，但每次开始都会更新本会话的 `open_loop_steps`，不会沿用第一次加载模型时的旧值。
+草稿不写入 `runs/`、不加载 VLA、也不推进物理仿真；切换任务或 seed 会按新环境上下文重建预览，修改步数或 VLA 摄像头输入不会重复渲染。点击“取消草稿”或刷新页面会丢弃草稿。活动仿真期间不能创建或修改草稿。模型权重仍跨会话复用，但每次开始都会更新本会话的 `open_loop_steps`、seed 和视觉消融设置，不会沿用第一次加载模型时的旧值。分支继承父会话的 seed、策略和摄像头输入，防止回溯前后实验条件漂移。
 
 同一时刻只允许一个活动会话。状态依次为：
 
@@ -665,33 +668,216 @@ iql:
   target_tau: 0.005
   micro_batch_size: 1
   gradient_accumulation_steps: 32
+
+logging:
+  tensorboard: true
+  flush_seconds: 5
 ```
 
 `paths.dataset_sources` 中的每一项可以是当前 `dataset-root`，也可以是 UI 数据集页面导出的任务 ZIP。`reward.gamma` 同时用于 PBRS chunk 折扣与 IQL Bellman target。导入器不会改写源文件；训练/验证按 root trajectory 分组，父轨迹和它的全部分支不会被拆到不同集合。
 
-### 4.4 四阶段运行方法
+### 4.4 数据选择、奖励标注、训练与评测
 
-以下命令均从 `~/eclipseaws/vla-liberox-workspace` 执行：
+四个阶段使用两个 YAML：prepare、annotate 和 train 共同读取 `configs/liberox_iql.yaml`；evaluate 单独读取 `configs/inference.yaml`。以下命令都从 `~/eclipseaws/vla-liberox-workspace` 执行。
+
+#### 4.4.1 指定 prepare 的数据范围
+
+prepare 不会根据日期目录手工选择文件。它会递归扫描 `paths.dataset_sources` 下的所有 `run.json`，所以 `任务/日期/run` 这类中间目录不会影响发现结果；真正的筛选条件来自每个 `run.json` 的内容：
+
+```yaml
+paths:
+  # 可同时给出多个 dataset-root 目录或 UI 导出的任务 ZIP。
+  dataset_sources:
+    - ../../dataset-root
+  # prepare manifest、ZIP 解包缓存和奖励缓存的共同工作目录。
+  work_dir: ../outputs/work
+
+data:
+  project_id: libero_x_vla
+  # 空列表表示导入该 project 下的全部任务。
+  task_ids: []
+  validation_fraction: 0.2
+  split_seed: 7
+  success_consecutive_steps: 5
+```
+
+只训练一个任务时，必须填写 `run.json` 中完整、大小写一致的 `task_id`，而不是提示词或磁盘目录名。例如：
+
+```yaml
+data:
+  project_id: libero_x_vla
+  task_ids:
+    - LEVEL1::EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+```
+
+也可以同时指定多个任务：
+
+```yaml
+data:
+  project_id: libero_x_vla
+  task_ids:
+    - LEVEL1::EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+    - LEVEL1::EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+```
+
+`task_ids: []` 才表示全部任务。prepare 只接收 `status=COMPLETED` 且没有 `error` 的会话，并验证 `project_id`、20 Hz 时间网格、`N` 个动作对应 `N+1` 个状态/图像、7 维 OSC action 范围和 policy action round-trip。原始轨迹完整导入；分支只从 `resume_step` 开始生成额外 chunk，因此不会再次训练复制过来的父轨迹前缀。
+
+运行 prepare：
 
 ```bash
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
+conda run -n vla-liberox python \
+  vla-adapter-rynn-iql/scripts/prepare_dataset.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
+```
+
+结果写入 `paths.work_dir/dataset_manifest.json`，其中最值得先检查的是：
+
+- `episode_count`：筛选后包含的原始/分支轨迹数；
+- `success_count`：经过连续成功阈值确认的成功轨迹数；
+- `chunk_count`：实际可供 IQL 采样的 8 步 chunk 总数；
+- 每条 episode 的 `task_id`、`kind`、`resume_step`、`split`、`action_count` 和 `terminal_step`。
+
+同一个 `work_dir` 再次 prepare 会原子替换旧的 `dataset_manifest.json`，但不会修改 `dataset-root` 中的任何文件。训练/验证划分按 `root_run_id` 完成，因此父轨迹及其所有分支一定处于同一个 split。当前训练器只从 `split=train` 采样，validation 仅预留给独立评估，不会自动早停或选择 checkpoint。
+
+`allow_no_success: true` 只允许“没有确认成功轨迹”的小数据继续做流程烟测，并会打印警告；它不会把失败数据伪装成成功。设为 `false` 时 prepare 会直接终止。`action_horizon/action_dim/proprio_dim/control_hz` 在当前实现中必须保持 `8/7/8/20`，它们是 VLA-Adapter 与 Franka 数据契约，不是用于筛选数据量的参数。
+
+#### 4.4.2 annotate 的目的与输出
+
+annotate 的作用不是重新判断任务是否成功，也不是训练 RynnValue。它冻结加载 RynnValue-4B，对 prepare 后每条轨迹的 action-chunk 边界执行以下处理：
+
+1. 只读取第三人称 `agentview` 和该轨迹的 BDDL 提示词；不读取 wrist、动作来源或人工/策略标签。
+2. 为每个边界预测剩余完成时间 `remaining_seconds` 并保存 entropy；每条轨迹另生成一次文本 Analysis 供诊断。
+3. 使用 `Φ=-remaining_seconds` 计算 PBRS shaping，再与环境 success 产生的 `-1` step cost 合成为每个 chunk 的 `chunk_reward`。
+4. 将奖励保存到 `paths.work_dir/rewards/<run_id>.npz`，并生成 `reward_manifest.json`；训练阶段只读取这些离线结果，不再加载 RynnValue。
+
+因此，失败原始轨迹、接管后成功轨迹和重新推理分支都会用同一个冻结模型标注；区别来自 prepare 选中的有效片段和环境 terminal，而不是人为给 RynnValue 设置不同类别。分支仍只标注 `resume_step` 后的新后缀。
+
+主要奖励参数：
+
+```yaml
+reward:
+  model: Alibaba-DAMO-Academy/RynnValue-4B
+  device: cuda:0
+  dtype: bfloat16
+  max_frames: 64
+  annotation_batch_size: 1
+  window_overlap: 8
+  gamma: 0.99
+  shaping_weight: 0.1
+```
+
+- `max_frames`：每个 RynnValue 时间窗口最多覆盖的边界帧数；窗口内每个时间前缀会按官方方法均匀重采样为固定数量的图像槽，长轨迹再拆成重叠窗口。
+- `annotation_batch_size`：一次 RynnValue 前向处理的时间前缀数量；16 GB 显存保持 `1`。
+- `window_overlap`：长轨迹相邻窗口的重叠边界数，重叠预测会取平均。
+- `gamma`：chunk 内 sparse return 和 PBRS 的时间折扣，也会被 IQL Bellman target 使用。
+- `shaping_weight`：RynnValue 势函数奖励的强度；`0` 表示只使用 sparse step cost。
+
+运行标注：
+
+```bash
+conda run -n rynnvalue-reward python \
+  vla-adapter-rynn-iql/scripts/annotate_rewards.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
+```
+
+缓存键包含 dataset hash、轨迹/图像 hash、提示词、chunk 边界、奖励配置和 RynnValue 版本。完全相同时会复用已有 `.npz`；中断后再次运行会跳过已经完成的条目。如果修改了 `task_ids`、源数据、成功阈值、split 或 action 边界，prepare 会生成新的 dataset hash，此后必须重新运行 annotate。旧缓存文件可以留在目录中，但新的 `reward_manifest.json` 只引用当前数据范围；训练也会拒绝 dataset hash 不一致的奖励索引。
+
+#### 4.4.3 配置并运行 IQL 后训练
+
+训练始终冻结 VLA 的视觉/语言 backbone，只更新 continuous action head 和 proprio projector；Pixel-IQL 的双 Q、value 和 target 网络也会从头训练。默认配置如下：
+
+```yaml
+vla:
+  base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
+  stats_key: libero_object
+  use_pro_version: true
+  freeze_backbone: true
+
+iql:
+  critic_image_size: 128
+  critic_lr: 0.0003
+  value_lr: 0.0003
+  policy_peak_lr: 0.00003
+  policy_final_lr: 0.000003
+  expectile: 0.8
+  beta: 10.0
+  max_advantage_weight: 100.0
+  target_tau: 0.005
+  critic_warmup_steps: 200
+  train_steps: 10000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+  checkpoint_interval: 512
+  resume_checkpoint: null
+  seed: 7
+  device: cuda:0
+  dtype: bfloat16
+```
+
+参数语义分为四组：
+
+- 数据与显存：`critic_image_size` 只控制 Q/V 使用的双视角缩放尺寸；VLA actor 仍走自身 processor。当前 16 GB profile 强制 `micro_batch_size=1`。actor 累计 `gradient_accumulation_steps=32` 个 micro-step 后更新一次，等效 actor batch 为 32；critic/value 则每个 micro-step 都更新。
+- 训练长度：`train_steps=10000` 表示 10000 次 replay 抽样和 critic/value 更新，不是 10000 个完整 epoch。默认情况下 actor optimizer 大约执行 `ceil(10000/32)=313` 次。每个 chunk 被均匀采样，因此 chunk 更多的长轨迹会贡献更多训练样本；当前没有按成功/失败、human/policy 或 episode 做额外重加权。
+- critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value optimizer。`expectile` 越高，value 越偏向高 Q 动作；actor 权重为 `exp(beta × advantage)`，再由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
+- actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。`critic_warmup_steps` 期间 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 并没有在前 200 步冻结。
+- 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
+
+运行训练：
+
+```bash
+conda run -n vla-liberox python \
+  vla-adapter-rynn-iql/scripts/train_iql.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
+```
+
+每次训练创建新的 `outputs/training/<run>/`，不会覆盖旧实验。`checkpoint_interval` 必须能被 `gradient_accumulation_steps` 整除。断点恢复时把配置改为：
+
+```yaml
+iql:
+  # 其余字段保持与目标实验兼容；train_steps 是恢复后的总目标步数。
+  train_steps: 20000
+  resume_checkpoint: ../outputs/training/<run>/checkpoints/step_00010000
+```
+
+恢复会校验 dataset hash、reward hash、基础 checkpoint 和 stats key，并恢复 Q/V/target、两个 actor 组件、optimizer、随机数状态和 replay sampler。`train_steps` 是绝对终点，例如从 step 10000 恢复到 `train_steps=20000` 只再执行 10000 步。
+
+#### 4.4.4 评测 base 与训练后的 overlay
+
+评测不读取 `liberox_iql.yaml` 的数据筛选范围，而是由 `configs/inference.yaml` 独立指定任务和 rollout：
+
+```yaml
+policy:
+  overlay: ../../policy-registry/latest/policy.yaml
+evaluation:
+  level: LEVEL1
+  task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+  trials: 1
+  max_steps: 300
+  open_loop_steps: 8
+  seed: 7
+  compare_base: true
+```
+
+`compare_base: true` 会用相同任务设置分别运行基础 Object-Pro 与 IQL overlay；成功仍只由 LIBERO-X 环境判定。
+
+```bash
+conda run -n vla-liberox python \
+  vla-adapter-rynn-iql/scripts/evaluate.py \
   --config vla-adapter-rynn-iql/configs/inference.yaml
 ```
 
-四个命令分别完成：
+#### 4.4.5 哪些修改需要重跑哪些阶段
 
-1. `prepare_dataset.py`：校验源数据、动作 round-trip、分支前缀去重，并生成带源文件哈希的 replay manifest。
-2. `annotate_rewards.py`：冻结加载 RynnValue-4B，按 action-chunk 边界标注剩余时间并计算 PBRS 奖励；缓存支持断点续跑。
-3. `train_iql.py`：先预热 Q/V，再进行 advantage-weighted VLA 动作头训练；保存完整优化器、target、RNG 和 replay sampler 状态。
-4. `evaluate.py`：加载基础 Object-Pro，再校验并覆盖 action head/proprio projector，可配置同时评测 base 与 overlay。
+| 修改内容 | prepare | annotate | train | evaluate |
+|---|---:|---:|---:|---:|
+| `dataset_sources`、`project_id`、`task_ids` 或源轨迹 | 必须 | 必须 | 必须 | 按需 |
+| `success_consecutive_steps`、`split_seed`、`validation_fraction` | 必须 | 必须 | 必须 | 按需 |
+| RynnValue 版本、`max_frames`、`window_overlap`、`gamma`、`shaping_weight` | 不需要 | 必须 | 必须 | 按需 |
+| VLA checkpoint/stats 或任一 `iql.*` 参数 | 不需要 | 不需要 | 必须 | 必须 |
+| 仅 `logging.*` | 不需要 | 不需要 | 仅影响新训练 | 不需要 |
+| 仅 `inference.yaml` | 不需要 | 不需要 | 不需要 | 必须 |
 
-也可用编排脚本依次调度两个 Conda 环境：
+首次跑通或希望严格重建全部阶段时，可以使用编排脚本自动在两个 Conda 环境间切换：
 
 ```bash
 python vla-adapter-rynn-iql/scripts/run_pipeline.py \
@@ -699,7 +885,46 @@ python vla-adapter-rynn-iql/scripts/run_pipeline.py \
   --inference-config vla-adapter-rynn-iql/configs/inference.yaml
 ```
 
-需要从中断点恢复训练时，把 `iql.resume_checkpoint` 指向某个 `outputs/training/<run>/step_XXXXXXXX/`。保存间隔必须能被梯度累积步数整除，避免保存尚未提交的 actor 梯度。
+只想完成 `prepare → annotate → train` 而暂不仿真评测时，加 `--skip-evaluation`。
+
+#### 4.4.6 使用 TensorBoard 查看训练变化
+
+新训练默认同时保存两种指标：`metrics.jsonl` 是可审计的逐步原始记录，`tensorboard/` 是图表事件。训练开始后可在另一个终端启动：
+
+```bash
+cd ~/eclipseaws/vla-liberox-workspace
+conda run -n vla-liberox tensorboard \
+  --logdir vla-adapter-rynn-iql/outputs/training \
+  --host 127.0.0.1 \
+  --port 6006
+```
+
+浏览器打开 `http://127.0.0.1:6006`。如果训练发生在另一台机器上，不要把 TensorBoard 直接暴露到局域网；从本机建立 SSH 转发后访问同一地址：
+
+```bash
+ssh -L 6006:127.0.0.1:6006 <user>@<training-host>
+```
+
+已经完成、尚无 TensorBoard 事件的旧训练可从 `metrics.jsonl` 转换，不需要重新训练：
+
+```bash
+conda run -n vla-liberox python \
+  vla-adapter-rynn-iql/scripts/metrics_to_tensorboard.py \
+  --run-dir vla-adapter-rynn-iql/outputs/training/<run>
+```
+
+转换结果写入该 run 的 `tensorboard-imported/`。旧日志只能显示当时已经记录的 loss、Q/V、advantage weight、耗时和显存；新版本才会额外记录七个 action 维度的 L1、夹爪预测/目标均值、闭爪样本比例、actor 学习率和梯度范数。
+
+建议重点观察：
+
+- `loss/actor_loss` 与 `action_l1/actor_l1_gripper`：动作头总体误差和夹爪维度误差；
+- `gripper/actor_gripper_prediction_mean`、`target_mean` 和 `target_close_fraction`：判断模型是否只学会移动而没有学会闭爪；
+- `iql/advantage_weight_mean`：若长期贴近 `max_advantage_weight`，通常表示权重饱和；
+- `value/q_mean`、`value/value_mean`、`value/advantage_mean`：判断 critic/value 是否漂移；
+- `optimization/actor_grad_norm`、`action_head_parameter_norm` 和 `proprio_projector_parameter_norm`：只在梯度累积真正提交 optimizer 的步骤出现，默认每 32 步一次，用于检查两个可训练组件是否获得梯度以及参数尺度是否异常漂移；
+- `system/steps_per_second` 与 `cuda_peak_memory_gib`：查看速度和显存峰值。
+
+可在 YAML 中把 `logging.tensorboard` 设为 `false` 关闭事件写入，`metrics.jsonl` 仍会保留。当前没有默认启用 W&B：它需要联网、账号登录和实验同步策略；若以后需要跨机器共享，可在不改变这些指标名称的前提下增加 W&B 后端。
 
 ### 4.5 数据与奖励语义
 
@@ -756,6 +981,18 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-liberox python -m pytest -q
 - [VLA-Adapter 官方实现](https://github.com/OpenHelix-Team/VLA-Adapter)
 - [LIBERO-X 官方实现](https://github.com/meituan/LIBERO-X)
 - [本仓库的独立训练说明](vla-adapter-rynn-iql/README.md)
+
+### 4.8 能到达目标但无法抓取时的调优顺序
+
+“能到达碗附近但没有完成闭爪/抬升”通常说明空间接近能力已经学到，瓶颈集中在短暂的抓取转换阶段。不要先盲目增加总训练步数；应先在同一任务、相同 seed 下对 base 与 overlay 各运行多次，并按以下顺序定位：
+
+1. 将 `configs/inference.yaml` 的 `evaluation.open_loop_steps` 从 `8` 改为 `1` 或 `2`。抓取接触阶段每 50–100 ms 重规划，通常比一次盲执行 8 步更稳；若成功率明显上升，主要问题是开环执行而不是奖励或动作头完全失效。
+2. 检查失败视频对应的 `trajectory.csv`：raw gripper 应在接触前从接近 `1`（开）切到接近 `0`（闭），环境 gripper action 则应变为 `+1`。若始终不闭合，重点检查示教中“闭爪并保持、随后抬升”的有效 chunk 数，而不是只看总轨迹数。
+3. 现有 50 条接管轨迹的长前缀会让“接近目标”的样本远多于真正抓取转换。优先从夹爪接近碗前开始新增短分支，明确包含对准、闭爪保持和抬升；数据准备仍只导入分支后缀，不重复父前缀。
+4. 查看训练目录的 `metrics.jsonl`。若 `advantage_weight_mean` 长期贴近上限 `100`，说明 `beta: 10` 对当前小数据和有噪声的价值估计过激；下一次对照实验可先尝试 `beta: 3`、`max_advantage_weight: 20`，并把 `critic_warmup_steps` 提高到约 `1000`。每次只改变一组变量。
+5. 若 gripper 输出方向正确但动作抖动或过冲，再把 `policy_peak_lr` 从 `3e-5` 降至 `1e-5`、`policy_final_lr` 从 `3e-6` 降至 `1e-6`，并保留独立验证轨迹选择 checkpoint，避免 action head 在少量成功数据上过拟合。
+
+摄像头关闭功能适合诊断模型究竟依赖主视角还是腕部视角，不建议把单摄像头消融结果直接当作正式策略提升。训练 overlay 仍是双摄像头模型；若希望永久改成单摄像头结构，需要重新设计并训练模型输入层，而不是只关闭一个槽位。
 
 ## 5. 为什么这样适配
 

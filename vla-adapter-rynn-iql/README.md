@@ -60,6 +60,42 @@ file for reproducible experiments. Source trajectories are read-only. Branch
 prefixes are de-duplicated and only the new suffix contributes extra replay
 chunks.
 
+## TensorBoard monitoring
+
+New training runs write both the auditable `metrics.jsonl` stream and
+TensorBoard events under `outputs/training/<run>/tensorboard/`. Logging is
+controlled by the strict YAML section:
+
+```yaml
+logging:
+  tensorboard: true
+  flush_seconds: 5
+```
+
+Start the local viewer from the workspace root:
+
+```bash
+conda run -n vla-liberox tensorboard \
+  --logdir vla-adapter-rynn-iql/outputs/training \
+  --host 127.0.0.1 --port 6006
+```
+
+Then open `http://127.0.0.1:6006`. For a completed run created before
+TensorBoard logging was added, convert its existing JSONL metrics without
+retraining:
+
+```bash
+conda run -n vla-liberox python \
+  vla-adapter-rynn-iql/scripts/metrics_to_tensorboard.py \
+  --run-dir vla-adapter-rynn-iql/outputs/training/<run>
+```
+
+The dashboards group Q/value/actor losses, IQL advantage weights, all seven
+action-axis L1 errors, gripper predictions and targets, actor learning rate and
+gradient/parameter norms, throughput, and CUDA peak memory. Legacy conversion can only
+show fields that existed in the old JSONL. W&B is intentionally not a required
+dependency; TensorBoard keeps local runs usable without an account or network.
+
 For a fast CPU test without model downloads:
 
 ```bash

@@ -54,3 +54,26 @@ def test_operator_only_cameras_do_not_change_vla_inputs():
         "oblique_minus_45",
         "oblique_plus_45",
     ]
+
+
+def test_policy_camera_ablation_blacks_only_the_selected_slot():
+    observation = {
+        "agentview_image": np.full((8, 8, 3), 17, dtype=np.uint8),
+        "robot0_eye_in_hand_image": np.full((8, 8, 3), 23, dtype=np.uint8),
+        "robot0_eef_pos": np.ones(3, dtype=np.float32),
+    }
+    masked = direct.mask_policy_camera_observations(
+        observation, ("robot0_eye_in_hand",)
+    )
+    assert masked is not observation
+    assert np.all(masked["agentview_image"] == 17)
+    assert np.all(masked["robot0_eye_in_hand_image"] == 0)
+    assert np.all(observation["robot0_eye_in_hand_image"] == 23)
+    assert masked["robot0_eef_pos"] is observation["robot0_eef_pos"]
+
+
+def test_policy_camera_ablation_keeps_at_least_one_visual_input():
+    with np.testing.assert_raises(ValueError):
+        direct.mask_policy_camera_observations(
+            {}, ("agentview", "robot0_eye_in_hand")
+        )

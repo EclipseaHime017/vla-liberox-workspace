@@ -103,6 +103,9 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
     manager.draft = None
     manager.catalog = _DraftCatalog()
     manager.policy_catalog = _PolicyCatalog()
+    manager.eval_config = SimpleNamespace(
+        seed=0, disabled_policy_cameras=()
+    )
     manager.ui_config = SimpleNamespace(output_root=tmp_path)
     manager._launch_draft_preview = lambda draft: (
         setattr(draft, "latest_jpeg", b"jpeg"),
@@ -111,7 +114,13 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
     started = {}
 
     def create_original(
-        max_steps, open_loop_steps, task_id=None, policy_id="base", initial_jpeg=None
+        max_steps,
+        open_loop_steps,
+        task_id=None,
+        policy_id="base",
+        initial_jpeg=None,
+        seed=None,
+        disabled_policy_cameras=None,
     ):
         started.update(
             max_steps=max_steps,
@@ -119,6 +128,8 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
             task_id=task_id,
             policy_id=policy_id,
             initial_jpeg=initial_jpeg,
+            seed=seed,
+            disabled_policy_cameras=disabled_policy_cameras,
         )
         return {"id": "started"}
 
@@ -141,6 +152,8 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
         "task_id": "LEVEL1::task_b",
         "policy_id": "base",
         "initial_jpeg": b"jpeg",
+        "seed": 0,
+        "disabled_policy_cameras": (),
     }
 
 

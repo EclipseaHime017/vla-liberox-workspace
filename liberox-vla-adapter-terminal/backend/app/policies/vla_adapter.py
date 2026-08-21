@@ -120,6 +120,7 @@ class VLAAdapterPolicyProvider:
         self,
         observation: dict[str, Any],
         prompt: str,
+        disabled_policy_cameras: tuple[str, ...] = (),
     ) -> Sequence[np.ndarray]:
         with self._lock:
             if self.cfg is None or self.components is None:
@@ -130,6 +131,7 @@ class VLAAdapterPolicyProvider:
                 self.components,
                 observation,
                 prompt,
+                disabled_policy_cameras,
             )
 
     def process_action(self, action: np.ndarray) -> np.ndarray:

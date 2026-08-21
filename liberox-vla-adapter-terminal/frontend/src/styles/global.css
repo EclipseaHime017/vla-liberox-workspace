@@ -61,6 +61,11 @@ h2 { font-size: 16px; letter-spacing: -.01em; }
 .new-run .locked-field input:disabled { color: #6e6e73; background: #f1f1f3; border-color: #e2e2e6; opacity: 1; }
 .branch-step-field, .locked-field-note { grid-column: 1 / -1; }
 .locked-field-note { line-height: 1.5; }
+.policy-camera-fieldset { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.policy-camera-fieldset legend { padding: 0 4px; color: var(--muted); font-size: 11px; }
+.new-run .policy-camera-option { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 12px; }
+.new-run .policy-camera-option input { width: auto; margin: 0; }
+.policy-camera-fieldset p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .button-row { display: flex; gap: 8px; grid-column: 1 / -1; }
 .session-filter { padding: 11px 15px; border-bottom: 1px solid var(--line); }
 .session-filter label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .075em; }

@@ -1,4 +1,4 @@
-import type { Draft, PolicyBranchDraft, PolicyInfo, TaskInfo } from "../run-control/types";
+import type { Draft, PolicyBranchDraft, PolicyCameraId, PolicyInfo, TaskInfo } from "../run-control/types";
 import { canStartDraft } from "../simulation-view/controls";
 import { Button } from "../../components/ui/Button";
 import { Input } from "../../components/ui/Input";
@@ -9,10 +9,13 @@ type Props = {
   draft: Draft | null; branchDraft: PolicyBranchDraft | null;
   tasks: TaskInfo[]; policies: PolicyInfo[]; active: boolean; busy: boolean;
   taskId: string; policyId: string; maxSteps: number; openLoop: number;
+  seed: number; disabledPolicyCameras: PolicyCameraId[];
   onCreate: () => void; onStart: () => void; onCancel: () => void; onStop: () => void;
   onTask: (value: string) => void; onMaxSteps: (value: number, commit: boolean) => void;
   onPolicy: (value: string) => void;
   onOpenLoop: (value: number, commit: boolean) => void;
+  onSeed: (value: number, commit: boolean) => void;
+  onPolicyCamera: (camera: PolicyCameraId, enabled: boolean) => void;
   onBranchOpenLoop: (value: number) => void;
   onStartBranch: () => void; onCancelBranch: () => void;
 };
@@ -59,6 +62,27 @@ export function RunConfigForm(props: Props) {
       <label>策略模型<PolicySelector policies={props.policies} value={props.policyId} disabled={props.active || props.busy} onChange={props.onPolicy} /></label>
       <label>总控制步数<Input type="number" min={1} max={10000} value={props.maxSteps} disabled={props.active || props.busy} onChange={(event) => props.onMaxSteps(Number(event.target.value), false)} onBlur={() => props.onMaxSteps(props.maxSteps, true)} /></label>
       <label>每次预测执行步数<Input type="number" min={1} max={8} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>
+      <label>随机种子<Input type="number" min={0} max={2147483647} step={1} value={props.seed} disabled={props.active || props.busy} onChange={(event) => props.onSeed(Number(event.target.value), false)} onBlur={() => props.onSeed(props.seed, true)} /></label>
+      <fieldset className="policy-camera-fieldset" disabled={props.active || props.busy}>
+        <legend>VLA 摄像头输入</legend>
+        {([
+          ["agentview", "主视角"],
+          ["robot0_eye_in_hand", "腕部视角"],
+        ] as const).map(([camera, label]) => {
+          const enabled = !props.disabledPolicyCameras.includes(camera);
+          const enabledCount = 2 - props.disabledPolicyCameras.length;
+          return <label className="policy-camera-option" key={camera}>
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={props.active || props.busy || (enabled && enabledCount === 1)}
+              onChange={(event) => props.onPolicyCamera(camera, event.target.checked)}
+            />
+            <span>{label}</span>
+          </label>;
+        })}
+        <p>关闭后仅将该 VLA 输入槽替换为黑帧；预览和录像仍保存原图，且至少保留一个输入。</p>
+      </fieldset>
       <div className="button-row">
         <Button className="primary" disabled={!canStartDraft(props.draft.preview_ready, props.active, props.busy)} onClick={props.onStart}>开始仿真</Button>
         <Button disabled={props.active || props.busy} onClick={props.onCancel}>取消草稿</Button>

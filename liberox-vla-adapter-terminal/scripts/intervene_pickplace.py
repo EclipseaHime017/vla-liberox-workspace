@@ -528,6 +528,7 @@ def main() -> int:
                     components,
                     current_observation,
                     task_description,
+                    eval_config.disabled_policy_cameras,
                 )
 
             loop_result = run_control_loop(

@@ -24,7 +24,7 @@ reward:
   revision: 3f73b5d2b5e53b21f248c8791004dde6a8cf2b92
   device: cuda:0
   dtype: bfloat16
-  max_frames: 64
+  max_frames: 32
   annotation_batch_size: 1
   window_overlap: 8
   gamma: 0.99
@@ -55,3 +55,7 @@ iql:
   seed: 7
   device: cuda:0
   dtype: bfloat16
+logging:
+  # TensorBoard events are written beside metrics.jsonl for each training run.
+  tensorboard: true
+  flush_seconds: 5

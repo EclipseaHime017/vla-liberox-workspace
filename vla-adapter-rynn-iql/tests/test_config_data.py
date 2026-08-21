@@ -51,6 +51,15 @@ def test_success_confirmation_threshold_is_validated(configured, tmp_path: Path)
         load_train_config(path)
 
 
+def test_tensorboard_logging_configuration_is_strict(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["logging"]["tensorboard"] = "yes"
+    path = tmp_path / "invalid-logging.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(TypeError, match="logging.tensorboard"):
+        load_train_config(path)
+
+
 def test_branch_prefix_is_not_added_as_new_replay(configured):
     prepare_dataset(configured)
     manifest = load_manifest(configured)

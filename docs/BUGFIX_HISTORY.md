@@ -551,3 +551,10 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 根因是官方 `LinearValueHead` 和 `BroValueHead` 构造函数显式默认 `torch.float32`；原标注器虽然用 BF16 参数加载 checkpoint，最后却只执行 `.to(device)`，无法保证自定义 value head 与 BF16 Qwen backbone 使用相同 dtype；
 - 标注器改为显式使用固定本地源码的 `RynnValueLangConfig/Processor/Model`，不允许错误回退到普通 Qwen language-model head；加载后按官方推理程序执行整模 `.to(device=..., dtype=torch.bfloat16)`；
 - 标注前校验 `2560 × 8 = 20480` 的 value-head 输入契约，并扫描全部浮点参数；任何残留 FP32/FP16 参数都立即报告具体名称。第一版配置固定 `reward.dtype: bfloat16`，value 解码与 entropy softmax 仍按官方实现使用 FP32 保持数值稳定。
+
+## 2026-08-21：UI 支持会话随机种子与 VLA 摄像头输入消融
+
+- 原始仿真草稿新增随机种子，启动时同步设置环境与策略随机源，并写入 run config、manifest 和轨迹 metadata；回溯分支继承父会话 seed；
+- 草稿新增 `agentview` / `robot0_eye_in_hand` 输入开关，最多关闭其中一路。被关闭的模型输入槽使用同尺寸黑帧，保持 Object-Pro 固定双图结构；
+- 摄像头开关只影响 VLA 推理，不修改实时四视角、保存的 observation 或视频，便于对照诊断且不丢失原始数据；
+- 预览服务按任务与 seed 区分环境上下文，API 严格拒绝非法 seed、未知/重复摄像头以及同时关闭两路输入。

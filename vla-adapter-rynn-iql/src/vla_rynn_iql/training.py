@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from .config import LoadedConfig
 from .data import load_manifest
 from .io import atomic_json, sha256_file, stable_hash
 from .iql import PixelIQL, advantage_weights, weighted_masked_l1
+from .monitoring import ACTION_NAMES, log_tensorboard_metric
 from .replay import ReplayDataset
 from .rewards import load_reward_index
 from .vla_adapter import (
@@ -32,6 +34,51 @@ from .vla_adapter import (
 
 
 LOG = logging.getLogger(__name__)
+
+
+def _action_diagnostics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> dict[str, float]:
+    """Return unweighted per-axis errors so gripper learning is observable."""
+    valid = mask.float().unsqueeze(-1)
+    denominator = valid.sum().clamp_min(1.0)
+    error = (prediction.float() - target.float()).abs()
+    per_axis = (error * valid).sum(dim=(0, 1)) / denominator
+    valid_steps = mask.bool()
+    predicted_gripper = prediction.float()[..., -1][valid_steps]
+    target_gripper = target.float()[..., -1][valid_steps]
+    diagnostics = torch.cat(
+        (
+            per_axis,
+            torch.stack(
+                (
+                    predicted_gripper.mean(),
+                    target_gripper.mean(),
+                    (target_gripper < 0.5).float().mean(),
+                )
+            ),
+        )
+    ).detach().cpu().tolist()
+    result = {
+        f"actor_l1_{name}": float(diagnostics[index])
+        for index, name in enumerate(ACTION_NAMES)
+    }
+    result.update(
+        actor_gripper_prediction_mean=float(diagnostics[7]),
+        actor_gripper_target_mean=float(diagnostics[8]),
+        actor_gripper_target_close_fraction=float(diagnostics[9]),
+    )
+    return result
+
+
+def _module_parameter_norm(module: torch.nn.Module) -> float:
+    """Calculate a module-wide L2 norm without flattening or copying its parameters."""
+    norms = [parameter.detach().norm(2).float() for parameter in module.parameters()]
+    if not norms:
+        return 0.0
+    return float(torch.stack(norms).norm(2))
 
 
 def _device(name: str) -> torch.device:
@@ -277,7 +324,30 @@ def train(config: LoadedConfig) -> Path:
     start_time = time.monotonic()
     latest_checkpoint: Path | None = None
     metrics_path = run_dir / "metrics.jsonl"
-    with metrics_path.open("w", encoding="utf-8") as metrics_file:
+    logging_cfg = config.section("logging")
+    with ExitStack() as stack:
+        metrics_file = stack.enter_context(metrics_path.open("w", encoding="utf-8"))
+        writer = None
+        if logging_cfg["tensorboard"]:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+            except ImportError as exc:
+                raise RuntimeError(
+                    "TensorBoard logging is enabled but tensorboard is not installed; "
+                    "install requirements-train.txt"
+                ) from exc
+            writer = stack.enter_context(
+                SummaryWriter(
+                    log_dir=str(run_dir / "tensorboard"),
+                    flush_secs=float(logging_cfg["flush_seconds"]),
+                )
+            )
+            writer.add_text(
+                "run/effective_config",
+                "```yaml\n" + yaml.safe_dump(config.raw, sort_keys=False) + "```",
+                start_step,
+            )
+        current_actor_lr = float(actor_optimizer.param_groups[0]["lr"])
         for step in range(start_step, total_steps):
             batch = _sample_batch(
                 dataset, int(iql_cfg["micro_batch_size"]), data_generator
@@ -318,30 +388,58 @@ def train(config: LoadedConfig) -> Path:
             actor_loss = weighted_masked_l1(
                 prediction, critic_batch["actions"], critic_batch["action_mask"], weights
             )
+            action_metrics = _action_diagnostics(
+                prediction,
+                critic_batch["actions"],
+                critic_batch["action_mask"],
+            )
             (actor_loss / accumulation).backward()
             actor_loss_value = float(actor_loss.detach())
             weight_mean = float(weights.mean())
+            actor_grad_norm = None
+            action_head_parameter_norm = None
+            proprio_projector_parameter_norm = None
             if (step + 1) % accumulation == 0 or step == total_steps - 1:
-                torch.nn.utils.clip_grad_norm_(actor_parameters, 1.0)
-                lr = _actor_lr(
+                actor_grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(actor_parameters, 1.0)
+                )
+                current_actor_lr = _actor_lr(
                     step, total_steps, float(iql_cfg["policy_peak_lr"]),
                     float(iql_cfg["policy_final_lr"]), warmup,
                 )
                 for group in actor_optimizer.param_groups:
-                    group["lr"] = lr
+                    group["lr"] = current_actor_lr
                 actor_optimizer.step()
                 actor_optimizer.zero_grad(set_to_none=True)
+                action_head_parameter_norm = _module_parameter_norm(
+                    components.action_head
+                )
+                proprio_projector_parameter_norm = _module_parameter_norm(
+                    components.proprio_projector
+                )
             metric = {
                 "step": step + 1, "q_loss": critic_metrics.q_loss,
                 "value_loss": critic_metrics.value_loss, "q_mean": critic_metrics.q_mean,
                 "value_mean": critic_metrics.value_mean,
                 "advantage_mean": critic_metrics.advantage_mean,
                 "actor_loss": actor_loss_value, "advantage_weight_mean": weight_mean,
+                "actor_learning_rate": current_actor_lr,
+                "actor_grad_norm": actor_grad_norm,
+                "action_head_parameter_norm": action_head_parameter_norm,
+                "proprio_projector_parameter_norm": proprio_projector_parameter_norm,
                 "elapsed_seconds": time.monotonic() - start_time,
                 "cuda_peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
+                **action_metrics,
             }
+            metric["steps_per_second"] = (metric["step"] - start_step) / max(
+                float(metric["elapsed_seconds"]), 1e-9
+            )
+            metric["cuda_peak_memory_gib"] = float(
+                metric["cuda_peak_memory_bytes"]
+            ) / (1024.0 ** 3)
             metrics_file.write(json.dumps(metric, sort_keys=True) + "\n")
             metrics_file.flush()
+            log_tensorboard_metric(writer, metric)
             if (step + 1) % int(iql_cfg["checkpoint_interval"]) == 0 or step + 1 == total_steps:
                 latest_checkpoint = _save_checkpoint(
                     checkpoint_root, step + 1, components, agent, actor_optimizer,

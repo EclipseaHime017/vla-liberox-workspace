@@ -8,6 +8,7 @@ Local-first simulation, VLA evaluation, trajectory rewind, and SpaceMouse takeov
 - Compatibility: the existing evaluation, intervention, and SpaceMouse CLI scripts remain available.
 - Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
+- Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
 
 ## Repository layout
@@ -85,6 +86,11 @@ uses 8×7 action chunks and 8-D proprio at 20 Hz, and is designed for staged use
 on a 16 GB GPU. A dataset containing only failures is accepted for integration
 testing with an explicit warning, but is not evidence that offline training will
 improve task success.
+
+IQL training writes TensorBoard events beside the raw `metrics.jsonl` log. Run
+`tensorboard --logdir vla-adapter-rynn-iql/outputs/training` to compare runs;
+existing JSONL-only runs can be imported with
+`vla-adapter-rynn-iql/scripts/metrics_to_tensorboard.py`.
 
 ### References
 

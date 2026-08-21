@@ -3,3 +3,4 @@ transformers==4.40.1
 accelerate>=0.28,<2
 imageio>=2.34,<3
 imageio-ffmpeg>=0.5,<1
+tensorboard>=2.15,<3
