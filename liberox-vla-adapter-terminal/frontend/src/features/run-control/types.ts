@@ -3,7 +3,9 @@ export type TaskInfo = {
   level: string;
   task_name: string;
   prompt: string;
-  init_state_index: number;
+  init_state_count: number;
+  init_state_index_min: number;
+  init_state_index_max: number;
 };
 
 export type PolicyInfo = {
@@ -44,7 +46,7 @@ export type Bootstrap = {
 
 export type Draft = {
   id: string; task_id: string; max_steps: number; open_loop_steps: number;
-  seed: number; disabled_policy_cameras: PolicyCameraId[];
+  seed: number; init_state_index: number; disabled_policy_cameras: PolicyCameraId[];
   policy_id: string; policy_label: string;
   preview_status: "PREPARING" | "RENDERING" | "READY" | "ERROR";
   preview_revision: number; preview_ready: boolean; preview_available: boolean;
@@ -73,7 +75,7 @@ export type Session = {
   spacemouse_stale: boolean | null; spacemouse_latency_ms: number | null;
   spacemouse_deadman_ms: number | null; status: string; created_at: string | null;
   max_steps: number; open_loop_steps: number; current_step: number; state_count: number;
-  seed: number; disabled_policy_cameras: PolicyCameraId[];
+  seed: number; init_state_index: number; disabled_policy_cameras: PolicyCameraId[];
   action_count: number; policy_queries: number; success: boolean; error: string | null;
   stopped_reason: string | null; measured_control_hz: number | null;
   simulated_duration_seconds: number; branchable: boolean; legacy: boolean; managed: boolean;

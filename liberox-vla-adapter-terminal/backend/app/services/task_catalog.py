@@ -15,7 +15,8 @@ class TaskCatalog(Protocol):
     def metadata(self, task_id: str) -> dict[str, Any]: ...
     def list_tasks(self) -> list[dict[str, Any]]: ...
     def paths(self, task_id: str) -> tuple[Path, Path]: ...
-    def initial_state(self, task_id: str) -> Any: ...
+    def initial_state(self, task_id: str, index: int = 0) -> Any: ...
+    def initial_state_count(self, task_id: str) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -27,15 +28,15 @@ class TaskEntry:
     bddl_path: Path
     init_path: Path
 
-    def metadata(self) -> dict[str, Any]:
+    def metadata(self, init_state_count: int) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "level": self.level,
             "task_name": self.task_name,
             "prompt": self.prompt,
-            "bddl": str(self.bddl_path),
-            "init": str(self.init_path),
-            "init_state_index": 0,
+            "init_state_count": init_state_count,
+            "init_state_index_min": 0,
+            "init_state_index_max": init_state_count - 1,
         }
 
 
@@ -83,18 +84,32 @@ class ConfiguredTaskCatalog:
         except KeyError as exc:
             raise ValueError(f"Unknown UI task_id: {task_id}") from exc
 
-    def initial_state(self, task_id: str) -> Any:
+    def _load_states(self, task_id: str) -> Any:
         entry = self.entry(task_id)
         if task_id not in self._states:
             self._states[task_id] = direct.load_initial_states(self.runtime, entry.init_path)
-        return self._states[task_id][0]
+        return self._states[task_id]
+
+    def initial_state_count(self, task_id: str) -> int:
+        return len(self._load_states(task_id))
+
+    def initial_state(self, task_id: str, index: int = 0) -> Any:
+        states = self._load_states(task_id)
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("init_state_index must be an integer")
+        if not 0 <= index < len(states):
+            raise ValueError(
+                f"init_state_index for {task_id} must be in [0, {len(states) - 1}], "
+                f"got {index}"
+            )
+        return states[index]
 
     def paths(self, task_id: str) -> tuple[Path, Path]:
         entry = self.entry(task_id)
         return entry.bddl_path, entry.init_path
 
     def metadata(self, task_id: str) -> dict[str, Any]:
-        return self.entry(task_id).metadata()
+        return self.entry(task_id).metadata(self.initial_state_count(task_id))
 
     def list_tasks(self) -> list[dict[str, Any]]:
-        return [entry.metadata() for entry in self._entries.values()]
+        return [self.metadata(task_id) for task_id in self._entries]

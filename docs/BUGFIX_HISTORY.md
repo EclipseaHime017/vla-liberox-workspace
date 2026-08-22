@@ -558,3 +558,9 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 草稿新增 `agentview` / `robot0_eye_in_hand` 输入开关，最多关闭其中一路。被关闭的模型输入槽使用同尺寸黑帧，保持 Object-Pro 固定双图结构；
 - 摄像头开关只影响 VLA 推理，不修改实时四视角、保存的 observation 或视频，便于对照诊断且不丢失原始数据；
 - 预览服务按任务与 seed 区分环境上下文，API 严格拒绝非法 seed、未知/重复摄像头以及同时关闭两路输入。
+
+## 2026-08-22：拆分环境 seed 与 benchmark 初始状态
+
+- 原始仿真草稿新增 `init_state_index`，不再把环境随机种子误当作完整场景布局选择器；
+- 每个任务从实际 init 文件动态公开状态数量与合法范围 `0..N-1`，后端在预览和创建会话前统一校验，切换任务时索引重置为 0；
+- 草稿预览、正式 rollout、run manifest、有效配置和轨迹 metadata 均记录并使用所选索引；回溯分支继承父轨迹索引且不可修改。

@@ -14,9 +14,10 @@ async def create_draft(body: DraftRequest, request: Request):
         body.task_id,
         body.max_steps,
         body.open_loop_steps,
-        body.policy_id,
-        body.seed,
-        body.disabled_policy_cameras,
+        policy_id=body.policy_id,
+        seed=body.seed,
+        init_state_index=body.init_state_index,
+        disabled_policy_cameras=body.disabled_policy_cameras,
     )
     except Exception as exc: raise http_error(exc) from exc
 
@@ -28,6 +29,7 @@ async def update_draft(body: UpdateDraftRequest, request: Request):
         max_steps=body.max_steps,
         open_loop_steps=body.open_loop_steps,
         seed=body.seed,
+        init_state_index=body.init_state_index,
         disabled_policy_cameras=body.disabled_policy_cameras,
     )
     except Exception as exc: raise http_error(exc) from exc

@@ -31,6 +31,7 @@ class SimulationSession:
     max_steps: int
     open_loop_steps: int
     seed: int = 0
+    init_state_index: int = 0
     disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
     policy_label: str | None = None
@@ -121,6 +122,7 @@ class SimulationSession:
             "max_steps": self.max_steps,
             "open_loop_steps": self.open_loop_steps,
             "seed": self.seed,
+            "init_state_index": self.init_state_index,
             "disabled_policy_cameras": list(self.disabled_policy_cameras),
             "current_step": self.current_step,
             "state_count": self.state_count,
@@ -154,6 +156,7 @@ class SimulationDraft:
     max_steps: int
     open_loop_steps: int
     seed: int = 0
+    init_state_index: int = 0
     disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
     policy_label: str | None = None
@@ -169,6 +172,7 @@ class SimulationDraft:
             "max_steps": self.max_steps,
             "open_loop_steps": self.open_loop_steps,
             "seed": self.seed,
+            "init_state_index": self.init_state_index,
             "disabled_policy_cameras": list(self.disabled_policy_cameras),
             "policy_id": self.policy_id,
             "policy_label": self.policy_label,

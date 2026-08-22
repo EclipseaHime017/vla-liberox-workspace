@@ -62,6 +62,7 @@ class FakeManager:
         open_loop_steps,
         policy_id="base",
         seed=0,
+        init_state_index=0,
         disabled_policy_cameras=None,
     ):
         if self.active:
@@ -71,6 +72,7 @@ class FakeManager:
             "open_loop_steps": open_loop_steps, "preview_status": "READY",
             "policy_id": policy_id, "policy_label": policy_id,
             "seed": seed,
+            "init_state_index": init_state_index,
             "disabled_policy_cameras": list(disabled_policy_cameras or []),
             "preview_ready": True, "preview_available": True,
         }

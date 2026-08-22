@@ -433,6 +433,7 @@ class SimulationManager:
         max_steps: int,
         open_loop_steps: int,
         seed: int | None = None,
+        init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
         policy_id: str = "base",
         task_id: str | None = None,
@@ -453,6 +454,7 @@ class SimulationManager:
                 raise ValueError("Source trajectory task is not available in the UI catalog")
             policy_id = str(parent.get("policy_id") or "base")
             seed = int(parent.get("seed", default_seed))
+            init_state_index = int(parent.get("init_state_index", 0))
             disabled_policy_cameras = parent.get(
                 "disabled_policy_cameras", default_disabled_cameras
             )
@@ -466,6 +468,7 @@ class SimulationManager:
             max_steps, open_loop_steps, seed, disabled_policy_cameras
         )
         task_id = task_id or self.catalog.default_task_id
+        self.catalog.initial_state(task_id, init_state_index)
         task = self.catalog.metadata(task_id)
         policy = self._policy_entry(policy_id)
         session_id = uuid.uuid4().hex[:12]
@@ -487,6 +490,7 @@ class SimulationManager:
             max_steps=max_steps,
             open_loop_steps=open_loop_steps,
             seed=seed,
+            init_state_index=init_state_index,
             disabled_policy_cameras=disabled_policy_cameras,
             policy_id=policy.policy_id,
             policy_label=policy.label,
@@ -585,6 +589,7 @@ class SimulationManager:
         policy_id: str = "base",
         initial_jpeg: bytes | None = None,
         seed: int | None = None,
+        init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         record = self._new_record(
@@ -594,6 +599,7 @@ class SimulationManager:
             task_id=task_id,
             policy_id=policy_id,
             seed=seed,
+            init_state_index=init_state_index,
             disabled_policy_cameras=disabled_policy_cameras,
         )
         if initial_jpeg is not None:
@@ -614,7 +620,7 @@ class SimulationManager:
 
     def _prepare_draft(self, draft: SimulationDraft, revision: int) -> None:
         try:
-            state = self.catalog.initial_state(draft.task_id)
+            state = self.catalog.initial_state(draft.task_id, draft.init_state_index)
             with self.lock:
                 if self.draft is not draft or draft.preview_revision != revision:
                     return
@@ -643,6 +649,7 @@ class SimulationManager:
         open_loop_steps: int,
         policy_id: str = "base",
         seed: int | None = None,
+        init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         seed = self.eval_config.seed if seed is None else seed
@@ -654,7 +661,7 @@ class SimulationManager:
         self._validate_session_values(
             max_steps, open_loop_steps, seed, disabled_policy_cameras
         )
-        self.catalog.entry(task_id)
+        self.catalog.initial_state(task_id, init_state_index)
         policy = self._policy_entry(policy_id)
         with self.lock:
             if self.active_session_id is not None:
@@ -665,6 +672,7 @@ class SimulationManager:
                 max_steps=max_steps,
                 open_loop_steps=open_loop_steps,
                 seed=seed,
+                init_state_index=init_state_index,
                 disabled_policy_cameras=disabled_policy_cameras,
                 policy_id=policy.policy_id,
                 policy_label=policy.label,
@@ -682,6 +690,7 @@ class SimulationManager:
         open_loop_steps: int | None = None,
         policy_id: str | None = None,
         seed: int | None = None,
+        init_state_index: int | None = None,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         with self.lock:
@@ -697,6 +706,13 @@ class SimulationManager:
             )
             next_policy_id = policy_id if policy_id is not None else draft.policy_id
             next_seed = seed if seed is not None else draft.seed
+            next_init_state_index = (
+                init_state_index
+                if init_state_index is not None
+                else draft.init_state_index
+            )
+            if next_task_id != draft.task_id and init_state_index is None:
+                next_init_state_index = 0
             next_disabled_cameras = tuple(
                 disabled_policy_cameras
                 if disabled_policy_cameras is not None
@@ -705,13 +721,18 @@ class SimulationManager:
             self._validate_session_values(
                 next_max_steps, next_open_loop, next_seed, next_disabled_cameras
             )
-            self.catalog.entry(next_task_id)
+            self.catalog.initial_state(next_task_id, next_init_state_index)
             policy = self._policy_entry(next_policy_id)
-            preview_changed = next_task_id != draft.task_id or next_seed != draft.seed
+            preview_changed = (
+                next_task_id != draft.task_id
+                or next_seed != draft.seed
+                or next_init_state_index != draft.init_state_index
+            )
             draft.task_id = next_task_id
             draft.max_steps = next_max_steps
             draft.open_loop_steps = next_open_loop
             draft.seed = next_seed
+            draft.init_state_index = next_init_state_index
             draft.disabled_policy_cameras = next_disabled_cameras
             draft.policy_id = policy.policy_id
             draft.policy_label = policy.label
@@ -756,6 +777,7 @@ class SimulationManager:
                 policy_id=draft.policy_id,
                 initial_jpeg=draft.latest_jpeg,
                 seed=draft.seed,
+                init_state_index=draft.init_state_index,
                 disabled_policy_cameras=draft.disabled_policy_cameras,
             )
         except Exception:
@@ -959,7 +981,7 @@ class SimulationManager:
                     "level": record.task_level,
                     "task_name": record.task_name,
                     "prompt": record.task_prompt,
-                    "init_state_index": 0,
+                    "init_state_index": record.init_state_index,
                 },
                 "policy": {
                     "provider": "vla_adapter",
@@ -1019,6 +1041,7 @@ class SimulationManager:
                 "max_steps": record.max_steps,
                 "open_loop_steps": record.open_loop_steps,
                 "seed": record.seed,
+                "init_state_index": record.init_state_index,
                 "disabled_policy_cameras": list(record.disabled_policy_cameras),
                 "state_count": record.state_count,
                 "action_count": record.action_count,
@@ -1124,6 +1147,9 @@ class SimulationManager:
                 "open_loop_steps", manifest.get("open_loop_steps")
             ),
             "seed": int(manifest.get("seed", context.get("seed", 0)) or 0),
+            "init_state_index": int(
+                manifest.get("init_state_index", context.get("init_state_index", 0)) or 0
+            ),
             "disabled_policy_cameras": list(
                 manifest.get("disabled_policy_cameras", []) or []
             ),
@@ -1334,7 +1360,9 @@ class SimulationManager:
                 if callable(set_seed):
                     set_seed(seed)
             if record.kind == "original":
-                initial_state = self.catalog.initial_state(record.task_id)
+                initial_state = self.catalog.initial_state(
+                    record.task_id, record.init_state_index
+                )
                 recorder = self.recorder_factory.original(float(self.eval_config.control_hz))
             else:
                 assert record.source_trajectory is not None and record.resume_step is not None
@@ -1671,6 +1699,7 @@ class SimulationManager:
             if record.control_mode == "policy"
             else None,
             "seed": record.seed,
+            "init_state_index": record.init_state_index,
             "disabled_policy_cameras": list(record.disabled_policy_cameras),
             "open_loop_steps": record.open_loop_steps,
             "control_hz": self.eval_config.control_hz,

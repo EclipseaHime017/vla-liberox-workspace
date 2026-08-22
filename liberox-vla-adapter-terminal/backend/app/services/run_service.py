@@ -32,7 +32,7 @@ class RunService:
     def frame_state(self, run_id, step): return self.worker.frame_state(run_id, step)
     def artifact(self, run_id, name) -> Path: return self.worker.artifact_path(run_id, name)
     def get_draft(self): return self.worker.get_draft()
-    def create_draft(self, *args): return self.worker.create_draft(*args)
+    def create_draft(self, *args, **kwargs): return self.worker.create_draft(*args, **kwargs)
     def update_draft(self, **kwargs): return self.worker.update_draft(**kwargs)
     def discard_draft(self): return self.worker.discard_draft()
     def draft_preview(self): return self.worker.draft_preview()

@@ -9,12 +9,13 @@ type Props = {
   draft: Draft | null; branchDraft: PolicyBranchDraft | null;
   tasks: TaskInfo[]; policies: PolicyInfo[]; active: boolean; busy: boolean;
   taskId: string; policyId: string; maxSteps: number; openLoop: number;
-  seed: number; disabledPolicyCameras: PolicyCameraId[];
+  seed: number; initStateIndex: number; disabledPolicyCameras: PolicyCameraId[];
   onCreate: () => void; onStart: () => void; onCancel: () => void; onStop: () => void;
   onTask: (value: string) => void; onMaxSteps: (value: number, commit: boolean) => void;
   onPolicy: (value: string) => void;
   onOpenLoop: (value: number, commit: boolean) => void;
   onSeed: (value: number, commit: boolean) => void;
+  onInitStateIndex: (value: number, commit: boolean) => void;
   onPolicyCamera: (camera: PolicyCameraId, enabled: boolean) => void;
   onBranchOpenLoop: (value: number) => void;
   onStartBranch: () => void; onCancelBranch: () => void;
@@ -63,6 +64,8 @@ export function RunConfigForm(props: Props) {
       <label>总控制步数<Input type="number" min={1} max={10000} value={props.maxSteps} disabled={props.active || props.busy} onChange={(event) => props.onMaxSteps(Number(event.target.value), false)} onBlur={() => props.onMaxSteps(props.maxSteps, true)} /></label>
       <label>每次预测执行步数<Input type="number" min={1} max={8} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>
       <label>随机种子<Input type="number" min={0} max={2147483647} step={1} value={props.seed} disabled={props.active || props.busy} onChange={(event) => props.onSeed(Number(event.target.value), false)} onBlur={() => props.onSeed(props.seed, true)} /></label>
+      <label>初始状态索引<Input type="number" min={props.draft.task.init_state_index_min} max={props.draft.task.init_state_index_max} step={1} value={props.initStateIndex} disabled={props.active || props.busy} onChange={(event) => props.onInitStateIndex(Number(event.target.value), false)} onBlur={() => props.onInitStateIndex(props.initStateIndex, true)} /></label>
+      <p className="locked-field-note">当前任务可选范围：{props.draft.task.init_state_index_min}–{props.draft.task.init_state_index_max}（共 {props.draft.task.init_state_count} 个）。切换索引会改变 benchmark 初始布局。</p>
       <fieldset className="policy-camera-fieldset" disabled={props.active || props.busy}>
         <legend>VLA 摄像头输入</legend>
         {([

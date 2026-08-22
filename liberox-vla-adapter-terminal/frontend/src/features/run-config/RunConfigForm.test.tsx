@@ -27,6 +27,7 @@ describe("policy branch configuration", () => {
       maxSteps={300}
       openLoop={8}
       seed={0}
+      initStateIndex={0}
       disabledPolicyCameras={[]}
       onCreate={vi.fn()}
       onStart={vi.fn()}
@@ -37,6 +38,7 @@ describe("policy branch configuration", () => {
       onMaxSteps={vi.fn()}
       onOpenLoop={vi.fn()}
       onSeed={vi.fn()}
+      onInitStateIndex={vi.fn()}
       onPolicyCamera={vi.fn()}
       onBranchOpenLoop={onBranchOpenLoop}
       onStartBranch={onStartBranch}
@@ -62,28 +64,34 @@ describe("policy branch configuration", () => {
 describe("original simulation configuration", () => {
   it("edits the random seed and policy camera selection in a draft", () => {
     const onSeed = vi.fn();
+    const onInitStateIndex = vi.fn();
     const onPolicyCamera = vi.fn();
     render(<RunConfigForm
       draft={{
         id: "draft", task_id: "task", max_steps: 300, open_loop_steps: 8,
-        seed: 7, disabled_policy_cameras: [], policy_id: "base", policy_label: "Base",
+        seed: 7, init_state_index: 0, disabled_policy_cameras: [], policy_id: "base", policy_label: "Base",
         preview_status: "READY", preview_revision: 1, preview_ready: true,
         preview_available: true, error: null,
-        task: { task_id: "task", level: "LEVEL1", task_name: "task", prompt: "pick", init_state_index: 0 },
+        task: { task_id: "task", level: "LEVEL1", task_name: "task", prompt: "pick", init_state_count: 10, init_state_index_min: 0, init_state_index_max: 9 },
       }}
       branchDraft={null}
-      tasks={[{ task_id: "task", level: "LEVEL1", task_name: "task", prompt: "pick", init_state_index: 0 }]}
+      tasks={[{ task_id: "task", level: "LEVEL1", task_name: "task", prompt: "pick", init_state_count: 10, init_state_index_min: 0, init_state_index_max: 9 }]}
       policies={[{ policy_id: "base", label: "Base", base_checkpoint: "base", stats_key: "stats", kind: "base", training_step: null, compatibility_sha256: null }]}
       active={false} busy={false} taskId="task" policyId="base"
-      maxSteps={300} openLoop={8} seed={7} disabledPolicyCameras={[]}
+      maxSteps={300} openLoop={8} seed={7} initStateIndex={0} disabledPolicyCameras={[]}
       onCreate={vi.fn()} onStart={vi.fn()} onCancel={vi.fn()} onStop={vi.fn()}
       onTask={vi.fn()} onPolicy={vi.fn()} onMaxSteps={vi.fn()} onOpenLoop={vi.fn()}
-      onSeed={onSeed} onPolicyCamera={onPolicyCamera}
+      onSeed={onSeed} onInitStateIndex={onInitStateIndex} onPolicyCamera={onPolicyCamera}
       onBranchOpenLoop={vi.fn()} onStartBranch={vi.fn()} onCancelBranch={vi.fn()}
     />);
 
     fireEvent.change(screen.getByLabelText("随机种子"), { target: { value: "42" } });
     expect(onSeed).toHaveBeenCalledWith(42, false);
+    const initStateInput = screen.getByLabelText("初始状态索引") as HTMLInputElement;
+    expect(initStateInput.min).toBe("0");
+    expect(initStateInput.max).toBe("9");
+    fireEvent.change(initStateInput, { target: { value: "4" } });
+    expect(onInitStateIndex).toHaveBeenCalledWith(4, false);
     fireEvent.click(screen.getByLabelText("腕部视角"));
     expect(onPolicyCamera).toHaveBeenCalledWith("robot0_eye_in_hand", false);
   });

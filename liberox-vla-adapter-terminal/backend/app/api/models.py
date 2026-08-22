@@ -25,6 +25,7 @@ class DraftRequest(StrictModel):
     max_steps: int = Field(ge=1, le=10000)
     open_loop_steps: int = Field(ge=1, le=8)
     seed: int | None = Field(default=None, ge=0, le=2147483647)
+    init_state_index: int = Field(default=0, ge=0)
     disabled_policy_cameras: list[PolicyCamera] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -39,6 +40,7 @@ class UpdateDraftRequest(StrictModel):
     max_steps: int | None = Field(default=None, ge=1, le=10000)
     open_loop_steps: int | None = Field(default=None, ge=1, le=8)
     seed: int | None = Field(default=None, ge=0, le=2147483647)
+    init_state_index: int | None = Field(default=None, ge=0)
     disabled_policy_cameras: list[PolicyCamera] | None = None
 
     @model_validator(mode="after")
@@ -49,6 +51,7 @@ class UpdateDraftRequest(StrictModel):
             and self.max_steps is None
             and self.open_loop_steps is None
             and self.seed is None
+            and self.init_state_index is None
             and self.disabled_policy_cameras is None
         ):
             raise ValueError("At least one draft field must be provided")

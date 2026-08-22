@@ -30,7 +30,10 @@ def test_configured_task_catalog_validates_and_loads_selected_state(
     monkeypatch.setattr(
         task_catalog.direct,
         "load_initial_states",
-        lambda _runtime, init: [np.asarray([len(init.name)], dtype=np.float64)],
+        lambda _runtime, init: [
+            np.asarray([len(init.name)], dtype=np.float64),
+            np.asarray([len(init.name) + 1], dtype=np.float64),
+        ],
     )
     runtime = SimpleNamespace(
         parse_bddl_file=lambda path: {"language": f"prompt for {Path(path).stem}"}
@@ -50,6 +53,10 @@ def test_configured_task_catalog_validates_and_loads_selected_state(
     ]
     task_b = "LEVEL1::task_b"
     assert catalog.initial_state(task_b).shape == (1,)
+    assert catalog.metadata(task_b)["init_state_index_max"] == 1
+    assert catalog.initial_state(task_b, 1)[0] == len("task_b.init") + 1
+    with np.testing.assert_raises_regex(ValueError, r"must be in \[0, 1\]"):
+        catalog.initial_state(task_b, 2)
     assert catalog.resolve_id("LEVEL1", "unknown") is None
 
 
@@ -80,7 +87,16 @@ class _DraftCatalog:
             "level": "LEVEL1",
             "task_name": task_name,
             "prompt": f"prompt {task_name}",
+            "init_state_count": 2,
+            "init_state_index_min": 0,
+            "init_state_index_max": 1,
         }
+
+    def initial_state(self, task_id, index=0):
+        self.entry(task_id)
+        if not 0 <= index < 2:
+            raise ValueError(index)
+        return np.asarray([index], dtype=np.float64)
 
 
 class _PolicyCatalog:
@@ -120,6 +136,7 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
         policy_id="base",
         initial_jpeg=None,
         seed=None,
+        init_state_index=0,
         disabled_policy_cameras=None,
     ):
         started.update(
@@ -129,6 +146,7 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
             policy_id=policy_id,
             initial_jpeg=initial_jpeg,
             seed=seed,
+            init_state_index=init_state_index,
             disabled_policy_cameras=disabled_policy_cameras,
         )
         return {"id": "started"}
@@ -141,6 +159,7 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
     updated = manager.update_draft(
         task_id="LEVEL1::task_b", max_steps=120, open_loop_steps=2
     )
+    assert updated["init_state_index"] == 0
     assert updated["preview_revision"] == 2
     assert list(tmp_path.iterdir()) == []
 
@@ -153,6 +172,7 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
         "policy_id": "base",
         "initial_jpeg": b"jpeg",
         "seed": 0,
+        "init_state_index": 0,
         "disabled_policy_cameras": (),
     }
 

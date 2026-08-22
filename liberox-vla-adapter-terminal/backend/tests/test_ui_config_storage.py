@@ -49,6 +49,12 @@ class FakeCatalog:
             "prompt": "place object",
         }
 
+    def initial_state(self, task_id, index=0):
+        assert task_id == TASK_ID
+        if index != 0:
+            raise ValueError(index)
+        return np.zeros(1, dtype=np.float64)
+
 
 def test_ui_paths_are_relative_to_yaml(tmp_path: Path):
     path = tmp_path / "ui.yaml"

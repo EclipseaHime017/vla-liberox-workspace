@@ -464,11 +464,12 @@ UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz �
 
 三个任务都使用 `VLA-Adapter/LIBERO-Object-Pro`，不附加 `experimental_ood` 标签，也不修改环境成功条件：成功仍完全由对应 BDDL/LIBERO 环境判定，`success` 和成功率沿用原有统计语义。
 
-新建原始仿真采用明确的两阶段流程：先点击“创建仿真”，在内存草稿中切换任务、调整以下参数并检查第一个 init state 的静态预览；只有预览就绪后，“开始仿真”才会创建唯一结果目录并加载策略：
+新建原始仿真采用明确的两阶段流程：先点击“创建仿真”，在内存草稿中切换任务、调整以下参数并检查所选 init state 的静态预览；只有预览就绪后，“开始仿真”才会创建唯一结果目录并加载策略：
 
 - `max_steps`：本次总控制步数；
 - `open_loop_steps`：每次 VLA 预测 8 个 action 后实际执行的数量，有效范围 `1..8`；
-- `seed`：本次环境与策略随机种子，有效范围 `0..2147483647`。benchmark 的 init state 仍固定为所选任务的第 0 个，修改 seed 不等于切换 init state；
+- `seed`：本次环境与策略随机种子，有效范围 `0..2147483647`。它可影响 reset 时生成的部分固定装置或目标位置，但不会替代 benchmark init state；
+- `init_state_index`：选择当前任务预先保存的 benchmark 初始状态，采用从 0 开始的索引。UI 根据任务实际状态数动态显示范围 `0..N-1`，切换任务时自动重置为 0，越界值会在创建会话前被后端拒绝；
 - `VLA 摄像头输入`：可关闭 `agentview` 或 `robot0_eye_in_hand` 中的一个做视觉消融。关闭后对应的固定输入槽传入同尺寸黑帧，避免破坏 Object-Pro 的双图像结构；至少保留一个摄像头。四视角实时预览、轨迹 observation 和两路录像仍保存未经遮挡的原图。
 
 UI 专属参数固定从 `configs/ui_config.yaml` 读取，启动命令不接受配置地址：
@@ -493,7 +494,7 @@ additional_tasks:
     task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
 ```
 
-草稿不写入 `runs/`、不加载 VLA、也不推进物理仿真；切换任务或 seed 会按新环境上下文重建预览，修改步数或 VLA 摄像头输入不会重复渲染。点击“取消草稿”或刷新页面会丢弃草稿。活动仿真期间不能创建或修改草稿。模型权重仍跨会话复用，但每次开始都会更新本会话的 `open_loop_steps`、seed 和视觉消融设置，不会沿用第一次加载模型时的旧值。分支继承父会话的 seed、策略和摄像头输入，防止回溯前后实验条件漂移。
+草稿不写入 `runs/`、不加载 VLA、也不推进物理仿真；切换任务、seed 或 `init_state_index` 会重建预览，修改步数或 VLA 摄像头输入不会重复渲染。点击“取消草稿”或刷新页面会丢弃草稿。活动仿真期间不能创建或修改草稿。模型权重仍跨会话复用，但每次开始都会更新本会话的 `open_loop_steps`、seed 和视觉消融设置，不会沿用第一次加载模型时的旧值。分支继承父会话的 seed、`init_state_index`、策略和摄像头输入，防止回溯前后实验条件漂移。
 
 同一时刻只允许一个活动会话。状态依次为：
 
