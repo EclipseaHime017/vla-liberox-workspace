@@ -41,4 +41,11 @@ describe("offline job monitor", () => {
     expect(screen.getByText("Q loss")).toBeTruthy();
     expect(screen.getByText("12.5 GiB")).toBeTruthy();
   });
+
+  it("allows a terminal record to be dismissed", () => {
+    const onDismiss = vi.fn();
+    render(<JobMonitor initial={{ ...job, status: "COMPLETED" }} onDismiss={onDismiss} />);
+    screen.getByRole("button", { name: "关闭记录" }).click();
+    expect(onDismiss).toHaveBeenCalledOnce();
+  });
 });

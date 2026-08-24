@@ -212,9 +212,9 @@ class OfflineJobService:
         return self._reconcile(job_id)
 
     def delete_dataset(
-        self, dataset_id: str, confirm_dataset_id: str
+        self, dataset_id: str, confirm_dataset_id: str, *, force: bool = False
     ) -> dict[str, Any]:
-        """Delete a dataset only when no active or training job references it."""
+        """Delete a dataset while retaining, and optionally detaching, job history."""
         with self.lock:
             live_references = [
                 job for job in self.list() if job.get("dataset_id") == dataset_id
@@ -238,13 +238,28 @@ class OfflineJobService:
             training = [
                 job["id"] for job in references if job.get("kind") == "training"
             ]
-            if training:
+            if training and not force:
                 raise ConflictError(
                     "Dataset is referenced by training history",
                     code="DATASET_HAS_TRAINING",
                     context={"dataset_id": dataset_id, "training_jobs": training},
                 )
-            return self.datasets.delete_dataset(dataset_id, confirm_dataset_id)
+            result = self.datasets.delete_dataset(dataset_id, confirm_dataset_id)
+            deleted_at = _utc_now()
+            for job_id in training:
+                try:
+                    path, job = self._load_job(job_id)
+                    job["source_dataset_deleted"] = True
+                    job["source_dataset_deleted_at"] = deleted_at
+                    atomic_write_json(path, job)
+                    self.repository.upsert(job, path)
+                except (KeyError, OSError, ValueError, json.JSONDecodeError):
+                    # The SQLite reference may outlive a manually removed job manifest.
+                    continue
+            return {
+                **result,
+                "retained_training_jobs": training,
+            }
 
     def _public_job(self, job: dict[str, Any]) -> dict[str, Any]:
         result = {

@@ -231,6 +231,39 @@ def test_job_service_blocks_dataset_deletion_with_training_history():
         jobs.delete_dataset("ds", "ds")
 
 
+def test_forced_dataset_deletion_retains_and_marks_training_history(tmp_path: Path):
+    jobs = object.__new__(OfflineJobService)
+    jobs.lock = threading.RLock()
+    jobs.jobs_root = tmp_path / "jobs"
+    job_dir = jobs.jobs_root / "train"
+    job_dir.mkdir(parents=True)
+    job_path = job_dir / "job.json"
+    payload = {
+        "schema_version": 1, "id": "train", "kind": "training",
+        "status": "COMPLETED", "dataset_id": "ds",
+        "created_at": "2026-08-24T10:00:00+00:00",
+    }
+    job_path.write_text(json.dumps(payload), encoding="utf-8")
+    jobs.list = lambda: [payload]
+    upserts = []
+    jobs.repository = SimpleNamespace(
+        references_for_dataset=lambda _: [],
+        upsert=lambda job, path: upserts.append((job, path)),
+    )
+    jobs.datasets = SimpleNamespace(delete_dataset=lambda *_: {
+        "deleted": "ds", "annotation_status": "READY",
+        "source_runs_deleted": False, "shared_cache_deleted": False,
+    })
+
+    result = jobs.delete_dataset("ds", "ds", force=True)
+
+    retained = json.loads(job_path.read_text(encoding="utf-8"))
+    assert result["retained_training_jobs"] == ["train"]
+    assert retained["source_dataset_deleted"] is True
+    assert retained["source_dataset_deleted_at"]
+    assert upserts[0][1] == job_path
+
+
 def test_training_parameters_reject_unknown_and_unsafe_values():
     with pytest.raises(ValueError, match="Unknown"):
         OfflineJobService._validate_training_parameters({"command": "rm"})

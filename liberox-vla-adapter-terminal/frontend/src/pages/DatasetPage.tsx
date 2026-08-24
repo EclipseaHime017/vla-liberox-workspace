@@ -12,6 +12,7 @@ import { SuccessRateChart } from "../features/metrics/SuccessRateChart";
 import { RunTable } from "../features/dataset/RunTable";
 import { JobMonitor } from "../features/training/JobMonitor";
 import { Badge } from "../components/ui/Badge";
+import { ApiError } from "../api/client";
 
 const sources = ["inference", "manual", "policy_requery"] as const;
 const outcomes = ["success", "failure"] as const;
@@ -127,8 +128,25 @@ export function DatasetPage() {
     const action = dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集";
     if (!window.confirm(`${action}“${dataset.name}”？\n\n将删除该数据集清单和专属标注目录，但不会删除源轨迹或全局共享奖励缓存。`)) return;
     setBusy(true); setError("");
-    try { await deleteTrainingDataset(dataset.id); await refresh(); }
-    catch (reason) { setError(String(reason)); }
+    try {
+      try {
+        await deleteTrainingDataset(dataset.id);
+      } catch (reason) {
+        const detail = reason instanceof ApiError && typeof reason.detail === "object" && reason.detail
+          ? reason.detail as { code?: string; training_jobs?: string[] }
+          : null;
+        if (detail?.code !== "DATASET_HAS_TRAINING") throw reason;
+        const jobs = detail.training_jobs?.join("、") || "已有训练任务";
+        const confirmed = window.confirm(
+          `该数据集已被训练记录引用：${jobs}\n\n` +
+          "继续删除只会移除数据集和专属标注；训练输出、checkpoint 与 policy overlay 会保留，并标记其源数据集已删除。是否继续？",
+        );
+        if (!confirmed) return;
+        await deleteTrainingDataset(dataset.id, true);
+      }
+      if (annotationJob?.dataset_id === dataset.id) setAnnotationJob(null);
+      await refresh();
+    } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
 
@@ -174,7 +192,7 @@ export function DatasetPage() {
           {dataset.integrity_error && <p className="dataset-integrity-error">{dataset.integrity_error}</p>}
         </article>) : <div className="empty-table">尚未创建训练数据集。</div>}
       </div>
-      {annotationJob && <JobMonitor initial={annotationJob} onUpdate={(job) => { setAnnotationJob(job); if (["COMPLETED", "FAILED", "CANCELED"].includes(job.status)) void refresh(); }} />}
+      {annotationJob && <JobMonitor initial={annotationJob} onDismiss={() => setAnnotationJob(null)} onUpdate={(job) => { setAnnotationJob(job); if (["COMPLETED", "FAILED", "CANCELED"].includes(job.status)) void refresh(); }} />}
       <div className="path-card"><span>数据根目录</span><code>{summary.dataset_root}</code><span>目录索引</span><code>{summary.catalog}</code></div>
     </>}
   </section>;

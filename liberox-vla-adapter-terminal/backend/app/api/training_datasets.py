@@ -70,7 +70,7 @@ async def delete_dataset(
 ):
     try:
         return offline_job_service(request).delete_dataset(
-            dataset_id, body.confirm_dataset_id
+            dataset_id, body.confirm_dataset_id, force=body.force
         )
     except Exception as exc:
         raise http_error(exc) from exc

@@ -25,8 +25,10 @@ function displayLine(line: string) {
   return { time: "", level: "OUT", message: line };
 }
 
-export function JobMonitor({ initial, onUpdate }: {
-  initial: OfflineJob; onUpdate?: (job: OfflineJob) => void;
+export function JobMonitor({ initial, onUpdate, onDismiss }: {
+  initial: OfflineJob;
+  onUpdate?: (job: OfflineJob) => void;
+  onDismiss?: () => void;
 }) {
   const [job, setJob] = useState(initial);
   const [text, setText] = useState("");
@@ -60,6 +62,7 @@ export function JobMonitor({ initial, onUpdate }: {
       <span>阶段 <b>{phase}</b></span>
       {metric && <><span>Step <b>{String(metric.step ?? "—")}</b></span><span>进度 <b>{Number(metric.progress_percent ?? 0).toFixed(1)}%</b></span><span>速度 <b>{metricNumber(metric.steps_per_second, 3)} step/s</b></span><span>已用 <b>{duration(metric.elapsed_seconds)}</b></span><span>ETA <b>{duration(metric.estimated_remaining_seconds)}</b></span><span>完成时间 <b>{String(metric.estimated_completion_time ?? "计算中")}</b></span></>}
       {!terminal.has(job.status) && <button className="danger" onClick={() => void stopOfflineJob(job.id).then(setJob).catch((reason) => setError(String(reason)))}>停止任务</button>}
+      {terminal.has(job.status) && onDismiss && <button onClick={onDismiss}>关闭记录</button>}
     </div>
     {metric && <div className="job-metric-grid">
       <span><small>Q loss</small><b>{metricNumber(metric.q_loss)}</b></span>

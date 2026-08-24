@@ -1,6 +1,15 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 
 
 PolicyCamera = Literal["agentview", "robot0_eye_in_hand"]
@@ -120,6 +129,7 @@ class DeriveTrainingDatasetRequest(StrictModel):
 
 class DeleteTrainingDatasetRequest(StrictModel):
     confirm_dataset_id: str = Field(min_length=1)
+    force: StrictBool = False
 
 
 class TrainingRunRequest(StrictModel):

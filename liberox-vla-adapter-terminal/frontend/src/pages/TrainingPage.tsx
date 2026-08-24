@@ -23,6 +23,7 @@ const advancedFields = [
   ["max_advantage_weight", "最大 advantage weight", "any"], ["target_tau", "Target tau", "any"],
   ["console_interval_steps", "日志间隔", 1], ["flush_seconds", "TensorBoard flush", "any"],
 ] as const;
+const activeJobStates = new Set(["STARTING", "RUNNING", "STOPPING"]);
 
 export function TrainingPage() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -42,8 +43,10 @@ export function TrainingPage() {
         setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskId(nextBootstrap.task.task_id);
         setParameters({ ...nextDefaults.basic, ...nextDefaults.advanced, resume_checkpoint: null });
         setTensorboard(board);
-        const latest = jobs.find((item) => item.kind === "training");
-        if (latest) setJob(latest);
+        const active = jobs.find(
+          (item) => item.kind === "training" && activeJobStates.has(item.status),
+        );
+        if (active) setJob(active);
       }).catch((reason) => setError(String(reason)));
   }, []);
   useEffect(() => {
@@ -105,7 +108,7 @@ export function TrainingPage() {
           {defaults?.checkpoints.length ? <label>断点恢复<select value={String(parameters.resume_checkpoint ?? "")} onChange={(event) => patchParameter("resume_checkpoint", event.target.value || null)}><option value="">不恢复</option>{defaults.checkpoints.map((checkpoint) => <option value={checkpoint.path} key={checkpoint.path}>{checkpoint.label}</option>)}</select></label> : null}
           <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">{advancedFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={parameters[name] ?? ""} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div></details>
           {defaults && <div className="fixed-parameters"><h2>固定兼容项</h2>{Object.entries(defaults.fixed).map(([name, value]) => <span key={name}><b>{name}</b>{String(value)}</span>)}</div>}
-          <button className="primary start-training" disabled={busy || !datasetId || Boolean(job && ["STARTING", "RUNNING", "STOPPING"].includes(job.status))} onClick={() => void begin()}>开始训练</button>
+          <button className="primary start-training" disabled={busy || !datasetId || Boolean(job && activeJobStates.has(job.status))} onClick={() => void begin()}>开始训练</button>
         </div>
       </section>
       <section className="surface tensorboard-card">
@@ -114,7 +117,7 @@ export function TrainingPage() {
       </section>
     </div>
     {job && <>
-      <JobMonitor initial={job} onUpdate={setJob} />
+      <JobMonitor initial={job} onUpdate={setJob} onDismiss={() => setJob(null)} />
       {job.training_summary && <section className="surface training-result"><div className="panel-title"><strong>训练结果</strong><span>{job.status}</span></div><div><span>Overlay</span><code>{String(job.training_summary.policy_overlay ?? "尚未发布")}</code><span>数据哈希</span><code>{String(job.training_summary.dataset_sha256 ?? "—")}</code></div></section>}
     </>}
   </section>;
