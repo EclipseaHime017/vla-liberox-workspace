@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   annotateTrainingDataset, createTrainingDataset, datasetExportUrl, deriveTrainingDataset,
-  getBootstrap, getDatasetSummary, listDatasetRuns, listOfflineJobs,
+  deleteTrainingDataset, getBootstrap, getDatasetSummary, listDatasetRuns, listOfflineJobs,
   listTrainingDatasets, previewTrainingDataset, verifyTrainingDataset,
 } from "../features/run-control/api";
 import type {
@@ -123,6 +123,13 @@ export function DatasetPage() {
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
+  const cancelFrozenDataset = async (dataset: TrainingDataset) => {
+    if (!window.confirm(`取消冻结“${dataset.name}”？\n\n只会删除这个数据集清单，不会删除任何源轨迹。`)) return;
+    setBusy(true); setError("");
+    try { await deleteTrainingDataset(dataset.id); await refresh(); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  };
 
   return <section className="content-page">
     <div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>按控制来源检索轨迹，冻结可复现的数据集版本，并在独立 RynnValue 环境中完成奖励标注。</p></div>
@@ -160,9 +167,9 @@ export function DatasetPage() {
       <div className="surface frozen-datasets">
         <div className="panel-title"><strong>冻结数据集版本</strong><span>{datasets.length}</span></div>
         {datasets.length ? datasets.map((dataset) => <article key={dataset.id} className="dataset-card">
-          <div><h2>{dataset.name}</h2><code>{dataset.id}</code><p>{dataset.member_count} 条 · {dataset.action_count} actions · {dataset.chunk_count} chunks</p></div>
+          <div><h2>{dataset.name}</h2><code>{dataset.id}</code><p>{dataset.member_count} 条 · 预计 {dataset.action_count} actions · {dataset.chunk_count} chunks</p></div>
           <div className="dataset-badges"><Badge tone={dataset.integrity_status === "HEALTHY" ? "green" : "red"}>{dataset.integrity_status}</Badge><Badge tone={dataset.annotation_status === "READY" ? "green" : dataset.annotation_status === "ERROR" ? "red" : "neutral"}>{dataset.annotation_status}</Badge></div>
-          <div className="dataset-card-actions"><button onClick={() => void verifyTrainingDataset(dataset.id).then(() => refresh()).catch((reason) => setError(String(reason)))}>验证完整性</button><button onClick={() => openBuilder(dataset)}>派生版本</button><button className="primary" disabled={busy || dataset.integrity_status !== "HEALTHY" || dataset.annotation_status === "RUNNING"} onClick={() => void annotate(dataset)}>{dataset.annotation_status === "READY" ? "重新标注" : "开始标注"}</button></div>
+          <div className="dataset-card-actions">{dataset.annotation_status === "NOT_STARTED" && <button className="danger" disabled={busy} onClick={() => void cancelFrozenDataset(dataset)}>取消冻结</button>}<button onClick={() => void verifyTrainingDataset(dataset.id).then(() => refresh()).catch((reason) => setError(String(reason)))}>验证完整性</button><button onClick={() => openBuilder(dataset)}>派生版本</button><button className="primary" disabled={busy || dataset.integrity_status !== "HEALTHY" || dataset.annotation_status === "RUNNING"} onClick={() => void annotate(dataset)}>{dataset.annotation_status === "READY" ? "重新标注" : "开始标注"}</button></div>
           {dataset.integrity_error && <p className="dataset-integrity-error">{dataset.integrity_error}</p>}
         </article>) : <div className="empty-table">尚未创建训练数据集。</div>}
       </div>

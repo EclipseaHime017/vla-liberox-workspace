@@ -118,6 +118,10 @@ class DeriveTrainingDatasetRequest(StrictModel):
     success_consecutive_steps: int = Field(default=5, ge=1, le=100)
 
 
+class DeleteTrainingDatasetRequest(StrictModel):
+    confirm_dataset_id: str = Field(min_length=1)
+
+
 class TrainingRunRequest(StrictModel):
     dataset_id: str = Field(min_length=1)
     parameters: dict[str, StrictInt | StrictFloat | StrictStr | None]

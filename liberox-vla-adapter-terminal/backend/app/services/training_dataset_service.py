@@ -369,6 +369,41 @@ class TrainingDatasetService:
             raise ValueError("A derived dataset must keep the parent task")
         return self.create(task_id=task_id, parent_dataset_id=dataset_id, **kwargs)
 
+    def delete_unannotated(
+        self, dataset_id: str, confirm_dataset_id: str
+    ) -> dict[str, Any]:
+        """Remove an unused frozen manifest without touching referenced runs."""
+        if confirm_dataset_id != dataset_id:
+            raise ValueError("confirm_dataset_id must exactly match dataset_id")
+        with self.lock:
+            manifest_path, payload = self._load(dataset_id)
+            if payload.get("annotation_status") != "NOT_STARTED":
+                raise ConflictError(
+                    "Only an unannotated frozen dataset can be canceled",
+                    code="DATASET_ALREADY_USED",
+                    context={
+                        "dataset_id": dataset_id,
+                        "annotation_status": payload.get("annotation_status"),
+                    },
+                )
+            children = [
+                item["id"] for item in self.list()
+                if item.get("parent_dataset_id") == dataset_id
+            ]
+            if children:
+                raise ConflictError(
+                    "Dataset has derived versions and cannot be canceled",
+                    code="DATASET_HAS_DERIVATIONS",
+                    context={"dataset_id": dataset_id, "children": children},
+                )
+            directory = manifest_path.parent
+            root = self.root.resolve()
+            if directory.is_symlink() or directory.resolve().parent != root:
+                raise ValueError("Dataset directory is outside the managed root")
+            shutil.rmtree(directory)
+            self.repository.delete(dataset_id)
+        return {"deleted": dataset_id, "source_runs_deleted": False}
+
     def _manifest_path(self, dataset_id: str) -> Path:
         if not dataset_id or Path(dataset_id).name != dataset_id or ".." in dataset_id:
             raise ValueError("Invalid dataset id")

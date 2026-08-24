@@ -158,6 +158,42 @@ def test_immutable_membership_tampering_is_detected(tmp_path: Path):
     assert current.get(dataset["id"])["integrity_status"] == "BROKEN"
 
 
+def test_cancel_frozen_dataset_only_removes_unused_manifest(tmp_path: Path):
+    run = make_run(tmp_path, "root")
+    current = service(tmp_path, [run])
+    dataset = current.create(
+        name="unused", task_id="LEVEL1::pick",
+        selection={"mode": "manual", "run_ids": ["root"]},
+    )
+    directory = current.root / dataset["id"]
+    result = current.delete_unannotated(dataset["id"], dataset["id"])
+    assert result == {"deleted": dataset["id"], "source_runs_deleted": False}
+    assert not directory.exists()
+    assert Path(run["trajectory"]).is_file()
+    assert current.references_for_run("root") == []
+
+
+def test_cancel_frozen_dataset_rejects_used_or_parent_versions(tmp_path: Path):
+    run = make_run(tmp_path, "root")
+    current = service(tmp_path, [run])
+    parent = current.create(
+        name="parent", task_id="LEVEL1::pick",
+        selection={"mode": "manual", "run_ids": ["root"]},
+    )
+    current.create(
+        name="child", task_id="LEVEL1::pick",
+        selection={"mode": "manual", "run_ids": ["root"]},
+        parent_dataset_id=parent["id"],
+    )
+    with pytest.raises(Exception, match="derived versions"):
+        current.delete_unannotated(parent["id"], parent["id"])
+    current.update_annotation(parent["id"], "RUNNING", annotation_id="ann")
+    with pytest.raises(Exception, match="unannotated"):
+        current.delete_unannotated(parent["id"], parent["id"])
+    with pytest.raises(ValueError, match="exactly match"):
+        current.delete_unannotated(parent["id"], "wrong")
+
+
 def test_training_parameters_reject_unknown_and_unsafe_values():
     with pytest.raises(ValueError, match="Unknown"):
         OfflineJobService._validate_training_parameters({"command": "rm"})

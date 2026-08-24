@@ -6,6 +6,7 @@ from .dependencies import http_error, offline_job_service, training_dataset_serv
 from .models import (
     CreateTrainingDatasetRequest,
     DatasetPreviewRequest,
+    DeleteTrainingDatasetRequest,
     DeriveTrainingDatasetRequest,
 )
 
@@ -58,6 +59,18 @@ async def derive(dataset_id: str, body: DeriveTrainingDatasetRequest, request: R
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
             success_consecutive_steps=body.success_consecutive_steps,
+        )
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.delete("/{dataset_id}")
+async def delete_dataset(
+    dataset_id: str, body: DeleteTrainingDatasetRequest, request: Request
+):
+    try:
+        return training_dataset_service(request).delete_unannotated(
+            dataset_id, body.confirm_dataset_id
         )
     except Exception as exc:
         raise http_error(exc) from exc

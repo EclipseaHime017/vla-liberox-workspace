@@ -33,6 +33,12 @@ export const deriveTrainingDataset = (parentId: string, body: {
   method: "POST", body: JSON.stringify(body),
 });
 
+export const deleteTrainingDataset = (id: string) => api<{
+  deleted: string; source_runs_deleted: boolean;
+}>(`/api/training-datasets/${encodeURIComponent(id)}`, {
+  method: "DELETE", body: JSON.stringify({ confirm_dataset_id: id }),
+});
+
 export const listTrainingDatasets = (taskId?: string) => api<TrainingDataset[]>(
   "/api/training-datasets" + (taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""),
 );
