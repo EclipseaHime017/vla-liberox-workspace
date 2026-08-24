@@ -211,6 +211,41 @@ class OfflineJobService:
     def get(self, job_id: str) -> dict[str, Any]:
         return self._reconcile(job_id)
 
+    def delete_dataset(
+        self, dataset_id: str, confirm_dataset_id: str
+    ) -> dict[str, Any]:
+        """Delete a dataset only when no active or training job references it."""
+        with self.lock:
+            live_references = [
+                job for job in self.list() if job.get("dataset_id") == dataset_id
+            ]
+            references_by_id = {
+                job["id"]: job
+                for job in self.repository.references_for_dataset(dataset_id)
+            }
+            references_by_id.update({job["id"]: job for job in live_references})
+            references = list(references_by_id.values())
+            active = [
+                job["id"] for job in references
+                if job.get("status") in ACTIVE_JOB_STATES
+            ]
+            if active:
+                raise ConflictError(
+                    "Dataset has an active background job",
+                    code="DATASET_JOB_ACTIVE",
+                    context={"dataset_id": dataset_id, "jobs": active},
+                )
+            training = [
+                job["id"] for job in references if job.get("kind") == "training"
+            ]
+            if training:
+                raise ConflictError(
+                    "Dataset is referenced by training history",
+                    code="DATASET_HAS_TRAINING",
+                    context={"dataset_id": dataset_id, "training_jobs": training},
+                )
+            return self.datasets.delete_dataset(dataset_id, confirm_dataset_id)
+
     def _public_job(self, job: dict[str, Any]) -> dict[str, Any]:
         result = {
             key: value for key, value in job.items()

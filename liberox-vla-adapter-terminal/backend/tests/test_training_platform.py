@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -167,7 +168,10 @@ def test_cancel_frozen_dataset_only_removes_unused_manifest(tmp_path: Path):
     )
     directory = current.root / dataset["id"]
     result = current.delete_unannotated(dataset["id"], dataset["id"])
-    assert result == {"deleted": dataset["id"], "source_runs_deleted": False}
+    assert result == {
+        "deleted": dataset["id"], "annotation_status": "NOT_STARTED",
+        "source_runs_deleted": False, "shared_cache_deleted": False,
+    }
     assert not directory.exists()
     assert Path(run["trajectory"]).is_file()
     assert current.references_for_run("root") == []
@@ -188,10 +192,43 @@ def test_cancel_frozen_dataset_rejects_used_or_parent_versions(tmp_path: Path):
     with pytest.raises(Exception, match="derived versions"):
         current.delete_unannotated(parent["id"], parent["id"])
     current.update_annotation(parent["id"], "RUNNING", annotation_id="ann")
-    with pytest.raises(Exception, match="unannotated"):
+    with pytest.raises(Exception, match="active"):
         current.delete_unannotated(parent["id"], parent["id"])
     with pytest.raises(ValueError, match="exactly match"):
         current.delete_unannotated(parent["id"], "wrong")
+
+
+def test_delete_annotated_dataset_removes_version_but_preserves_source(tmp_path: Path):
+    run = make_run(tmp_path, "root")
+    current = service(tmp_path, [run])
+    dataset = current.create(
+        name="annotated", task_id="LEVEL1::pick",
+        selection={"mode": "manual", "run_ids": ["root"]},
+    )
+    current.update_annotation(dataset["id"], "RUNNING", annotation_id="ann")
+    current.update_annotation(dataset["id"], "READY", annotation_id="ann")
+    annotation = current.root / dataset["id"] / "annotations" / "ann"
+    annotation.mkdir(parents=True)
+    result = current.delete_dataset(dataset["id"], dataset["id"])
+    assert result["annotation_status"] == "READY"
+    assert result["source_runs_deleted"] is False
+    assert not annotation.parent.parent.exists()
+    assert Path(run["trajectory"]).is_file()
+
+
+def test_job_service_blocks_dataset_deletion_with_training_history():
+    jobs = object.__new__(OfflineJobService)
+    jobs.lock = threading.RLock()
+    jobs.list = lambda: [{
+        "id": "train", "kind": "training", "status": "COMPLETED",
+        "dataset_id": "ds",
+    }]
+    jobs.repository = SimpleNamespace(references_for_dataset=lambda _: [])
+    jobs.datasets = SimpleNamespace(
+        delete_dataset=lambda *_: pytest.fail("dataset deletion must be blocked")
+    )
+    with pytest.raises(Exception, match="training history"):
+        jobs.delete_dataset("ds", "ds")
 
 
 def test_training_parameters_reject_unknown_and_unsafe_values():

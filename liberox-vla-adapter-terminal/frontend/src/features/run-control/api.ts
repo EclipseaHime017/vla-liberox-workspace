@@ -34,7 +34,8 @@ export const deriveTrainingDataset = (parentId: string, body: {
 });
 
 export const deleteTrainingDataset = (id: string) => api<{
-  deleted: string; source_runs_deleted: boolean;
+  deleted: string; annotation_status: string;
+  source_runs_deleted: boolean; shared_cache_deleted: boolean;
 }>(`/api/training-datasets/${encodeURIComponent(id)}`, {
   method: "DELETE", body: JSON.stringify({ confirm_dataset_id: id }),
 });

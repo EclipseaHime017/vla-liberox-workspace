@@ -373,11 +373,33 @@ class TrainingDatasetService:
         self, dataset_id: str, confirm_dataset_id: str
     ) -> dict[str, Any]:
         """Remove an unused frozen manifest without touching referenced runs."""
+        return self._delete_dataset(
+            dataset_id, confirm_dataset_id, require_unannotated=True
+        )
+
+    def delete_dataset(
+        self, dataset_id: str, confirm_dataset_id: str
+    ) -> dict[str, Any]:
+        """Remove a non-active dataset version while preserving shared sources."""
+        return self._delete_dataset(
+            dataset_id, confirm_dataset_id, require_unannotated=False
+        )
+
+    def _delete_dataset(
+        self, dataset_id: str, confirm_dataset_id: str, *, require_unannotated: bool
+    ) -> dict[str, Any]:
         if confirm_dataset_id != dataset_id:
             raise ValueError("confirm_dataset_id must exactly match dataset_id")
         with self.lock:
             manifest_path, payload = self._load(dataset_id)
-            if payload.get("annotation_status") != "NOT_STARTED":
+            annotation_status = payload.get("annotation_status")
+            if annotation_status == "RUNNING":
+                raise ConflictError(
+                    "Dataset annotation is active and cannot be deleted",
+                    code="DATASET_ANNOTATION_ACTIVE",
+                    context={"dataset_id": dataset_id},
+                )
+            if require_unannotated and annotation_status != "NOT_STARTED":
                 raise ConflictError(
                     "Only an unannotated frozen dataset can be canceled",
                     code="DATASET_ALREADY_USED",
@@ -402,7 +424,12 @@ class TrainingDatasetService:
                 raise ValueError("Dataset directory is outside the managed root")
             shutil.rmtree(directory)
             self.repository.delete(dataset_id)
-        return {"deleted": dataset_id, "source_runs_deleted": False}
+        return {
+            "deleted": dataset_id,
+            "annotation_status": annotation_status,
+            "source_runs_deleted": False,
+            "shared_cache_deleted": False,
+        }
 
     def _manifest_path(self, dataset_id: str) -> Path:
         if not dataset_id or Path(dataset_id).name != dataset_id or ".." in dataset_id:

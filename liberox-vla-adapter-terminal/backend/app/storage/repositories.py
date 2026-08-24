@@ -220,6 +220,7 @@ class OfflineJobRepository:
                         job.get("completed_at"),
                     ),
                 )
+
             elif job["kind"] == "training":
                 overlay = None
                 output = Path(str(job.get("output_path") or ""))
@@ -250,3 +251,16 @@ class OfflineJobRepository:
                         job["created_at"], job.get("completed_at"),
                     ),
                 )
+
+    def references_for_dataset(self, dataset_id: str) -> list[dict[str, Any]]:
+        with connect(self.database_path) as database:
+            rows = database.execute(
+                """
+                SELECT id, kind, status
+                FROM offline_jobs
+                WHERE project_id = ? AND dataset_id = ?
+                ORDER BY created_at DESC
+                """,
+                (self.project_id, dataset_id),
+            ).fetchall()
+        return [dict(row) for row in rows]

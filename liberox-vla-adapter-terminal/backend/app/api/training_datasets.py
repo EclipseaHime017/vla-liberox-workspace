@@ -69,7 +69,7 @@ async def delete_dataset(
     dataset_id: str, body: DeleteTrainingDatasetRequest, request: Request
 ):
     try:
-        return training_dataset_service(request).delete_unannotated(
+        return offline_job_service(request).delete_dataset(
             dataset_id, body.confirm_dataset_id
         )
     except Exception as exc:
