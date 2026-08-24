@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import random
+import threading
 import shutil
 import subprocess
 import time
@@ -38,6 +39,16 @@ from .vla_adapter import (
 
 
 LOG = logging.getLogger(__name__)
+_STOP_REQUESTED = threading.Event()
+
+
+class TrainingCancelled(RuntimeError):
+    pass
+
+
+def request_training_stop() -> None:
+    """Ask the optimizer loop to checkpoint at its next safe step boundary."""
+    _STOP_REQUESTED.set()
 
 
 def _action_diagnostics(
@@ -270,6 +281,7 @@ def _restore_checkpoint(
 
 
 def train(config: LoadedConfig) -> Path:
+    _STOP_REQUESTED.clear()
     iql_cfg = config.section("iql")
     logging_cfg = config.section("logging")
     seed = int(iql_cfg["seed"])
@@ -474,6 +486,25 @@ def train(config: LoadedConfig) -> Path:
                     config, manifest, reward_index,
                 )
                 LOG.info("Saved checkpoint %s", latest_checkpoint)
+            if _STOP_REQUESTED.is_set():
+                if latest_checkpoint is None or (step + 1) % int(iql_cfg["checkpoint_interval"]) != 0:
+                    latest_checkpoint = _save_checkpoint(
+                        checkpoint_root, step + 1, components, agent, actor_optimizer,
+                        data_generator, config, manifest, reward_index,
+                    )
+                atomic_json(run_dir / "summary.json", {
+                    "schema_version": 1, "status": "canceled", "steps": step + 1,
+                    "elapsed_seconds": time.monotonic() - start_time,
+                    "dataset_sha256": manifest["dataset_sha256"],
+                    "reward_sha256": stable_hash(reward_index),
+                    "cancel_checkpoint": str(latest_checkpoint),
+                    "resumed_from_step": start_step,
+                })
+                LOG.warning(
+                    "Training stop requested; saved cancellation checkpoint %s",
+                    latest_checkpoint,
+                )
+                raise TrainingCancelled("Training canceled after safe checkpoint")
     assert latest_checkpoint is not None
     registry = Path(config.section("paths")["policy_registry"])
     registry.mkdir(parents=True, exist_ok=True)

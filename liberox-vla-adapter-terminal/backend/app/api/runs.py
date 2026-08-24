@@ -41,8 +41,18 @@ async def branch(run_id: str, body: CreateBranchRequest, request: Request):
 @router.delete("/sessions/{run_id}")
 async def delete(run_id: str, body: DeleteSessionRequest, request: Request):
     try:
+        datasets = getattr(request.app.state, "training_dataset_service", None)
+        references = [] if datasets is None else datasets.references_for_run(run_id)
+        if references and not body.force:
+            from ..core.exceptions import ConflictError
+            raise ConflictError(
+                "Run is referenced by immutable training datasets",
+                code="RUN_REFERENCED",
+                context={"run_id": run_id, "datasets": references},
+            )
         service(request).delete(run_id, body.confirm_session_id)
-        return {"deleted": run_id}
+        broken = datasets.mark_broken_for_run(run_id) if references and datasets is not None else []
+        return {"deleted": run_id, **({"broken_datasets": broken} if broken else {})}
     except Exception as exc: raise http_error(exc) from exc
 
 @router.get("/sessions/{run_id}/frames/{step}")

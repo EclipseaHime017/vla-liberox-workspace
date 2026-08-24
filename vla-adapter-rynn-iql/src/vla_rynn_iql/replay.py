@@ -21,6 +21,8 @@ class ReplayDataset(Dataset):
         self.config = config
         self.manifest = load_manifest(config)
         reward_index = load_reward_index(config)
+        if reward_index.get("complete") is False:
+            raise ValueError("Reward annotation manifest is incomplete")
         if reward_index["dataset_sha256"] != self.manifest["dataset_sha256"]:
             raise ValueError("Reward annotations were generated for a different dataset manifest")
         annotations = {item["run_id"]: item["annotation_path"] for item in reward_index["episodes"]}

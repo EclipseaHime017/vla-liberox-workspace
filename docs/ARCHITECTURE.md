@@ -6,16 +6,18 @@ The studio uses a one-way dependency flow:
 React client
   ↓ HTTP / WebSocket
 FastAPI routers (backend/app/api)
-  ↓
-RunService (backend/app/services/run_service.py)
-  ↓
-SimulationManager / worker (backend/app/workers/simulation_worker.py)
-  ├─ LiberoXSimulator       simulator lifecycle; never persists data
-  ├─ VLAAdapterPolicyProvider  model load/predict/unload
-  ├─ EpisodeRecorderFactory trajectory/media publishing; never calls the UI
-  ├─ LiberoEvaluator        LIBERO `done` success semantics
-  ├─ ConfiguredTaskCatalog  BDDL/init-state discovery
-  └─ RunRepository          SQLite index; run files remain authoritative
+  ├─ RunService → SimulationManager / worker
+  │    ├─ LiberoXSimulator       simulator lifecycle; never persists data
+  │    ├─ VLAAdapterPolicyProvider  model load/predict/unload
+  │    ├─ EpisodeRecorderFactory trajectory/media publishing; never calls the UI
+  │    ├─ LiberoEvaluator        LIBERO `done` success semantics
+  │    ├─ ConfiguredTaskCatalog  BDDL/init-state discovery
+  │    └─ RunRepository          SQLite index; run files remain authoritative
+  ├─ TrainingDatasetService → immutable manifests + hash verification
+  └─ OfflineJobService → detached runner
+       ├─ vla-liberox: prepare / Pixel-IQL
+       ├─ rynnvalue-reward: frozen reward annotation
+       └─ cross-process GPU file lock
 ```
 
 ## State ownership
@@ -25,6 +27,8 @@ SimulationManager / worker (backend/app/workers/simulation_worker.py)
 - The shared preview service owns its own read-only MuJoCo environment and consumes only the latest submitted state.
 - `RunService` is the only interface used by HTTP and WebSocket routers.
 - React never imports simulator concepts or touches files; it consumes documented API resources.
+- Offline jobs own their Conda child process groups and durable logs. FastAPI may restart without terminating them, then reconciles PID/heartbeat state from `job.json`.
+- Simulation, annotation, and training share one GPU task guard; TensorBoard is read-only and outside that lock.
 
 ## Extension points
 

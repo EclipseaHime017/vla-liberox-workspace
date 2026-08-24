@@ -60,6 +60,13 @@ file for reproducible experiments. Source trajectories are read-only. Branch
 prefixes are de-duplicated and only the new suffix contributes extra replay
 chunks.
 
+The LIBERO Studio UI can generate `data.selection_manifest` automatically from
+an immutable, single-task dataset version. In that mode prepare does not scan
+the rest of `dataset-root`: it verifies and imports exactly the listed members,
+hashes, segment boundaries, and frozen train/validation split. The UI runs
+prepare/training with `vla-liberox` and annotation with `rynnvalue-reward`; it
+does not merge either dependency stack or pass browser-provided shell commands.
+
 ## TensorBoard monitoring
 
 New training runs write both the auditable `metrics.jsonl` stream and
@@ -156,8 +163,12 @@ dataset/reward hashes and workspace Git commit.
 
 - `outputs/work/dataset_manifest.json`: validated read-only replay index and
   source hashes; source runs are never rewritten.
-- `outputs/work/rewards/`: resumable RynnValue values, entropy, PBRS rewards and
-  diagnostic Analysis text keyed by the data/reward/model hash.
+- `paths.annotation_cache/<content_hash>.{npz,json}`: atomic, per-trajectory
+  RynnValue values, entropy, PBRS rewards and provenance. Dataset identity is
+  excluded from the key, so derived dataset versions reuse unchanged members.
+- `outputs/work/rewards/reward_manifest.json`: the current dataset's complete
+  reference index into that cache; partial indexes are also written while an
+  annotation job is running.
 - `outputs/training/<run>/`: metrics, full checkpoints, provenance and effective
   config.
 - `policy-registry/<policy_id>/`: immutable action-head and proprio-projector
@@ -168,3 +179,8 @@ dataset/reward hashes and workspace Git commit.
 No stage silently falls back to CPU after a CUDA OOM; the failing reward,
 training, or evaluation stage is named in the exception. A no-success dataset
 is accepted only when `data.allow_no_success: true` and always emits a warning.
+
+Platform-managed datasets, jobs, annotations and training outputs live under
+`dataset-root/projects/<project_id>/`; see the workspace
+[`docs/DATA_LAYOUT.md`](../docs/DATA_LAYOUT.md). Their JSON/YAML files remain the
+recoverable source of truth while SQLite is only a rebuildable query index.

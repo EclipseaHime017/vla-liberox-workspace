@@ -4,6 +4,7 @@ import json
 import importlib.metadata
 import logging
 import math
+import os
 import re
 import subprocess
 import sys
@@ -411,12 +412,12 @@ def annotate_manifest(config: LoadedConfig, annotator: TemporalValueAnnotator | 
     annotator = annotator or RynnValueAnnotator(config)
     reward_dir = Path(config.section("paths")["work_dir"]) / "rewards"
     reward_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = Path(config.section("paths")["annotation_cache"])
+    cache_dir.mkdir(parents=True, exist_ok=True)
     index: list[dict[str, Any]] = []
     for episode in manifest["episodes"]:
-        output = reward_dir / f"{episode['run_id']}.npz"
-        meta_path = reward_dir / f"{episode['run_id']}.json"
         source_key = stable_hash({
-            "dataset": manifest["dataset_sha256"], "run": episode["run_id"],
+            "run": episode["run_id"],
             "trajectory": episode["trajectory_sha256"],
             "observations": episode["observations_sha256"],
             "prompt": episode["prompt"],
@@ -424,9 +425,18 @@ def annotate_manifest(config: LoadedConfig, annotator: TemporalValueAnnotator | 
             "reward_config": reward_cfg,
             "model": annotator.metadata,
         })
+        output = cache_dir / f"{source_key}.npz"
+        meta_path = cache_dir / f"{source_key}.json"
         if output.is_file() and meta_path.is_file():
-            current = json.loads(meta_path.read_text(encoding="utf-8"))
-            if current.get("source_key") == source_key:
+            try:
+                current = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                current = None
+            if (
+                isinstance(current, dict)
+                and current.get("source_key") == source_key
+                and current.get("annotation_sha256") == sha256_file(output)
+            ):
                 index.append(current)
                 continue
         with np.load(episode["observations_path"], allow_pickle=False) as images:
@@ -460,10 +470,15 @@ def annotate_manifest(config: LoadedConfig, annotator: TemporalValueAnnotator | 
                 float(reward_cfg["gamma"]), float(reward_cfg["shaping_weight"]),
             ) for chunk in episode["chunks"]
         ], dtype=np.float32)
-        np.savez_compressed(
-            output, boundaries=boundaries, remaining_seconds=values,
-            entropy=entropy, chunk_reward=chunk_rewards,
-        )
+        temporary = cache_dir / f".{source_key}.{os.getpid()}.npz"
+        try:
+            np.savez_compressed(
+                temporary, boundaries=boundaries, remaining_seconds=values,
+                entropy=entropy, chunk_reward=chunk_rewards,
+            )
+            os.replace(temporary, output)
+        finally:
+            temporary.unlink(missing_ok=True)
         metadata = {
             "schema_version": 1, "run_id": episode["run_id"], "source_key": source_key,
             "annotation_path": str(output.resolve()), "annotation_sha256": sha256_file(output),
@@ -473,11 +488,16 @@ def annotate_manifest(config: LoadedConfig, annotator: TemporalValueAnnotator | 
         atomic_json(meta_path, metadata)
         index.append(metadata)
         LOG.info("Annotated %s (%d boundaries)", episode["run_id"], len(boundaries))
+        atomic_json(reward_dir / "reward_manifest.json", {
+            "schema_version": 1, "dataset_sha256": manifest["dataset_sha256"],
+            "reward_config": reward_cfg, "annotator": annotator.metadata,
+            "complete": False, "episodes": index,
+        })
     index_path = reward_dir / "reward_manifest.json"
     atomic_json(index_path, {
         "schema_version": 1, "dataset_sha256": manifest["dataset_sha256"],
         "reward_config": reward_cfg, "annotator": annotator.metadata,
-        "episodes": index,
+        "complete": True, "episodes": index,
     })
     return index_path
 

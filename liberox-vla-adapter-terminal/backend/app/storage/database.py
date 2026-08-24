@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -51,11 +51,75 @@ def migrate(path: Path) -> None:
                 ON runs(project_id, task_id);
             CREATE INDEX IF NOT EXISTS idx_runs_status
                 ON runs(status);
+            CREATE TABLE IF NOT EXISTS training_datasets (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                integrity_status TEXT NOT NULL,
+                annotation_status TEXT NOT NULL,
+                member_count INTEGER NOT NULL,
+                parent_dataset_id TEXT,
+                manifest_path TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_training_datasets_project_task
+                ON training_datasets(project_id, task_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS training_dataset_members (
+                dataset_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                PRIMARY KEY(dataset_id, run_id),
+                FOREIGN KEY(dataset_id) REFERENCES training_datasets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_training_dataset_members_run
+                ON training_dataset_members(run_id);
+            CREATE TABLE IF NOT EXISTS offline_jobs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                dataset_id TEXT,
+                job_path TEXT NOT NULL UNIQUE,
+                pid INTEGER,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_offline_jobs_project_created
+                ON offline_jobs(project_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS annotation_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                manifest_path TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS training_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                annotation_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                output_path TEXT,
+                overlay_path TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
             """
         )
         row = database.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
         if row is None:
             database.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
+        elif int(row["version"]) == 1:
+            database.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
         elif int(row["version"]) != SCHEMA_VERSION:
             raise RuntimeError(
                 f"Unsupported catalog schema {row['version']}; expected {SCHEMA_VERSION}"

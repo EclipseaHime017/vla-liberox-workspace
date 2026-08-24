@@ -82,6 +82,66 @@ export type Session = {
   preparation_phase: string | null; preparation_message: string | null;
   countdown_remaining: number | null; preview_ready: boolean;
   preparation_timing: Record<string, number | null>; artifacts: Record<string, string>;
+  source_type?: "inference" | "manual" | "policy_requery" | "incomplete";
+  outcome?: "success" | "failure";
+  training_eligible?: boolean; ineligible_reason?: string | null;
+  training_start_step?: number; training_action_count?: number; training_chunk_count?: number;
+};
+
+export type DatasetSelection = {
+  mode: "random" | "sequential" | "rule" | "manual";
+  size?: number | null; seed: number; order: "oldest" | "newest";
+  source_types: Array<"inference" | "manual" | "policy_requery">;
+  outcomes: Array<"success" | "failure">;
+  run_ids: string[];
+  quotas: Array<{
+    source_type: "inference" | "manual" | "policy_requery";
+    outcome: "success" | "failure"; count: number;
+    order: "random" | "oldest" | "newest";
+  }>;
+};
+
+export type DatasetPreview = {
+  task_id: string; eligible_count: number; selected_count: number;
+  action_count: number; chunk_count: number; categories: Record<string, number>;
+  run_ids: string[]; runs: Session[];
+};
+
+export type TrainingDataset = {
+  id: string; project_id: string; name: string; task_id: string;
+  status: "FROZEN"; integrity_status: "HEALTHY" | "BROKEN";
+  integrity_error: string | null; annotation_status: "NOT_STARTED" | "RUNNING" | "READY" | "ERROR" | "CANCELED";
+  annotation_id: string | null; parent_dataset_id: string | null;
+  created_at: string; updated_at: string; member_count: number;
+  action_count: number; chunk_count: number; categories: Record<string, number>;
+  validation_fraction: number; split_seed: number; success_consecutive_steps: number;
+  dataset_sha256: string; members: Array<{
+    run_id: string; root_run_id: string; parent_run_id: string | null;
+    source_type: string; outcome: string; resume_step: number; end_step: number;
+    action_count: number; chunk_count: number; split: "train" | "validation";
+  }>;
+};
+
+export type OfflineJob = {
+  id: string; kind: "annotation" | "training";
+  status: "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
+  dataset_id: string; created_at: string; started_at: string | null; completed_at: string | null;
+  stage: string; stage_label: string; error: string | null; output_path: string;
+  parameters: Record<string, string | number | null>; log_size: number;
+  metrics?: Record<string, number | string | null>;
+  training_summary?: Record<string, unknown>;
+};
+
+export type TrainingDefaults = {
+  basic: Record<string, number>; advanced: Record<string, number>;
+  fixed: Record<string, string | number | boolean>;
+  environments: Record<string, string>;
+  checkpoints: Array<{ path: string; label: string }>;
+};
+
+export type TensorBoardStatus = {
+  url: string; running: boolean; managed: boolean; pid: number | null;
+  logdir: string; starting?: boolean;
 };
 
 export type ControllerStatus = {

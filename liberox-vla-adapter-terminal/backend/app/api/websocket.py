@@ -7,6 +7,29 @@ from ..domain.run import TERMINAL_STATES
 
 router = APIRouter()
 
+
+@router.websocket("/ws/jobs/{job_id}")
+async def job_socket(websocket: WebSocket, job_id: str):
+    await websocket.accept()
+    service = getattr(websocket.app.state, "offline_job_service", None)
+    if service is None:
+        await websocket.send_json({"type": "error", "message": "Offline job service unavailable"})
+        await websocket.close(code=1011)
+        return
+    offset = 0
+    try:
+        while True:
+            job = await asyncio.to_thread(service.get, job_id)
+            logs = await asyncio.to_thread(service.logs, job_id, offset)
+            offset = logs["next_offset"]
+            await websocket.send_json({"type": "job", "job": job, "logs": logs})
+            if job["status"] in {"COMPLETED", "FAILED", "CANCELED"} and not logs["text"]:
+                await asyncio.sleep(1.0)
+            else:
+                await asyncio.sleep(0.5)
+    except (WebSocketDisconnect, KeyError):
+        return
+
 @router.websocket("/ws/sessions/{run_id}")
 async def session_socket(websocket: WebSocket, run_id: str):
     service = websocket.app.state.run_service

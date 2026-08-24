@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import torch
+import yaml
 
 from vla_rynn_iql.data import prepare_dataset
+from vla_rynn_iql.config import load_train_config
+from vla_rynn_iql.io import sha256_file, stable_hash
 from vla_rynn_iql.rewards import (
     RynnValueAnnotator, annotate_manifest, annotation_windows, shaped_chunk_reward,
     validate_rynnvalue_config_contract, validate_rynnvalue_runtime_dtype,
@@ -59,6 +63,64 @@ def test_reward_cache_resumes_without_reannotation(configured):
     annotate_manifest(configured, annotator)
     assert first_calls > 0
     assert annotator.calls == first_calls
+
+
+def test_tampered_reward_cache_is_recomputed(configured):
+    prepare_dataset(configured)
+    annotate_manifest(configured, CountingAnnotator())
+    index = json.loads(
+        (Path(configured.section("paths")["work_dir"]) / "rewards" / "reward_manifest.json")
+        .read_text(encoding="utf-8")
+    )
+    with Path(index["episodes"][0]["annotation_path"]).open("ab") as stream:
+        stream.write(b"tampered")
+    second = CountingAnnotator()
+    annotate_manifest(configured, second)
+    assert second.calls > 0
+
+
+def test_reward_cache_is_reused_across_dataset_versions(configured, tmp_path):
+    prepare_dataset(configured)
+    first = CountingAnnotator()
+    annotate_manifest(configured, first)
+    assert first.calls > 0
+
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("root/run.json"))
+    episode = run_json.parent / "episodes" / "episode_000"
+    members = [{
+            "run_id": "root", "split": "train", "resume_step": 0,
+            "end_step": 17,
+            "artifacts": {
+                name: {"path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size}
+                for name, path in {
+                    "manifest": run_json, "trajectory": episode / "trajectory.npz",
+                    "observations": episode / "trajectory_observations.npz",
+                }.items()
+            },
+        }]
+    immutable = {
+        "task_id": "LEVEL1::task", "selection": {"mode": "manual"},
+        "validation_fraction": 0.2, "split_seed": 7,
+        "success_consecutive_steps": 5, "members": members,
+    }
+    selection = {
+        "schema_version": 1, "id": "ds_second", "project_id": "libero_x_vla",
+        **immutable, "dataset_sha256": stable_hash(immutable),
+    }
+    selection_path = tmp_path / "second-dataset.json"
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["data"]["selection_manifest"] = str(selection_path)
+    raw["data"]["task_ids"] = ["LEVEL1::task"]
+    raw["paths"]["work_dir"] = str(tmp_path / "second-work")
+    path = tmp_path / "second-config.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    second_config = load_train_config(path)
+    prepare_dataset(second_config)
+    second = CountingAnnotator()
+    annotate_manifest(second_config, second)
+    assert second.calls == 0
 
 
 def test_sparse_reward_uses_only_debounced_terminal(configured):

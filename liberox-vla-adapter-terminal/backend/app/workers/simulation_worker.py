@@ -226,6 +226,7 @@ class SimulationManager:
         self.legacy_sessions: dict[str, dict[str, Any]] = {}
         self.draft: SimulationDraft | None = None
         self.active_session_id: str | None = None
+        self.gpu_guard = None
         self._trajectory_cache: dict[str, tuple[dict[str, np.ndarray], dict[str, Any]]] = {}
         self._frame_env = None
         self._frame_task_id: str | None = None
@@ -524,6 +525,9 @@ class SimulationManager:
         return record
 
     def _claim(self, record: SimulationSession) -> None:
+        gpu_guard = getattr(self, "gpu_guard", None)
+        if gpu_guard is not None:
+            gpu_guard()
         with self.lock:
             if self.draft is not None:
                 raise RuntimeError("Cancel or start the current draft before creating a session")
@@ -652,6 +656,9 @@ class SimulationManager:
         init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        gpu_guard = getattr(self, "gpu_guard", None)
+        if gpu_guard is not None:
+            gpu_guard()
         seed = self.eval_config.seed if seed is None else seed
         disabled_policy_cameras = tuple(
             self.eval_config.disabled_policy_cameras

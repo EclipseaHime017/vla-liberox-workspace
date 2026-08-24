@@ -133,6 +133,9 @@ button.danger { color: var(--danger); background: #fff5f5; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(0,0,0,.28); backdrop-filter: blur(8px); }
 .delete-dialog { width: min(460px, calc(100vw - 32px)); padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.94); box-shadow: 0 30px 90px rgba(0,0,0,.2); }
 .delete-dialog p { margin: 14px 0 18px; color: var(--muted); line-height: 1.55; font-size: 12px; }
+.delete-reference-warning { margin: 0 0 16px; padding: 12px; border: 1px solid rgba(215,0,21,.16); border-radius: 10px; background: #fff1f2; display: grid; gap: 5px; font-size: 10px; color: var(--danger); }
+.delete-reference-warning span { overflow-wrap: anywhere; }
+.delete-reference-warning p { margin: 5px 0 0; color: var(--danger); }
 .loading { min-height: 50vh; display: grid; place-items: center; color: var(--muted); }
 
 .content-page { display: grid; gap: 20px; }
@@ -165,11 +168,12 @@ td code { font-size: 11px; }
 .task-summary > button.selected-task { background: var(--blue-soft); border-radius: 8px; }
 .task-summary span { color: var(--muted); }
 .dataset-browser { overflow: hidden; }
-.dataset-toolbar { display: grid; grid-template-columns: minmax(280px, 1fr) auto auto; align-items: end; gap: 12px; padding: 15px 17px; border-bottom: 1px solid var(--line); }
+.dataset-toolbar { display: grid; grid-template-columns: minmax(280px, 1fr) auto auto auto; align-items: end; gap: 12px; padding: 15px 17px; border-bottom: 1px solid var(--line); }
 .dataset-toolbar label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
 .dataset-toolbar select { width: 100%; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 9px; background: #fff; color: var(--text); }
 .dataset-toolbar > span { padding: 9px 0; color: var(--muted); font-size: 11px; }
 .export-button { padding: 9px 12px; border-radius: 9px; background: var(--blue); color: #fff; text-decoration: none; font-size: 12px; }
+.dataset-toolbar > button, .dataset-toolbar > .export-button { display: inline-flex; align-items: center; justify-content: center; width: 148px; height: 42px; padding: 0 16px; border: 1px solid var(--blue); border-radius: 10px; font-size: 13px; font-weight: 600; line-height: 1; white-space: nowrap; }
 .export-note, .empty-table { padding: 14px 17px; color: var(--muted); font-size: 11px; }
 .path-card { display: grid; grid-template-columns: 120px 1fr; gap: 10px; padding: 18px; font-size: 11px; }
 .path-card span { color: var(--muted); }
@@ -179,6 +183,86 @@ td code { font-size: 11px; }
 .settings-list > div:last-child { border: 0; }
 .settings-list span { color: var(--muted); font-size: 12px; }
 .settings-list strong { font-size: 12px; }
+
+.cell-note { display: block; max-width: 220px; margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+.dataset-builder { overflow: visible; }
+.builder-grid, .training-form { display: grid; gap: 14px; padding: 18px; }
+.builder-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.builder-grid > label, .training-form > label, .parameter-grid label, .advanced-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
+.builder-grid input, .builder-grid select, .training-form input, .training-form select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 9px; background: #fff; color: var(--text); }
+.builder-grid fieldset { margin: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-wrap: wrap; gap: 9px 14px; }
+.builder-grid fieldset legend { padding: 0 5px; color: var(--muted); font-size: 10px; }
+.builder-grid fieldset label { display: flex; align-items: center; gap: 5px; font-size: 11px; }
+.builder-grid fieldset input { width: auto; }
+.builder-grid details { grid-column: 1 / -1; padding: 11px 13px; background: var(--surface-muted); border-radius: 10px; }
+.builder-grid summary, .training-form summary { cursor: pointer; font-size: 12px; font-weight: 650; }
+.advanced-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding-top: 12px; }
+.manual-selection-note { grid-column: 1 / -1; padding: 12px; border-radius: 9px; background: var(--blue-soft); color: var(--muted); font-size: 11px; }
+.quota-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.quota-grid > div { display: grid; grid-template-columns: minmax(120px, 1fr) 72px 92px; align-items: center; gap: 7px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; font-size: 10px; }
+.builder-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 16px; }
+.selection-preview { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 18px 18px; padding: 13px; border: 1px solid rgba(0,113,227,.14); border-radius: 10px; background: var(--blue-soft); font-size: 11px; }
+.selection-preview > span { color: var(--muted); }
+.dataset-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 16px; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+.dataset-card:last-child { border-bottom: 0; }
+.dataset-card h2 { margin-bottom: 4px; }
+.dataset-card code { color: var(--muted); font-size: 10px; }
+.dataset-card p { margin-top: 6px; color: var(--muted); font-size: 10px; }
+.dataset-badges, .dataset-card-actions { display: flex; gap: 7px; align-items: center; }
+.dataset-integrity-error { grid-column: 1 / -1; color: var(--danger) !important; }
+.job-monitor-card { min-height: 310px; display: flex; flex-direction: column; }
+.job-status-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 18px; padding: 11px 15px; border-bottom: 1px solid var(--line); font-size: 10px; color: var(--muted); }
+.job-status-strip span:first-child { margin-right: auto; }
+.job-status-strip span b { margin-right: 6px; color: var(--text); }
+.job-status-strip button { padding: 6px 9px; }
+.job-metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--line); background: var(--surface-muted); }
+.job-metric-grid > span { display: grid; gap: 3px; min-width: 0; padding: 10px 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.job-metric-grid small { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+.job-metric-grid b { overflow: hidden; color: var(--text); font: 600 10px/1.35 ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.job-serial { height: 300px; min-height: 300px; flex: none; }
+.job-warning, .job-error { padding: 9px 15px; color: #9a6700; background: #fff9e8; font-size: 10px; }
+.job-error { color: var(--danger); background: #fff1f2; }
+.empty-log { padding: 10px; color: var(--muted); }
+.training-layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 16px; align-items: start; }
+.training-form { grid-template-columns: 1fr; }
+.training-config > .panel-title { min-height: 62px; }
+.training-config > .panel-title strong { font-size: 24px; }
+.training-config > .panel-title span { font-size: 16.5px; }
+.training-config .training-form { gap: 18px; padding: 24px; }
+.training-config .training-form > label, .training-config .parameter-grid label { gap: 8px; font-size: 16.5px; }
+.training-config .training-form input, .training-config .training-form select { padding: 12px 14px; border-radius: 11px; font-size: 16.5px; }
+.training-dataset-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); font-size: 11px; }
+.training-dataset-summary span { color: var(--muted); }
+.training-dataset-summary p { width: 100%; color: var(--muted); font-size: 10px; }
+.training-config .training-dataset-summary { gap: 11px 18px; padding: 17px; border-radius: 12px; font-size: 16.5px; }
+.training-config .training-dataset-summary .badge { padding: 6px 10px; font-size: 15px; }
+.training-config .training-dataset-summary p { font-size: 15px; line-height: 1.5; }
+.parameter-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.training-form details { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.training-config .training-form details { padding: 16px; border-radius: 12px; }
+.training-config .training-form summary { font-size: 18px; }
+.advanced-parameters { grid-template-columns: repeat(5, minmax(0, 1fr)); padding-top: 12px; }
+.fixed-parameters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px; border-radius: 10px; background: var(--surface-muted); }
+.fixed-parameters h2 { grid-column: 1 / -1; margin-bottom: 2px; }
+.fixed-parameters span { display: grid; gap: 3px; color: var(--muted); font: 10px ui-monospace, monospace; overflow-wrap: anywhere; }
+.fixed-parameters b { color: var(--text); }
+.training-config .fixed-parameters { gap: 11px; padding: 17px; border-radius: 12px; }
+.training-config .fixed-parameters h2 { font-size: 24px; }
+.training-config .fixed-parameters span { gap: 5px; font-size: 15px; }
+.start-training { justify-self: end; min-width: 150px; }
+.training-config .start-training { min-width: 190px; min-height: 50px; padding: 10px 18px; font-size: 21px; }
+.tensorboard-card > .panel-title { min-height: 62px; }
+.tensorboard-card > .panel-title strong { font-size: 20px; }
+.tensorboard-card > .panel-title span { font-size: 15px; }
+.tensorboard-card > div:last-child { padding: 24px; }
+.tensorboard-card strong { overflow-wrap: anywhere; font-size: 17px; }
+.tensorboard-card p { margin: 16px 0 22px; color: var(--muted); font-size: 15px; line-height: 1.6; }
+.tensorboard-card button, .tensorboard-card .export-button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 10px 16px; font-size: 16px; }
+.tensorboard-dot { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: #8e8e93; }
+.tensorboard-dot.online { background: var(--green); }
+.training-result > div:last-child { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; padding: 16px; font-size: 11px; }
+.training-result span { color: var(--muted); }
+.training-result code { overflow-wrap: anywhere; }
 
 @media (max-width: 1100px) {
   .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
@@ -191,12 +275,16 @@ td code { font-size: 11px; }
   .viewer-monitor-layout.has-monitor { grid-template-columns: 1fr; }
   .viewer-monitor-layout.has-monitor .viewer-panel .viewer { width: min(50%, 50vh, 600px); }
   .viewer-monitor-layout .monitor-panel { height: 194px; }
+  .builder-grid, .parameter-grid, .advanced-parameters { grid-template-columns: repeat(2, 1fr); }
+  .quota-grid { grid-template-columns: 1fr 1fr; }
+  .training-layout { grid-template-columns: 1fr; }
+  .job-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
   .app-shell { display: block; }
   .app-sidebar { position: fixed; z-index: 20; left: 0; right: 0; top: auto; bottom: 0; width: 100%; height: 62px; padding: 7px; border: 0; border-top: 1px solid var(--line); }
   .brand-mark, .local-label { display: none; }
-  .app-sidebar nav { grid-template-columns: repeat(4, 1fr); }
+  .app-sidebar nav { grid-template-columns: repeat(5, 1fr); }
   .app-sidebar nav button, .app-sidebar nav button:not(.active) { justify-content: center; font-size: 9px; flex-direction: column; gap: 2px; padding: 4px; }
   .app-header { padding: 0 15px; }
   .privacy-pill { display: none; }
@@ -207,5 +295,8 @@ td code { font-size: 11px; }
   .viewer.multi-camera { width: 100%; }
   .viewer-monitor-layout.has-monitor .viewer-panel .viewer { width: 100%; }
   .dataset-toolbar { grid-template-columns: 1fr; align-items: stretch; }
+  .dataset-toolbar > button, .dataset-toolbar > .export-button { width: 100%; }
+  .builder-grid, .advanced-grid, .quota-grid, .parameter-grid, .advanced-parameters, .fixed-parameters { grid-template-columns: 1fr; }
+  .dataset-card { grid-template-columns: 1fr; }
   .path-card, .settings-list > div { grid-template-columns: 1fr; }
 }

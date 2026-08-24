@@ -12,7 +12,9 @@ from fastapi.staticfiles import StaticFiles
 
 import eval_pickplace_direct as direct
 
-from .api import controller, datasets, drafts, runs, websocket
+from .api import (
+    controller, datasets, drafts, offline_jobs, runs, training_datasets, websocket,
+)
 from .api.models import (
     CreateBranchRequest,
     DeleteSessionRequest,
@@ -23,6 +25,8 @@ from .core.config import DEFAULT_UI_CONFIG, UIConfig, load_ui_config
 from .core.frontend import frontend_build_info
 from .services.run_service import RunService
 from .services.dataset_service import DatasetService
+from .services.offline_job_service import OfflineJobService
+from .services.training_dataset_service import TrainingDatasetService
 from .workers.simulation_worker import SimulationManager
 
 
@@ -46,21 +50,37 @@ def create_app(
         app.state.manager = worker  # compatibility for local diagnostics
         app.state.run_service = RunService(worker)
         app.state.dataset_service = DatasetService(app.state.run_service)
+        if hasattr(ui_config, "project_root"):
+            app.state.training_dataset_service = TrainingDatasetService(
+                app.state.run_service, ui_config
+            )
+            app.state.offline_job_service = OfflineJobService(
+                ui_config, worker, app.state.training_dataset_service
+            )
+            worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
+        else:
+            app.state.training_dataset_service = None
+            app.state.offline_job_service = None
         try:
             yield
         finally:
+            offline = getattr(app.state, "offline_job_service", None)
+            if offline is not None:
+                offline.close()
             if owned:
                 await asyncio.to_thread(app.state.run_service.close)
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="2.0.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
     app.include_router(runs.router)
     app.include_router(drafts.router)
     app.include_router(controller.router)
     app.include_router(datasets.router)
+    app.include_router(training_datasets.router)
+    app.include_router(offline_jobs.router)
     app.include_router(websocket.router)
 
     @app.get("/api/build-info", tags=["diagnostics"])

@@ -30,6 +30,11 @@ preview_fps: 10
 jpeg_quality: 85
 manual_translation_gain: 0.25
 manual_rotation_gain: 0.25
+offline_rl_root: ./offline
+train_environment: vla-liberox
+reward_environment: rynnvalue-reward
+tensorboard_host: 127.0.0.1
+tensorboard_port: 6006
 additional_tasks: []
 """
 
@@ -64,6 +69,7 @@ def test_ui_paths_are_relative_to_yaml(tmp_path: Path):
     assert config.policy_registry == (tmp_path / "policies").resolve()
     assert config.output_root == (tmp_path / "data/projects/test_project/runs").resolve()
     assert config.legacy_scan_roots == ((tmp_path / "runs").resolve(),)
+    assert config.offline_rl_root == (tmp_path / "offline").resolve()
 
 
 def test_duplicate_and_unknown_keys_fail(tmp_path: Path):

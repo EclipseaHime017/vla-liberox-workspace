@@ -4,7 +4,7 @@ import {
   stepToVideoTime,
   videoTimeToStep,
 } from "../features/simulation-view/controls";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import { sessionWebSocket } from "../api/websocket";
 import { ACTIVE, TERMINAL, type Bootstrap, type ControllerStatus, type Draft, type FrameState, type PolicyBranchDraft, type PolicyCameraId, type Session, type TaskInfo } from "../features/run-control/types";
 import { Gain, Info, Metric } from "../features/metrics/MetricsPanel";
@@ -39,6 +39,7 @@ function CollectPage() {
   const [rotationGain, setRotationGain] = useState(0.08);
   const [controller, setController] = useState<ControllerStatus | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
+  const [deleteReferences, setDeleteReferences] = useState<Array<{ id: string; name: string }>>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const websocket = useRef<WebSocket | null>(null);
@@ -379,14 +380,14 @@ function CollectPage() {
     } catch (reason) { setError(String(reason)); }
   };
 
-  const removeSession = async () => {
+  const removeSession = async (force = false) => {
     if (!deleteTarget) return;
     setBusy(true);
     setError("");
     try {
       await api<{ deleted: string }>("/api/sessions/" + deleteTarget.id, {
         method: "DELETE",
-        body: JSON.stringify({ confirm_session_id: deleteTarget.id }),
+        body: JSON.stringify({ confirm_session_id: deleteTarget.id, force }),
       });
       const remaining = sessions.filter((item) => item.id !== deleteTarget.id);
       setSessions(remaining);
@@ -395,7 +396,12 @@ function CollectPage() {
         setSelectedStep(0);
       }
       setDeleteTarget(null);
-    } catch (reason) { setError(String(reason)); }
+      setDeleteReferences([]);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409 && typeof reason.detail === "object" && reason.detail && "code" in reason.detail && (reason.detail as { code: string }).code === "RUN_REFERENCED") {
+        setDeleteReferences(((reason.detail as { datasets?: Array<{ id: string; name: string }> }).datasets ?? []));
+      } else setError(String(reason));
+    }
     finally { setBusy(false); }
   };
 
@@ -623,9 +629,10 @@ function CollectPage() {
         <div className="delete-dialog">
           <h2>永久删除会话？</h2>
           <p>将永久删除 <strong>{deleteTarget.id}</strong> 的整个 UI 结果目录，此操作无法恢复。已有分支已保存独立源轨迹，不会被级联删除。</p>
+          {deleteReferences.length > 0 && <div className="delete-reference-warning"><strong>以下训练数据集引用此轨迹：</strong>{deleteReferences.map((item) => <span key={item.id}>{item.name} · {item.id}</span>)}<p>强制删除后它们会被标记为 BROKEN，并禁止继续标注或训练。</p></div>}
           <div className="button-row">
-            <button onClick={() => setDeleteTarget(null)}>取消</button>
-            <button className="danger" disabled={busy} onClick={removeSession}>确认永久删除</button>
+            <button onClick={() => { setDeleteTarget(null); setDeleteReferences([]); }}>取消</button>
+            <button className="danger" disabled={busy} onClick={() => void removeSession(deleteReferences.length > 0)}>{deleteReferences.length ? "强制删除并破坏引用" : "确认永久删除"}</button>
           </div>
         </div>
       </div>}

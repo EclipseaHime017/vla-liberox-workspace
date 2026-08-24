@@ -71,6 +71,52 @@ def _source_roots(config: LoadedConfig) -> list[Path]:
     return roots
 
 
+def _selected_runs(config: LoadedConfig) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    """Return exact UI-selected run manifests, or an empty map for CLI discovery."""
+    value = config.section("data").get("selection_manifest")
+    if value is None:
+        return {}, None
+    path = Path(value).expanduser().resolve()
+    if not path.is_file() or path.is_symlink():
+        raise FileNotFoundError(f"Training dataset selection manifest not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1 or not isinstance(payload.get("members"), list):
+        raise ValueError(f"Unsupported training dataset manifest: {path}")
+    immutable = {
+        "task_id": payload.get("task_id"),
+        "selection": payload.get("selection"),
+        "validation_fraction": payload.get("validation_fraction"),
+        "split_seed": payload.get("split_seed"),
+        "success_consecutive_steps": payload.get("success_consecutive_steps"),
+        "members": payload.get("members"),
+    }
+    if stable_hash(immutable) != payload.get("dataset_sha256"):
+        raise ValueError("Immutable training dataset manifest hash changed")
+    if payload.get("project_id") != config.section("data")["project_id"]:
+        raise ValueError("Training dataset project_id does not match the config")
+    configured_tasks = set(config.section("data")["task_ids"])
+    if configured_tasks and payload.get("task_id") not in configured_tasks:
+        raise ValueError("Training dataset task does not match data.task_ids")
+    selected: dict[str, dict[str, Any]] = {}
+    for member in payload["members"]:
+        run_id = member.get("run_id")
+        artifacts = member.get("artifacts") or {}
+        source = artifacts.get("manifest") or {}
+        source_path = Path(str(source.get("path") or "")).expanduser().resolve()
+        if not isinstance(run_id, str) or not run_id or run_id in selected:
+            raise ValueError("Training dataset members must have unique non-empty run_id values")
+        if member.get("split") not in {"train", "validation"}:
+            raise ValueError(f"Selected run has invalid split: {run_id}")
+        if not source_path.is_file() or source_path.is_symlink():
+            raise FileNotFoundError(f"Selected run manifest is missing: {source_path}")
+        if sha256_file(source_path) != source.get("sha256"):
+            raise ValueError(f"Selected run manifest SHA256 changed: {run_id}")
+        selected[run_id] = {**member, "manifest_path": source_path}
+    if not selected:
+        raise ValueError("Training dataset selection is empty")
+    return selected, payload
+
+
 def _column(row: dict[str, str], names: tuple[str, ...], default: float = 0.0) -> float:
     for name in names:
         value = row.get(name, "")
@@ -302,15 +348,45 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
     work = Path(config.section("paths")["work_dir"])
     work.mkdir(parents=True, exist_ok=True)
     discovered: dict[str, dict[str, Any]] = {}
-    for root in _source_roots(config):
-        for run_json in sorted(root.rglob("run.json")):
-            episode = _load_run(run_json, config)
-            if episode is None:
-                continue
-            run_id = episode["run_id"]
-            if run_id in discovered and episode["source_manifest_sha256"] != discovered[run_id]["source_manifest_sha256"]:
-                raise ValueError(f"Conflicting duplicate run id: {run_id}")
-            discovered[run_id] = episode
+    selected, selection_payload = _selected_runs(config)
+    if selected:
+        manifest_paths = [member["manifest_path"] for member in selected.values()]
+    else:
+        manifest_paths = [
+            run_json
+            for root in _source_roots(config)
+            for run_json in sorted(root.rglob("run.json"))
+        ]
+    for run_json in manifest_paths:
+        episode = _load_run(run_json, config)
+        if episode is None:
+            if selected:
+                raise ValueError(
+                    f"Selected run is not a valid completed episode: {run_json}"
+                )
+            continue
+        run_id = episode["run_id"]
+        if selected and run_id not in selected:
+            raise ValueError(f"Selected manifest resolved to unexpected run id: {run_id}")
+        if run_id in discovered and episode["source_manifest_sha256"] != discovered[run_id]["source_manifest_sha256"]:
+            raise ValueError(f"Conflicting duplicate run id: {run_id}")
+        if selected:
+            member = selected[run_id]
+            expected_resume = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
+            if member.get("resume_step") != expected_resume:
+                raise ValueError(f"Selected resume_step changed: {run_id}")
+            if member.get("end_step") != episode["recorded_action_count"]:
+                raise ValueError(f"Selected recorded action length changed: {run_id}")
+            for name, episode_key in (
+                ("trajectory", "trajectory_sha256"),
+                ("observations", "observations_sha256"),
+            ):
+                expected = member["artifacts"][name]["sha256"]
+                if episode[episode_key] != expected:
+                    raise ValueError(f"Selected {name} SHA256 changed: {run_id}")
+        discovered[run_id] = episode
+    if selected and set(discovered) != set(selected):
+        raise ValueError("Prepared runs do not exactly match the immutable selection")
     if not discovered:
         raise RuntimeError("No valid completed episodes were found")
 
@@ -319,7 +395,10 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
     fraction = float(config.section("data")["validation_fraction"])
     episodes = sorted(discovered.values(), key=lambda item: item["run_id"])
     for episode in episodes:
-        episode["split"] = _split(episode["root_run_id"], seed, fraction)
+        episode["split"] = (
+            selected[episode["run_id"]]["split"]
+            if selected else _split(episode["root_run_id"], seed, fraction)
+        )
         first = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
         chunks = []
         for start in range(first, episode["action_count"], horizon):
@@ -327,7 +406,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             chunks.append({"start": start, "length": length, "end": start + length})
         episode["chunks"] = chunks
         episode["reward_boundaries"] = sorted({value for chunk in chunks for value in (chunk["start"], chunk["end"])})
-    if all(ep["split"] == "validation" for ep in episodes):
+    if not selected and all(ep["split"] == "validation" for ep in episodes):
         # Tiny smoke-test datasets still need at least one train root.
         root = episodes[0]["root_run_id"]
         for episode in episodes:
@@ -345,6 +424,8 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             raise RuntimeError(message)
     payload = {
         "schema_version": 1,
+        "source_dataset_id": None if selection_payload is None else selection_payload["id"],
+        "source_dataset_sha256": None if selection_payload is None else selection_payload["dataset_sha256"],
         "config_sha256": config.digest,
         "dataset_sha256": stable_hash([{k: ep[k] for k in (
             "run_id", "source_manifest_sha256", "trajectory_sha256",

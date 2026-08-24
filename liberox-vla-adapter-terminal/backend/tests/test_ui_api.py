@@ -16,6 +16,7 @@ from backend.app.main import (
     UpdateDraftRequest,
     create_app,
 )
+from backend.app.api.models import TrainingRunRequest
 
 
 class FakeManager:
@@ -291,6 +292,10 @@ def test_request_validation(tmp_path: Path):
             "control_mode": "manual",
             "open_loop_steps": 1,
             "manual_source": "spacemouse",
+        })
+    with pytest.raises(ValidationError):
+        TrainingRunRequest.model_validate({
+            "dataset_id": "ds", "parameters": {"train_steps": True},
         })
 
 

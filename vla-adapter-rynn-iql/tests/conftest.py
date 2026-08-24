@@ -65,7 +65,9 @@ def configured(tmp_path: Path):
     raw = yaml.safe_load(DEFAULT_TRAIN_CONFIG.read_text(encoding="utf-8"))
     raw["paths"].update({
         "dataset_sources": [str(dataset)], "work_dir": str(tmp_path / "work"),
-        "output_dir": str(tmp_path / "output"), "vla_adapter_root": str(tmp_path / "vla"),
+        "output_dir": str(tmp_path / "output"),
+        "annotation_cache": str(tmp_path / "annotation-cache"),
+        "vla_adapter_root": str(tmp_path / "vla"),
         "libero_x_root": str(tmp_path / "libero"),
         "rynnvalue_root": str(tmp_path / "RynnValue"),
         "policy_registry": str(tmp_path / "registry"),

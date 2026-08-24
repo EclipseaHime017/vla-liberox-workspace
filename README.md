@@ -1,5 +1,7 @@
 # LIBERO-X Local Data Studio
 
+Current release: **v0.2.0**
+
 Local-first simulation, VLA evaluation, trajectory rewind, and SpaceMouse takeover for the three validated Franka/LIBERO-X tasks.
 
 - Backend: FastAPI application service with a background simulation worker.
@@ -10,6 +12,7 @@ Local-first simulation, VLA evaluation, trajectory rewind, and SpaceMouse takeov
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
 - Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
+- Integrated workflow: the Dataset page freezes hash-verified, single-task dataset versions and launches reward annotation; the Training page launches resumable IQL jobs, streams metrics/logs, and manages local TensorBoard without merging the two Conda environments.
 
 ## Repository layout
 
@@ -27,6 +30,12 @@ vla-liberox-workspace/
 The collection terminal and offline trainer are separate systems. The trainer
 never rewrites `dataset-root`; their only runtime integration boundary is a
 hash-checked `policy.yaml` overlay published to `policy-registry/`.
+
+The Web UI orchestrates them without importing RynnValue into the simulation
+process. Prepare/training subprocesses use `vla-liberox`, annotation uses
+`rynnvalue-reward`, and simulation/annotation/training share a persistent
+cross-process GPU lock. Dataset manifests reference and hash source artifacts
+instead of copying trajectories or videos.
 
 Start from `vla-liberox-workspace/` after activating `vla-liberox`:
 

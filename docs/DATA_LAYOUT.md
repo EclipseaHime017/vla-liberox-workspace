@@ -7,6 +7,13 @@ dataset-root/
 ├── catalog.sqlite3
 └── projects/
     └── libero_x_vla/
+        ├── datasets/
+        │   └── <dataset_id>/
+        │       ├── dataset.json
+        │       └── annotations/<annotation_id>/work/
+        ├── annotation-cache/
+        ├── training/<training_id>/
+        ├── jobs/<job_id>/
         └── runs/
             └── <task_name>/
                 └── YYYY-MM-DD/
@@ -33,6 +40,38 @@ dataset-root/
 - `legacy_scan_roots` are indexed read-only. Existing `runs/` directories are never migrated, renamed, or deleted by the new catalog.
 
 All JSON/YAML/CSV publications use temporary files followed by atomic replacement. New run directories are unique and never overwrite earlier experiments.
+
+## Immutable training datasets and background jobs
+
+`datasets/<dataset_id>/dataset.json` is an immutable, single-task membership
+manifest. It stores the explicit run IDs, provenance (`inference`, `manual`, or
+`policy_requery`), root/parent IDs, resume boundary, effective action range,
+train/validation grouping, and the path, size, and SHA-256 of each source
+`run.json`, `trajectory.npz`, and `trajectory_observations.npz`. It does not copy
+those high-volume artifacts. Branch members represent one selected record but
+prepare only imports `[resume_step, end_step)` as new replay data.
+
+The mutable fields in the same JSON are limited to integrity and annotation
+lifecycle. Full verification recomputes every hash. Deleting a referenced run
+requires explicit force confirmation and marks every referencing dataset
+`BROKEN`; existing training summaries and overlays remain auditable but the
+dataset can no longer be annotated or trained.
+
+`annotation-cache/<content_hash>.npz` contains RynnValue boundary values,
+entropy, and PBRS chunk rewards for one source trajectory. Its adjacent JSON
+records the model/config contract and source hashes. The cache key excludes the
+whole dataset hash, so unchanged members are reused by derived dataset versions.
+Each annotation version has its own
+`datasets/<dataset_id>/annotations/<annotation_id>/work/reward_manifest.json`
+which references only that frozen dataset.
+
+`jobs/<job_id>/job.json` is the durable state/heartbeat/PID manifest;
+`job.log` is append-only and `effective_config.yaml` is the validated config
+actually passed to the Conda subprocesses. Training artifacts are written under
+`training/<training_id>/`, including metrics JSONL, TensorBoard events,
+checkpoints, summary, and cancellation checkpoints. `catalog.sqlite3` indexes
+datasets, members, annotations, training runs, and jobs, but these files remain
+the recoverable source of truth.
 
 ## Offline RL export
 

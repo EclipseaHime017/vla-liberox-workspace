@@ -7,8 +7,9 @@ import CollectPage from "../pages/CollectPage";
 import { DatasetPage } from "../pages/DatasetPage";
 import { RunsPage } from "../pages/RunsPage";
 import { SettingsPage } from "../pages/SettingsPage";
+import { TrainingPage } from "../pages/TrainingPage";
 
-const titles: Record<PageId, string> = { collect: "仿真与接管", runs: "运行记录", dataset: "数据管理", settings: "系统设置" };
+const titles: Record<PageId, string> = { collect: "仿真与接管", runs: "运行记录", dataset: "数据管理", training: "离线训练", settings: "系统设置" };
 
 export default function App() {
   const [page, setPage] = useState<PageId>("collect");
@@ -18,5 +19,5 @@ export default function App() {
       .then((info) => setBuildId(info.dist_fingerprint?.slice(0, 12) ?? "missing"))
       .catch(() => setBuildId("legacy-backend"));
   }, []);
-  return <div className="app-shell"><Sidebar page={page} onPage={setPage} /><div className="app-body"><Header title={titles[page]} buildId={buildId} /><PageLayout><div hidden={page !== "collect"}><CollectPage /></div>{page === "runs" && <RunsPage />}{page === "dataset" && <DatasetPage />}{page === "settings" && <SettingsPage />}</PageLayout></div></div>;
+  return <div className="app-shell"><Sidebar page={page} onPage={setPage} /><div className="app-body"><Header title={titles[page]} buildId={buildId} /><PageLayout><div hidden={page !== "collect"}><CollectPage /></div>{page === "runs" && <RunsPage />}{page === "dataset" && <DatasetPage />}{page === "training" && <TrainingPage />}{page === "settings" && <SettingsPage />}</PageLayout></div></div>;
 }

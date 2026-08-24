@@ -38,9 +38,11 @@ UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, 
 TRAIN_SCHEMA = {
     "schema_version": None,
     "paths": {"dataset_sources": None, "work_dir": None, "output_dir": None,
+              "annotation_cache": None,
               "vla_adapter_root": None, "libero_x_root": None,
               "rynnvalue_root": None, "policy_registry": None},
-    "data": {"project_id": None, "task_ids": None, "action_horizon": None,
+    "data": {"project_id": None, "task_ids": None, "selection_manifest": None,
+             "action_horizon": None,
              "action_dim": None, "proprio_dim": None, "control_hz": None,
              "success_consecutive_steps": None, "validation_fraction": None,
              "split_seed": None, "allow_no_success": None},
@@ -148,7 +150,7 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
         raise ValueError("Only schema_version=1 is supported")
     _resolve_paths(
         raw, path,
-        ("work_dir", "output_dir", "vla_adapter_root", "libero_x_root",
+        ("work_dir", "output_dir", "annotation_cache", "vla_adapter_root", "libero_x_root",
          "rynnvalue_root", "policy_registry"),
     )
     data, reward, vla, iql, logging_cfg = (
@@ -158,6 +160,14 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
         raise TypeError("data.project_id must be a non-empty string")
     if not isinstance(data["task_ids"], list) or any(not isinstance(x, str) for x in data["task_ids"]):
         raise TypeError("data.task_ids must be a list of strings")
+    selection_manifest = data["selection_manifest"]
+    if selection_manifest is not None:
+        if not isinstance(selection_manifest, str) or not selection_manifest.strip():
+            raise TypeError("data.selection_manifest must be null or a non-empty path")
+        selection_path = Path(selection_manifest).expanduser()
+        data["selection_manifest"] = str(
+            (selection_path if selection_path.is_absolute() else path.parent / selection_path).resolve()
+        )
     for name, expected in (("action_horizon", 8), ("action_dim", 7), ("proprio_dim", 8)):
         _number(data, name, low=1, integer=True)
         if data[name] != expected:

@@ -1,5 +1,7 @@
 # LIBERO-X × VLA-Adapter Terminal
 
+当前版本：**v0.2.0**
+
 这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse 接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。
 
 默认任务：
@@ -778,7 +780,7 @@ annotate 的作用不是重新判断任务是否成功，也不是训练 RynnVal
 1. 只读取第三人称 `agentview` 和该轨迹的 BDDL 提示词；不读取 wrist、动作来源或人工/策略标签。
 2. 为每个边界预测剩余完成时间 `remaining_seconds` 并保存 entropy；每条轨迹另生成一次文本 Analysis 供诊断。
 3. 使用 `Φ=-remaining_seconds` 计算 PBRS shaping，再与环境 success 产生的 `-1` step cost 合成为每个 chunk 的 `chunk_reward`。
-4. 将奖励保存到 `paths.work_dir/rewards/<run_id>.npz`，并生成 `reward_manifest.json`；训练阶段只读取这些离线结果，不再加载 RynnValue。
+4. 将逐轨迹奖励原子写入 `paths.annotation_cache/<content_hash>.npz`，并在 `paths.work_dir/rewards/reward_manifest.json` 保存当前数据集的引用索引；训练阶段只读取这些离线结果，不再加载 RynnValue。
 
 因此，失败原始轨迹、接管后成功轨迹和重新推理分支都会用同一个冻结模型标注；区别来自 prepare 选中的有效片段和环境 terminal，而不是人为给 RynnValue 设置不同类别。分支仍只标注 `resume_step` 后的新后缀。
 
@@ -810,7 +812,7 @@ conda run -n rynnvalue-reward python \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 ```
 
-缓存键包含 dataset hash、轨迹/图像 hash、提示词、chunk 边界、奖励配置和 RynnValue 版本。完全相同时会复用已有 `.npz`；中断后再次运行会跳过已经完成的条目。如果修改了 `task_ids`、源数据、成功阈值、split 或 action 边界，prepare 会生成新的 dataset hash，此后必须重新运行 annotate。旧缓存文件可以留在目录中，但新的 `reward_manifest.json` 只引用当前数据范围；训练也会拒绝 dataset hash 不一致的奖励索引。
+缓存键按单条轨迹内容寻址，包含轨迹/图像 hash、提示词、chunk 边界、奖励配置和 RynnValue 版本，但不包含整个数据集 hash。因此同一条轨迹进入不同的冻结数据集版本时可直接复用；中断后再次标注也会跳过已完成条目。修改源数据、成功阈值、有效片段/action 边界、提示词、奖励参数或 RynnValue 版本时对应条目的键会变化，必须重新计算；只修改 split 或加入其他轨迹不会让未变化条目失效。新的 `reward_manifest.json` 始终只引用当前冻结数据集，训练仍会拒绝 manifest 与奖励索引的 dataset hash 不一致。
 
 #### 4.4.3 配置并运行 IQL 后训练
 
@@ -1031,6 +1033,36 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-liberox python -m pytest -q
 5. 若 gripper 输出方向正确但动作抖动或过冲，再把 `policy_peak_lr` 从 `3e-5` 降至 `1e-5`、`policy_final_lr` 从 `3e-6` 降至 `1e-6`，并保留独立验证轨迹选择 checkpoint，避免 action head 在少量成功数据上过拟合。
 
 摄像头关闭功能适合诊断模型究竟依赖主视角还是腕部视角，不建议把单摄像头消融结果直接当作正式策略提升。训练 overlay 仍是双摄像头模型；若希望永久改成单摄像头结构，需要重新设计并训练模型输入层，而不是只关闭一个槽位。
+
+### 4.9 在 Web UI 中创建数据集、标注与训练
+
+LIBERO Studio 已把 CLI 的 prepare、RynnValue 标注和 IQL 训练编排为可恢复的后台任务，但仍保持两个 Conda 环境隔离：prepare/训练运行于 `vla-liberox`，奖励标注运行于 `rynnvalue-reward`。浏览器不会接收或执行任意配置路径/命令；后端只根据表单白名单生成并保存 `effective_config.yaml`。
+
+使用流程如下：
+
+1. 打开侧栏“数据集”，先选择一个任务。轨迹表将来源明确分为“原始推理”“人工接管”“二次推理”和不可训练的“错误/未完成”；人工/二次推理分支会显示策略前缀、`resume_step` 以及实际进入训练的后缀长度。
+2. 点击“创建训练数据集”，选择随机、按时间顺序、分类配额或手动勾选。预览会给出 M、有效 action 数、预计 chunk 数和分类构成；确认后生成不可变、单任务数据集。修改成员必须使用“派生版本”，不会覆盖旧版本。
+3. 点击“验证完整性”会重新计算 `run.json`、trajectory 和双视角 observation 的大小及 SHA-256。普通删除被引用轨迹时返回冲突并列出数据集；确认强制删除后关联数据集立即变为 `BROKEN`，不能继续标注或训练。
+4. 点击“开始标注”。平台先在 `vla-liberox` 中按冻结成员清单 prepare，再在 `rynnvalue-reward` 中调用 RynnValue-4B。任务窗口关闭或刷新浏览器不会停止后台进程；重新打开页面会恢复状态和完整日志。失败/取消后再次开始会复用全局逐轨迹缓存。
+5. 打开侧栏“训练”，选择任务和 `READY + HEALTHY` 的数据集。训练固定使用该版本全部 M 条；若要改变规模，应回到数据集页面派生并重新标注。基础参数和高级 IQL 参数会生成严格 YAML，Franka、BF16、micro batch 1、8×7 action、8D proprio、双视角 critic 和冻结 backbone 等兼容项只读。
+6. 任务监视器实时显示阶段、step、速度、已用时间、滚动 ETA/预计完成时间、Q/value/actor loss、Q/V/advantage、advantage weight、学习率、梯度范数和峰值显存，历史日志可滚动查看。安全停止会在优化边界保存取消 checkpoint。完成后页面显示发布的 policy overlay，可回到仿真平台选择。
+
+TensorBoard 按需由平台用 `vla-liberox` 启动并覆盖所有受管训练目录，固定访问 `http://127.0.0.1:6006/`。它不占用 GPU 任务锁，可与仿真并存；若端口被其他服务占用，页面会明确报错而不会结束那个进程。
+
+仿真、标注和训练共享一个跨进程 GPU 文件锁，同一时间只允许一个任务，不排队；冲突请求返回 `409`。开始标注/训练前平台会卸载驻留 VLA，完成后不自动重载，下一次仿真按需加载。后台任务使用独立进程组，PID、心跳、日志与状态均落盘，所以 UI 后端重启不会主动终止它。
+
+平台持久化目录为：
+
+```text
+dataset-root/projects/libero_x_vla/
+├── datasets/<dataset_id>/dataset.json
+├── annotation-cache/<content_hash>.{json,npz}
+├── training/<training_id>/
+├── jobs/<job_id>/{job.json,job.log,effective_config.yaml}
+└── runs/...
+```
+
+生产 UI 的 `frontend/dist` 仍是本机构建产物。拉取包含此页面的代码后，直接重启 `run_ui.py` 会检测源码指纹并运行 `npm run build`；新机器应先在 `liberox-vla-adapter-terminal/frontend` 执行 `npm ci`。完整持久化格式和引用关系见 `docs/DATA_LAYOUT.md`。
 
 ## 5. 为什么这样适配
 

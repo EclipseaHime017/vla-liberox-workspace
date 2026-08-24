@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import zipfile
 
 import numpy as np
@@ -10,6 +11,7 @@ import pytest
 
 from vla_rynn_iql.config import load_train_config
 from vla_rynn_iql.data import load_manifest, prepare_dataset
+from vla_rynn_iql.io import sha256_file, stable_hash
 
 
 def test_duplicate_yaml_key_is_rejected(tmp_path: Path):
@@ -160,3 +162,46 @@ def test_ui_export_zip_is_imported_without_modifying_source(configured, tmp_path
     imported = load_train_config(path)
     prepare_dataset(imported)
     assert load_manifest(imported)["episode_count"] == 2
+
+
+def test_ui_selection_manifest_prepares_exact_members_and_split(configured, tmp_path: Path):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    episode = run_json.parent / "episodes" / "episode_000"
+    members = [{
+            "run_id": "branch", "split": "validation", "resume_step": 5,
+            "end_step": 22,
+            "artifacts": {
+                name: {"path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size}
+                for name, path in {
+                    "manifest": run_json,
+                    "trajectory": episode / "trajectory.npz",
+                    "observations": episode / "trajectory_observations.npz",
+                }.items()
+            },
+        }]
+    immutable = {
+        "task_id": "LEVEL1::task", "selection": {"mode": "manual"},
+        "validation_fraction": 0.2, "split_seed": 7,
+        "success_consecutive_steps": 5, "members": members,
+    }
+    selection = {
+        "schema_version": 1, "id": "ds_exact", "project_id": "libero_x_vla",
+        **immutable, "dataset_sha256": stable_hash(immutable),
+    }
+    selection_path = tmp_path / "dataset.json"
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["data"]["selection_manifest"] = str(selection_path)
+    raw["data"]["task_ids"] = ["LEVEL1::task"]
+    raw["paths"]["work_dir"] = str(tmp_path / "exact-work")
+    config_path = tmp_path / "exact.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    selected = load_train_config(config_path)
+    prepare_dataset(selected)
+    manifest = load_manifest(selected)
+    assert manifest["source_dataset_id"] == "ds_exact"
+    assert [episode["run_id"] for episode in manifest["episodes"]] == ["branch"]
+    assert manifest["episodes"][0]["split"] == "validation"
+    assert manifest["episodes"][0]["chunks"][0]["start"] == 5

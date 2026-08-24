@@ -4,6 +4,7 @@ paths:
     - ../../dataset-root
   work_dir: ../outputs/work
   output_dir: ../outputs/training
+  annotation_cache: ../outputs/annotation-cache
   vla_adapter_root: ../../VLA-Adapter
   libero_x_root: ../../LIBERO-X
   rynnvalue_root: ../../RynnValue
@@ -11,6 +12,8 @@ paths:
 data:
   project_id: libero_x_vla
   task_ids: []
+  # Optional immutable UI dataset manifest. null preserves recursive CLI discovery.
+  selection_manifest: null
   action_horizon: 8
   action_dim: 7
   proprio_dim: 8

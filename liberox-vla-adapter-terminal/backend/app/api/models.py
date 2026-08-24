@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
 
 
 PolicyCamera = Literal["agentview", "robot0_eye_in_hand"]
@@ -69,3 +69,55 @@ class CreateBranchRequest(StrictModel):
 
 class DeleteSessionRequest(StrictModel):
     confirm_session_id: str = Field(min_length=1)
+    force: bool = False
+
+
+DatasetSourceType = Literal["inference", "manual", "policy_requery"]
+DatasetOutcome = Literal["success", "failure"]
+
+
+class SelectionQuota(StrictModel):
+    source_type: DatasetSourceType
+    outcome: DatasetOutcome
+    count: int = Field(ge=0)
+    order: Literal["random", "oldest", "newest"] = "random"
+
+
+class DatasetSelectionRequest(StrictModel):
+    mode: Literal["random", "sequential", "rule", "manual"]
+    size: int | None = Field(default=None, ge=1)
+    seed: int = Field(default=0, ge=0, le=2147483647)
+    order: Literal["oldest", "newest"] = "newest"
+    source_types: list[DatasetSourceType] = Field(
+        default_factory=lambda: ["inference", "manual", "policy_requery"]
+    )
+    outcomes: list[DatasetOutcome] = Field(
+        default_factory=lambda: ["success", "failure"]
+    )
+    run_ids: list[str] = Field(default_factory=list)
+    quotas: list[SelectionQuota] = Field(default_factory=list)
+
+
+class DatasetPreviewRequest(StrictModel):
+    task_id: str = Field(min_length=1)
+    selection: DatasetSelectionRequest
+
+
+class CreateTrainingDatasetRequest(DatasetPreviewRequest):
+    name: str = Field(min_length=1, max_length=100)
+    validation_fraction: float = Field(default=0.2, ge=0, le=0.9)
+    split_seed: int = Field(default=7, ge=0, le=2147483647)
+    success_consecutive_steps: int = Field(default=5, ge=1, le=100)
+
+
+class DeriveTrainingDatasetRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=100)
+    selection: DatasetSelectionRequest
+    validation_fraction: float = Field(default=0.2, ge=0, le=0.9)
+    split_seed: int = Field(default=7, ge=0, le=2147483647)
+    success_consecutive_steps: int = Field(default=5, ge=1, le=100)
+
+
+class TrainingRunRequest(StrictModel):
+    dataset_id: str = Field(min_length=1)
+    parameters: dict[str, StrictInt | StrictFloat | StrictStr | None]

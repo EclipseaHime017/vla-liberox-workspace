@@ -4,6 +4,8 @@ from fastapi import HTTPException, Request
 
 from ..services.run_service import RunService
 from ..services.dataset_service import DatasetService
+from ..services.offline_job_service import OfflineJobService
+from ..services.training_dataset_service import TrainingDatasetService
 
 
 def service(request: Request) -> RunService:
@@ -22,7 +24,25 @@ def dataset_service(request: Request) -> DatasetService:
     return current
 
 
+def training_dataset_service(request: Request) -> TrainingDatasetService:
+    current = getattr(request.app.state, "training_dataset_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Offline dataset service is unavailable")
+    return current
+
+
+def offline_job_service(request: Request) -> OfflineJobService:
+    current = getattr(request.app.state, "offline_job_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Offline job service is unavailable")
+    return current
+
+
 def http_error(exc: Exception) -> HTTPException:
+    from ..core.exceptions import ConflictError
+
+    if isinstance(exc, ConflictError):
+        return HTTPException(status_code=409, detail=exc.detail())
     if isinstance(exc, KeyError):
         return HTTPException(status_code=404, detail="Run not found")
     if isinstance(exc, (ValueError, IndexError)):

@@ -57,6 +57,11 @@ class UIConfig:
     jpeg_quality: int
     manual_translation_gain: float
     manual_rotation_gain: float
+    offline_rl_root: Path
+    train_environment: str
+    reward_environment: str
+    tensorboard_host: str
+    tensorboard_port: int
     additional_tasks: tuple[AdditionalTaskConfig, ...]
 
     @property
@@ -167,12 +172,21 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         jpeg_quality=_strict_int(raw, "jpeg_quality"),
         manual_translation_gain=_strict_number(raw, "manual_translation_gain"),
         manual_rotation_gain=_strict_number(raw, "manual_rotation_gain"),
+        offline_rl_root=_resolve(_strict_string(raw, "offline_rl_root"), base),
+        train_environment=_strict_string(raw, "train_environment"),
+        reward_environment=_strict_string(raw, "reward_environment"),
+        tensorboard_host=_strict_string(raw, "tensorboard_host"),
+        tensorboard_port=_strict_int(raw, "tensorboard_port"),
         additional_tasks=tuple(parsed_tasks),
     )
     if config.host != "127.0.0.1":
         raise ValueError("The first UI version is local-only; host must be 127.0.0.1")
+    if config.tensorboard_host != "127.0.0.1":
+        raise ValueError("TensorBoard is local-only; tensorboard_host must be 127.0.0.1")
     if not 1 <= config.port <= 65535:
         raise ValueError("port must be in [1, 65535]")
+    if not 1 <= config.tensorboard_port <= 65535:
+        raise ValueError("tensorboard_port must be in [1, 65535]")
     if (
         not config.project_id.replace("_", "").replace("-", "").isalnum()
         or Path(config.project_id).name != config.project_id
