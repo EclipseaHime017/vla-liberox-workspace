@@ -56,9 +56,10 @@ conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
 ```
 
 Each script loads its adjacent default YAML. `--config` may select an explicit
-file for reproducible experiments. Source trajectories are read-only. Branch
-prefixes are de-duplicated and only the new suffix contributes extra replay
-chunks.
+file for reproducible experiments. Source trajectories are read-only. A branch
+contributes the actually executed policy prefix of the interrupted action chunk
+plus its new suffix; the rest of the copied parent prefix is excluded. Identical
+interrupted prefixes from sibling branches are de-duplicated.
 
 The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan
@@ -123,18 +124,26 @@ VLA checkpoint.
 
 ## Data and reward semantics
 
-Completed original trajectories enter replay once. A branch contributes only
-its `resume_step..end` suffix, so the copied parent prefix is never counted
-twice. If a fixed-duration recording continues after success, `done` may stay
+Completed original trajectories enter replay once and retain their complete
+failed-policy action chunks. If takeover occurs inside a nominal 8-step chunk,
+the branch additionally contributes the genuinely executed prefix ending at
+`resume_step` with `chunk_length=E`, followed by separate `human` or
+`policy_requery` transitions. The unused remainder of the copied branch prefix
+is excluded, and identical interrupted prefixes from sibling branches are
+represented once. No transition crosses an `action_source` boundary. Thus the
+error-policy continuation and the intervention alternative remain available
+from the same state without treating padding as executed time. If a fixed-duration recording continues after success, `done` may stay
 latched or fluctuate as the object moves out of and back into the goal region.
 `data.success_consecutive_steps` debounces this signal (default 5 steps, or
 250 ms at 20 Hz). A false sample resets the streak; the action that reaches the
 threshold becomes the effective terminal. Unconfirmed pulses are treated as a
 failed trajectory. Later actions are excluded from replay and reward annotation
 without changing the source NPZ. The manifest retains both raw and debounced
-success diagnostics, recorded/effective lengths, and terminal metadata. The importer groups
+success diagnostics, recorded/effective lengths, transition source/type, and terminal metadata. The importer groups
 train/validation splits by root trajectory, validates the N+1 state/image
-invariant, and constructs masked 8×7 action chunks.
+invariant, and constructs masked 8×7 tensors for variable-duration chunks of
+at most eight actions. Rewards and Bellman bootstrap use the actual
+`chunk_length`, including `gamma ** chunk_length`.
 
 RynnValue receives only upright `agentview` frames and the BDDL task prompt. At
 each action-chunk boundary, the adapter follows the pinned official inference
@@ -161,8 +170,10 @@ dataset/reward hashes and workspace Git commit.
 
 ## Outputs and safety boundaries
 
-- `outputs/work/dataset_manifest.json`: validated read-only replay index and
-  source hashes; source runs are never rewritten.
+- `outputs/work/dataset_manifest.json`: schema-v2 validated read-only replay
+  index, variable-duration transition metadata and source hashes; source runs
+  are never rewritten. Older prepared manifests must be prepared and annotated
+  again before training.
 - `paths.annotation_cache/<content_hash>.{npz,json}`: atomic, per-trajectory
   RynnValue values, entropy, PBRS rewards and provenance. Dataset identity is
   excluded from the key, so derived dataset versions reuse unchanged members.

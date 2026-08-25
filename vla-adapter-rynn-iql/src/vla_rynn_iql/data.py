@@ -18,6 +18,7 @@ from .io import atomic_json, sha256_file, stable_hash
 
 LOG = logging.getLogger(__name__)
 MANIFEST_NAME = "dataset_manifest.json"
+MANIFEST_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,115 @@ def confirmed_terminal_step(done: np.ndarray, consecutive_steps: int) -> int | N
         if streak >= consecutive_steps:
             return index
     return None
+
+
+def action_source_segments(sources: list[str], end: int) -> list[dict[str, Any]]:
+    """Return a compact partition of ``[0, end)`` by action producer."""
+    if not 0 < end <= len(sources):
+        raise ValueError(f"Invalid action-source endpoint {end} for {len(sources)} actions")
+    segments: list[dict[str, Any]] = []
+    start = 0
+    current = sources[0]
+    for index in range(1, end):
+        if sources[index] == current:
+            continue
+        segments.append({"start": start, "end": index, "action_source": current})
+        start, current = index, sources[index]
+    segments.append({"start": start, "end": end, "action_source": current})
+    return segments
+
+
+def build_semi_mdp_chunks(
+    *,
+    first: int,
+    end: int,
+    horizon: int,
+    source_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build variable-duration transitions without crossing controller boundaries.
+
+    The fixed horizon is only a maximum. Action-source changes and branch resume
+    points are hard boundaries. Interrupted policy prefixes are added separately
+    by :func:`interrupted_policy_prefix` so the complete failed rollout remains
+    available as the counterfactual action.
+    """
+    if horizon < 1:
+        raise ValueError("horizon must be positive")
+    if not 0 <= first < end:
+        raise ValueError(f"Invalid replay interval [{first}, {end})")
+    boundaries = {first, end}
+    segment_lookup: list[dict[str, Any]] = []
+    for segment in source_segments:
+        segment_start = max(first, int(segment["start"]))
+        segment_end = min(end, int(segment["end"]))
+        if segment_start >= segment_end:
+            continue
+        source = str(segment["action_source"])
+        segment_lookup.append({
+            "start": segment_start, "end": segment_end, "action_source": source,
+        })
+        # Each controller/source segment owns its own horizon grid. A source
+        # change therefore starts a new macro-action sequence.
+        boundaries.update(range(segment_start, segment_end, horizon))
+        boundaries.add(segment_end)
+    covered = sum(segment["end"] - segment["start"] for segment in segment_lookup)
+    if covered != end - first:
+        raise ValueError(
+            f"Action-source segments cover {covered} actions, expected {end - first}"
+        )
+
+    ordered = sorted(boundaries)
+    chunks: list[dict[str, Any]] = []
+    segment_index = 0
+    for start, stop in zip(ordered, ordered[1:]):
+        while segment_lookup[segment_index]["end"] <= start:
+            segment_index += 1
+        segment = segment_lookup[segment_index]
+        if not (segment["start"] <= start < stop <= segment["end"]):
+            raise ValueError(f"Chunk [{start}, {stop}) crosses an action-source boundary")
+        chunks.append({
+            "start": start,
+            "length": stop - start,
+            "end": stop,
+            "action_source": segment["action_source"],
+            "transition_type": str(segment["action_source"]),
+            "interrupted": False,
+        })
+    return chunks
+
+
+def interrupted_policy_prefix(
+    *, resume_step: int, horizon: int, source_segments: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the actually executed prefix of a policy chunk cut by takeover."""
+    if resume_step <= 0 or resume_step % horizon == 0:
+        return None
+    nominal_start = resume_step - (resume_step % horizon)
+    segment = next(
+        (
+            item for item in source_segments
+            if int(item["start"]) < resume_step <= int(item["end"])
+        ),
+        None,
+    )
+    if segment is None:
+        raise ValueError(f"No action-source segment contains resume_step={resume_step}")
+    start = max(nominal_start, int(segment["start"]))
+    source = str(segment["action_source"])
+    if source != "policy":
+        raise ValueError(
+            f"Interrupted branch prefix must be policy actions, got {source!r}"
+        )
+    if start >= resume_step:
+        return None
+    return {
+        "start": start,
+        "length": resume_step - start,
+        "end": resume_step,
+        "action_source": source,
+        "transition_type": "policy_interrupted",
+        "interrupted": True,
+    }
 
 
 def _safe_extract(archive: Path, destination: Path) -> None:
@@ -328,6 +438,7 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         "terminal_step": terminal_step,
         "trailing_action_count": trailing_action_count,
         "post_terminal_false_count": post_terminal_false_count,
+        "action_source_segments": action_source_segments(sources, action_count),
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
@@ -394,16 +505,33 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
     seed = int(config.section("data")["split_seed"])
     fraction = float(config.section("data")["validation_fraction"])
     episodes = sorted(discovered.values(), key=lambda item: item["run_id"])
+    # A branch adds only its interrupted policy prefix and its new suffix. The
+    # complete parent rollout remains unchanged as the error-policy alternative.
+    # Identical prefixes shared by sibling branches are represented once.
+    seen_interrupted_prefixes: set[tuple[str, int, int]] = set()
     for episode in episodes:
         episode["split"] = (
             selected[episode["run_id"]]["split"]
             if selected else _split(episode["root_run_id"], seed, fraction)
         )
         first = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
-        chunks = []
-        for start in range(first, episode["action_count"], horizon):
-            length = min(horizon, episode["action_count"] - start)
-            chunks.append({"start": start, "length": length, "end": start + length})
+        chunks = build_semi_mdp_chunks(
+            first=first,
+            end=int(episode["action_count"]),
+            horizon=horizon,
+            source_segments=episode["action_source_segments"],
+        )
+        if episode["kind"] == "branch":
+            prefix = interrupted_policy_prefix(
+                resume_step=first,
+                horizon=horizon,
+                source_segments=episode["action_source_segments"],
+            )
+            if prefix is not None:
+                key = (str(episode["root_run_id"]), prefix["start"], prefix["end"])
+                if key not in seen_interrupted_prefixes:
+                    chunks.insert(0, prefix)
+                    seen_interrupted_prefixes.add(key)
         episode["chunks"] = chunks
         episode["reward_boundaries"] = sorted({value for chunk in chunks for value in (chunk["start"], chunk["end"])})
     if not selected and all(ep["split"] == "validation" for ep in episodes):
@@ -423,7 +551,8 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
         else:
             raise RuntimeError(message)
     payload = {
-        "schema_version": 1,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "chunking": "variable_duration_action_source_v1",
         "source_dataset_id": None if selection_payload is None else selection_payload["id"],
         "source_dataset_sha256": None if selection_payload is None else selection_payload["dataset_sha256"],
         "config_sha256": config.digest,
@@ -433,7 +562,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             "action_count", "recorded_action_count", "terminal_step",
             "trailing_action_count", "post_terminal_false_count", "recorded_success",
             "raw_done_true_count", "success_consecutive_steps", "success_streak_start",
-            "split")}
+            "action_source_segments", "chunks", "split")}
             for ep in episodes]),
         "action_horizon": horizon,
         "action_dim": config.section("data")["action_dim"],
@@ -455,8 +584,10 @@ def load_manifest(config: LoadedConfig) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"Prepared dataset manifest not found: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1:
-        raise ValueError("Unsupported dataset manifest schema")
+    if payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported dataset manifest schema; rerun prepare_dataset.py before annotation"
+        )
     return payload
 
 

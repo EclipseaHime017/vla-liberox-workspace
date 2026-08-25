@@ -83,4 +83,7 @@ class ReplayDataset(Dataset):
             "prompt": episode["prompt"],
             "run_id": episode["run_id"],
             "start": start,
+            "action_source": str(chunk["action_source"]),
+            "transition_type": str(chunk["transition_type"]),
+            "interrupted": bool(chunk["interrupted"]),
         }

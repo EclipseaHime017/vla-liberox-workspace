@@ -74,13 +74,18 @@ def test_console_progress_interval_is_a_positive_integer(
         load_train_config(path)
 
 
-def test_branch_prefix_is_not_added_as_new_replay(configured):
+def test_branch_adds_only_interrupted_policy_prefix_and_new_suffix(configured):
     prepare_dataset(configured)
     manifest = load_manifest(configured)
     episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     assert [chunk["start"] for chunk in episodes["root"]["chunks"]] == [0, 8, 16]
-    assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [5, 13]
-    assert episodes["branch"]["reward_boundaries"] == [5, 13, 18]
+    assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [0, 5, 13]
+    assert episodes["branch"]["chunks"][0] == {
+        "start": 0, "length": 5, "end": 5, "action_source": "policy",
+        "transition_type": "policy_interrupted", "interrupted": True,
+    }
+    assert episodes["branch"]["chunks"][1]["action_source"] == "human"
+    assert episodes["branch"]["reward_boundaries"] == [0, 5, 13, 18]
     assert episodes["root"]["split"] == episodes["branch"]["split"]
 
 
@@ -101,8 +106,59 @@ def test_latched_done_tail_is_excluded_from_replay_without_changing_source(confi
     assert branch["action_count"] == 18
     assert branch["trailing_action_count"] == 4
     assert branch["post_terminal_false_count"] == 0
-    assert branch["chunks"][-1] == {"start": 13, "length": 5, "end": 18}
+    assert branch["chunks"][-1] == {
+        "start": 13, "length": 5, "end": 18, "action_source": "human",
+        "transition_type": "human", "interrupted": False,
+    }
     assert trajectory.read_bytes() == original_bytes
+
+
+def test_action_source_change_is_a_hard_chunk_boundary(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    sources = arrays["action_source"].astype("<U32")
+    sources[5:10] = "human"
+    sources[10:] = "policy_requery"
+    arrays["action_source"] = sources
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert [
+        (chunk["start"], chunk["end"], chunk["action_source"])
+        for chunk in branch["chunks"]
+    ] == [
+        (0, 5, "policy"),
+        (5, 10, "human"),
+        (10, 18, "policy_requery"),
+    ]
+
+
+def test_sibling_branches_deduplicate_same_interrupted_prefix(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    branch_run = next(source.rglob("branch/run.json")).parent
+    sibling_run = branch_run.parent / "branch-sibling"
+    import shutil
+    shutil.copytree(branch_run, sibling_run)
+    run = json.loads((sibling_run / "run.json").read_text(encoding="utf-8"))
+    run["id"] = "branch-sibling"
+    (sibling_run / "run.json").write_text(json.dumps(run), encoding="utf-8")
+
+    prepare_dataset(configured)
+    branches = [
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["kind"] == "branch"
+    ]
+    interrupted = [
+        chunk for episode in branches for chunk in episode["chunks"]
+        if chunk["interrupted"]
+    ]
+    assert len(interrupted) == 1
 
 
 def test_transient_success_requires_a_new_complete_streak(configured):
@@ -204,4 +260,6 @@ def test_ui_selection_manifest_prepares_exact_members_and_split(configured, tmp_
     assert manifest["source_dataset_id"] == "ds_exact"
     assert [episode["run_id"] for episode in manifest["episodes"]] == ["branch"]
     assert manifest["episodes"][0]["split"] == "validation"
-    assert manifest["episodes"][0]["chunks"][0]["start"] == 5
+    assert manifest["episodes"][0]["chunks"][0]["start"] == 0
+    assert manifest["episodes"][0]["chunks"][0]["end"] == 5
+    assert manifest["episodes"][0]["chunks"][0]["transition_type"] == "policy_interrupted"

@@ -564,3 +564,11 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 原始仿真草稿新增 `init_state_index`，不再把环境随机种子误当作完整场景布局选择器；
 - 每个任务从实际 init 文件动态公开状态数量与合法范围 `0..N-1`，后端在预览和创建会话前统一校验，切换任务时索引重置为 0；
 - 草稿预览、正式 rollout、run manifest、有效配置和轨迹 metadata 均记录并使用所选索引；回溯分支继承父轨迹索引且不可修改。
+
+## 2026-08-25：接管边界改为变长 Semi-MDP transition
+
+- 修复 prepare 仅按固定 8 步分割、无法表达 action chunk 在中途被人工接管的问题；固定 `8` 现在只是最大 horizon，`action_mask` 只负责张量 padding，`chunk_length` 保存实际执行长度；
+- 原始失败 rollout 的完整策略 chunk 保持不变，作为错误策略的反事实后续；分支额外保存当前策略 chunk 起点到 `resume_step` 的实际执行 prefix，再从接管点分别构造 `human` 或 `policy_requery` transition；
+- transition 不再跨越 `policy / policy_requery / human` 来源边界，相同 root、相同接管帧的 sibling 分支 interrupted prefix 只进入 replay 一次；
+- reward 继续按实际长度累计，next observation 使用 `s[t+L]`，IQL Bellman target 保持 `R_L + gamma^L V(s[t+L])`；replay 额外公开 `action_source`、`transition_type` 和 `interrupted` 元数据；
+- prepared manifest 升级到 schema v2，数据哈希覆盖实际 chunk 列表，避免旧 reward manifest 被误用于新边界。升级后必须依次重新执行 prepare 与 annotate，再开始训练。

@@ -590,7 +590,7 @@ prepare_dataset
   ├── 校验轨迹、双视角图像、20 Hz 与成功状态
   ├── 原始轨迹完整导入；分支仅保留 resume_step 后缀
   ├── 按 root trajectory 划分训练集与验证集
-  └── 生成固定 8-step action chunk 与 dataset_manifest.json
+  └── 生成最大 8-step、按接管/动作来源截断的变长 transition 与 dataset_manifest.json
         │
         ▼
 冻结的 RynnValue-4B 离线标注
@@ -625,7 +625,7 @@ Pixel-IQL                         冻结的 VLA backbone
 
 三个主要处理环节分别负责：
 
-1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始轨迹完整导入，接管或重新推理分支只加入 `resume_step` 后的新后缀；随后按 8 步切分 action chunk，并按 root trajectory 划分训练集与验证集。该阶段不运行模型、不计算奖励，也不修改源数据，输出 `outputs/work/dataset_manifest.json`。
+1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始失败 rollout 保留完整的策略 chunk；若接管发生在 8 步 chunk 中间，分支额外加入从该 chunk 起点到 `resume_step` 的真实已执行 policy prefix，再加入接管/重新推理后缀，其余复制前缀不导入。相同 root、相同接管帧的 sibling 分支 prefix 只保留一次，且 transition 不跨越 `policy`、`policy_requery`、`human` 来源边界。固定 8 步只作为最大 horizon，实际长度写入 `chunk_length`。训练集与验证集仍按 root trajectory 划分。该阶段不运行模型、不计算奖励，也不修改源数据，输出 schema-v2 `outputs/work/dataset_manifest.json`。
 2. **Annotate（奖励标注）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 预测预计剩余时间，再与环境成功状态构造的 sparse step cost 合成为 PBRS chunk reward。该阶段不训练 RynnValue，也不更新 VLA；输出位于 `outputs/work/rewards/` 的逐轨迹 NPZ、元数据和 `reward_manifest.json`，相同数据与配置可命中缓存跳过重复标注。
 3. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已标注 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；VLA 视觉/语言 backbone 只做冻结的特征提取，反向传播仅更新 continuous action head 与 proprio projector。训练 checkpoint 会保留 Q/V、optimizer 和随机状态以便恢复，最终部署 overlay 只发布 action head、proprio projector 和兼容性清单。
 
@@ -752,7 +752,7 @@ data:
     - LEVEL1::EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
 ```
 
-`task_ids: []` 才表示全部任务。prepare 只接收 `status=COMPLETED` 且没有 `error` 的会话，并验证 `project_id`、20 Hz 时间网格、`N` 个动作对应 `N+1` 个状态/图像、7 维 OSC action 范围和 policy action round-trip。原始轨迹完整导入；分支只从 `resume_step` 开始生成额外 chunk，因此不会再次训练复制过来的父轨迹前缀。
+`task_ids: []` 才表示全部任务。prepare 只接收 `status=COMPLETED` 且没有 `error` 的会话，并验证 `project_id`、20 Hz 时间网格、`N` 个动作对应 `N+1` 个状态/图像、7 维 OSC action 范围和 policy action round-trip。原始轨迹完整导入。分支不会重新导入整段父前缀，但会保留“当前 policy chunk 起点到 `resume_step`”这一条被打断的变长 transition，并从 `resume_step` 开始导入 human 或 policy-requery 后缀。若接管正好发生在 8 步边界，则不存在额外的短 prefix。相同 root 与接管帧的 sibling prefix 自动去重。
 
 运行 prepare：
 
@@ -766,7 +766,7 @@ conda run -n vla-liberox python \
 
 - `episode_count`：筛选后包含的原始/分支轨迹数；
 - `success_count`：经过连续成功阈值确认的成功轨迹数；
-- `chunk_count`：实际可供 IQL 采样的 8 步 chunk 总数；
+- `chunk_count`：实际可供 IQL 采样的变长 transition 总数；每条最多 8 步，被接管、动作来源变化或轨迹终点截断时可以更短；
 - 每条 episode 的 `task_id`、`kind`、`resume_step`、`split`、`action_count` 和 `terminal_step`。
 
 同一个 `work_dir` 再次 prepare 会原子替换旧的 `dataset_manifest.json`，但不会修改 `dataset-root` 中的任何文件。训练/验证划分按 `root_run_id` 完成，因此父轨迹及其所有分支一定处于同一个 split。当前训练器只从 `split=train` 采样，validation 仅预留给独立评估，不会自动早停或选择 checkpoint。
@@ -782,7 +782,7 @@ annotate 的作用不是重新判断任务是否成功，也不是训练 RynnVal
 3. 使用 `Φ=-remaining_seconds` 计算 PBRS shaping，再与环境 success 产生的 `-1` step cost 合成为每个 chunk 的 `chunk_reward`。
 4. 将逐轨迹奖励原子写入 `paths.annotation_cache/<content_hash>.npz`，并在 `paths.work_dir/rewards/reward_manifest.json` 保存当前数据集的引用索引；训练阶段只读取这些离线结果，不再加载 RynnValue。
 
-因此，失败原始轨迹、接管后成功轨迹和重新推理分支都会用同一个冻结模型标注；区别来自 prepare 选中的有效片段和环境 terminal，而不是人为给 RynnValue 设置不同类别。分支仍只标注 `resume_step` 后的新后缀。
+因此，失败原始轨迹、接管后成功轨迹和重新推理分支都会用同一个冻结模型标注；区别来自 prepare 构造的 transition、实际 `action_source`、环境 terminal 和后继状态，而不是人为给 RynnValue 设置不同类别。分支会标注接管前被打断的 policy prefix 与 `resume_step` 后的新后缀，但不会标注其余复制父前缀。
 
 主要奖励参数：
 
@@ -855,7 +855,7 @@ logging:
 参数语义分为四组：
 
 - 数据与显存：`critic_image_size` 只控制 Q/V 使用的双视角缩放尺寸；VLA actor 仍走自身 processor。当前 16 GB profile 强制 `micro_batch_size=1`。actor 累计 `gradient_accumulation_steps=32` 个 micro-step 后更新一次，等效 actor batch 为 32；critic/value 则每个 micro-step 都更新。
-- 训练长度：`train_steps=10000` 表示 10000 次 replay 抽样和 critic/value 更新，不是 10000 个完整 epoch。默认情况下 actor optimizer 大约执行 `ceil(10000/32)=313` 次。每个 chunk 被均匀采样，因此 chunk 更多的长轨迹会贡献更多训练样本；当前没有按成功/失败、human/policy 或 episode 做额外重加权。
+- 训练长度：`train_steps=10000` 表示 10000 次 replay 抽样和 critic/value 更新，不是 10000 个完整 epoch。默认情况下 actor optimizer 大约执行 `ceil(10000/32)=313` 次。每个变长 transition 被均匀采样，因此 transition 更多的长轨迹会贡献更多训练样本；`action_source` 与 `transition_type` 会保留在 replay 元数据中，但当前没有按成功/失败、human/policy 或 episode 做额外重加权。
 - critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value optimizer。`expectile` 越高，value 越偏向高 Q 动作；actor 权重为 `exp(beta × advantage)`，再由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
 - actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。`critic_warmup_steps` 期间 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 并没有在前 200 步冻结。
 - 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
@@ -983,7 +983,7 @@ R_t = Σ(h=0..L-1) γ^h r_sparse(t+h)
       + κ(γ^L Φ(t+L) - Φ(t))
 ```
 
-成功前的 sparse step cost 为 `-1`，成功终止步为 `0`；失败轨迹一直保留 step cost。末尾不足 8 步的 chunk 使用 mask，Bellman bootstrap 使用实际 `L`，而不是固定 8。
+成功前的 sparse step cost 为 `-1`，成功终止步为 `0`；失败轨迹一直保留 step cost。轨迹末尾、接管点或 `action_source` 变化产生的短 chunk 都使用 mask 统一到 `8×7` 张量，但 reward、next state 与 Bellman bootstrap 使用实际 `L`：`R_L + gamma^L V(s_{t+L})`，而不是固定 8。原始错误策略的完整 chunk 仍保留；被接管分支另建实际执行 prefix 与 human/policy-requery transition，二者不会混在同一 chunk 中。
 
 主要中间结果：
 

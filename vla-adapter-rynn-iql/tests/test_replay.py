@@ -42,3 +42,19 @@ def test_transient_raw_done_does_not_terminate_an_earlier_chunk(configured):
 
     assert replay[replay_index(5)]["bootstrap_mask"].item() == 1.0
     assert replay[replay_index(13)]["bootstrap_mask"].item() == 0.0
+
+
+def test_replay_exposes_variable_duration_transition_metadata(configured):
+    prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    replay = ReplayDataset(configured, _stats(7), _stats(8), split="train")
+    item = next(
+        replay[index] for index, (episode, chunk_index, _) in enumerate(replay.items)
+        if episode["run_id"] == "branch"
+        and episode["chunks"][chunk_index]["interrupted"]
+    )
+    assert item["chunk_length"].item() == 5
+    assert item["action_mask"].tolist() == [True] * 5 + [False] * 3
+    assert item["action_source"] == "policy"
+    assert item["transition_type"] == "policy_interrupted"
+    assert item["bootstrap_mask"].item() == 1.0
