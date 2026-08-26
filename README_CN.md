@@ -1,6 +1,6 @@
 # LIBERO-X × VLA-Adapter Terminal
 
-当前版本：**v0.2.0**
+当前版本：**v0.2.1**
 
 这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse 接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。
 
@@ -1049,7 +1049,7 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 标注和 IQL 训练编排为�
 
 TensorBoard 按需由平台用 `vla-liberox` 启动并覆盖所有受管训练目录，固定访问 `http://127.0.0.1:6006/`。它不占用 GPU 任务锁，可与仿真并存；若端口被其他服务占用，页面会明确报错而不会结束那个进程。
 
-仿真、标注和训练共享一个跨进程 GPU 文件锁，同一时间只允许一个任务，不排队；冲突请求返回 `409`。开始标注/训练前平台会卸载驻留 VLA，完成后不自动重载，下一次仿真按需加载。后台任务使用独立进程组，PID、心跳、日志与状态均落盘，所以 UI 后端重启不会主动终止它。
+仿真、标注、训练和批量测试共享一个跨进程 GPU 文件锁，同一时间只允许一个任务，不排队；冲突请求返回 `409`。开始标注、训练或批量测试前平台会卸载驻留 VLA，完成后不自动重载，下一次仿真按需加载。后台任务使用独立进程组，PID、心跳、日志与状态均落盘，所以 UI 后端重启不会主动终止它。TensorBoard 是只读进程，不占用这把 GPU 锁。
 
 平台持久化目录为：
 
@@ -1063,6 +1063,35 @@ dataset-root/projects/libero_x_vla/
 ```
 
 生产 UI 的 `frontend/dist` 仍是本机构建产物。拉取包含此页面的代码后，直接重启 `run_ui.py` 会检测源码指纹并运行 `npm run build`；新机器应先在 `liberox-vla-adapter-terminal/frontend` 执行 `npm ci`。完整持久化格式和引用关系见 `docs/DATA_LAYOUT.md`。
+
+### 4.10 在 Web UI 中批量测试策略
+
+侧栏“测试”位于“训练”之后，用于对基础 VLA 或训练发布的 policy overlay 进行可复现的批量成功率评估。它与主页单次仿真不同：一次测试固定选择**一个任务和一个策略**，不保存可回放轨迹或视觉文件，也不会进入运行记录或训练数据集。
+
+创建测试时配置：
+
+- `trials`：仿真回合数，默认 100，有效范围 `1..1000`；
+- `max_steps`：每个回合的固定控制步数；
+- `open_loop_steps`：每次 VLA 预测后实际执行的动作数，有效范围 `1..8`；
+- 初始状态池：默认使用当前 BDDL 任务的全部合法 `init_state_index`，也可在高级设置中选择子集或固定一个；
+- `base_seed` 与 `seed_count`：环境 seed 池为 `base_seed .. base_seed + seed_count - 1`；默认 `seed_count=ceil(trials/init_state_count)`，设为 1 即固定 seed；
+- `schedule_seed`：只控制完整测试顺序的可复现打乱；
+- 实时模式：默认按墙钟严格限制为 20 Hz；关闭后可加速运行，但 MuJoCo 的 `control_freq=20`、动作与模拟时间语义不变。
+
+这里的“随机环境”只表示所选任务有限的 benchmark 初始状态，不会切换到同一 LEVEL 下其他 BDDL 场景。后端在开始前冻结完整调度，对初始状态池和 seed 池做确定性的均衡组合轮转；任一状态、seed 及可用组合的分配次数差不超过 1。预览区会先显示分布、预计时长和前若干组合，正式运行期间 schedule 不再改变。
+
+测试的 headline 成功语义是：环境 `done=true` 必须连续出现 5 个控制步才确认成功。短暂命中后出现 `false` 会重新计数；达到 5 步后成功状态锁存，即使后续 `done=false` 也不撤销。无论是否已确认成功，每个正常回合都继续执行到 `max_steps`，因此该指标不等同于“首次 done 后立即结束”的官方 LIBERO benchmark。单回合错误会记录后继续测试，连续 3 个回合错误时提前结束整次任务；错误回合计入已尝试回合和成功率分母。
+
+运行监视器显示模型加载、当前回合、`init_state_index`、seed、完成进度、成功数、实时成功率、ETA、控制频率和滚动日志。历史详情包含总体成功率与 Wilson 95% 置信区间、完成覆盖率，以及按初始状态、seed、状态×seed 组合的分组成功率和逐回合关键数值。取消的部分测试只对已尝试回合计算临时成功率，并单独显示覆盖率，不能与完整测试混为一谈。页面刷新只恢复仍活动的测试；已结束记录从历史表选择查看，可在终态下通过重复输入测试 ID 二次确认后永久删除。
+
+每次测试唯一的结果 artifact 是：
+
+```text
+dataset-root/projects/libero_x_vla/evaluations/
+└── <task_name>/YYYY-MM-DD/<timestamp>__<evaluation_id>/evaluation.json
+```
+
+`evaluation.json` 原子更新并保存任务/策略快照、完整有效配置、冻结 schedule 及哈希、逐回合数值、成功率分组、模型加载与总耗时。测试不会生成视频、图像、observation、action、trajectory、NPZ、CSV 或图表。`jobs/<evaluation_id>/` 中的 `job.json`、`job.log` 和 `effective_config.yaml` 只是 detached job 的恢复与诊断信息，不属于测试结果。测试与仿真、RynnValue 标注和 IQL 训练使用同一 GPU 互斥锁；TensorBoard 不受影响。
 
 ## 5. 为什么这样适配
 

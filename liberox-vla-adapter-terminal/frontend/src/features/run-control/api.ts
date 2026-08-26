@@ -1,7 +1,8 @@
 import { api } from "../../api/client";
 import type {
-  Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, OfflineJob,
-  Session, TensorBoardStatus, TrainingDataset, TrainingDefaults,
+  Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, EvaluationConfig,
+  EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
+  TensorBoardStatus, TrainingDataset, TrainingDefaults,
 } from "./types";
 
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
@@ -68,4 +69,34 @@ export const startTraining = (datasetId: string, parameters: Record<string, unkn
 export const getTensorBoard = () => api<TensorBoardStatus>("/api/tensorboard");
 export const startTensorBoard = () => api<TensorBoardStatus>(
   "/api/tensorboard/start", { method: "POST" },
+);
+
+export const previewEvaluation = (config: EvaluationConfig) => api<EvaluationPreview>(
+  "/api/evaluations/preview", { method: "POST", body: JSON.stringify(config) },
+);
+type EvaluationJobResponse = OfflineJob | { job: OfflineJob };
+const unwrapEvaluationJob = (response: EvaluationJobResponse) => (
+  "job" in response ? response.job : response
+);
+export const startEvaluation = (config: EvaluationConfig) => api<EvaluationJobResponse>(
+  "/api/evaluations", { method: "POST", body: JSON.stringify(config) },
+).then(unwrapEvaluationJob);
+export const listEvaluations = (filters: EvaluationFilters = {}) => {
+  const query = new URLSearchParams();
+  Object.entries(filters).forEach(([name, value]) => {
+    if (value) query.set(name, value);
+  });
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return api<EvaluationRecord[]>(`/api/evaluations${suffix}`);
+};
+export const getEvaluation = (id: string) => api<EvaluationRecord>(
+  `/api/evaluations/${encodeURIComponent(id)}`,
+);
+export const stopEvaluation = (id: string) => api<EvaluationJobResponse>(
+  `/api/evaluations/${encodeURIComponent(id)}/stop`, { method: "POST" },
+).then(unwrapEvaluationJob);
+export const deleteEvaluation = (id: string, confirmation: string) => api<{ deleted: string }>(
+  `/api/evaluations/${encodeURIComponent(id)}`, {
+    method: "DELETE", body: JSON.stringify({ confirm_evaluation_id: confirmation }),
+  },
 );

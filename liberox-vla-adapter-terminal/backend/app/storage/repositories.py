@@ -264,3 +264,82 @@ class OfflineJobRepository:
                 (self.project_id, dataset_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def delete(self, job_id: str) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                "DELETE FROM offline_jobs WHERE id = ? AND project_id = ?",
+                (job_id, self.project_id),
+            )
+
+
+class EvaluationRepository:
+    """Recoverable index for lightweight policy evaluation manifests."""
+
+    def __init__(self, database_path: Path, project_id: str):
+        self.database_path = database_path
+        self.project_id = project_id
+        migrate(database_path)
+
+    def upsert(self, evaluation: dict[str, Any], manifest_path: Path) -> None:
+        aggregate = evaluation.get("aggregate") or evaluation.get("summary") or {}
+        config = evaluation.get("config") or {}
+        evaluation_id = str(evaluation.get("evaluation_id") or evaluation.get("id"))
+        with connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO evaluation_runs (
+                    id, project_id, task_id, policy_id, job_id, status, trials,
+                    attempted, successes, result_path, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    task_id=excluded.task_id,
+                    policy_id=excluded.policy_id,
+                    status=excluded.status,
+                    trials=excluded.trials,
+                    attempted=excluded.attempted,
+                    successes=excluded.successes,
+                    result_path=excluded.result_path,
+                    completed_at=excluded.completed_at
+                """,
+                (
+                    evaluation_id,
+                    self.project_id,
+                    (
+                        evaluation.get("task_snapshot")
+                        or evaluation.get("task")
+                        or {}
+                    ).get("task_id", ""),
+                    (
+                        evaluation.get("policy_snapshot")
+                        or evaluation.get("policy")
+                        or {}
+                    ).get("policy_id", ""),
+                    str(evaluation.get("job_id") or evaluation_id),
+                    str(evaluation.get("status") or "FAILED"),
+                    int(config.get("trials", evaluation.get("trial_count", 0)) or 0),
+                    int(aggregate.get("attempted", aggregate.get("attempted_count", 0)) or 0),
+                    int(aggregate.get("successes", aggregate.get("success_count", 0)) or 0),
+                    str(manifest_path.resolve()),
+                    str(evaluation.get("created_at") or ""),
+                    evaluation.get("completed_at"),
+                ),
+            )
+
+    def manifest_path(self, evaluation_id: str) -> Path | None:
+        with connect(self.database_path) as database:
+            row = database.execute(
+                """
+                SELECT result_path FROM evaluation_runs
+                WHERE id = ? AND project_id = ?
+                """,
+                (evaluation_id, self.project_id),
+            ).fetchone()
+        return None if row is None else Path(str(row["result_path"]))
+
+    def delete(self, evaluation_id: str) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                "DELETE FROM evaluation_runs WHERE id = ? AND project_id = ?",
+                (evaluation_id, self.project_id),
+            )

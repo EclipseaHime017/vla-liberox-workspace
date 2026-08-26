@@ -13,6 +13,11 @@ dataset-root/
         │       └── annotations/<annotation_id>/work/
         ├── annotation-cache/
         ├── training/<training_id>/
+        ├── evaluations/
+        │   └── <task_name>/
+        │       └── YYYY-MM-DD/
+        │           └── YYYY-MM-DD_HHMMSS__<evaluation_id>/
+        │               └── evaluation.json
         ├── jobs/<job_id>/
         └── runs/
             └── <task_name>/
@@ -70,8 +75,51 @@ which references only that frozen dataset.
 actually passed to the Conda subprocesses. Training artifacts are written under
 `training/<training_id>/`, including metrics JSONL, TensorBoard events,
 checkpoints, summary, and cancellation checkpoints. `catalog.sqlite3` indexes
-datasets, members, annotations, training runs, and jobs, but these files remain
-the recoverable source of truth.
+datasets, members, annotations, training runs, evaluation runs, and jobs, but
+these files remain the recoverable source of truth.
+
+## Lightweight batch evaluations
+
+`evaluations/<task_name>/<date>/<timestamp>__<evaluation_id>/evaluation.json`
+is the only result artifact created by the Test page. It contains the selected
+task and policy snapshot, base checkpoint/overlay compatibility metadata, the
+validated effective configuration, the complete frozen schedule and its hash,
+per-episode numeric results, aggregate success statistics, timings, lifecycle
+state, and any error. The result directory must not contain MP4, image, NPZ,
+CSV, observation, action, trajectory, or plot files.
+
+The independent `jobs/<evaluation_id>/` directory is scheduler diagnostics,
+not evaluation output. It retains `job.json`, append-only `job.log`, and the
+generated `effective_config.yaml` so a detached process can be stopped or
+reconciled after a backend restart. Deleting a terminal evaluation removes both
+its result directory and corresponding job diagnostics after exact-ID
+confirmation; it never removes a policy, checkpoint, dataset, or simulation
+run.
+
+Each evaluation selects exactly one BDDL task and one policy. The
+`init_state_index` pool contains only the finite benchmark states of that task;
+it never ranges over other BDDL scenes in the same level. The seed pool is
+`base_seed .. base_seed + seed_count - 1`. Before execution, the service uses
+`schedule_seed` to create a deterministic balanced rotation over init states
+and seeds, with the allocation count for every state, seed, and available
+combination differing by at most one. The full schedule is persisted before
+the first episode and is immutable during the job.
+
+A normal episode always records `max_steps` executed control steps. Success is
+latched only after five consecutive LIBERO-X `done=true` steps; a later false
+value does not clear the confirmed result, and confirmation does not terminate
+the episode early. Errors count in the attempted-episode success-rate
+denominator. A canceled or stopped evaluation reports aggregate values only for
+attempted episodes and separately records completion coverage, so partial and
+complete tests cannot be confused.
+
+The aggregate section includes total success rate with Wilson 95% confidence
+interval, success/failure/error counts, coverage, and group statistics by init
+state, seed, and init-state/seed combination. Per-episode values include first
+confirmed-success step, maximum done streak, final done, inference count and
+latency, measured control frequency, deadline misses, and elapsed time. The
+file also records policy-load time, total wall time, and total simulated time.
+All updates use temporary files followed by atomic replacement.
 
 ## Offline RL export
 

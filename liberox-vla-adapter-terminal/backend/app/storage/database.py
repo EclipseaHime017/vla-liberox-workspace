@@ -10,7 +10,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -113,12 +113,32 @@ def migrate(path: Path) -> None:
                 created_at TEXT NOT NULL,
                 completed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS evaluation_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                policy_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trials INTEGER NOT NULL,
+                attempted INTEGER NOT NULL DEFAULT 0,
+                successes INTEGER NOT NULL DEFAULT 0,
+                result_path TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_evaluation_runs_project_created
+                ON evaluation_runs(project_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_evaluation_runs_project_task
+                ON evaluation_runs(project_id, task_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_evaluation_runs_project_policy
+                ON evaluation_runs(project_id, policy_id, created_at DESC);
             """
         )
         row = database.execute("SELECT version FROM schema_info LIMIT 1").fetchone()
         if row is None:
             database.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
-        elif int(row["version"]) == 1:
+        elif int(row["version"]) in {1, 2}:
             database.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
         elif int(row["version"]) != SCHEMA_VERSION:
             raise RuntimeError(

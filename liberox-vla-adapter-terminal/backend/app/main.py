@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 import eval_pickplace_direct as direct
 
 from .api import (
-    controller, datasets, drafts, offline_jobs, runs, training_datasets, websocket,
+    controller, datasets, drafts, evaluations, offline_jobs, runs,
+    training_datasets, websocket,
 )
 from .api.models import (
     CreateBranchRequest,
@@ -72,7 +73,7 @@ def create_app(
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="0.2.0",
+        version="0.2.1",
         lifespan=lifespan,
     )
     app.include_router(runs.router)
@@ -80,6 +81,7 @@ def create_app(
     app.include_router(controller.router)
     app.include_router(datasets.router)
     app.include_router(training_datasets.router)
+    app.include_router(evaluations.router)
     app.include_router(offline_jobs.router)
     app.include_router(websocket.router)
 

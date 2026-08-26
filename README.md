@@ -1,8 +1,10 @@
 # LIBERO-X Local Data Studio
 
-Current release: **v0.2.0**
+Current release: **v0.2.1**
 
-Local-first simulation, VLA evaluation, trajectory rewind, and SpaceMouse takeover for the three validated Franka/LIBERO-X tasks.
+Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse takeover,
+offline post-training, and reproducible batch policy testing for the three
+validated Franka/LIBERO-X tasks.
 
 - Backend: FastAPI application service with a background simulation worker.
 - Frontend: React + TypeScript, served by FastAPI after a Vite production build.
@@ -13,6 +15,7 @@ Local-first simulation, VLA evaluation, trajectory rewind, and SpaceMouse takeov
 - Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
 - Integrated workflow: the Dataset page freezes hash-verified, single-task dataset versions and launches reward annotation; the Training page launches resumable IQL jobs, streams metrics/logs, and manages local TensorBoard without merging the two Conda environments.
+- Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
 
 ## Repository layout
 
@@ -32,10 +35,11 @@ never rewrites `dataset-root`; their only runtime integration boundary is a
 hash-checked `policy.yaml` overlay published to `policy-registry/`.
 
 The Web UI orchestrates them without importing RynnValue into the simulation
-process. Prepare/training subprocesses use `vla-liberox`, annotation uses
-`rynnvalue-reward`, and simulation/annotation/training share a persistent
-cross-process GPU lock. Dataset manifests reference and hash source artifacts
-instead of copying trajectories or videos.
+process. Prepare/training/testing subprocesses use `vla-liberox`, annotation
+uses `rynnvalue-reward`, and simulation/annotation/training/testing share a
+persistent cross-process GPU lock. TensorBoard is read-only and remains outside
+that lock. Dataset manifests reference and hash source artifacts instead of
+copying trajectories or videos.
 
 Start from `vla-liberox-workspace/` after activating `vla-liberox`:
 
@@ -46,6 +50,23 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 On a new checkout, run `npm ci` once in `liberox-vla-adapter-terminal/frontend/`. The launcher fingerprints the frontend sources, prints the exact build command before running it, and automatically rebuilds the Git-ignored `frontend/dist` after later pulls. Run `npm run build` there for a manual source-only rebuild, or `npm ci && npm run build` after `package-lock.json` changes. Neither `npm run build` nor `npm test` installs or upgrades dependencies.
 
 Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup and operation, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries, and [docs/DATA_LAYOUT.md](docs/DATA_LAYOUT.md) for persistence rules.
+
+## Batch policy testing
+
+The Test page runs a selected task and policy repeatedly without publishing
+rollout media or trajectories. “Random environments” are the finite
+`init_state_index` values belonging to that exact BDDL task, not other scenes;
+environment seeds form the second randomization axis. The backend freezes a
+reproducible, balanced schedule before launch, then runs every normal episode to
+`max_steps`. A success is latched only after five consecutive `done=true`
+control steps, while the remainder of the episode still executes.
+
+The default mode is wall-clock-limited to 20 Hz; accelerated mode removes only
+that wall-clock wait and keeps the MuJoCo control-frequency semantics unchanged.
+Each test stores one lightweight `evaluation.json` under the project
+`evaluations/` tree. Detached-job diagnostics (`job.json`, `job.log`, and the
+validated effective YAML) remain in `jobs/`; no video, observation, action,
+trajectory, image, or plot is written by batch testing.
 
 ## RynnValue + IQL offline post-training
 

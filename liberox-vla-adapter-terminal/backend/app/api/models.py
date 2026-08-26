@@ -135,3 +135,34 @@ class DeleteTrainingDatasetRequest(StrictModel):
 class TrainingRunRequest(StrictModel):
     dataset_id: str = Field(min_length=1)
     parameters: dict[str, StrictInt | StrictFloat | StrictStr | None]
+
+
+class EvaluationRequest(StrictModel):
+    task_id: StrictStr = Field(min_length=1)
+    policy_id: StrictStr = Field(default="base", min_length=1)
+    trials: StrictInt = Field(default=100, ge=1, le=1000)
+    max_steps: StrictInt = Field(ge=1, le=10000)
+    open_loop_steps: StrictInt = Field(ge=1, le=8)
+    realtime: StrictBool = True
+    init_state_indices: list[StrictInt] | None = None
+    base_seed: StrictInt = Field(default=0, ge=0, le=2147483647)
+    seed_count: StrictInt | None = Field(default=None, ge=1, le=1000)
+    schedule_seed: StrictInt = Field(default=0, ge=0, le=2147483647)
+
+    @model_validator(mode="after")
+    def validate_state_pool(self):
+        if self.init_state_indices is not None:
+            if not self.init_state_indices:
+                raise ValueError("init_state_indices must not be empty")
+            if len(self.init_state_indices) != len(set(self.init_state_indices)):
+                raise ValueError("init_state_indices must not contain duplicates")
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in self.init_state_indices
+            ):
+                raise ValueError("init_state_indices must contain non-negative integers")
+        return self
+
+
+class DeleteEvaluationRequest(StrictModel):
+    confirm_evaluation_id: str = Field(min_length=1)

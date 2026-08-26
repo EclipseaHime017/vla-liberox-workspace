@@ -1,6 +1,6 @@
 [project]
 name = "liberox-local-studio-backend"
-version = "0.2.0"
+version = "0.2.1"
 requires-python = ">=3.10,<3.11"
 dependencies = [
   "fastapi==0.141.1",

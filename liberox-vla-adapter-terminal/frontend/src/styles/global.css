@@ -264,6 +264,114 @@ td code { font-size: 11px; }
 .training-result span { color: var(--muted); }
 .training-result code { overflow-wrap: anywhere; }
 
+.evaluation-builder { overflow: visible; }
+.evaluation-form { display: grid; grid-template-columns: 1.5fr 1.5fr repeat(3, minmax(130px, .7fr)); gap: 12px; padding: 18px; }
+.evaluation-form > label, .evaluation-advanced label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; }
+.evaluation-form input:not([type="checkbox"]), .evaluation-form select, .evaluation-filters input, .evaluation-filters select, .evaluation-advanced input:not([type="checkbox"]) { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 9px; background: #fff; color: var(--text); }
+.evaluation-builder > .panel-title { min-height: 62px; }
+.evaluation-builder > .panel-title strong { font-size: 24px; }
+.evaluation-builder > .panel-title span { font-size: 16.5px; }
+.evaluation-builder .evaluation-form { gap: 18px; padding: 24px; }
+.evaluation-builder .evaluation-form > label, .evaluation-builder .evaluation-advanced label { gap: 8px; font-size: 16.5px; }
+.evaluation-builder .evaluation-form > label > input, .evaluation-builder .evaluation-form > label > select, .evaluation-builder .evaluation-advanced label > input:not([type="checkbox"]), .evaluation-builder .evaluation-advanced label > select { padding: 12px 14px; border-radius: 11px; font-size: 16.5px; }
+.evaluation-randomization-options { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; margin: 0; padding: 17px; border: 1px solid rgba(0,113,227,.15); border-radius: 12px; background: var(--blue-soft); }
+.evaluation-randomization-options legend { padding: 0 6px; color: var(--muted); font-size: 15px; }
+.evaluation-randomization-option { display: flex; align-items: center; gap: 11px; color: var(--text); cursor: pointer; }
+.evaluation-randomization-option > input { flex: none; width: 20px; height: 20px; margin: 0; padding: 0; accent-color: var(--blue); }
+.evaluation-randomization-option > span { display: grid; gap: 4px; }
+.evaluation-randomization-option b { font-size: 16.5px; }
+.evaluation-randomization-option small { color: var(--muted); font-size: 14px; line-height: 1.4; }
+.evaluation-randomization-options > p { grid-column: 1 / -1; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.evaluation-form > details { grid-column: 1 / -1; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); }
+.evaluation-form summary { cursor: pointer; font-size: 12px; font-weight: 650; }
+.evaluation-builder .evaluation-form > details { padding: 16px; border-radius: 12px; }
+.evaluation-builder .evaluation-form summary { font-size: 18px; }
+.evaluation-advanced { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding-top: 13px; }
+.evaluation-advanced fieldset { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.65); }
+.evaluation-advanced legend { padding: 0 5px; font-size: 10px; color: var(--muted); }
+.evaluation-advanced fieldset > label { margin-bottom: 9px; }
+.evaluation-advanced fieldset > small { display: block; margin-top: 7px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.evaluation-builder .evaluation-advanced fieldset { padding: 16px; border-radius: 12px; }
+.evaluation-builder .evaluation-advanced legend { font-size: 15px; }
+.evaluation-builder .evaluation-advanced fieldset > small { font-size: 14px; }
+.evaluation-advanced .switch-field { display: flex; align-items: center; grid-template-columns: auto 1fr; gap: 7px; color: var(--text); }
+.evaluation-advanced .switch-field input, .state-index-grid input { width: auto; }
+.evaluation-builder .evaluation-advanced .switch-field input, .evaluation-builder .state-index-grid input { width: 18px; height: 18px; margin: 0; padding: 0; accent-color: var(--blue); }
+.state-index-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; margin: 8px 0; }
+.state-index-grid label { display: flex; align-items: center; gap: 4px; padding: 5px; border-radius: 6px; background: #f5f5f7; color: var(--text); font-size: 10px; }
+.evaluation-builder .state-index-grid label { font-size: 15px; }
+.evaluation-builder-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 18px; }
+.evaluation-builder-actions button { min-width: 130px; }
+.evaluation-builder .evaluation-builder-actions { gap: 12px; padding: 0 24px 24px; }
+.evaluation-builder .evaluation-builder-actions button { min-width: 190px; min-height: 50px; padding: 10px 18px; font-size: 21px; }
+.evaluation-preview { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin: 0 18px 18px; border: 1px solid rgba(0,113,227,.16); border-radius: 11px; overflow: hidden; background: rgba(0,113,227,.12); }
+.evaluation-preview > div:not(.preview-schedule) { padding: 13px; background: #f4f8ff; }
+.evaluation-preview strong, .evaluation-preview span { display: block; }
+.evaluation-preview strong { font-size: 16px; }
+.evaluation-preview span { margin-top: 4px; color: var(--muted); font-size: 9px; }
+.evaluation-preview > p { grid-column: 1 / -1; padding: 10px 13px; background: #f4f8ff; color: var(--muted); font-size: 10px; }
+.preview-schedule { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; }
+.preview-schedule span { margin: 0; padding: 8px 12px; background: #fff; font: 9px ui-monospace, monospace; }
+.evaluation-monitor-card { display: flex; flex-direction: column; overflow: hidden; }
+.evaluation-monitor-card > .panel-title strong, .evaluation-history > .panel-title strong, .evaluation-context > .panel-title strong, .evaluation-combinations > .panel-title strong, .evaluation-trials > .panel-title strong { font-size: 18px; }
+.evaluation-monitor-card > .panel-title span, .evaluation-history > .panel-title span { font-size: 13px; }
+.evaluation-status-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); background: var(--line); gap: 1px; }
+.evaluation-status-grid > span { display: grid; gap: 4px; padding: 12px 14px; background: var(--surface-muted); min-width: 0; }
+.evaluation-status-grid small { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+.evaluation-status-grid b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 12px ui-monospace, monospace; }
+.evaluation-status-grid em { color: var(--muted); font: normal 9px ui-monospace, monospace; }
+.evaluation-page .evaluation-status-grid small { font-size: 11px; }
+.evaluation-page .evaluation-status-grid b { font-size: 14px; }
+.evaluation-page .evaluation-status-grid em { font-size: 11px; }
+.evaluation-progress { height: 3px; background: #e5e5ea; }
+.evaluation-progress div { height: 100%; background: var(--blue); transition: width .2s; }
+.evaluation-job-actions span { display: flex; gap: 8px; }
+.evaluation-serial { height: 180px; flex: none; }
+.evaluation-filters { display: grid; grid-template-columns: 1.6fr 1.3fr .8fr 1fr 1fr auto; gap: 10px; align-items: end; padding: 14px 17px; border-bottom: 1px solid var(--line); }
+.evaluation-filters label { display: grid; gap: 5px; color: var(--muted); font-size: 10px; }
+.evaluation-filters button { min-height: 36px; }
+.evaluation-page .evaluation-filters label { font-size: 13px; }
+.evaluation-page .evaluation-filters input, .evaluation-page .evaluation-filters select, .evaluation-page .evaluation-filters button { min-height: 42px; font-size: 14px; }
+.evaluation-page table { font-size: 14px; }
+.evaluation-page th { font-size: 11px; }
+.evaluation-page .cell-note { font-size: 11px; }
+.selected-row { background: var(--blue-soft); }
+.history-actions { display: flex; gap: 6px; }
+.history-actions button { padding: 6px 8px; white-space: nowrap; font-size: 10px; }
+.evaluation-page .history-actions button { padding: 8px 10px; font-size: 13px; }
+.evaluation-detail { display: grid; gap: 16px; }
+.evaluation-overview { display: grid; grid-template-columns: 210px 1fr; padding: 22px; align-items: center; }
+.evaluation-headline-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+.evaluation-headline-stats > div { padding: 16px; border-radius: 12px; background: var(--surface-muted); }
+.evaluation-headline-stats strong, .evaluation-headline-stats span { display: block; }
+.evaluation-headline-stats strong { font-size: 22px; }
+.evaluation-headline-stats span { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.evaluation-headline-stats p { grid-column: 1 / -1; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.evaluation-context > div:last-child { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px 16px; padding: 16px 18px; font-size: 11px; }
+.evaluation-context span { color: var(--muted); }
+.evaluation-context code { overflow-wrap: anywhere; }
+.evaluation-breakdown-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); }
+.evaluation-breakdown { padding: 18px; background: var(--surface); }
+.evaluation-breakdown h2 { margin-bottom: 12px; }
+.evaluation-breakdown > div:not(.empty-breakdown) { display: grid; grid-template-columns: 72px minmax(80px, 1fr) 55px 90px; align-items: center; gap: 9px; min-height: 28px; font-size: 10px; }
+.evaluation-breakdown > div > div { height: 6px; overflow: hidden; border-radius: 999px; background: #e5e5ea; }
+.evaluation-breakdown i { display: block; height: 100%; border-radius: inherit; background: var(--blue); }
+.evaluation-breakdown b { text-align: right; }
+.evaluation-breakdown small { color: var(--muted); }
+.empty-breakdown { padding: 18px 0; color: var(--muted); font-size: 11px; }
+.combination-matrix { max-height: 500px; }
+.combination-matrix table { width: max-content; min-width: 100%; }
+.combination-matrix th, .combination-matrix td { min-width: 82px; text-align: center; }
+.combination-matrix thead th { position: sticky; top: 0; z-index: 2; background: #f5f5f7; }
+.combination-matrix tbody th { position: sticky; left: 0; z-index: 1; background: #f5f5f7; }
+.combination-matrix td { background: #fff; }
+.combination-matrix td.measured { background: var(--blue-soft); }
+.combination-matrix td.pending { color: var(--muted); }
+.combination-matrix td strong, .combination-matrix td small { display: block; }
+.combination-matrix td small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.evaluation-trials .table-wrap { max-height: 520px; }
+.evaluation-trials thead { position: sticky; top: 0; z-index: 1; }
+
 @media (max-width: 1100px) {
   .app-shell { grid-template-columns: 76px minmax(0, 1fr); }
   .brand-mark strong, .app-sidebar nav button:not(.active) { font-size: 0; }
@@ -279,12 +387,16 @@ td code { font-size: 11px; }
   .quota-grid { grid-template-columns: 1fr 1fr; }
   .training-layout { grid-template-columns: 1fr; }
   .job-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .evaluation-form { grid-template-columns: repeat(2, 1fr); }
+  .evaluation-advanced { grid-template-columns: 1fr; }
+  .evaluation-status-grid { grid-template-columns: repeat(3, 1fr); }
+  .evaluation-filters { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 720px) {
   .app-shell { display: block; }
   .app-sidebar { position: fixed; z-index: 20; left: 0; right: 0; top: auto; bottom: 0; width: 100%; height: 62px; padding: 7px; border: 0; border-top: 1px solid var(--line); }
   .brand-mark, .local-label { display: none; }
-  .app-sidebar nav { grid-template-columns: repeat(5, 1fr); }
+  .app-sidebar nav { grid-template-columns: repeat(6, 1fr); }
   .app-sidebar nav button, .app-sidebar nav button:not(.active) { justify-content: center; font-size: 9px; flex-direction: column; gap: 2px; padding: 4px; }
   .app-header { padding: 0 15px; }
   .privacy-pill { display: none; }
@@ -299,4 +411,9 @@ td code { font-size: 11px; }
   .builder-grid, .advanced-grid, .quota-grid, .parameter-grid, .advanced-parameters, .fixed-parameters { grid-template-columns: 1fr; }
   .dataset-card { grid-template-columns: 1fr; }
   .path-card, .settings-list > div { grid-template-columns: 1fr; }
+  .evaluation-form, .evaluation-filters, .evaluation-status-grid, .evaluation-overview, .evaluation-headline-stats, .evaluation-breakdown-grid, .evaluation-randomization-options { grid-template-columns: 1fr; }
+  .evaluation-preview { grid-template-columns: repeat(2, 1fr); }
+  .preview-schedule { grid-template-columns: repeat(2, 1fr); }
+  .evaluation-builder-actions button { flex: 1; min-width: 0; }
+  .evaluation-context > div:last-child { grid-template-columns: 1fr; }
 }

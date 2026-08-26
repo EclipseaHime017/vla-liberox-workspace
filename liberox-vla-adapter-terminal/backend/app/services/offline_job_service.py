@@ -6,8 +6,11 @@ import copy
 import fcntl
 import hashlib
 import json
+import math
 import os
+import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -23,7 +26,7 @@ import yaml
 
 from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
-from ..storage.repositories import OfflineJobRepository
+from ..storage.repositories import EvaluationRepository, OfflineJobRepository
 
 
 ACTIVE_JOB_STATES = frozenset({"STARTING", "RUNNING", "STOPPING"})
@@ -57,10 +60,17 @@ class OfflineJobService:
         self.jobs_root = self.project_root / "jobs"
         self.training_root = self.project_root / "training"
         self.cache_root = self.project_root / "annotation-cache"
+        self.evaluations_root = self.project_root / "evaluations"
         self.gpu_lock_path = self.project_root / ".gpu-task.lock"
-        for path in (self.jobs_root, self.training_root, self.cache_root):
+        for path in (
+            self.jobs_root, self.training_root, self.cache_root,
+            self.evaluations_root,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         self.repository = OfflineJobRepository(
+            ui_config.catalog_path, ui_config.project_id
+        )
+        self.evaluation_repository = EvaluationRepository(
             ui_config.catalog_path, ui_config.project_id
         )
         self.lock = threading.RLock()
@@ -68,6 +78,7 @@ class OfflineJobService:
         self.tensorboard_process: subprocess.Popen[Any] | None = None
         self.tensorboard_log = self.project_root / "tensorboard.log"
         self._reconcile_all()
+        self._reconcile_all_evaluations()
 
     @property
     def base_config_path(self) -> Path:
@@ -190,6 +201,12 @@ class OfflineJobService:
                     )
             except Exception:
                 pass
+        elif job["kind"] == "evaluation":
+            manifest = Path(str(job.get("output_path") or "")) / "evaluation.json"
+            try:
+                self._index_evaluation_manifest(manifest)
+            except Exception:
+                pass
         return self._public_job(job)
 
     def _reconcile_all(self) -> None:
@@ -275,6 +292,44 @@ class OfflineJobService:
             summary = self._training_summary(job)
             if summary is not None:
                 result["training_summary"] = summary
+        elif job["kind"] == "evaluation":
+            manifest = Path(str(job.get("output_path") or "")) / "evaluation.json"
+            try:
+                evaluation = self._load_evaluation_manifest(manifest)
+                public = self._public_evaluation(
+                    evaluation, manifest, detail=False
+                )
+                aggregate = public["aggregate"]
+                attempted = int(aggregate.get("attempted_trials", 0) or 0)
+                total = int(aggregate.get("total_trials", 0) or 0)
+                elapsed = float(public.get("wall_time_seconds") or 0.0)
+                trial_mean = aggregate.get("elapsed_seconds_mean")
+                remaining = (
+                    float(trial_mean) * max(0, total - attempted)
+                    if trial_mean is not None else None
+                )
+                completed_trials = evaluation.get("trials") or evaluation.get("episodes") or []
+                latest = completed_trials[-1] if completed_trials else {}
+                schedule = evaluation.get("schedule") or []
+                active = (
+                    evaluation.get("status") in ACTIVE_JOB_STATES
+                    and attempted < total
+                    and attempted < len(schedule)
+                )
+                scheduled = schedule[attempted] if active else latest
+                result["evaluation_summary"] = {
+                    **aggregate,
+                    "evaluation_id": evaluation["id"],
+                    "current_trial": attempted + 1 if active else attempted,
+                    "progress_percent": attempted / total * 100.0 if total else 0.0,
+                    "elapsed_seconds": elapsed,
+                    "estimated_remaining_seconds": remaining,
+                    "init_state_index": scheduled.get("init_state_index"),
+                    "seed": scheduled.get("seed"),
+                    "measured_control_hz": latest.get("measured_control_hz"),
+                }
+            except Exception:
+                pass
         return result
 
     def logs(self, job_id: str, offset: int = 0, limit: int = 256_000) -> dict[str, Any]:
@@ -311,7 +366,7 @@ class OfflineJobService:
     def assert_simulation_allowed(self) -> None:
         if self.launch_reserved or self.has_active_job() or self._external_gpu_lock():
             raise ConflictError(
-                "An annotation or training job is using the GPU",
+                "An annotation, training, or evaluation job is using the GPU",
                 code="GPU_TASK_ACTIVE",
             )
 
@@ -342,7 +397,7 @@ class OfflineJobService:
         self,
         *,
         kind: str,
-        dataset_id: str,
+        dataset_id: str | None,
         stages: list[dict[str, Any]],
         config_path: Path,
         output_path: Path,
@@ -628,6 +683,651 @@ class OfflineJobService:
                 )},
             },
         )
+
+    @staticmethod
+    def _evaluation_id(value: Any) -> str:
+        evaluation_id = str(value or "")
+        if (
+            not evaluation_id
+            or Path(evaluation_id).name != evaluation_id
+            or ".." in evaluation_id
+            or re.fullmatch(r"[A-Za-z0-9_-]+", evaluation_id) is None
+        ):
+            raise ValueError("Invalid evaluation id")
+        return evaluation_id
+
+    @staticmethod
+    def _task_slug(task: dict[str, Any]) -> str:
+        source = str(task.get("task_name") or task.get("task_id") or "task")
+        slug = re.sub(r"[^a-z0-9]+", "_", source.lower()).strip("_")
+        if not slug:
+            raise ValueError("Task cannot be converted to a safe evaluation slug")
+        return slug
+
+    @staticmethod
+    def _validate_date_filter(value: str | None, name: str) -> str | None:
+        if value is None:
+            return None
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"{name} must use YYYY-MM-DD") from None
+        return value
+
+    @staticmethod
+    def _evaluation_config(
+        request: dict[str, Any], *, state_indices: list[int], seed_count: int,
+        control_hz: float,
+    ) -> dict[str, Any]:
+        return {
+            "trials": int(request["trials"]),
+            "max_steps": int(request["max_steps"]),
+            "open_loop_steps": int(request["open_loop_steps"]),
+            "realtime": bool(request["realtime"]),
+            "init_state_indices": state_indices,
+            "base_seed": int(request["base_seed"]),
+            "seed_count": seed_count,
+            "schedule_seed": int(request["schedule_seed"]),
+            "control_hz": int(control_hz),
+            "success_streak": 5,
+            "consecutive_error_limit": 3,
+            "disabled_policy_cameras": [],
+        }
+
+    def _evaluation_snapshots(
+        self, task_id: str, policy_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        task = self.manager.catalog.metadata(task_id)
+        bddl_path, init_path = self.manager.catalog.paths(task_id)
+        task_snapshot = {
+            "task_id": task["task_id"],
+            "level": task["level"],
+            "task_name": task["task_name"],
+            "prompt": task["prompt"],
+            "bddl_path": str(bddl_path.resolve()),
+            "init_path": str(init_path.resolve()),
+        }
+        self.manager.policy_catalog.refresh()
+        policy = self.manager.policy_catalog.entry(policy_id)
+        policy_snapshot = {
+            "policy_id": policy.policy_id,
+            "label": policy.label,
+            "base_checkpoint": policy.base_checkpoint,
+            "stats_key": policy.stats_key,
+            "manifest": None if policy.manifest is None else str(policy.manifest),
+            "action_head": None if policy.action_head is None else str(policy.action_head),
+            "proprio_projector": None
+            if policy.proprio_projector is None else str(policy.proprio_projector),
+            "training_step": policy.training_step,
+            "compatibility_sha256": policy.compatibility_sha256,
+        }
+        return task_snapshot, policy_snapshot
+
+    def preview_evaluation(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Validate an evaluation and return its deterministic frozen schedule."""
+        from ..evaluation.batch import build_evaluation_preview
+
+        task_id = str(request["task_id"])
+        task_snapshot, policy_snapshot = self._evaluation_snapshots(
+            task_id, str(request["policy_id"])
+        )
+        state_count = int(self.manager.catalog.initial_state_count(task_id))
+        requested_states = request.get("init_state_indices")
+        state_indices = (
+            list(range(state_count))
+            if requested_states is None else [int(value) for value in requested_states]
+        )
+        if not state_indices:
+            raise ValueError("At least one init state must be selected")
+        if len(state_indices) != len(set(state_indices)):
+            raise ValueError("init_state_indices must not contain duplicates")
+        invalid = [value for value in state_indices if not 0 <= value < state_count]
+        if invalid:
+            raise ValueError(
+                f"init_state_indices for {task_id} must be in [0, {state_count - 1}]; "
+                f"invalid values: {invalid}"
+            )
+        trials = int(request["trials"])
+        seed_count = request.get("seed_count")
+        effective_seed_count = (
+            math.ceil(trials / len(state_indices))
+            if seed_count is None else int(seed_count)
+        )
+        base_seed = int(request["base_seed"])
+        if base_seed + effective_seed_count - 1 > 2147483647:
+            raise ValueError("base_seed + seed_count exceeds 2147483647")
+        control_hz = int(getattr(self.manager.eval_config, "control_hz", 20))
+        preview = build_evaluation_preview(
+            trials=trials,
+            init_state_indices=state_indices,
+            base_seed=base_seed,
+            seed_count=effective_seed_count,
+            schedule_seed=int(request["schedule_seed"]),
+            control_hz=control_hz,
+            max_steps=int(request["max_steps"]),
+        )
+        config = self._evaluation_config(
+            request,
+            state_indices=state_indices,
+            seed_count=effective_seed_count,
+            control_hz=control_hz,
+        )
+        distribution = preview.get("distribution") or {}
+        public_schedule = [
+            {
+                "trial_index": int(item.get("trial_index", item.get("episode_index", 0))),
+                "init_state_index": int(item["init_state_index"]),
+                "seed": int(item["seed"]),
+            }
+            for item in preview["schedule"]
+        ]
+        return {
+            **preview,
+            "config": {
+                "task_id": task_snapshot["task_id"],
+                "policy_id": policy_snapshot["policy_id"],
+                **config,
+            },
+            "schedule": public_schedule,
+            "task_snapshot": task_snapshot,
+            "policy_snapshot": policy_snapshot,
+            "init_state_count": state_count,
+            "init_state_counts": preview.get("init_state_counts")
+            or distribution.get("init_state_counts", {}),
+            "seed_counts": preview.get("seed_counts")
+            or distribution.get("seed_counts", {}),
+            "combination_counts": preview.get("combination_counts")
+            or distribution.get("combination_counts", {}),
+            "estimated_duration_seconds": preview.get(
+                "estimated_duration_seconds",
+                preview.get("estimated_simulation_seconds"),
+            ),
+        }
+
+    def start_evaluation(self, request: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            preview = self.preview_evaluation(request)
+            self._prepare_launch()
+            try:
+                return self._launch_evaluation(preview)
+            finally:
+                self.launch_reserved = False
+
+    def _launch_evaluation(self, preview: dict[str, Any]) -> dict[str, Any]:
+        evaluation_id = (
+            f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        now = _utc_now()
+        task = preview["task_snapshot"]
+        policy = preview["policy_snapshot"]
+        date = datetime.now().strftime("%Y-%m-%d")
+        directory_name = (
+            f"{datetime.now().strftime('%Y-%m-%d_%H%M%S')}__{evaluation_id}"
+        )
+        result_dir = self.evaluations_root / self._task_slug(task) / date / directory_name
+        job_dir = self.jobs_root / evaluation_id
+        result_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            job_dir.mkdir(parents=True, exist_ok=False)
+        except Exception:
+            shutil.rmtree(result_dir)
+            raise
+        result_path = result_dir / "evaluation.json"
+        config_path = job_dir / "effective_config.yaml"
+        config_keys = {
+            "trials", "max_steps", "open_loop_steps", "realtime",
+            "init_state_indices", "base_seed", "seed_count", "schedule_seed",
+            "control_hz", "success_streak", "consecutive_error_limit",
+            "disabled_policy_cameras",
+        }
+        runtime_config = {
+            key: value for key, value in preview["config"].items() if key in config_keys
+        }
+        raw_schedule = [
+            {
+                "trial_index": int(item.get("trial_index", index)),
+                "init_state_index": int(item["init_state_index"]),
+                "seed": int(item["seed"]),
+            }
+            for index, item in enumerate(preview["schedule"])
+        ]
+        effective = {
+            "schema_version": 1,
+            "evaluation_id": evaluation_id,
+            "result_path": str(result_path.resolve()),
+            "task_snapshot": task,
+            "policy_snapshot": policy,
+            "config": runtime_config,
+            "schedule": raw_schedule,
+            "schedule_sha256": preview["schedule_sha256"],
+        }
+        manifest = {
+            "schema_version": 1,
+            "id": evaluation_id,
+            "job_id": evaluation_id,
+            "status": "STARTING",
+            "created_at": now,
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+            "task_snapshot": task,
+            "policy_snapshot": policy,
+            "config": runtime_config,
+            "schedule": raw_schedule,
+            "schedule_sha256": preview["schedule_sha256"],
+            "success_rule": {
+                "done_consecutive_steps": runtime_config["success_streak"],
+                "success_latched": True,
+                "run_full_horizon": True,
+                "errors_in_denominator": True,
+            },
+            "aggregate": {
+                "attempted": 0,
+                "successes": 0,
+                "failures": 0,
+                "errors": 0,
+                "completion_rate": 0.0,
+                "success_rate": 0.0,
+            },
+            "trials": [],
+        }
+        atomic_write_yaml(config_path, effective)
+        atomic_write_json(result_path, manifest)
+        self.evaluation_repository.upsert(manifest, result_path)
+        terminal_root = Path(__file__).resolve().parents[3]
+        script = terminal_root / "scripts" / "run_policy_evaluation.py"
+        stages = [{
+            "id": "evaluate",
+            "label": "LIBERO-X 策略批量测试",
+            "environment": self.ui_config.train_environment,
+            "argv": ["python", str(script), "--config", str(config_path)],
+            "cwd": str(terminal_root),
+        }]
+        try:
+            job = self._new_job(
+                kind="evaluation",
+                dataset_id=None,
+                stages=stages,
+                config_path=config_path,
+                output_path=result_dir,
+                parameters={
+                    "evaluation_id": evaluation_id,
+                    "task_id": task["task_id"],
+                    "policy_id": policy["policy_id"],
+                    **runtime_config,
+                    "schedule_sha256": preview["schedule_sha256"],
+                },
+            )
+        except Exception as exc:
+            manifest.update(
+                status="FAILED", completed_at=_utc_now(),
+                error=f"Cannot launch evaluation: {type(exc).__name__}: {exc}",
+            )
+            atomic_write_json(result_path, manifest)
+            self.evaluation_repository.upsert(manifest, result_path)
+            raise
+        return job
+
+    def _ensure_evaluation_path(self, path: Path) -> Path:
+        root = self.evaluations_root.resolve()
+        if path.name != "evaluation.json" or path.is_symlink() or not path.is_file():
+            raise FileNotFoundError(path)
+        absolute = path.absolute()
+        try:
+            lexical = absolute.relative_to(root)
+        except ValueError:
+            raise ValueError("Evaluation manifest is outside the managed root") from None
+        current = root
+        for part in lexical.parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("Symlink evaluation paths are not allowed")
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            raise ValueError("Evaluation manifest is outside the managed root") from None
+        return resolved
+
+    def _load_evaluation_manifest(self, path: Path) -> dict[str, Any]:
+        path = self._ensure_evaluation_path(path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        evaluation_id = self._evaluation_id(payload.get("id"))
+        if payload.get("schema_version") != 1:
+            raise ValueError(f"Unsupported evaluation manifest: {path}")
+        if payload.get("job_id", evaluation_id) != evaluation_id:
+            raise ValueError(f"Evaluation/job identity mismatch: {path}")
+        return payload
+
+    def _index_evaluation_manifest(self, path: Path) -> dict[str, Any]:
+        payload = self._load_evaluation_manifest(path)
+        self.evaluation_repository.upsert(payload, path)
+        return payload
+
+    def _reconcile_all_evaluations(self) -> None:
+        for path in self.evaluations_root.glob("*/*/*/evaluation.json"):
+            try:
+                self._index_evaluation_manifest(path)
+            except Exception:
+                continue
+
+    def _evaluation_manifest(self, evaluation_id: str) -> Path:
+        evaluation_id = self._evaluation_id(evaluation_id)
+        indexed = self.evaluation_repository.manifest_path(evaluation_id)
+        candidates = [indexed] if indexed is not None else []
+        candidates.extend(self.evaluations_root.glob("*/*/*/evaluation.json"))
+        seen: set[Path] = set()
+        for candidate in candidates:
+            if candidate is None or candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                payload = self._load_evaluation_manifest(candidate)
+            except Exception:
+                continue
+            if payload["id"] == evaluation_id:
+                self.evaluation_repository.upsert(payload, candidate)
+                return candidate.resolve()
+        raise KeyError(evaluation_id)
+
+    def _synchronize_evaluation(
+        self, path: Path, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        if payload.get("status") not in ACTIVE_JOB_STATES:
+            self.evaluation_repository.upsert(payload, path)
+            return payload
+        try:
+            self._load_job(payload["id"])
+            public_job = self._reconcile(payload["id"])
+        except Exception:
+            self.evaluation_repository.upsert(payload, path)
+            return payload
+        if public_job["status"] in TERMINAL_JOB_STATES:
+            # Normally the child writes the terminal result first. This fallback
+            # covers launch failures or a child killed before it could persist.
+            latest = self._load_evaluation_manifest(path)
+            if latest.get("status") in ACTIVE_JOB_STATES:
+                latest["status"] = public_job["status"]
+                latest["completed_at"] = public_job.get("completed_at") or _utc_now()
+                latest["error"] = public_job.get("error")
+                atomic_write_json(path, latest)
+            payload = latest
+        self.evaluation_repository.upsert(payload, path)
+        return payload
+
+    @staticmethod
+    def _public_evaluation(
+        payload: dict[str, Any], path: Path, *, detail: bool
+    ) -> dict[str, Any]:
+        value = copy.deepcopy(payload)
+        task = value.get("task_snapshot") or value.get("task") or {}
+        policy = value.get("policy_snapshot") or value.get("policy") or {}
+        value.update({
+            "task_id": task.get("task_id"),
+            "task_name": task.get("task_name"),
+            "task_prompt": task.get("prompt"),
+            "policy_id": policy.get("policy_id"),
+            "policy_label": policy.get("label"),
+            "base_checkpoint": policy.get("base_checkpoint"),
+            "overlay_id": None
+            if policy.get("policy_id") == "base" else policy.get("policy_id"),
+            "training_step": policy.get("training_step"),
+            "compatibility_sha256": policy.get("compatibility_sha256"),
+            "output_path": str(path.parent.resolve()),
+        })
+        config = value.get("config") or {}
+        value["config"] = {
+            "task_id": task.get("task_id"),
+            "policy_id": policy.get("policy_id"),
+            **config,
+        }
+        schedule = value.get("schedule") or []
+        value["schedule"] = [
+            {
+                **item,
+                "trial_index": int(item.get("trial_index", item.get("episode_index", index))),
+            }
+            for index, item in enumerate(schedule)
+        ]
+        trials = value.get("trials", value.get("episodes", [])) or []
+        value["trials"] = []
+        for index, item in enumerate(trials):
+            value["trials"].append({
+                **item,
+                "trial_index": int(item.get("trial_index", item.get("episode_index", index))),
+                "steps": int(item.get("steps", item.get("executed_steps", 0)) or 0),
+                "inference_latency_ms": item.get(
+                    "inference_latency_ms", item.get("inference_latency_mean_ms")
+                ),
+                "elapsed_seconds": float(
+                    item.get("elapsed_seconds", item.get("wall_seconds", 0.0)) or 0.0
+                ),
+            })
+        aggregate = value.get("aggregate") or value.get("summary") or {}
+        total = int(
+            aggregate.get(
+                "total_trials", aggregate.get("scheduled_trials", config.get("trials", 0))
+            ) or 0
+        )
+        attempted = int(
+            aggregate.get("attempted_trials", aggregate.get("attempted", len(trials))) or 0
+        )
+        successes = int(
+            aggregate.get("successes", aggregate.get("success_count", 0)) or 0
+        )
+        errors = int(aggregate.get("errors", aggregate.get("error_count", 0)) or 0)
+        failures = int(
+            aggregate.get("failures", max(0, attempted - successes - errors)) or 0
+        )
+        wilson = aggregate.get("wilson_95") or [0.0, 0.0]
+
+        def mean(name: str) -> Any:
+            metric = aggregate.get(name)
+            return metric.get("mean") if isinstance(metric, dict) else metric
+
+        def breakdown(name: str) -> dict[str, Any]:
+            groups = aggregate.get(name) or {}
+            return {
+                str(key): {
+                    **group,
+                    "trials": int(
+                        group.get("trials", group.get("attempted", 0)) or 0
+                    ),
+                }
+                for key, group in groups.items()
+            }
+
+        value["aggregate"] = {
+            "total_trials": total,
+            "attempted_trials": attempted,
+            "completed_trials": int(
+                aggregate.get("completed_trials", attempted) or 0
+            ),
+            "successes": successes,
+            "failures": failures,
+            "errors": errors,
+            "success_rate": float(
+                aggregate.get("success_rate", successes / attempted if attempted else 0.0)
+                or 0.0
+            ),
+            "wilson_lower": float(
+                aggregate.get("wilson_lower", wilson[0] if len(wilson) > 0 else 0.0)
+                or 0.0
+            ),
+            "wilson_upper": float(
+                aggregate.get("wilson_upper", wilson[1] if len(wilson) > 1 else 0.0)
+                or 0.0
+            ),
+            "completion_rate": float(
+                aggregate.get(
+                    "completion_rate",
+                    aggregate.get(
+                        "completion_coverage", attempted / total if total else 0.0
+                    ),
+                )
+                or 0.0
+            ),
+            "by_init_state": breakdown("by_init_state"),
+            "by_seed": breakdown("by_seed"),
+            "by_combination": breakdown("by_combination"),
+            "first_success_step_mean": aggregate.get(
+                "first_success_step_mean", mean("first_success_step")
+            ),
+            "policy_queries_mean": aggregate.get(
+                "policy_queries_mean", mean("policy_queries")
+            ),
+            "inference_latency_ms_mean": aggregate.get(
+                "inference_latency_ms_mean", mean("inference_latency_ms")
+            ),
+            "measured_control_hz_mean": aggregate.get(
+                "measured_control_hz_mean", mean("control_hz")
+            ),
+            "elapsed_seconds_mean": aggregate.get(
+                "elapsed_seconds_mean", mean("wall_seconds")
+            ),
+        }
+        value["model_load_seconds"] = value.get(
+            "model_load_seconds", (value.get("timing") or {}).get("model_load_seconds")
+        )
+        value["wall_time_seconds"] = value.get(
+            "wall_time_seconds",
+            (value.get("timing") or {}).get(
+                "wall_time_seconds", (value.get("timing") or {}).get("wall_seconds")
+            ),
+        )
+        value["simulated_time_seconds"] = value.get(
+            "simulated_time_seconds",
+            (value.get("timing") or {}).get(
+                "simulated_time_seconds",
+                (value.get("timing") or {}).get("simulated_seconds"),
+            ),
+        )
+        if not detail:
+            value["schedule_count"] = len(value.pop("schedule", []))
+            value["attempted_count"] = len(value.pop("trials", []))
+        return value
+
+    def get_evaluation(self, evaluation_id: str) -> dict[str, Any]:
+        path = self._evaluation_manifest(evaluation_id)
+        payload = self._synchronize_evaluation(
+            path, self._load_evaluation_manifest(path)
+        )
+        return self._public_evaluation(payload, path, detail=True)
+
+    def list_evaluations(
+        self,
+        *,
+        task_id: str | None = None,
+        policy_id: str | None = None,
+        status: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        date_from = self._validate_date_filter(date_from, "date_from")
+        date_to = self._validate_date_filter(date_to, "date_to")
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from must not be later than date_to")
+        result: list[dict[str, Any]] = []
+        for path in self.evaluations_root.glob("*/*/*/evaluation.json"):
+            try:
+                payload = self._synchronize_evaluation(
+                    path, self._load_evaluation_manifest(path)
+                )
+            except Exception:
+                continue
+            task = (
+                payload.get("task_snapshot") or payload.get("task") or {}
+            ).get("task_id")
+            policy = (
+                payload.get("policy_snapshot") or payload.get("policy") or {}
+            ).get("policy_id")
+            created_date = str(payload.get("created_at") or "")[:10]
+            if task_id is not None and task != task_id:
+                continue
+            if policy_id is not None and policy != policy_id:
+                continue
+            if status is not None and payload.get("status") != status:
+                continue
+            if date_from is not None and created_date < date_from:
+                continue
+            if date_to is not None and created_date > date_to:
+                continue
+            result.append(self._public_evaluation(payload, path, detail=False))
+        return sorted(result, key=lambda item: item.get("created_at", ""), reverse=True)
+
+    def stop_evaluation(self, evaluation_id: str) -> dict[str, Any]:
+        path = self._evaluation_manifest(evaluation_id)
+        current_job = self.get(evaluation_id)
+        if current_job["kind"] != "evaluation":
+            raise ValueError("Evaluation/job identity mismatch")
+        if current_job["status"] not in ACTIVE_JOB_STATES:
+            return current_job
+        job = self.stop(evaluation_id)
+        latest = self._load_evaluation_manifest(path)
+        if latest.get("status") in ACTIVE_JOB_STATES:
+            latest["status"] = (
+                job["status"] if job["status"] in TERMINAL_JOB_STATES else "STOPPING"
+            )
+            if job["status"] in TERMINAL_JOB_STATES:
+                latest["completed_at"] = job.get("completed_at") or _utc_now()
+                latest["error"] = job.get("error")
+            atomic_write_json(path, latest)
+            self.evaluation_repository.upsert(latest, path)
+        return job
+
+    def delete_evaluation(
+        self, evaluation_id: str, confirm_evaluation_id: str
+    ) -> dict[str, Any]:
+        evaluation_id = self._evaluation_id(evaluation_id)
+        if confirm_evaluation_id != evaluation_id:
+            raise ValueError(
+                "confirm_evaluation_id must exactly match evaluation_id"
+            )
+        with self.lock:
+            path = self._evaluation_manifest(evaluation_id)
+            payload = self._synchronize_evaluation(
+                path, self._load_evaluation_manifest(path)
+            )
+            if payload.get("status") in ACTIVE_JOB_STATES:
+                raise ConflictError(
+                    "Active evaluation must be stopped before deletion",
+                    code="EVALUATION_ACTIVE",
+                    context={"evaluation_id": evaluation_id},
+                )
+            result_dir = path.parent
+            if result_dir.is_symlink():
+                raise ValueError("Symlink evaluation directories are not allowed")
+            job_dir = self.jobs_root / evaluation_id
+            if job_dir.exists():
+                if job_dir.is_symlink() or job_dir.parent.resolve() != self.jobs_root.resolve():
+                    raise ValueError("Unsafe evaluation job directory")
+                job_path = job_dir / "job.json"
+                if job_path.is_file():
+                    job = json.loads(job_path.read_text(encoding="utf-8"))
+                    if job.get("id") != evaluation_id or job.get("kind") != "evaluation":
+                        raise ValueError("Evaluation job identity mismatch")
+                    if job.get("status") in ACTIVE_JOB_STATES:
+                        raise ConflictError(
+                            "Active evaluation must be stopped before deletion",
+                            code="EVALUATION_ACTIVE",
+                            context={"evaluation_id": evaluation_id},
+                        )
+            shutil.rmtree(result_dir)
+            if job_dir.is_dir():
+                shutil.rmtree(job_dir)
+            self.evaluation_repository.delete(evaluation_id)
+            self.repository.delete(evaluation_id)
+            for directory in (result_dir.parent, result_dir.parent.parent):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            return {
+                "deleted": evaluation_id,
+                "policy_deleted": False,
+                "dataset_deleted": False,
+            }
 
     def stop(self, job_id: str) -> dict[str, Any]:
         path, job = self._load_job(job_id)

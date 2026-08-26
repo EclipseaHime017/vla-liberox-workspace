@@ -123,13 +123,132 @@ export type TrainingDataset = {
 };
 
 export type OfflineJob = {
-  id: string; kind: "annotation" | "training";
+  id: string; kind: "annotation" | "training" | "evaluation";
   status: "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
-  dataset_id: string; created_at: string; started_at: string | null; completed_at: string | null;
+  dataset_id: string | null; created_at: string; started_at: string | null; completed_at: string | null;
   stage: string; stage_label: string; error: string | null; output_path: string;
-  parameters: Record<string, string | number | null>; log_size: number;
+  parameters: Record<string, string | number | boolean | null>; log_size: number;
   metrics?: Record<string, number | string | null>;
   training_summary?: Record<string, unknown>;
+  evaluation_summary?: EvaluationAggregate & { evaluation_id?: string };
+};
+
+export type EvaluationStatus = OfflineJob["status"];
+
+export type EvaluationConfig = {
+  task_id: string;
+  policy_id: string;
+  trials: number;
+  max_steps: number;
+  open_loop_steps: number;
+  realtime: boolean;
+  init_state_indices: number[] | null;
+  base_seed: number;
+  seed_count: number | null;
+  schedule_seed: number;
+};
+
+export type EvaluationScheduleItem = {
+  trial_index: number;
+  init_state_index: number;
+  seed: number;
+};
+
+export type EvaluationBreakdown = {
+  trials: number;
+  successes: number;
+  failures: number;
+  errors: number;
+  success_rate: number;
+};
+
+export type EvaluationTrial = {
+  trial_index: number;
+  init_state_index: number;
+  seed: number;
+  success: boolean;
+  error: string | null;
+  steps: number;
+  first_success_step: number | null;
+  max_done_streak: number;
+  final_done: boolean;
+  policy_queries: number;
+  inference_latency_ms: number | null;
+  measured_control_hz: number | null;
+  deadline_misses: number;
+  elapsed_seconds: number;
+};
+
+export type EvaluationAggregate = {
+  total_trials: number;
+  attempted_trials: number;
+  completed_trials: number;
+  successes: number;
+  failures: number;
+  errors: number;
+  success_rate: number;
+  wilson_lower: number;
+  wilson_upper: number;
+  completion_rate: number;
+  by_init_state: Record<string, EvaluationBreakdown>;
+  by_seed: Record<string, EvaluationBreakdown>;
+  by_combination: Record<string, EvaluationBreakdown>;
+  first_success_step_mean: number | null;
+  policy_queries_mean: number | null;
+  inference_latency_ms_mean: number | null;
+  measured_control_hz_mean: number | null;
+  elapsed_seconds_mean: number | null;
+};
+
+export type EvaluationPreview = {
+  config: EvaluationConfig;
+  schedule: EvaluationScheduleItem[];
+  schedule_sha256: string;
+  init_state_counts: Record<string, number>;
+  seed_counts: Record<string, number>;
+  combination_counts: Record<string, number>;
+  estimated_duration_seconds: number;
+};
+
+export type EvaluationRecord = {
+  id: string;
+  status: EvaluationStatus;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  task_id: string;
+  task_name: string;
+  task_prompt: string;
+  policy_id: string;
+  policy_label: string;
+  base_checkpoint: string;
+  overlay_id: string | null;
+  training_step: number | null;
+  compatibility_sha256: string | null;
+  config: EvaluationConfig;
+  schedule: EvaluationScheduleItem[];
+  schedule_sha256: string;
+  success_rule: {
+    done_consecutive_steps: number;
+    success_latched: boolean;
+    run_full_horizon: boolean;
+    errors_in_denominator: boolean;
+  };
+  trials: EvaluationTrial[];
+  aggregate: EvaluationAggregate;
+  model_load_seconds: number | null;
+  wall_time_seconds: number | null;
+  simulated_time_seconds: number | null;
+  error: string | null;
+  output_path: string;
+};
+
+export type EvaluationFilters = {
+  task_id?: string;
+  policy_id?: string;
+  status?: EvaluationStatus;
+  date_from?: string;
+  date_to?: string;
 };
 
 export type TrainingDefaults = {
