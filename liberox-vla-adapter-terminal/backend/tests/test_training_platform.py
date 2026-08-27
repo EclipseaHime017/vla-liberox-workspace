@@ -99,9 +99,14 @@ def test_selection_is_reproducible_and_classifies_branch_suffixes(tmp_path: Path
     )["run_ids"]
     listed = {item["id"]: item for item in current.list_runs()}
     assert listed["human"]["source_type"] == "manual"
-    assert listed["human"]["training_start_step"] == 5
-    assert listed["human"]["training_action_count"] == 12
+    assert listed["human"]["training_start_step"] == 0
+    assert listed["human"]["training_action_count"] == 17
+    assert listed["human"]["resume_step"] == 5
     assert listed["requery"]["source_type"] == "policy_requery"
+    page = current.list_runs_page(page=1, page_size=2)
+    assert page["total"] == 3
+    assert len(page["items"]) == 2
+    assert page["pages"] == 2
 
 
 def test_frozen_dataset_hashes_sources_and_marks_changed_source_broken(tmp_path: Path):

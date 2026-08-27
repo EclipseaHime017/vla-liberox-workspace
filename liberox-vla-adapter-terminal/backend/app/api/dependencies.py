@@ -6,6 +6,7 @@ from ..services.run_service import RunService
 from ..services.dataset_service import DatasetService
 from ..services.offline_job_service import OfflineJobService
 from ..services.training_dataset_service import TrainingDatasetService
+from ..services.trajectory_evaluation_service import TrajectoryEvaluationService
 
 
 def service(request: Request) -> RunService:
@@ -35,6 +36,13 @@ def offline_job_service(request: Request) -> OfflineJobService:
     current = getattr(request.app.state, "offline_job_service", None)
     if current is None:
         raise HTTPException(status_code=503, detail="Offline job service is unavailable")
+    return current
+
+
+def trajectory_evaluation_service(request: Request) -> TrajectoryEvaluationService:
+    current = getattr(request.app.state, "trajectory_evaluation_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Trajectory evaluation service is unavailable")
     return current
 
 

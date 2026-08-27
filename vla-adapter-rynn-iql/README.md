@@ -56,10 +56,11 @@ conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
 ```
 
 Each script loads its adjacent default YAML. `--config` may select an explicit
-file for reproducible experiments. Source trajectories are read-only. A branch
-contributes the actually executed policy prefix of the interrupted action chunk
-plus its new suffix; the rest of the copied parent prefix is excluded. Identical
-interrupted prefixes from sibling branches are de-duplicated.
+file for reproducible experiments. Source trajectories are read-only. Every
+branch retains its complete physical trajectory from step zero through the new
+suffix so RynnValue can score the natural rollout before takeover. The training
+replay de-duplicates physically copied parent prefixes across the parent and
+sibling branches.
 
 The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan
@@ -67,6 +68,16 @@ the rest of `dataset-root`: it verifies and imports exactly the listed members,
 hashes, segment boundaries, and frozen train/validation split. The UI runs
 prepare/training with `vla-liberox` and annotation with `rynnvalue-reward`; it
 does not merge either dependency stack or pass browser-provided shell commands.
+
+Creating or deriving a dataset in the UI still runs preparation. The backend
+launches a detached two-stage job: `prepare_dataset.py` first materializes that
+frozen selection's transition/split manifest under
+`datasets/<dataset_id>/annotations/<job_id>/work/`, then
+`annotate_rewards.py` resolves or computes its RynnValue entries. Durable
+per-trajectory evaluations seed the content cache before this job, so existing
+model evaluations are reused; preparation itself is still required because a
+dataset version has its own members, interrupted chunks, terminal threshold,
+and root-grouped split.
 
 ## TensorBoard monitoring
 
@@ -124,35 +135,72 @@ VLA checkpoint.
 
 ## Data and reward semantics
 
-Completed original trajectories enter replay once and retain their complete
-failed-policy action chunks. If takeover occurs inside a nominal 8-step chunk,
-the branch additionally contributes the genuinely executed prefix ending at
-`resume_step` with `chunk_length=E`, followed by separate `human` or
-`policy_requery` transitions. The unused remainder of the copied branch prefix
-is excluded, and identical interrupted prefixes from sibling branches are
-represented once. No transition crosses an `action_source` boundary. Thus the
+Completed original and branch trajectories are evaluated from step zero. If
+takeover occurs inside a nominal 8-step chunk, the final policy transition ends
+at `resume_step` with its actual `chunk_length=E`, followed by separate `human`
+or `policy_requery` transitions. No transition crosses an `action_source`
+boundary. When the training replay is assembled, physically identical parent
+prefix transitions are represented once across the parent and sibling branches. Thus the
 error-policy continuation and the intervention alternative remain available
 from the same state without treating padding as executed time. If a fixed-duration recording continues after success, `done` may stay
 latched or fluctuate as the object moves out of and back into the goal region.
 `data.success_consecutive_steps` debounces this signal (default 5 steps, or
 250 ms at 20 Hz). A false sample resets the streak; the action that reaches the
 threshold becomes the effective terminal. Unconfirmed pulses are treated as a
-failed trajectory. Later actions are excluded from replay and reward annotation
-without changing the source NPZ. The manifest retains both raw and debounced
+failed trajectory. Later actions are excluded from replay but remain in the
+full-trajectory RynnValue evaluation without changing the source NPZ. The
+manifest retains both raw and debounced
 success diagnostics, recorded/effective lengths, transition source/type, and terminal metadata. The importer groups
 train/validation splits by root trajectory, validates the N+1 state/image
 invariant, and constructs masked 8×7 tensors for variable-duration chunks of
-at most eight actions. Rewards and Bellman bootstrap use the actual
-`chunk_length`, including `gamma ** chunk_length`.
+at most eight actions. Each recorded chunk is one IQL macro-action decision:
+the actual `chunk_length` selects `s[t+L]` and controls the action mask, while
+the sparse reward and Bellman discount are each applied once per chunk.
 
 RynnValue receives only upright `agentview` frames and the BDDL task prompt. At
 each action-chunk boundary, the adapter follows the pinned official inference
 program: it uniformly resamples the visual prefix ending at that boundary and
 reads the last value slot. `annotation_batch_size: 1` is the 16 GB default;
-sequences longer than 64 boundaries use overlapping windows. Environment `done` is
-the sole success/terminal authority; language `Success` output is diagnostic
-only. Chunk reward is the discounted `-1`-until-success sparse return plus
-potential shaping `κ(γ^L Φ(s')-Φ(s))`, where `Φ=-remaining_seconds`.
+every boundary is evaluated from its complete prefix, so long trajectories are
+not merged by averaging overlapping windows. Evaluation schema v5 records the
+official decoded absolute distance, absolute logits/entropy, decoded relative
+distance, relative logits, and exact generated Analysis text/token IDs. Parsed
+Description / Match / Success values are display-only. Environment `done` is
+the sole success/terminal authority. `pbrs_shaping_reward` stores the raw,
+unweighted RynnValue Shape Reward `γΦ(s')-Φ(s)`, while `pbrs_chunk_reward`
+stores the Final Reward `r_sparse+κ·r_shape`. Here `r_sparse` is `-1` for an
+incomplete macro action and `0` when that chunk completes the task, and
+`Φ=-absolute temporal distance`. Valid schema-v4 sidecars reuse their complete
+official model heads and are migrated by recomputing only these deterministic
+reward arrays; RynnValue is not run again. Chunks recorded
+after the confirmed terminal are inspection-only and never enter ReplayDataset.
+
+The training default uses four uniformly sampled prefix frames, matching the
+offline reward-relabeling protocol in paper Appendix B.3. Upstream's standalone
+trend-video demo defaults to 64 frames; that demo default is not the paper's
+IQL relabeling setting.
+
+IQL update semantics follow the pinned `pi-rl` implementation: V is first fit
+by expectile regression against the minimum frozen target Q, online Q is then
+fit with the newly updated next-state V, target Q receives a Polyak update, and
+policy weights use the updated online `min(Q1,Q2)-V`. Auxiliary Q/V networks use
+Adam without weight decay. The VLA component optimizer uses AdamW with
+`betas=(0.9,0.95)`, `eps=1e-8`, weight decay `1e-10`, and gradient clipping at
+1.0.
+
+This is an algorithm-compatible port, not a layer-for-layer reproduction of
+the paper's π0.5 experiment. Like the paper, one predicted action chunk is one
+IQL decision step and receives one reward/discount. The paper uses a 16-step flow-matching policy,
+224px ResNet-18 IQL encoder, absolute joint actions, and no proprioception. The
+Object-Pro integration necessarily uses masked L1 on its 8×7 continuous action
+head, 8D proprio, normalized OSC_POSE execution, and a lighter two-view critic
+for the validated 16 GB profile. Interrupted or terminal chunks retain their
+actual `L` for padding masks and `s[t+L]`, but they are still a single macro
+decision and therefore do not introduce `gamma ** L`.
+The same profile does not claim paper-exact batch 64, 224px inputs, random-crop
+augmentation, 2,000-step policy-LR warmup, or policy EMA 0.99; those require a
+separate reproduction profile instead of being silently attributed to this
+VLA-Adapter port.
 
 The pinned 4B checkpoint is a BF16 RynnValue model, not a separately quantized
 Qwen model. Its Qwen text hidden width is 2560; eight consecutive value-token
@@ -170,13 +218,15 @@ dataset/reward hashes and workspace Git commit.
 
 ## Outputs and safety boundaries
 
-- `outputs/work/dataset_manifest.json`: schema-v2 validated read-only replay
+- `outputs/work/dataset_manifest.json`: schema-v4 validated read-only replay
   index, variable-duration transition metadata and source hashes; source runs
   are never rewritten. Older prepared manifests must be prepared and annotated
   again before training.
 - `paths.annotation_cache/<content_hash>.{npz,json}`: atomic, per-trajectory
-  RynnValue values, entropy, PBRS rewards and provenance. Dataset identity is
-  excluded from the key, so derived dataset versions reuse unchanged members.
+  official absolute/relative decoded values and logits, absolute entropy, exact
+  Analysis generation, paper-defined PBRS rewards, and provenance.
+  Dataset identity is excluded from the key, so derived dataset versions reuse
+  unchanged members.
 - `outputs/work/rewards/reward_manifest.json`: the current dataset's complete
   reference index into that cache; partial indexes are also written while an
   annotation job is running.

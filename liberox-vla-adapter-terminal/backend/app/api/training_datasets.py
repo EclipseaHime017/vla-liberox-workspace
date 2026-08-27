@@ -40,13 +40,22 @@ async def preview(body: DatasetPreviewRequest, request: Request):
 @router.post("", status_code=201)
 async def create(body: CreateTrainingDatasetRequest, request: Request):
     try:
-        return training_dataset_service(request).create(
+        dataset = training_dataset_service(request).create(
             name=body.name, task_id=body.task_id,
             selection=body.selection.model_dump(),
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
             success_consecutive_steps=body.success_consecutive_steps,
         )
+        try:
+            job = offline_job_service(request).start_annotation(dataset["id"])
+            dataset = training_dataset_service(request).get(dataset["id"])
+            dataset["automatic_evaluation_job_id"] = job["id"]
+        except Exception as exc:
+            # Freezing remains successful if another GPU job is active.  The
+            # same non-overwriting evaluation can be resumed from the UI.
+            dataset["automatic_evaluation_error"] = str(exc)
+        return dataset
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -54,12 +63,19 @@ async def create(body: CreateTrainingDatasetRequest, request: Request):
 @router.post("/{dataset_id}/derive", status_code=201)
 async def derive(dataset_id: str, body: DeriveTrainingDatasetRequest, request: Request):
     try:
-        return training_dataset_service(request).derive(
+        dataset = training_dataset_service(request).derive(
             dataset_id, name=body.name, selection=body.selection.model_dump(),
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
             success_consecutive_steps=body.success_consecutive_steps,
         )
+        try:
+            job = offline_job_service(request).start_annotation(dataset["id"])
+            dataset = training_dataset_service(request).get(dataset["id"])
+            dataset["automatic_evaluation_job_id"] = job["id"]
+        except Exception as exc:
+            dataset["automatic_evaluation_error"] = str(exc)
+        return dataset
     except Exception as exc:
         raise http_error(exc) from exc
 

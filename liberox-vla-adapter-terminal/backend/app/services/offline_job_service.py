@@ -52,10 +52,14 @@ def _sha256(path: Path) -> str:
 
 
 class OfflineJobService:
-    def __init__(self, ui_config: Any, manager: Any, datasets: Any):
+    def __init__(
+        self, ui_config: Any, manager: Any, datasets: Any,
+        trajectory_evaluations: Any | None = None,
+    ):
         self.ui_config = ui_config
         self.manager = manager
         self.datasets = datasets
+        self.trajectory_evaluations = trajectory_evaluations
         self.project_root = ui_config.project_root
         self.jobs_root = self.project_root / "jobs"
         self.training_root = self.project_root / "training"
@@ -201,6 +205,37 @@ class OfflineJobService:
                     )
             except Exception:
                 pass
+        if (
+            job["kind"] in {"annotation", "trajectory_evaluation"}
+            and job["status"] == "COMPLETED"
+            and self.trajectory_evaluations is not None
+            and not job.get("trajectory_binding")
+            and not job.get("trajectory_binding_error")
+        ):
+            work = Path(str(job["output_path"])) / "work"
+            try:
+                binding = self.trajectory_evaluations.bind(
+                    work / "dataset_manifest.json",
+                    work / "rewards" / "reward_manifest.json",
+                    overwrite=bool(job.get("parameters", {}).get("overwrite", False)),
+                )
+                job["trajectory_binding"] = binding
+                atomic_write_json(path, job)
+                self.repository.upsert(job, path)
+            except Exception as exc:
+                message = f"Cannot bind trajectory evaluations: {type(exc).__name__}: {exc}"
+                if job["kind"] == "trajectory_evaluation":
+                    job["status"] = "FAILED"
+                    job["error"] = message
+                    job["completed_at"] = _utc_now()
+                else:
+                    # Older dataset annotation directories may already have
+                    # been pruned.  Keep their historical completion status;
+                    # only new standalone evaluation jobs require binding as
+                    # part of their success contract.
+                    job["trajectory_binding_error"] = message
+                atomic_write_json(path, job)
+                self.repository.upsert(job, path)
         elif job["kind"] == "evaluation":
             manifest = Path(str(job.get("output_path") or "")) / "evaluation.json"
             try:
@@ -473,9 +508,141 @@ class OfflineJobService:
             finally:
                 self.launch_reserved = False
 
+    def start_trajectory_evaluation(
+        self,
+        *,
+        task_id: str,
+        run_ids: list[str] | None,
+        overwrite: bool,
+    ) -> dict[str, Any]:
+        """Evaluate selected trajectories independently from frozen datasets."""
+        with self.lock:
+            runs = self.datasets.list_runs(task_id=task_id, eligible=True)
+            available = {item["id"]: item for item in runs}
+            requested = list(available) if run_ids is None else list(run_ids)
+            if not requested:
+                raise ValueError("No eligible trajectories were selected")
+            if len(requested) != len(set(requested)):
+                raise ValueError("run_ids must not contain duplicates")
+            missing = [run_id for run_id in requested if run_id not in available]
+            if missing:
+                raise ValueError(f"Unavailable trajectories: {missing}")
+            skipped: list[str] = []
+            selected = requested
+            if not overwrite and self.trajectory_evaluations is not None:
+                selected = []
+                for run_id in requested:
+                    if self.trajectory_evaluations.status(available[run_id])["status"] == "READY":
+                        skipped.append(run_id)
+                    else:
+                        selected.append(run_id)
+            if not selected:
+                return {
+                    "kind": "trajectory_evaluation",
+                    "status": "COMPLETED",
+                    "job": None,
+                    "selected_count": 0,
+                    "skipped_count": len(skipped),
+                    "skipped_run_ids": skipped,
+                    "message": "All selected trajectories already have reusable evaluations",
+                }
+            self._prepare_launch()
+            try:
+                job = self._launch_trajectory_evaluation(
+                    task_id=task_id, run_ids=selected, overwrite=overwrite,
+                    skipped=skipped,
+                )
+            finally:
+                self.launch_reserved = False
+            return {
+                "kind": "trajectory_evaluation",
+                "status": job["status"],
+                "job": job,
+                "selected_count": len(selected),
+                "skipped_count": len(skipped),
+                "skipped_run_ids": skipped,
+            }
+
+    def _launch_trajectory_evaluation(
+        self,
+        *,
+        task_id: str,
+        run_ids: list[str],
+        overwrite: bool,
+        skipped: list[str],
+    ) -> dict[str, Any]:
+        job_id = f"rynn_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        job_dir = self.jobs_root / job_id
+        job_dir.mkdir(parents=True, exist_ok=False)
+        output_root = self.project_root / "trajectory-evaluations" / job_id
+        work_dir = output_root / "work"
+        work_dir.mkdir(parents=True, exist_ok=False)
+        raw = copy.deepcopy(self._load_base_config())
+        raw["data"]["task_ids"] = [task_id]
+        raw["paths"]["annotation_cache"] = str(self.cache_root.resolve())
+        raw["paths"]["work_dir"] = str(work_dir.resolve())
+        selection_path = job_dir / "trajectory_selection.json"
+        selection = self.datasets.write_evaluation_selection(
+            selection_path,
+            task_id=task_id,
+            run_ids=run_ids,
+            split_seed=int(raw["data"]["split_seed"]),
+            validation_fraction=float(raw["data"]["validation_fraction"]),
+            success_consecutive_steps=int(raw["data"]["success_consecutive_steps"]),
+        )
+        raw["data"]["selection_manifest"] = str(selection_path.resolve())
+        config_path = job_dir / "effective_config.yaml"
+        atomic_write_yaml(config_path, raw)
+        scripts = self.ui_config.offline_rl_root / "scripts"
+        annotate_argv = [
+            "python", str(scripts / "annotate_rewards.py"), "--config", str(config_path),
+        ]
+        if overwrite:
+            annotate_argv.append("--overwrite")
+        stages = [
+            {
+                "id": "prepare", "label": "准备轨迹评价输入",
+                "environment": self.ui_config.train_environment,
+                "argv": [
+                    "python", str(scripts / "prepare_dataset.py"),
+                    "--config", str(config_path),
+                ],
+                "cwd": str(self.ui_config.offline_rl_root),
+            },
+            {
+                "id": "annotate", "label": "RynnValue-4B 轨迹评价",
+                "environment": self.ui_config.reward_environment,
+                "argv": annotate_argv,
+                "cwd": str(self.ui_config.offline_rl_root),
+            },
+        ]
+        try:
+            return self._new_job(
+                kind="trajectory_evaluation", dataset_id=None, stages=stages,
+                config_path=config_path, output_path=output_root,
+                parameters={
+                    "task_id": task_id,
+                    "run_ids": run_ids,
+                    "member_count": len(run_ids),
+                    "skipped_run_ids": skipped,
+                    "overwrite": overwrite,
+                    "model": raw["reward"]["model"],
+                    "revision": raw["reward"]["revision"],
+                    "selection_sha256": selection["dataset_sha256"],
+                },
+            )
+        except Exception:
+            shutil.rmtree(output_root, ignore_errors=True)
+            raise
+
     def _launch_annotation(
         self, dataset_id: str, dataset: dict[str, Any]
     ) -> dict[str, Any]:
+        if self.trajectory_evaluations is not None:
+            self.trajectory_evaluations.seed_cache(
+                [member["run_id"] for member in dataset.get("members", [])],
+                self.cache_root,
+            )
         job_id = f"ann_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         job_dir = self.jobs_root / job_id
         job_dir.mkdir(parents=True, exist_ok=False)

@@ -23,6 +23,20 @@ from .io import atomic_json, sha256_file, stable_hash
 
 LOG = logging.getLogger(__name__)
 
+# v5 makes every action chunk one paper-IQL decision step: sparse reward and
+# Bellman discount are applied once per macro action, while the stored shape
+# reward is the unweighted PBRS term. v4 official model outputs remain reusable
+# because only the deterministic reward reduction changed.
+ANNOTATION_SCHEMA_VERSION = 5
+REUSABLE_OFFICIAL_OUTPUT_SCHEMA_VERSIONS = frozenset({4, 5})
+OFFICIAL_OUTPUT_KEYS = (
+    "absolute_temporal_distance_seconds",
+    "absolute_value_entropy_nats",
+    "absolute_value_logits",
+    "relative_temporal_distance_seconds",
+    "relative_value_logits",
+)
+
 
 def validate_rynnvalue_config_contract(config: Any, processor: Any) -> dict[str, Any]:
     """Validate the pinned RynnValue/Qwen value-head interface before loading weights."""
@@ -48,6 +62,25 @@ def validate_rynnvalue_config_contract(config: Any, processor: Any) -> dict[str,
     bins = int(config.value_tokenizer_config.bins)
     if bins < 2:
         raise RuntimeError(f"RynnValue value tokenizer has invalid bins={bins}")
+    relative_head_config = getattr(config, "relative_value_head_config", None)
+    relative_tokenizer_config = getattr(config, "relative_value_tokenizer_config", None)
+    if relative_head_config is None or relative_tokenizer_config is None:
+        raise RuntimeError(
+            "RynnValue checkpoint has no relative temporal-distance head; the complete "
+            "official output contract cannot be recorded"
+        )
+    relative_repeat = int(getattr(config, "relative_value_token_repeat", 0))
+    processor_relative_repeat = int(getattr(processor, "relative_value_token_repeat", 0))
+    if relative_repeat < 1 or processor_relative_repeat != relative_repeat:
+        raise RuntimeError(
+            "RynnValue processor/model relative-value-token repeat mismatch: "
+            f"processor={processor_relative_repeat}, model={relative_repeat}"
+        )
+    relative_bins = int(relative_tokenizer_config.bins)
+    if relative_bins < 2:
+        raise RuntimeError(
+            f"RynnValue relative value tokenizer has invalid bins={relative_bins}"
+        )
     return {
         "model_type": config.model_type,
         "qwen_hidden_size": hidden_size,
@@ -56,11 +89,18 @@ def validate_rynnvalue_config_contract(config: Any, processor: Any) -> dict[str,
         "value_head_type": str(head_config.head_type),
         "value_bins": bins,
         "value_head_count": int(config.num_value_heads),
+        "relative_value_token_repeat": relative_repeat,
+        "relative_value_head_input_size": hidden_size * relative_repeat,
+        "relative_value_head_type": str(relative_head_config.head_type),
+        "relative_value_bins": relative_bins,
     }
 
 
 def validate_rynnvalue_runtime_dtype(
-    model: Any, requested_dtype: Any, expected_head_input_size: int
+    model: Any,
+    requested_dtype: Any,
+    expected_head_input_size: int,
+    expected_relative_head_input_size: int | None = None,
 ) -> dict[str, Any]:
     """Reject mixed FP32/BF16 models before the first expensive annotation call."""
     heads = getattr(model, "value_heads", None)
@@ -76,6 +116,24 @@ def validate_rynnvalue_runtime_dtype(
             "RynnValue value-head input does not match the Qwen hidden-state contract: "
             f"loaded={int(weight.shape[1])}, expected={int(expected_head_input_size)}"
         )
+    relative_weight = None
+    if expected_relative_head_input_size is not None:
+        relative_head = getattr(model, "relative_value_head", None)
+        if relative_head is None:
+            raise RuntimeError("Loaded RynnValue model has no dedicated relative value head")
+        relative_projection = relative_head.proj
+        relative_input = getattr(relative_projection, "input_layer", relative_projection)
+        relative_weight = getattr(relative_input, "weight", None)
+        if relative_weight is None or relative_weight.ndim != 2:
+            raise RuntimeError(
+                "Loaded RynnValue relative value head has an unsupported input projection"
+            )
+        if int(relative_weight.shape[1]) != int(expected_relative_head_input_size):
+            raise RuntimeError(
+                "RynnValue relative value-head input does not match the Qwen hidden-state "
+                f"contract: loaded={int(relative_weight.shape[1])}, "
+                f"expected={int(expected_relative_head_input_size)}"
+            )
 
     dtype_counts: dict[str, int] = defaultdict(int)
     mismatches: list[str] = []
@@ -90,18 +148,26 @@ def validate_rynnvalue_runtime_dtype(
             "RynnValue contains floating parameters that were not converted to the requested "
             f"dtype {requested_dtype}: {', '.join(mismatches)}"
         )
-    return {
+    result = {
         "runtime_dtype": str(requested_dtype),
         "floating_parameter_dtypes": dict(dtype_counts),
         "value_head_input_shape": list(weight.shape),
         "value_head_dtype": str(weight.dtype),
     }
+    if relative_weight is not None:
+        result.update({
+            "relative_value_head_input_shape": list(relative_weight.shape),
+            "relative_value_head_dtype": str(relative_weight.dtype),
+        })
+    return result
 
 
 class TemporalValueAnnotator(Protocol):
     metadata: dict[str, Any]
 
-    def predict(self, prompt: str, frames: Sequence[np.ndarray]) -> tuple[np.ndarray, np.ndarray]: ...
+    def predict(self, prompt: str, frames: Sequence[np.ndarray]) -> dict[str, np.ndarray]: ...
+
+    def analyze(self, prompt: str, frames: Sequence[np.ndarray]) -> dict[str, Any]: ...
 
 
 def reward_view(frame: np.ndarray, orientation: str) -> np.ndarray:
@@ -205,7 +271,10 @@ class RynnValueAnnotator:
         # model so custom heads cannot remain FP32 beside a BF16 Qwen backbone.
         self.model = model.to(device=reward["device"], dtype=dtype).eval()
         runtime_contract = validate_rynnvalue_runtime_dtype(
-            self.model, dtype, model_contract["value_head_input_size"]
+            self.model,
+            dtype,
+            model_contract["value_head_input_size"],
+            model_contract["relative_value_head_input_size"],
         )
         self.torch = torch
         self.device = reward["device"]
@@ -242,6 +311,7 @@ class RynnValueAnnotator:
         self.camera_description = reward["camera_description"]
         self.max_frames = int(reward["max_frames"])
         self.batch_size = int(reward["annotation_batch_size"])
+        self.value_head_count = int(model_contract["value_head_count"])
 
     def _inputs(self, prompt: str, frames: Sequence[np.ndarray]):
         images = [Image.fromarray(np.asarray(frame, dtype=np.uint8)) for frame in frames]
@@ -277,22 +347,72 @@ class RynnValueAnnotator:
         }
 
     @staticmethod
-    def _last_slot(tensor: Any, sample_count: int) -> Any:
-        # This is the shape reduction used by the pinned official inference
-        # script and supports both single and ensembled value heads.
-        if tensor.dim() == 2 and tensor.shape[0] == 1:
-            tensor = tensor.reshape(sample_count, -1)
-        if tensor.dim() == 3:
-            tensor = tensor.mean(dim=0)
-        if tensor.dim() == 2 and tensor.shape[-1] > 1:
-            tensor = tensor[:, -1]
-        elif tensor.dim() == 2:
-            tensor = tensor[:, 0]
-        return tensor.float().reshape(-1)
+    def _absolute_last_slots(tensor: Any, sample_count: int, head_count: int) -> Any:
+        """Select the official demo's last prefix slot without averaging heads."""
+        tensor = tensor.float()
+        if tensor.dim() == 1 and head_count == 1:
+            tensor = tensor.reshape(1, sample_count, -1)
+        elif tensor.dim() == 2 and tensor.shape[0] == head_count:
+            tensor = tensor.reshape(head_count, sample_count, -1)
+        elif tensor.dim() == 3 and tensor.shape[:2] == (head_count, sample_count):
+            pass
+        else:
+            raise ValueError(
+                "Unexpected RynnValue absolute prediction shape: "
+                f"{tuple(tensor.shape)} for samples={sample_count}, heads={head_count}"
+            )
+        return tensor[:, :, -1].transpose(0, 1).contiguous()
 
-    def predict(self, prompt: str, frames: Sequence[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-        values: list[float] = []
-        entropies: list[float] = []
+    @staticmethod
+    def _absolute_last_logits(tensor: Any, sample_count: int, head_count: int) -> Any:
+        tensor = tensor.float()
+        if tensor.dim() == 2 and head_count == 1:
+            tensor = tensor.reshape(1, sample_count, -1, tensor.shape[-1])
+        elif tensor.dim() == 3 and tensor.shape[0] == head_count:
+            tensor = tensor.reshape(head_count, sample_count, -1, tensor.shape[-1])
+        elif tensor.dim() == 4 and tensor.shape[:2] == (head_count, sample_count):
+            pass
+        else:
+            raise ValueError(
+                "Unexpected RynnValue absolute-logit shape: "
+                f"{tuple(tensor.shape)} for samples={sample_count}, heads={head_count}"
+            )
+        return tensor[:, :, -1, :].permute(1, 0, 2).contiguous()
+
+    @staticmethod
+    def _relative_last_slots(tensor: Any, sample_count: int) -> Any:
+        tensor = tensor.float()
+        if tensor.dim() == 1:
+            tensor = tensor.reshape(sample_count, -1)
+        elif tensor.dim() == 2 and tensor.shape[0] == sample_count:
+            pass
+        else:
+            raise ValueError(
+                "Unexpected RynnValue relative prediction shape: "
+                f"{tuple(tensor.shape)} for samples={sample_count}"
+            )
+        return tensor[:, -1].contiguous()
+
+    @staticmethod
+    def _relative_last_logits(tensor: Any, sample_count: int) -> Any:
+        tensor = tensor.float()
+        if tensor.dim() == 2:
+            tensor = tensor.reshape(sample_count, -1, tensor.shape[-1])
+        elif tensor.dim() == 3 and tensor.shape[0] == sample_count:
+            pass
+        else:
+            raise ValueError(
+                "Unexpected RynnValue relative-logit shape: "
+                f"{tuple(tensor.shape)} for samples={sample_count}"
+            )
+        return tensor[:, -1, :].contiguous()
+
+    def predict(self, prompt: str, frames: Sequence[np.ndarray]) -> dict[str, np.ndarray]:
+        absolute_values: list[np.ndarray] = []
+        absolute_entropies: list[np.ndarray] = []
+        absolute_logits: list[np.ndarray] = []
+        relative_values: list[np.ndarray] = []
+        relative_logits: list[np.ndarray] = []
         samples = []
         for end_index in range(len(frames)):
             samples.append(self._prefix_inputs(prompt, frames, end_index))
@@ -300,19 +420,44 @@ class RynnValueAnnotator:
                 continue
             with self.torch.inference_mode():
                 output = self.model(**self._batch_kwargs(samples))
-            predicted = self._last_slot(output.value.pred_value, len(samples))
-            entropy_value = getattr(output.value, "entropy", None)
-            entropy = (
-                self.torch.zeros_like(predicted)
-                if entropy_value is None
-                else self._last_slot(entropy_value, len(samples))
+            if output.value.pred_value is None or output.value.entropy is None:
+                raise ValueError("RynnValue did not return its official absolute value outputs")
+            if output.value.logits is None:
+                raise ValueError("RynnValue did not return absolute value-head logits")
+            if output.relative.pred_value is None or output.relative.logits is None:
+                raise ValueError("RynnValue did not return its official relative value outputs")
+            count = len(samples)
+            absolute_values.append(
+                self._absolute_last_slots(
+                    output.value.pred_value, count, self.value_head_count
+                ).detach().cpu().numpy()
             )
-            if predicted.numel() != len(samples) or entropy.numel() != len(samples):
-                raise ValueError("RynnValue returned an unexpected prefix batch shape")
-            values.extend(predicted.detach().cpu().tolist())
-            entropies.extend(entropy.detach().cpu().tolist())
+            absolute_entropies.append(
+                self._absolute_last_slots(
+                    output.value.entropy, count, self.value_head_count
+                ).detach().cpu().numpy()
+            )
+            absolute_logits.append(
+                self._absolute_last_logits(
+                    output.value.logits, count, self.value_head_count
+                ).detach().cpu().numpy()
+            )
+            relative_values.append(
+                self._relative_last_slots(output.relative.pred_value, count)
+                .detach().cpu().numpy()
+            )
+            relative_logits.append(
+                self._relative_last_logits(output.relative.logits, count)
+                .detach().cpu().numpy()
+            )
             samples.clear()
-        return np.asarray(values, dtype=np.float32), np.asarray(entropies, dtype=np.float32)
+        return {
+            "absolute_temporal_distance_seconds": np.concatenate(absolute_values).astype(np.float32),
+            "absolute_value_entropy_nats": np.concatenate(absolute_entropies).astype(np.float32),
+            "absolute_value_logits": np.concatenate(absolute_logits).astype(np.float32),
+            "relative_temporal_distance_seconds": np.concatenate(relative_values).astype(np.float32),
+            "relative_value_logits": np.concatenate(relative_logits).astype(np.float32),
+        }
 
     def analyze(self, prompt: str, frames: Sequence[np.ndarray]) -> dict[str, Any]:
         inputs = self._prefix_inputs(prompt, frames, len(frames) - 1)
@@ -338,57 +483,137 @@ class RynnValueAnnotator:
             return found.group(1).strip() if found else None
 
         return {
-            "text": text,
-            "description": match(r"-\s*Video Description:\s*(.+)"),
-            "match": match(r"-\s*Match:\s*(Yes|No)"),
-            "success": match(r"-\s*Success:\s*(Yes|No)"),
+            "generated_text": text,
+            "generated_token_ids": generated[0, input_ids.shape[1]:]
+            .detach().cpu().to(self.torch.int64).tolist(),
+            # Parsing is explicitly display-only. The exact official generation
+            # above remains the persisted source of truth.
+            "parsed_for_display": {
+                "description": match(r"-\s*Video Description:\s*(.+)"),
+                "match": match(r"-\s*Match:\s*(Yes|No)"),
+                "success": match(r"-\s*Success:\s*(Yes|No)"),
+            },
         }
 
 
-def annotation_windows(count: int, maximum: int, overlap: int) -> list[tuple[int, int]]:
-    if count < 1:
-        raise ValueError("At least one reward boundary is required")
-    if count <= maximum:
-        return [(0, count)]
-    stride = maximum - overlap
-    starts = list(range(0, max(1, count - maximum + 1), stride))
-    final = count - maximum
-    if starts[-1] != final:
-        starts.append(final)
-    return [(start, min(count, start + maximum)) for start in starts]
+def validate_official_outputs(
+    outputs: dict[str, np.ndarray], boundary_count: int
+) -> dict[str, np.ndarray]:
+    required = {
+        "absolute_temporal_distance_seconds": 2,
+        "absolute_value_entropy_nats": 2,
+        "absolute_value_logits": 3,
+        "relative_temporal_distance_seconds": 1,
+        "relative_value_logits": 2,
+    }
+    if not isinstance(outputs, dict):
+        raise TypeError("RynnValue annotator must return the complete official output mapping")
+    if set(outputs) != set(required):
+        raise ValueError(
+            "RynnValue official output keys do not match the recorded contract: "
+            f"{sorted(outputs)}"
+        )
+    normalized: dict[str, np.ndarray] = {}
+    for name, dimensions in required.items():
+        value = np.asarray(outputs[name], dtype=np.float32)
+        if value.ndim != dimensions or value.shape[0] != boundary_count:
+            raise ValueError(
+                f"RynnValue {name} shape {value.shape} does not match "
+                f"{boundary_count} boundaries and {dimensions} dimensions"
+            )
+        if not np.isfinite(value).all():
+            raise ValueError(f"RynnValue {name} contains NaN or Inf")
+        normalized[name] = value
+    if normalized["absolute_temporal_distance_seconds"].shape != normalized[
+        "absolute_value_entropy_nats"
+    ].shape:
+        raise ValueError("RynnValue absolute distance/entropy head shapes do not match")
+    if normalized["absolute_value_logits"].shape[:2] != normalized[
+        "absolute_temporal_distance_seconds"
+    ].shape:
+        raise ValueError("RynnValue absolute logits do not match decoded head outputs")
+    return normalized
 
 
-def annotate_values(
-    annotator: TemporalValueAnnotator,
-    prompt: str,
-    frames: Sequence[np.ndarray],
-    maximum: int,
-    overlap: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    sums = np.zeros(len(frames), dtype=np.float64)
-    entropy_sums = np.zeros(len(frames), dtype=np.float64)
-    counts = np.zeros(len(frames), dtype=np.int32)
-    for start, end in annotation_windows(len(frames), maximum, overlap):
-        values, entropy = annotator.predict(prompt, frames[start:end])
-        if values.shape != (end - start,) or entropy.shape != (end - start,):
-            raise ValueError("RynnValue returned an unexpected number of temporal predictions")
-        if not np.isfinite(values).all() or not np.isfinite(entropy).all():
-            raise ValueError("RynnValue returned NaN or Inf")
-        sums[start:end] += values
-        entropy_sums[start:end] += entropy
-        counts[start:end] += 1
-    if np.any(counts == 0):
-        raise RuntimeError("Annotation windows did not cover every boundary")
-    return (sums / counts).astype(np.float32), (entropy_sums / counts).astype(np.float32)
+def sparse_macro_reward(done: np.ndarray, start: int, length: int) -> float:
+    """Return the paper sparse reward for one action-chunk transition."""
+    terminal = start + length - 1
+    if length < 1 or start < 0 or terminal >= len(done):
+        raise ValueError(
+            f"Invalid macro-action interval [{start}, {start + length}) for {len(done)} actions"
+        )
+    return 0.0 if bool(done[terminal]) else -1.0
 
 
-def sparse_chunk_return(done: np.ndarray, start: int, length: int, gamma: float) -> float:
-    total = 0.0
-    for offset in range(length):
-        # Paper convention: -1 before completion, 0 at a successful terminal.
-        step_cost = 0.0 if bool(done[start + offset]) else -1.0
-        total += (gamma ** offset) * step_cost
-    return total
+def chunk_reward_components(
+    done: np.ndarray,
+    start: int,
+    length: int,
+    value_start: float,
+    value_end: float,
+    gamma: float,
+    shaping_weight: float,
+) -> tuple[float, float, float]:
+    """Return paper sparse, raw PBRS shape, and final rewards for one macro action."""
+    sparse = sparse_macro_reward(done, start, length)
+    phi_start, phi_end = -float(value_start), -float(value_end)
+    pbrs_shaping = gamma * phi_end - phi_start
+    return sparse, pbrs_shaping, sparse + shaping_weight * pbrs_shaping
+
+
+def _reusable_official_sidecar(
+    episode: dict[str, Any], reward_cfg: dict[str, Any]
+) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, Any]] | None:
+    """Load hash-checked v4/v5 official heads without running RynnValue again."""
+    trajectory = Path(episode["trajectory_path"])
+    sidecar = trajectory.parent / "rynnvalue_evaluation.json"
+    values = trajectory.parent / "rynnvalue_evaluation.npz"
+    if not sidecar.is_file() or sidecar.is_symlink() or not values.is_file() or values.is_symlink():
+        return None
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        payload.get("schema_version") not in REUSABLE_OFFICIAL_OUTPUT_SCHEMA_VERSIONS
+        or payload.get("run_id") != episode["run_id"]
+        or payload.get("trajectory_sha256") != episode["trajectory_sha256"]
+        or payload.get("observations_sha256") != episode["observations_sha256"]
+        or payload.get("values_sha256") != sha256_file(values)
+    ):
+        return None
+    annotator_metadata = payload.get("annotator")
+    official_metadata = payload.get("official_outputs")
+    if not isinstance(annotator_metadata, dict) or not isinstance(official_metadata, dict):
+        return None
+    requested_revision = annotator_metadata.get("requested_revision")
+    resolved_revision = annotator_metadata.get("resolved_revision")
+    previous_reward_cfg = payload.get("reward_config")
+    if not isinstance(previous_reward_cfg, dict):
+        return None
+    if (
+        annotator_metadata.get("model") != reward_cfg.get("model")
+        or reward_cfg.get("revision") not in {requested_revision, resolved_revision}
+        or official_metadata.get("prefix_image_slots") != int(reward_cfg["max_frames"])
+        or previous_reward_cfg.get("robot_description") != reward_cfg.get("robot_description")
+        or previous_reward_cfg.get("camera_description") != reward_cfg.get("camera_description")
+    ):
+        return None
+    expected_boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
+    try:
+        with np.load(values, allow_pickle=False) as arrays:
+            boundaries = np.asarray(arrays["boundary_steps"], dtype=np.int64)
+            if not np.array_equal(boundaries, expected_boundaries):
+                return None
+            official_outputs = validate_official_outputs(
+                {name: arrays[name] for name in OFFICIAL_OUTPUT_KEYS}, len(boundaries)
+            )
+    except (KeyError, OSError, ValueError):
+        return None
+    analysis = official_metadata.get("analysis")
+    if not isinstance(analysis, dict):
+        return None
+    return official_outputs, analysis, annotator_metadata
 
 
 def shaped_chunk_reward(
@@ -400,34 +625,58 @@ def shaped_chunk_reward(
     gamma: float,
     shaping_weight: float,
 ) -> float:
-    phi_start, phi_end = -float(value_start), -float(value_end)
-    return sparse_chunk_return(done, start, length, gamma) + shaping_weight * (
-        (gamma ** length) * phi_end - phi_start
-    )
+    return chunk_reward_components(
+        done, start, length, value_start, value_end, gamma, shaping_weight,
+    )[2]
 
 
-def annotate_manifest(config: LoadedConfig, annotator: TemporalValueAnnotator | None = None) -> Path:
+def annotate_manifest(
+    config: LoadedConfig,
+    annotator: TemporalValueAnnotator | None = None,
+    *,
+    overwrite: bool = False,
+) -> Path:
     manifest = load_manifest(config)
     reward_cfg = config.section("reward")
-    annotator = annotator or RynnValueAnnotator(config)
+    active_annotator = annotator
+    manifest_annotator_metadata: dict[str, Any] | None = None
+
+    def live_annotator() -> TemporalValueAnnotator:
+        nonlocal active_annotator
+        if active_annotator is None:
+            active_annotator = RynnValueAnnotator(config)
+        return active_annotator
+
     reward_dir = Path(config.section("paths")["work_dir"]) / "rewards"
     reward_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(config.section("paths")["annotation_cache"])
     cache_dir.mkdir(parents=True, exist_ok=True)
     index: list[dict[str, Any]] = []
     for episode in manifest["episodes"]:
+        reusable = (
+            _reusable_official_sidecar(episode, reward_cfg)
+            if annotator is None and not overwrite else None
+        )
+        episode_annotator_metadata = (
+            reusable[2] if reusable is not None else live_annotator().metadata
+        )
+        if manifest_annotator_metadata is None:
+            manifest_annotator_metadata = episode_annotator_metadata
+        elif stable_hash(manifest_annotator_metadata) != stable_hash(episode_annotator_metadata):
+            raise ValueError("Prepared trajectories use incompatible RynnValue evaluator metadata")
         source_key = stable_hash({
+            "annotation_schema_version": ANNOTATION_SCHEMA_VERSION,
             "run": episode["run_id"],
             "trajectory": episode["trajectory_sha256"],
             "observations": episode["observations_sha256"],
             "prompt": episode["prompt"],
             "boundaries": episode["reward_boundaries"],
             "reward_config": reward_cfg,
-            "model": annotator.metadata,
+            "model": episode_annotator_metadata,
         })
         output = cache_dir / f"{source_key}.npz"
         meta_path = cache_dir / f"{source_key}.json"
-        if output.is_file() and meta_path.is_file():
+        if not overwrite and output.is_file() and meta_path.is_file():
             try:
                 current = json.loads(meta_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -439,64 +688,105 @@ def annotate_manifest(config: LoadedConfig, annotator: TemporalValueAnnotator | 
             ):
                 index.append(current)
                 continue
-        with np.load(episode["observations_path"], allow_pickle=False) as images:
-            raw = images["agentview_image"]
-            boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
-            frames = [reward_view(raw[int(index)], episode["observation_orientation"]) for index in boundaries]
-        values, entropy = annotate_values(
-            annotator, episode["prompt"], frames,
-            int(reward_cfg["max_frames"]), int(reward_cfg["window_overlap"]),
-        )
-        analysis = None
-        analyze = getattr(annotator, "analyze", None)
-        if callable(analyze):
-            maximum = int(reward_cfg["max_frames"])
-            if len(frames) > maximum:
-                sample = np.linspace(0, len(frames) - 1, maximum, dtype=np.int64)
-                analysis_frames = [frames[int(index)] for index in sample]
-            else:
-                analysis_frames = frames
-            analysis = analyze(episode["prompt"], analysis_frames)
-        value_lookup = {int(boundary): float(value) for boundary, value in zip(boundaries, values)}
+        boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
+        if reusable is not None:
+            official_outputs, analysis, _ = reusable
+            LOG.info("Reusing official RynnValue outputs for %s", episode["run_id"])
+        else:
+            current_annotator = live_annotator()
+            with np.load(episode["observations_path"], allow_pickle=False) as images:
+                raw = images["agentview_image"]
+                frames = [
+                    reward_view(raw[int(index)], episode["observation_orientation"])
+                    for index in boundaries
+                ]
+            official_outputs = validate_official_outputs(
+                current_annotator.predict(episode["prompt"], frames), len(frames)
+            )
+            analysis = current_annotator.analyze(episode["prompt"], frames)
+        absolute = official_outputs["absolute_temporal_distance_seconds"]
+        if absolute.shape[1] != 1:
+            raise ValueError(
+                "The pinned RynnValue reward path expects one official absolute value head; "
+                f"got {absolute.shape[1]}. Raw heads were not averaged."
+            )
+        value_lookup = {
+            int(boundary): float(value)
+            for boundary, value in zip(boundaries, absolute[:, 0])
+        }
         # Reward semantics use the debounced terminal from the prepared manifest,
         # never transient raw done=True samples from the immutable source trajectory.
         done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
         if episode["terminal_step"] is not None:
-            done[int(episode["terminal_step"])] = True
-        chunk_rewards = np.asarray([
-            shaped_chunk_reward(
+            # The environment terminal is absorbing for reward semantics. The
+            # recorded post-success tail remains available for diagnostics but
+            # does not reintroduce the pre-success -1 step cost.
+            done[int(episode["terminal_step"]):] = True
+        reward_components = [
+            chunk_reward_components(
                 done, int(chunk["start"]), int(chunk["length"]),
                 value_lookup[int(chunk["start"])], value_lookup[int(chunk["end"])],
                 float(reward_cfg["gamma"]), float(reward_cfg["shaping_weight"]),
-            ) for chunk in episode["chunks"]
-        ], dtype=np.float32)
+            ) for chunk in episode.get("evaluation_chunks", episode["chunks"])
+        ]
+        pbrs_shaping_rewards = np.asarray(
+            [component[1] for component in reward_components], dtype=np.float32,
+        )
+        chunk_rewards = np.asarray(
+            [component[2] for component in reward_components], dtype=np.float32,
+        )
         temporary = cache_dir / f".{source_key}.{os.getpid()}.npz"
         try:
             np.savez_compressed(
-                temporary, boundaries=boundaries, remaining_seconds=values,
-                entropy=entropy, chunk_reward=chunk_rewards,
+                temporary,
+                boundary_steps=boundaries,
+                **official_outputs,
+                pbrs_shaping_reward=pbrs_shaping_rewards,
+                # Backward-compatible name: this is the combined final training reward.
+                pbrs_chunk_reward=chunk_rewards,
             )
             os.replace(temporary, output)
         finally:
             temporary.unlink(missing_ok=True)
         metadata = {
-            "schema_version": 1, "run_id": episode["run_id"], "source_key": source_key,
+            "schema_version": ANNOTATION_SCHEMA_VERSION,
+            "run_id": episode["run_id"], "source_key": source_key,
             "annotation_path": str(output.resolve()), "annotation_sha256": sha256_file(output),
-            "environment_success": episode["success"], "annotator": annotator.metadata,
-            "analysis": analysis,
+            "environment_success": episode["success"],
+            "annotator": episode_annotator_metadata,
+            "official_outputs": {
+                "inference_method": "prefix_uniform_last_slot",
+                "prefix_image_slots": int(reward_cfg["max_frames"]),
+                "absolute_slot": "last_value_slot_of_each_uniformly_resampled_prefix",
+                "relative_slot": "between_last_two_slots_of_each_uniformly_resampled_prefix",
+                "boundary_count": len(boundaries),
+                "array_keys": sorted(official_outputs),
+                "analysis": analysis,
+            },
+            "pbrs_reward": {
+                "array_keys": [
+                    "pbrs_shaping_reward", "pbrs_chunk_reward",
+                ],
+                "description": (
+                    "Unweighted RynnValue PBRS shape reward and combined final IQL reward; "
+                    "each action chunk is one macro-action decision step"
+                ),
+            },
         }
         atomic_json(meta_path, metadata)
         index.append(metadata)
         LOG.info("Annotated %s (%d boundaries)", episode["run_id"], len(boundaries))
         atomic_json(reward_dir / "reward_manifest.json", {
-            "schema_version": 1, "dataset_sha256": manifest["dataset_sha256"],
-            "reward_config": reward_cfg, "annotator": annotator.metadata,
+            "schema_version": ANNOTATION_SCHEMA_VERSION,
+            "dataset_sha256": manifest["dataset_sha256"],
+            "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
             "complete": False, "episodes": index,
         })
     index_path = reward_dir / "reward_manifest.json"
     atomic_json(index_path, {
-        "schema_version": 1, "dataset_sha256": manifest["dataset_sha256"],
-        "reward_config": reward_cfg, "annotator": annotator.metadata,
+        "schema_version": ANNOTATION_SCHEMA_VERSION,
+        "dataset_sha256": manifest["dataset_sha256"],
+        "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
         "complete": True, "episodes": index,
     })
     return index_path
@@ -506,4 +796,14 @@ def load_reward_index(config: LoadedConfig) -> dict[str, Any]:
     path = Path(config.section("paths")["work_dir"]) / "rewards" / "reward_manifest.json"
     if not path.is_file():
         raise FileNotFoundError(f"Reward manifest not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION:
+        raise ValueError(
+            "Reward manifest uses obsolete transition semantics: "
+            f"expected schema v{ANNOTATION_SCHEMA_VERSION}, got "
+            f"v{payload.get('schema_version')}. Re-run annotation; reusable official "
+            "RynnValue outputs will be migrated without another model forward pass."
+        )
+    if payload.get("complete") is not True:
+        raise ValueError("Reward annotation manifest is incomplete")
+    return payload

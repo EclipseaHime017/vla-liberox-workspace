@@ -572,3 +572,44 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - transition 不再跨越 `policy / policy_requery / human` 来源边界，相同 root、相同接管帧的 sibling 分支 interrupted prefix 只进入 replay 一次；
 - reward 继续按实际长度累计，next observation 使用 `s[t+L]`，IQL Bellman target 保持 `R_L + gamma^L V(s[t+L])`；replay 额外公开 `action_source`、`transition_type` 和 `interrupted` 元数据；
 - prepared manifest 升级到 schema v2，数据哈希覆盖实际 chunk 列表，避免旧 reward manifest 被误用于新边界。升级后必须依次重新执行 prepare 与 annotate，再开始训练。
+## 2026-08-27：轨迹级 RynnValue 评价、分页详情与模型管理
+
+- 将 RynnValue 结果从冻结数据集生命周期中解耦：评价数组与带源 hash/模型 revision 的 sidecar 原子绑定到每条 episode；批量评价默认跳过有效结果，单条/多条评价默认覆盖；
+- 数据集冻结后自动启动非覆盖评价/prepare，训练数据集继续保存自己的完整 membership 与 reward manifest，但不再对相同轨迹重复执行 RynnValue；
+- 修复 sibling 分支的 interrupted prefix 在 prepare 阶段按所选集合去重、导致轨迹缓存键不稳定的问题；现在每条轨迹边界独立稳定，ReplayDataset 在采样层去重；
+- 数据表改为后端分页，默认 5 条并支持 10/20/50；新增轨迹详情、结果视频以及 action、EEF、RynnValue 曲线的逐时间点滑块和自动播放；
+- 新增模型侧栏与 overlay 详情，提供受基础模型只读、活动引用和注册目录边界保护的重命名、复制与删除操作，并展示可匹配的训练记录。
+
+## 2026-08-27：完整保存 RynnValue 官方输出并隔离派生奖励
+
+- 评价 sidecar 升级到 schema v2，记录 absolute/relative temporal distance、两个 head 的原始 logits、absolute entropy，以及完整 Analysis 文本和生成 token IDs；
+- 取消长轨迹重叠窗口平均，改为官方 demo 的 prefix-uniform/last-slot 推理语义，避免二次加工改变模型输出含义；
+- Description / Match / Success 明确标为对原始生成文本的显示解析，环境 `done` 仍是任务成功的唯一训练依据；
+- PBRS 改名为 `pbrs_chunk_reward` 并放入 derived-output 命名空间，旧 v1 sidecar 不再被视为完整评价，需重新评价后才能复用。
+
+## 2026-08-27：RynnValue/IQL 论文与固定仓库一致性审查
+
+- 修复 Pixel-IQL 将 Q 更新放在 V 更新之前的问题；现在先用冻结 target 双 Q 的最小值做 expectile V 更新，再用更新后的 V 构造 Q Bellman target，最后 Polyak 更新 target Q，与固定 `pi-rl` 仓库顺序一致；
+- 修复策略 advantage 默认读取 target Q 的额外滞后；actor 权重现在使用更新后的 online `min(Q1,Q2)-V`，target Q 只参与 V 拟合；
+- Q/V optimizer 从带默认 `0.01` weight decay 的 AdamW 改为官方 Adam，双 Q loss 按 ensemble head 取平均，Q/V gradient clipping 改为 `1.0`；VLA actor AdamW 固定 `betas=(0.9,0.95)`、`eps=1e-8`、`weight_decay=1e-10`；
+- RynnValue 离线奖励前缀槽数量默认改为论文附录 B.3 的 4 帧；官方独立趋势视频 demo 的 64 帧默认值明确标注为不同推理协议；
+- 单轨迹评价 schema 升级到 v3，旧 v2 sidecar 会显示为待评价并按 4 帧协议重新生成，避免把 32/64 帧历史结果静默当作论文 IQL 奖励复用；
+- 文档明确区分“算法/奖励语义一致”和“模型逐层复现”：π₀.₅ 的 16-step flow matching、绝对关节动作等实验结构不会伪装成 Object-Pro 的 8×7 OSC_POSE、proprio 与 masked-L1 适配；
+- 明确 UI 创建/派生数据集仍会在后台先执行 `prepare_dataset.py`，再执行 RynnValue annotate；已有轨迹 sidecar 只跳过重复模型前向，不会省略数据集专属 transition、terminal 和 split manifest 的 prepare。
+
+## 2026-08-27：接管分支保留完整自然 rollout
+
+- 修复 prepare 只从 `resume_step` 建立分支常规 chunk、导致 RynnValue 曲线遗漏接管前自然 rollout 的问题；分支现在从第 0 步到有效终点完整建立评价边界；
+- 接管点仍是 action-source 硬边界，被打断的 policy chunk 使用实际执行长度；PBRS 与 Bellman 折扣均使用该长度 `L`；
+- `ReplayDataset` 在训练采样阶段按 `(root_run_id,start,end,action_source)` 去重父轨迹及 sibling 分支物理复制的相同前缀，完整评价不会造成训练样本重复放大；
+- PBRS 图表移除“项目派生”标签，文档明确其奖励结构来自论文 PBRS 公式，变长处理只把固定 horizon 推广为实际 chunk 长度；
+- 数据与评价 schema 分别升级为 v3/v4，旧的后缀-only sidecar 不会被静默复用。
+- 数据详情新增 IQL chunk return 阶梯图；每个 PBRS return 在对应 `[start,end)` 内保持常值，详细预览同步显示 chunk 编号、起止 step 和实际长度 `L`。
+
+## 2026-08-27：IQL 奖励改为 action-chunk 宏动作语义
+
+- 修正此前把 action chunk 内每个 20 Hz 控制步分别累计 sparse reward、并使用 `gamma^L` 折扣的 Semi-MDP 处理；论文训练把一次预测/执行的 action chunk 作为一个 IQL 决策步，因此现在每个 chunk 只产生一次 sparse reward、一次 Shape Reward 和一次 Bellman 折扣；
+- 未完成任务的宏动作 sparse reward 为 `-1`，完成任务的宏动作为 `0`；原始 Shape Reward 保存为 `gamma * Phi(s[t+L]) - Phi(s[t])`，Final Reward 保存为 `r_sparse + kappa * r_shape`；
+- 实际长度 `L` 仍决定有效 action prefix、`action_mask` 与真实后继状态 `s[t+L]`，所以被接管、动作来源切换和轨迹末尾的短 chunk 不会被 padding 污染，但不再人为放大 sparse cost；
+- RynnValue 评价 schema 升级到 v5。hash、模型 revision、prefix 协议和边界都匹配的 v4 sidecar 会复用已经保存的 absolute/relative distance、entropy、logits 与 Analysis，仅重新计算确定性的 Shape/Final Reward，不再次执行 4B 模型前向；
+- IQL checkpoint 继续绑定 reward manifest hash，因此旧奖励训练出的 checkpoint 不能静默续训到新语义。

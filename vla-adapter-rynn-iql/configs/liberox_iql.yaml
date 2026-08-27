@@ -27,9 +27,11 @@ reward:
   revision: 3f73b5d2b5e53b21f248c8791004dde6a8cf2b92
   device: cuda:0
   dtype: bfloat16
-  max_frames: 32
+  # RynnValue paper Appendix B.3 uses four uniformly sampled causal-prefix
+  # frames for offline reward relabeling (the standalone demo defaults to 64).
+  max_frames: 4
   annotation_batch_size: 1
-  window_overlap: 8
+  # One discount per action chunk (macro action), not one discount per 20 Hz action.
   gamma: 0.99
   shaping_weight: 0.1
   robot_description: Franka Emika Panda single-arm robot

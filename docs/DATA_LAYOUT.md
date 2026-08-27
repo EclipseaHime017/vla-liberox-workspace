@@ -33,6 +33,8 @@ dataset-root/
                                 ├── *_observations.npz
                                 ├── agentview.mp4
                                 ├── vla_views.mp4
+                                ├── rynnvalue_evaluation.json
+                                ├── rynnvalue_evaluation.npz
                                 ├── *.png
                                 └── spacemouse_samples.csv
 ```
@@ -62,13 +64,61 @@ requires explicit force confirmation and marks every referencing dataset
 `BROKEN`; existing training summaries and overlays remain auditable but the
 dataset can no longer be annotated or trained.
 
-`annotation-cache/<content_hash>.npz` contains RynnValue boundary values,
-entropy, and PBRS chunk rewards for one source trajectory. Its adjacent JSON
-records the model/config contract and source hashes. The cache key excludes the
-whole dataset hash, so unchanged members are reused by derived dataset versions.
+`annotation-cache/<content_hash>.npz` contains the shared RynnValue computation
+cache. After a successful job, the same arrays are atomically copied to the
+source episode as `rynnvalue_evaluation.npz`; its adjacent JSON binds the
+trajectory hash, observation hash, RynnValue revision, reward configuration,
+evaluation time and value-file hash. These two small sidecars are the durable
+trajectory-level evaluation. They survive deletion or re-creation of a frozen
+dataset and are what the Dataset detail page reads.
+
+`annotation-cache/<content_hash>.npz` uses evaluation schema v5. It records the
+official RynnValue head results without averaging overlapping windows or replacing
+their semantics: `absolute_temporal_distance_seconds [N,H]`,
+`absolute_value_entropy_nats [N,H]`, `absolute_value_logits [N,H,B]`,
+`relative_temporal_distance_seconds [N]`, and `relative_value_logits [N,B]`,
+aligned by `boundary_steps [N]`. The adjacent JSON preserves the exact generated
+Analysis text and token IDs; `parsed_for_display` only extracts Description,
+Match, and Success for UI display and is never treated as the original output.
+For every boundary, the absolute result is the last `<value>` slot of the
+official uniformly resampled prefix; the relative result is the
+`<relative_value>` slot between that same prefix's final two presented images,
+not a finite difference computed afterward from two absolute predictions.
+`pbrs_shaping_reward` stores the raw, unweighted RynnValue Shape Reward
+`gamma * Phi(s_next) - Phi(s)`, and `pbrs_chunk_reward` stores the Final Reward
+`r_sparse + kappa * r_shape`. Every action chunk is one macro-action decision:
+`r_sparse` is `-1` for an incomplete chunk and `0` for a completing chunk, and
+the IQL Bellman target uses one `gamma`. Variable chunks keep their actual `L`
+only for the action mask and selection of `s[t+L]`. The cache key excludes the whole
+dataset hash, so unchanged members are reused by derived dataset versions.
+The Dataset detail API retains the absolute/relative remaining-time and entropy
+series. The UI also displays the observation potential directly derived as
+`Phi(s) = -absolute_remaining_time(s)` without changing the persisted official
+RynnValue outputs. The API exposes the reward terms as `pbrs_reward.shape_reward` and
+`pbrs_reward.final_reward` together
+with `chunk_start_steps`, `chunk_end_steps`, and `chunk_lengths`. The UI renders
+one sample at each chunk completion and connects adjacent chunk samples; it does
+not duplicate a chunk reward over every control frame.
+Schema v5 fixes the macro-action reward semantics and the paper-IQL relabeling
+protocol at four uniformly sampled prefix frames. Hash-valid v4 sidecars with
+the same official inference contract are migrated by reusing their official
+RynnValue heads and recomputing only the deterministic reward arrays. Older v2
+sidecars are intentionally treated as unevaluated because they may have been
+produced with the standalone demo's 32/64-frame protocol.
 Each annotation version has its own
 `datasets/<dataset_id>/annotations/<annotation_id>/work/reward_manifest.json`
 which references only that frozen dataset.
+
+The Dataset page has separate **trajectory evaluation** and **dataset package**
+flows. Batch evaluation skips valid sidecars unless overwrite is requested;
+explicit one/multi-run evaluation overwrites by default. Freezing a dataset
+automatically prepares its membership and fills only missing trajectory
+evaluations. A prepared branch keeps boundaries for its complete physical
+trajectory, including the natural rollout before takeover and any fixed-duration
+post-success tail, so RynnValue plots span the source video from time zero.
+`ReplayDataset` still stops at the confirmed terminal and removes duplicate
+`(root, start, end, action_source)` copied-prefix transitions only when training
+samples are assembled.
 
 `jobs/<job_id>/job.json` is the durable state/heartbeat/PID manifest;
 `job.log` is append-only and `effective_config.yaml` is the validated config

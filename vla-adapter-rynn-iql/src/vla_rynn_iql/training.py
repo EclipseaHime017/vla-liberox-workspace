@@ -310,7 +310,15 @@ def train(config: LoadedConfig) -> Path:
         critic_lr=float(iql_cfg["critic_lr"]), value_lr=float(iql_cfg["value_lr"]),
     ).to(device)
     actor_parameters = list(components.action_head.parameters()) + list(components.proprio_projector.parameters())
-    actor_optimizer = torch.optim.AdamW(actor_parameters, lr=float(iql_cfg["policy_peak_lr"]))
+    # Paper Table 9 / official pi-rl policy optimizer.  In particular, do not
+    # inherit AdamW's default 0.01 weight decay.
+    actor_optimizer = torch.optim.AdamW(
+        actor_parameters,
+        lr=float(iql_cfg["policy_peak_lr"]),
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        weight_decay=1e-10,
+    )
     accumulation = int(iql_cfg["gradient_accumulation_steps"])
     total_steps = int(iql_cfg["train_steps"])
     warmup = int(iql_cfg["critic_warmup_steps"])

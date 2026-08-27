@@ -18,6 +18,12 @@ export type PolicyInfo = {
   compatibility_sha256: string | null;
 };
 
+export type PolicyDetail = PolicyInfo & {
+  manifest: null | Record<string, string | number | null>;
+  components: Array<{ name: string; filename: string; size_bytes: number; sha256: string }>;
+  training_records: OfflineJob[];
+};
+
 export type PolicyCameraId = "agentview" | "robot0_eye_in_hand";
 
 export type Bootstrap = {
@@ -67,6 +73,7 @@ export type PolicyBranchDraft = {
 export type Session = {
   id: string; kind: "original" | "branch"; task_id: string | null; level: string | null;
   task_name: string | null; task: string | null; parent_session_id: string | null;
+  resume_step?: number | null;
   control_mode: string; manual_source: "browser" | "spacemouse" | null;
   policy_id: string; policy_label: string | null; policy_base_checkpoint: string | null;
   policy_overlay: string | null; policy_compatibility_sha256: string | null;
@@ -86,6 +93,51 @@ export type Session = {
   outcome?: "success" | "failure";
   training_eligible?: boolean; ineligible_reason?: string | null;
   training_start_step?: number; training_action_count?: number; training_chunk_count?: number;
+  rynn_evaluation?: {
+    status: "NOT_EVALUATED" | "READY";
+    evaluated_at?: string | null; model?: string | null; revision?: string | null;
+    boundary_count?: number; source_key?: string | null;
+  };
+};
+
+export type PaginatedRuns = {
+  items: Session[]; total: number; eligible_count: number; evaluated_count: number;
+  page: number; page_size: number; pages: number;
+};
+
+export type TrajectoryDetail = {
+  run: Session;
+  artifacts: Record<string, string>;
+  series: {
+    time_seconds: number[]; action_time_seconds: number[];
+    env_action: number[][]; raw_action: number[][];
+    eef_position: number[][]; eef_axis_angle: number[][]; gripper_qpos: number[][];
+  };
+  evaluation: null | {
+    status: "READY"; evaluated_at: string; model: string | null;
+    boundary_steps: number[];
+    official_outputs: {
+      absolute_temporal_distance_seconds: number[][];
+      absolute_value_entropy_nats: number[][];
+      absolute_value_logits: number[][][];
+      relative_temporal_distance_seconds: number[];
+      relative_value_logits: number[][];
+      inference_method: string | null; prefix_image_slots: number | null;
+      absolute_slot: string | null; relative_slot: string | null;
+      analysis: null | {
+        generated_text?: string; generated_token_ids?: number[];
+        parsed_for_display?: {
+          description?: string | null; match?: string | null; success?: string | null;
+        };
+      };
+    };
+    pbrs_reward: {
+      shape_reward: number[]; final_reward: number[]; chunk_start_steps: number[];
+      chunk_end_steps: number[]; chunk_lengths: number[];
+      description?: string | null;
+    };
+    reward_config: Record<string, unknown>;
+  };
 };
 
 export type DatasetSelection = {
@@ -120,14 +172,16 @@ export type TrainingDataset = {
     source_type: string; outcome: string; resume_step: number; end_step: number;
     action_count: number; chunk_count: number; split: "train" | "validation";
   }>;
+  automatic_evaluation_job_id?: string;
+  automatic_evaluation_error?: string;
 };
 
 export type OfflineJob = {
-  id: string; kind: "annotation" | "training" | "evaluation";
+  id: string; kind: "annotation" | "trajectory_evaluation" | "training" | "evaluation";
   status: "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
   dataset_id: string | null; created_at: string; started_at: string | null; completed_at: string | null;
   stage: string; stage_label: string; error: string | null; output_path: string;
-  parameters: Record<string, string | number | boolean | null>; log_size: number;
+  parameters: Record<string, unknown>; log_size: number;
   metrics?: Record<string, number | string | null>;
   training_summary?: Record<string, unknown>;
   evaluation_summary?: EvaluationAggregate & { evaluation_id?: string };

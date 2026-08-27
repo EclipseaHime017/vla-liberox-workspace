@@ -4,7 +4,11 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from .dependencies import dataset_service, http_error, service, training_dataset_service
+from .dependencies import (
+    dataset_service, http_error, offline_job_service, service,
+    training_dataset_service, trajectory_evaluation_service,
+)
+from .models import TrajectoryEvaluationRequest
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -19,10 +23,33 @@ async def runs(
     source_type: str | None = Query(default=None),
     outcome: str | None = Query(default=None),
     eligible: bool | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=5, ge=1, le=50),
 ):
     try:
-        return training_dataset_service(request).list_runs(
-            task_id, source_type, outcome, eligible
+        return training_dataset_service(request).list_runs_page(
+            task_id, source_type, outcome, eligible,
+            page=page, page_size=page_size,
+        )
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.get("/runs/{run_id}")
+async def run_detail(run_id: str, request: Request):
+    try:
+        return trajectory_evaluation_service(request).detail(run_id)
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.post("/evaluations", status_code=201)
+async def evaluate_trajectories(body: TrajectoryEvaluationRequest, request: Request):
+    try:
+        return offline_job_service(request).start_trajectory_evaluation(
+            task_id=body.task_id,
+            run_ids=None if body.run_ids is None else list(body.run_ids),
+            overwrite=(body.run_ids is not None) if body.overwrite is None else body.overwrite,
         )
     except Exception as exc:
         raise http_error(exc) from exc

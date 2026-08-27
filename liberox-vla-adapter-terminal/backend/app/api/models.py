@@ -132,6 +132,33 @@ class DeleteTrainingDatasetRequest(StrictModel):
     force: StrictBool = False
 
 
+class TrajectoryEvaluationRequest(StrictModel):
+    task_id: StrictStr = Field(min_length=1)
+    run_ids: list[StrictStr] | None = None
+    overwrite: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def validate_run_ids(self):
+        if self.run_ids is not None:
+            if not self.run_ids:
+                raise ValueError("run_ids must not be empty when provided")
+            if len(self.run_ids) != len(set(self.run_ids)):
+                raise ValueError("run_ids must not contain duplicates")
+        return self
+
+
+class RenamePolicyRequest(StrictModel):
+    label: StrictStr = Field(min_length=1, max_length=100)
+
+
+class CopyPolicyRequest(StrictModel):
+    label: StrictStr = Field(min_length=1, max_length=100)
+
+
+class DeletePolicyRequest(StrictModel):
+    confirm_policy_id: StrictStr = Field(min_length=1)
+
+
 class TrainingRunRequest(StrictModel):
     dataset_id: str = Field(min_length=1)
     parameters: dict[str, StrictInt | StrictFloat | StrictStr | None]

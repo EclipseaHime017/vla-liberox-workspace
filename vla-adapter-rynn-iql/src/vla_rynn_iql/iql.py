@@ -64,12 +64,11 @@ def expectile_loss(diff: torch.Tensor, expectile: float) -> torch.Tensor:
 def chunk_bellman_target(
     reward: torch.Tensor,
     next_value: torch.Tensor,
-    chunk_length: torch.Tensor,
     bootstrap_mask: torch.Tensor,
     discount: float,
 ) -> torch.Tensor:
-    chunk_discount = discount ** chunk_length.float()
-    return reward.float() + chunk_discount * bootstrap_mask.float() * next_value
+    """One-step Bellman target where one IQL decision is one action chunk."""
+    return reward.float() + discount * bootstrap_mask.float() * next_value
 
 
 @dataclass
@@ -92,13 +91,22 @@ class PixelIQL(nn.Module):
         self.target_q2 = copy.deepcopy(self.q2).requires_grad_(False)
         self.value = ValueNetwork(proprio_dim)
         self.discount, self.expectile, self.tau = discount, expectile, tau
-        self.q_optimizer = torch.optim.AdamW(
+        # Match the official RynnValue pi-rl IQL implementation: the auxiliary
+        # critic and value networks use Adam without weight decay.  AdamW's
+        # default 0.01 decay materially changes the fitted Q/V functions.
+        self.q_optimizer = torch.optim.Adam(
             list(self.q1.parameters()) + list(self.q2.parameters()), lr=critic_lr
         )
-        self.value_optimizer = torch.optim.AdamW(self.value.parameters(), lr=value_lr)
+        self.value_optimizer = torch.optim.Adam(self.value.parameters(), lr=value_lr)
 
     @torch.no_grad()
-    def advantage(self, batch: dict[str, torch.Tensor], target: bool = True) -> torch.Tensor:
+    def advantage(self, batch: dict[str, torch.Tensor], target: bool = False) -> torch.Tensor:
+        """Return the policy weight advantage from the online critic by default.
+
+        RynnValue's official ``PiIQLLearner.compute_advantages`` evaluates the
+        just-updated online critic and value function.  Target critics are used
+        to fit V, not to weight the policy demonstrations.
+        """
         q1 = (self.target_q1 if target else self.q1)(
             batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]
         )
@@ -108,36 +116,52 @@ class PixelIQL(nn.Module):
         return torch.minimum(q1, q2) - self.value(batch["pixels"], batch["proprio"])
 
     def update(self, batch: dict[str, torch.Tensor]) -> IQLMetrics:
+        # Official IQL order: (1) fit V to the frozen target-Q expectile,
+        # (2) fit online Q to a Bellman target built with the newly updated V,
+        # then (3) Polyak-update target Q.  Reversing the first two stages adds
+        # an unintended extra lag to every Bellman update.
+        with torch.no_grad():
+            target_q_for_value = torch.minimum(
+                self.target_q1(
+                    batch["pixels"], batch["proprio"], batch["actions"],
+                    batch["action_mask"],
+                ),
+                self.target_q2(
+                    batch["pixels"], batch["proprio"], batch["actions"],
+                    batch["action_mask"],
+                ),
+            )
+        value = self.value(batch["pixels"], batch["proprio"])
+        value_loss = expectile_loss(target_q_for_value - value, self.expectile)
+        self.value_optimizer.zero_grad(set_to_none=True)
+        value_loss.backward()
+        nn.utils.clip_grad_norm_(self.value.parameters(), 1.0)
+        self.value_optimizer.step()
+
         with torch.no_grad():
             next_value = self.value(batch["next_pixels"], batch["next_proprio"])
             target = chunk_bellman_target(
-                batch["reward"], next_value, batch["chunk_length"],
-                batch["bootstrap_mask"], self.discount,
+                batch["reward"], next_value, batch["bootstrap_mask"], self.discount,
             )
         q1 = self.q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
         q2 = self.q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
-        q_loss = F.mse_loss(q1, target) + F.mse_loss(q2, target)
+        # The official ensemble loss averages over both Q heads.
+        q_loss = 0.5 * (F.mse_loss(q1, target) + F.mse_loss(q2, target))
         self.q_optimizer.zero_grad(set_to_none=True)
         q_loss.backward()
-        nn.utils.clip_grad_norm_(list(self.q1.parameters()) + list(self.q2.parameters()), 10.0)
+        nn.utils.clip_grad_norm_(list(self.q1.parameters()) + list(self.q2.parameters()), 1.0)
         self.q_optimizer.step()
-
-        with torch.no_grad():
-            target_q = torch.minimum(
-                self.target_q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]),
-                self.target_q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]),
-            )
-        value = self.value(batch["pixels"], batch["proprio"])
-        value_loss = expectile_loss(target_q - value, self.expectile)
-        self.value_optimizer.zero_grad(set_to_none=True)
-        value_loss.backward()
-        nn.utils.clip_grad_norm_(self.value.parameters(), 10.0)
-        self.value_optimizer.step()
         self.soft_update()
-        advantage = target_q - value.detach()
+        with torch.no_grad():
+            online_q = torch.minimum(
+                self.q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]),
+                self.q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]),
+            )
+            updated_value = self.value(batch["pixels"], batch["proprio"])
+            advantage = online_q - updated_value
         return IQLMetrics(
-            float(q_loss.detach()), float(value_loss.detach()), float(target_q.mean()),
-            float(value.detach().mean()), float(advantage.mean()),
+            float(q_loss.detach()), float(value_loss.detach()), float(online_q.mean()),
+            float(updated_value.mean()), float(advantage.mean()),
         )
 
     @torch.no_grad()

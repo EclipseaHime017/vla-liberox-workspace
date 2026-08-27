@@ -12,6 +12,7 @@ import yaml
 
 from backend.app.policies.catalog import PolicyCatalog
 from backend.app.policies.vla_adapter import VLAAdapterPolicyProvider
+from backend.app.services.policy_management_service import PolicyManagementService
 
 
 BASE = "VLA-Adapter/LIBERO-Object-Pro"
@@ -121,3 +122,23 @@ def test_provider_revalidates_overlay_at_load_boundary(tmp_path: Path):
     (manifest.parent / "action_head.pt").write_bytes(b"changed-after-draft")
     with pytest.raises(ValueError, match="hash mismatch"):
         provider.load(8, "trained")
+
+
+def test_policy_management_renames_copies_and_deletes_overlay(tmp_path: Path):
+    _overlay(tmp_path)
+    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    manager = SimpleNamespace(
+        policy_catalog=catalog, active_session_id=None, draft=None,
+    )
+    current = PolicyManagementService(manager)
+    renamed = current.rename("trained", "Grasp tuning v2")
+    assert renamed["label"] == "Grasp tuning v2"
+    copied = current.copy("trained", "Grasp tuning copy")
+    assert copied["policy_id"] != "trained"
+    assert (tmp_path / copied["policy_id"] / "policy.yaml").is_file()
+    assert current.delete(copied["policy_id"], copied["policy_id"]) == {
+        "deleted": copied["policy_id"]
+    }
+    assert [item["policy_id"] for item in current.list()] == ["base", "trained"]
+    with pytest.raises(Exception, match="read-only"):
+        current.delete("base", "base")

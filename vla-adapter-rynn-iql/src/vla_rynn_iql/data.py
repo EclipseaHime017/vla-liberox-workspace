@@ -18,7 +18,7 @@ from .io import atomic_json, sha256_file, stable_hash
 
 LOG = logging.getLogger(__name__)
 MANIFEST_NAME = "dataset_manifest.json"
-MANIFEST_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -65,9 +65,8 @@ def build_semi_mdp_chunks(
     """Build variable-duration transitions without crossing controller boundaries.
 
     The fixed horizon is only a maximum. Action-source changes and branch resume
-    points are hard boundaries. Interrupted policy prefixes are added separately
-    by :func:`interrupted_policy_prefix` so the complete failed rollout remains
-    available as the counterfactual action.
+    points are hard boundaries, so a takeover can end the final policy chunk at
+    its actual executed length instead of pretending that the full horizon ran.
     """
     if horizon < 1:
         raise ValueError("horizon must be positive")
@@ -110,42 +109,42 @@ def build_semi_mdp_chunks(
             "action_source": segment["action_source"],
             "transition_type": str(segment["action_source"]),
             "interrupted": False,
+            "copied_prefix": False,
         })
     return chunks
 
 
-def interrupted_policy_prefix(
-    *, resume_step: int, horizon: int, source_segments: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Return the actually executed prefix of a policy chunk cut by takeover."""
-    if resume_step <= 0 or resume_step % horizon == 0:
-        return None
-    nominal_start = resume_step - (resume_step % horizon)
-    segment = next(
+def iter_unique_replay_chunks(
+    episodes: list[dict[str, Any]], *, split: str | None = None,
+) -> Iterator[tuple[dict[str, Any], int]]:
+    """Yield replay chunks while counting physically copied prefixes once."""
+    copied_prefix_keys = {
         (
-            item for item in source_segments
-            if int(item["start"]) < resume_step <= int(item["end"])
-        ),
-        None,
-    )
-    if segment is None:
-        raise ValueError(f"No action-source segment contains resume_step={resume_step}")
-    start = max(nominal_start, int(segment["start"]))
-    source = str(segment["action_source"])
-    if source != "policy":
-        raise ValueError(
-            f"Interrupted branch prefix must be policy actions, got {source!r}"
+            str(episode["root_run_id"]), int(chunk["start"]),
+            int(chunk["end"]), str(chunk["action_source"]),
         )
-    if start >= resume_step:
-        return None
-    return {
-        "start": start,
-        "length": resume_step - start,
-        "end": resume_step,
-        "action_source": source,
-        "transition_type": "policy_interrupted",
-        "interrupted": True,
+        for episode in episodes
+        for chunk in episode["chunks"]
+        if bool(chunk.get("copied_prefix", False))
     }
+    seen_copied_prefixes: set[tuple[str, int, int, str]] = set()
+    ordered = sorted(
+        episodes,
+        key=lambda item: (item.get("kind") == "branch", str(item["run_id"])),
+    )
+    for episode in ordered:
+        if split is not None and episode["split"] != split:
+            continue
+        for chunk_index, chunk in enumerate(episode["chunks"]):
+            key = (
+                str(episode["root_run_id"]), int(chunk["start"]),
+                int(chunk["end"]), str(chunk["action_source"]),
+            )
+            if key in copied_prefix_keys:
+                if key in seen_copied_prefixes:
+                    continue
+                seen_copied_prefixes.add(key)
+            yield episode, chunk_index
 
 
 def _safe_extract(archive: Path, destination: Path) -> None:
@@ -439,6 +438,9 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         "trailing_action_count": trailing_action_count,
         "post_terminal_false_count": post_terminal_false_count,
         "action_source_segments": action_source_segments(sources, action_count),
+        "recorded_action_source_segments": action_source_segments(
+            sources, recorded_action_count,
+        ),
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
@@ -505,35 +507,63 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
     seed = int(config.section("data")["split_seed"])
     fraction = float(config.section("data")["validation_fraction"])
     episodes = sorted(discovered.values(), key=lambda item: item["run_id"])
-    # A branch adds only its interrupted policy prefix and its new suffix. The
-    # complete parent rollout remains unchanged as the error-policy alternative.
-    # Identical prefixes shared by sibling branches are represented once.
-    seen_interrupted_prefixes: set[tuple[str, int, int]] = set()
+    # Keep every episode's transition description independent of the other
+    # episodes selected for this particular dataset.  This is important for
+    # trajectory-level reward annotations: selecting another sibling branch
+    # must not change the cache key or boundary layout of an existing run.
+    # Every branch keeps its complete physical trajectory for trajectory-level
+    # RynnValue evaluation. Copied parent prefixes are de-duplicated only when
+    # ReplayDataset assembles the training replay.
     for episode in episodes:
         episode["split"] = (
             selected[episode["run_id"]]["split"]
             if selected else _split(episode["root_run_id"], seed, fraction)
         )
-        first = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
+        resume_step = (
+            int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
+        )
         chunks = build_semi_mdp_chunks(
-            first=first,
+            first=0,
             end=int(episode["action_count"]),
             horizon=horizon,
             source_segments=episode["action_source_segments"],
         )
         if episode["kind"] == "branch":
-            prefix = interrupted_policy_prefix(
-                resume_step=first,
-                horizon=horizon,
-                source_segments=episode["action_source_segments"],
-            )
-            if prefix is not None:
-                key = (str(episode["root_run_id"]), prefix["start"], prefix["end"])
-                if key not in seen_interrupted_prefixes:
-                    chunks.insert(0, prefix)
-                    seen_interrupted_prefixes.add(key)
+            for chunk in chunks:
+                if int(chunk["end"]) > resume_step:
+                    continue
+                if str(chunk["action_source"]) != "policy":
+                    raise ValueError(
+                        f"Branch {episode['run_id']} has non-policy action "
+                        f"before resume_step={resume_step}: {chunk['action_source']!r}"
+                    )
+                chunk["copied_prefix"] = True
+                if int(chunk["end"]) == resume_step and int(chunk["length"]) < horizon:
+                    chunk["transition_type"] = "policy_interrupted"
+                    chunk["interrupted"] = True
+                else:
+                    chunk["transition_type"] = "policy_prefix"
         episode["chunks"] = chunks
-        episode["reward_boundaries"] = sorted({value for chunk in chunks for value in (chunk["start"], chunk["end"])})
+        # Replay terminates at the debounced success transition, but trajectory
+        # evaluation must continue over every physically recorded observation.
+        # Keeping the training chunks first preserves ReplayDataset's chunk
+        # indices while RynnValue and the detail UI retain the complete timeline.
+        evaluation_chunks = list(chunks)
+        if int(episode["action_count"]) < int(episode["recorded_action_count"]):
+            trailing_chunks = build_semi_mdp_chunks(
+                first=int(episode["action_count"]),
+                end=int(episode["recorded_action_count"]),
+                horizon=horizon,
+                source_segments=episode["recorded_action_source_segments"],
+            )
+            for chunk in trailing_chunks:
+                chunk["transition_type"] = "post_terminal_evaluation"
+            evaluation_chunks.extend(trailing_chunks)
+        episode["evaluation_chunks"] = evaluation_chunks
+        episode["reward_boundaries"] = sorted({
+            value for chunk in evaluation_chunks
+            for value in (chunk["start"], chunk["end"])
+        })
     if not selected and all(ep["split"] == "validation" for ep in episodes):
         # Tiny smoke-test datasets still need at least one train root.
         root = episodes[0]["root_run_id"]
@@ -552,7 +582,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             raise RuntimeError(message)
     payload = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "chunking": "variable_duration_action_source_v1",
+        "chunking": "variable_duration_action_source_v2_full_branch_prefix",
         "source_dataset_id": None if selection_payload is None else selection_payload["id"],
         "source_dataset_sha256": None if selection_payload is None else selection_payload["dataset_sha256"],
         "config_sha256": config.digest,
@@ -562,7 +592,8 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             "action_count", "recorded_action_count", "terminal_step",
             "trailing_action_count", "post_terminal_false_count", "recorded_success",
             "raw_done_true_count", "success_consecutive_steps", "success_streak_start",
-            "action_source_segments", "chunks", "split")}
+            "action_source_segments", "recorded_action_source_segments", "chunks",
+            "evaluation_chunks", "split")}
             for ep in episodes]),
         "action_horizon": horizon,
         "action_dim": config.section("data")["action_dim"],
@@ -571,7 +602,8 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
         "success_consecutive_steps": config.section("data")["success_consecutive_steps"],
         "episode_count": len(episodes),
         "success_count": successes,
-        "chunk_count": sum(len(ep["chunks"]) for ep in episodes),
+        "trajectory_chunk_count": sum(len(ep["chunks"]) for ep in episodes),
+        "chunk_count": sum(1 for _ in iter_unique_replay_chunks(episodes)),
         "episodes": episodes,
     }
     manifest = work / MANIFEST_NAME

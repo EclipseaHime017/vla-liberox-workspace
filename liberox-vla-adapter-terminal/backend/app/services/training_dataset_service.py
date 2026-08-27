@@ -48,7 +48,7 @@ def _split(root_id: str, seed: int, fraction: float) -> str:
 class TrainingDatasetService:
     """Owns immutable manifests while run files remain read-only source data."""
 
-    def __init__(self, run_service: Any, ui_config: Any):
+    def __init__(self, run_service: Any, ui_config: Any, evaluations: Any | None = None):
         self.run_service = run_service
         self.ui_config = ui_config
         self.root = ui_config.project_root / "datasets"
@@ -56,6 +56,7 @@ class TrainingDatasetService:
         self.repository = TrainingDatasetRepository(
             ui_config.catalog_path, ui_config.project_id
         )
+        self.evaluations = evaluations
         self.lock = threading.RLock()
         self._index_existing()
 
@@ -110,18 +111,62 @@ class TrainingDatasetService:
             if eligible is not None and trainable is not eligible:
                 continue
             resume = int(run.get("resume_step") or 0) if run.get("kind") == "branch" else 0
-            actions = max(0, int(run.get("action_count") or 0) - resume)
-            result.append({
+            actions = max(0, int(run.get("action_count") or 0))
+            chunk_count = (
+                math.ceil(resume / 8) + math.ceil(max(0, actions - resume) / 8)
+                if run.get("kind") == "branch" and actions
+                else math.ceil(actions / 8) if actions else 0
+            )
+            public = {
                 **run,
                 "source_type": current_source,
                 "outcome": current_outcome,
                 "training_eligible": trainable,
                 "ineligible_reason": reason,
-                "training_start_step": resume,
+                "training_start_step": 0,
                 "training_action_count": actions,
-                "training_chunk_count": math.ceil(actions / 8) if actions else 0,
-            })
+                "training_chunk_count": chunk_count,
+            }
+            result.append(public)
         return sorted(result, key=lambda item: (item.get("created_at") or "", item["id"]), reverse=True)
+
+    def list_runs_page(
+        self,
+        task_id: str | None = None,
+        source_type: str | None = None,
+        outcome: str | None = None,
+        eligible: bool | None = None,
+        *,
+        page: int = 1,
+        page_size: int = 5,
+    ) -> dict[str, Any]:
+        if type(page) is not int or page < 1:
+            raise ValueError("page must be a positive integer")
+        if type(page_size) is not int or not 1 <= page_size <= 50:
+            raise ValueError("page_size must be in [1, 50]")
+        values = self.list_runs(task_id, source_type, outcome, eligible)
+        total = len(values)
+        pages = max(1, math.ceil(total / page_size))
+        if page > pages and total:
+            page = pages
+        start = (page - 1) * page_size
+        eligible_count = sum(bool(item.get("training_eligible")) for item in values)
+        items = values[start:start + page_size]
+        if self.evaluations is not None:
+            for item in items:
+                item["rynn_evaluation"] = self.evaluations.status(item)
+            evaluated_count = sum(self.evaluations.exists(item) for item in values)
+        else:
+            evaluated_count = 0
+        return {
+            "items": items,
+            "total": total,
+            "eligible_count": eligible_count,
+            "evaluated_count": evaluated_count,
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+        }
 
     @staticmethod
     def _validate_selection(selection: dict[str, Any]) -> None:
@@ -258,6 +303,96 @@ class TrainingDatasetService:
             "sha256": _sha256(resolved),
         }
 
+    def _member(
+        self,
+        run: dict[str, Any],
+        *,
+        split_seed: int,
+        validation_fraction: float,
+    ) -> dict[str, Any]:
+        output = Path(run["output_dir"])
+        manifest = output / "run.json"
+        if not manifest.is_file():
+            manifest = output / "session.json"
+        trajectory = Path(run["trajectory"])
+        observations = trajectory.with_name("trajectory_observations.npz")
+        root_id = str(run.get("root_session_id") or run.get("parent_session_id") or run["id"])
+        return {
+            "run_id": run["id"],
+            "root_run_id": root_id,
+            "parent_run_id": run.get("parent_session_id"),
+            "source_type": run["source_type"],
+            "outcome": run["outcome"],
+            "resume_step": int(run.get("resume_step") or 0),
+            "end_step": int(run["action_count"]),
+            "action_count": run["training_action_count"],
+            "chunk_count": run["training_chunk_count"],
+            "split": _split(root_id, split_seed, validation_fraction),
+            "artifacts": {
+                "manifest": self._artifact(manifest),
+                "trajectory": self._artifact(trajectory),
+                "observations": self._artifact(observations),
+            },
+        }
+
+    @staticmethod
+    def _ensure_train_split(members: list[dict[str, Any]]) -> None:
+        if members and all(member["split"] == "validation" for member in members):
+            first_root = members[0]["root_run_id"]
+            for member in members:
+                if member["root_run_id"] == first_root:
+                    member["split"] = "train"
+
+    def write_evaluation_selection(
+        self,
+        path: Path,
+        *,
+        task_id: str,
+        run_ids: list[str],
+        split_seed: int,
+        validation_fraction: float,
+        success_consecutive_steps: int,
+    ) -> dict[str, Any]:
+        """Write a prepare_dataset-compatible transient selection manifest."""
+        if not run_ids or len(run_ids) != len(set(run_ids)):
+            raise ValueError("run_ids must be a non-empty unique list")
+        available = {
+            item["id"]: item for item in self.list_runs(task_id=task_id, eligible=True)
+        }
+        missing = [run_id for run_id in run_ids if run_id not in available]
+        if missing:
+            raise ValueError(f"Unavailable evaluation runs: {missing}")
+        members = [
+            self._member(
+                available[run_id], split_seed=split_seed,
+                validation_fraction=validation_fraction,
+            )
+            for run_id in run_ids
+        ]
+        self._ensure_train_split(members)
+        selection = {
+            "mode": "manual", "run_ids": run_ids,
+            "source_types": sorted(SOURCE_TYPES), "outcomes": sorted(OUTCOMES),
+            "seed": split_seed, "order": "newest", "quotas": [],
+        }
+        immutable = {
+            "task_id": task_id,
+            "selection": selection,
+            "validation_fraction": validation_fraction,
+            "split_seed": split_seed,
+            "success_consecutive_steps": success_consecutive_steps,
+            "members": members,
+        }
+        payload = {
+            "schema_version": 1,
+            "id": f"trajectory-evaluation-{uuid.uuid4().hex[:12]}",
+            "project_id": self.ui_config.project_id,
+            **immutable,
+            "dataset_sha256": _stable_hash(immutable),
+        }
+        atomic_write_json(path, payload)
+        return payload
+
     def create(
         self,
         *,
@@ -285,39 +420,16 @@ class TrainingDatasetService:
         with self.lock:
             directory.mkdir(parents=False, exist_ok=False)
             try:
-                members = []
-                for run in resolved["runs"]:
-                    output = Path(run["output_dir"])
-                    manifest = output / "run.json"
-                    if not manifest.is_file():
-                        manifest = output / "session.json"
-                    trajectory = Path(run["trajectory"])
-                    observations = trajectory.with_name("trajectory_observations.npz")
-                    root_id = str(run.get("root_session_id") or run.get("parent_session_id") or run["id"])
-                    members.append({
-                        "run_id": run["id"],
-                        "root_run_id": root_id,
-                        "parent_run_id": run.get("parent_session_id"),
-                        "source_type": run["source_type"],
-                        "outcome": run["outcome"],
-                        "resume_step": run["training_start_step"],
-                        "end_step": int(run["action_count"]),
-                        "action_count": run["training_action_count"],
-                        "chunk_count": run["training_chunk_count"],
-                        "split": _split(root_id, split_seed, validation_fraction),
-                        "artifacts": {
-                            "manifest": self._artifact(manifest),
-                            "trajectory": self._artifact(trajectory),
-                            "observations": self._artifact(observations),
-                        },
-                    })
+                members = [
+                    self._member(
+                        run, split_seed=split_seed,
+                        validation_fraction=validation_fraction,
+                    )
+                    for run in resolved["runs"]
+                ]
                 # Freeze the tiny-dataset fallback here. Downstream prepare
                 # consumes the exact split stored in this immutable manifest.
-                if members and all(member["split"] == "validation" for member in members):
-                    first_root = members[0]["root_run_id"]
-                    for member in members:
-                        if member["root_run_id"] == first_root:
-                            member["split"] = "train"
+                self._ensure_train_split(members)
                 immutable = {
                     "task_id": task_id,
                     "selection": selection,

@@ -2,15 +2,26 @@ import { api } from "../../api/client";
 import type {
   Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, EvaluationConfig,
   EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
-  TensorBoardStatus, TrainingDataset, TrainingDefaults,
+  PaginatedRuns, PolicyDetail, PolicyInfo, TensorBoardStatus, TrajectoryDetail,
+  TrainingDataset, TrainingDefaults,
 } from "./types";
 
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
 export const listRuns = () => api<Session[]>("/api/runs");
 export const getDatasetSummary = () => api<DatasetSummary>("/api/datasets/summary");
-export const listDatasetRuns = (taskId: string) => api<Session[]>(
-  "/api/datasets/runs?task_id=" + encodeURIComponent(taskId),
+export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5) => api<PaginatedRuns>(
+  "/api/datasets/runs?task_id=" + encodeURIComponent(taskId)
+  + `&page=${page}&page_size=${pageSize}`,
 );
+export const getTrajectoryDetail = (runId: string) => api<TrajectoryDetail>(
+  `/api/datasets/runs/${encodeURIComponent(runId)}`,
+);
+export const evaluateTrajectories = (body: {
+  task_id: string; run_ids: string[] | null; overwrite: boolean;
+}) => api<{
+  kind: "trajectory_evaluation"; status: string; job: OfflineJob | null;
+  selected_count: number; skipped_count: number; skipped_run_ids: string[]; message?: string;
+}>("/api/datasets/evaluations", { method: "POST", body: JSON.stringify(body) });
 export const datasetExportUrl = (taskId: string) => (
   "/api/datasets/export?task_id=" + encodeURIComponent(taskId)
 );
@@ -69,6 +80,23 @@ export const startTraining = (datasetId: string, parameters: Record<string, unkn
 export const getTensorBoard = () => api<TensorBoardStatus>("/api/tensorboard");
 export const startTensorBoard = () => api<TensorBoardStatus>(
   "/api/tensorboard/start", { method: "POST" },
+);
+
+export const listModels = () => api<PolicyInfo[]>("/api/models");
+export const getModel = (id: string) => api<PolicyDetail>(
+  `/api/models/${encodeURIComponent(id)}`,
+);
+export const renameModel = (id: string, label: string) => api<PolicyDetail>(
+  `/api/models/${encodeURIComponent(id)}`,
+  { method: "PATCH", body: JSON.stringify({ label }) },
+);
+export const copyModel = (id: string, label: string) => api<PolicyDetail>(
+  `/api/models/${encodeURIComponent(id)}/copy`,
+  { method: "POST", body: JSON.stringify({ label }) },
+);
+export const deleteModel = (id: string) => api<{ deleted: string }>(
+  `/api/models/${encodeURIComponent(id)}`,
+  { method: "DELETE", body: JSON.stringify({ confirm_policy_id: id }) },
 );
 
 export const previewEvaluation = (config: EvaluationConfig) => api<EvaluationPreview>(

@@ -1,6 +1,6 @@
 # LIBERO-X Local Data Studio
 
-Current release: **v0.2.1**
+Current release: **v0.3.0**
 
 Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse takeover,
 offline post-training, and reproducible batch policy testing for the three
@@ -14,7 +14,8 @@ validated Franka/LIBERO-X tasks.
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
 - Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
-- Integrated workflow: the Dataset page freezes hash-verified, single-task dataset versions and launches reward annotation; the Training page launches resumable IQL jobs, streams metrics/logs, and manages local TensorBoard without merging the two Conda environments.
+- Integrated workflow: the Dataset page evaluates RynnValue once per trajectory, preserves its complete output sidecar, paginates run previews, exposes video/action/EEF, absolute/relative remaining-time, observation-potential and entropy estimates, plus Shape/Final Reward details, and independently packages hash-verified training datasets; the Training page launches resumable IQL jobs, streams metrics/logs, and manages local TensorBoard without merging the two Conda environments.
+- Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
 - Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
 
 ## Repository layout
@@ -31,8 +32,11 @@ vla-liberox-workspace/
 ```
 
 The collection terminal and offline trainer are separate systems. The trainer
-never rewrites `dataset-root`; their only runtime integration boundary is a
-hash-checked `policy.yaml` overlay published to `policy-registry/`.
+never rewrites recorded actions, states, observations, or media. UI-launched
+RynnValue evaluation adds only hash-checked `rynnvalue_evaluation.json/npz`
+sidecars beside an episode so later dataset packages can reuse the result. The
+deployment integration boundary remains a hash-checked `policy.yaml` overlay
+published to `policy-registry/`.
 
 The Web UI orchestrates them without importing RynnValue into the simulation
 process. Prepare/training/testing subprocesses use `vla-liberox`, annotation
@@ -75,11 +79,12 @@ Franka policy, freezes its vision/language backbone, and updates only the
 continuous action head and proprio projector:
 
 ```text
-dataset-root (read-only)
+dataset-root
         │
-        ├── validate trajectories and de-duplicate branch prefixes
+        ├── validate trajectories; bind reusable RynnValue sidecars per episode
         ▼
-frozen RynnValue-4B ── temporal distance ── PBRS chunk rewards
+frozen RynnValue-4B ── absolute/relative heads + exact Analysis output
+        │               (PBRS follows the paper formula and is stored separately)
         │
         ▼
 Pixel-IQL critics/value + advantage-weighted VLA behavior cloning
@@ -91,7 +96,11 @@ policy-registry/<policy_id>/policy.yaml
 ```
 
 RynnValue follows the pinned official inference implementation and is used only
-as an offline reward annotator. The PyTorch trainer implements IQL with double-Q
+as an offline reward annotator. Evaluation schema v2 retains decoded absolute
+and relative temporal distances, both distributional-head logits, absolute-head
+entropy, and the exact generated Analysis text/token IDs. No overlapping-window
+average is applied, and PBRS is never labeled as a native model output. The
+PyTorch trainer implements IQL with double-Q
 critics, expectile value regression and advantage-weighted behavior cloning; it
 does not perform online exploration or modify the upstream VLA-Adapter source.
 

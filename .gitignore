@@ -8,6 +8,8 @@
 !/policy-registry/.gitkeep
 /vla-adapter-rynn-iql/outputs/
 /RynnValue/
+/tmp/
+/annotation-cache/
 
 # Python
 **/__pycache__/
@@ -26,6 +28,8 @@ dist/
 .venv/
 venv/
 env/
+events.out.tfevents.*
+wandb/
 
 # Frontend
 **/node_modules/
@@ -40,9 +44,18 @@ env/
 .env.*
 !.env.example
 *.log
+*.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
 .cache/
+
+# Generated trajectories, videos, and portable dataset exports
+*.npy
+*.npz
+*.mp4
+*.avi
+*.mkv
+*.zip
 
 # IDE / OS
 .vscode/

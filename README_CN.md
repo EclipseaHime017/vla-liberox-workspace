@@ -1,6 +1,6 @@
 # LIBERO-X × VLA-Adapter Terminal
 
-当前版本：**v0.2.1**
+当前版本：**v0.3.0**
 
 这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse 接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。
 
@@ -526,7 +526,7 @@ UI 启动后只探测控制器，不占用动作输出。连接设备后顶部�
 
 新会话按 `dataset-root/projects/libero_x_vla/runs/<task_name>/<YYYY-MM-DD>/<时间>__<session_id>/` 分组，不覆盖历史结果。`catalog.sqlite3` 只保存可重建的检索和成功率索引；run 目录仍是事实来源。`run.json` 是生命周期和安全删除所需的极简清单，`config.yaml` 固化任务、模型和控制参数，`summary.json` 只记录用户关心的结果与关键时序；轨迹、视频、图表和 SpaceMouse 采样统一放在 `episodes/episode_000/`。不再重复生成 `results.jsonl`、`trajectory.json`、`source_trajectory.json` 或 `spacemouse_device_summary.json`。完整回放 metadata 已内嵌在 `trajectory.npz`，逐步可读数据保留在 `trajectory.csv`。
 
-采集主界面的会话侧栏提供“全部任务数据”和三个具体任务的检索选项，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。`trajectory.npz`、observation NPZ、图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。详细 transition 对齐、视频拆分和接管分段规则见 `docs/DATA_LAYOUT.md`。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
+采集主界面的会话侧栏提供“全部任务数据”和三个具体任务的检索选项，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。数据集页进一步拆成“轨迹评价”和“打包训练数据集”：批量评价默认跳过已有 RynnValue sidecar，也可显式覆盖；选择一条或多条轨迹评价时默认覆盖。评价成功后 `rynnvalue_evaluation.json/npz` 与 `trajectory.npz` 位于同一 episode，后续冻结不同数据集时直接复用。轨迹表默认每页 5 条，可选 10/20/50，详情页显示结果视频、7维action、末端位置/轴角、RynnValue的absolute/relative remaining time、由 `Φ(s)=-v(s)` 得到的observation potential与entropy估计，以及每个chunk一个采样点的`RynnValue Shape Reward`和`Final Reward`曲线；点击后可拖动滑块或自动播放并查看chunk范围和实际长度`L`。完整head logits和Analysis仍保存在sidecar供审计，但不在详情UI展示。冻结数据集会自动补齐缺失评价而不覆盖已有结果。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV、可用的 RynnValue 评价 sidecar，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。核心 `trajectory.npz`、observation NPZ、普通图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。详细 transition 对齐、视频拆分、轨迹评价和接管分段规则见 `docs/DATA_LAYOUT.md`。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
 
 创建分支时会立即把父轨迹控制数据物理复制为子目录中的 `source_trajectory.npz`，但不复制父 observations、视频或图表；因此父会话被删除后，子分支仍能独立恢复状态和绘制对比。原始会话生成轨迹图和 7 张 action 图；回溯分支不生成只包含二次推理的单独图表，只生成 7 张“完整原始轨迹 + 从回溯帧开始的二次推理/人工接管”action 对比图。若准备阶段尚未执行新动作就失败，仅保存精简轨迹、清单和 summary，不再重建整段视频、observations 或对比图。已有历史目录不会自动删除或迁移。
 
@@ -537,6 +537,8 @@ UI 启动后只探测控制器，不占用动作输出。连接设备后顶部�
 后端遵循 `API → RunService → SimulationWorker → Simulator / Policy / Recorder / Evaluator` 的单向依赖，React 不直接接触 MuJoCo，模拟器不写数据库，Recorder 不回调 UI。前端拆分为采集、运行记录、数据集与设置页面；采集页始终挂载，浏览数据时不会使活动 SpaceMouse WebSocket 意外断开。界面使用浅色半透明面板，不再使用深蓝渐变背景。详细边界见 `docs/ARCHITECTURE.md`，目录规则见 `docs/DATA_LAYOUT.md`。
 
 当前 bootstrap 返回 `model_switching=true`、`task_switching=true`。这里的“模型切换”仅指在创建草稿时选择基础 Object-Pro 或与其兼容的 IQL policy overlay，不会更换视觉/语言 backbone；会话开始后策略锁定，分支继承父会话策略。缺失、被篡改、维度不符或基础 checkpoint 不兼容的 overlay 会在仿真开始前报错，不会静默回退到基础模型。
+
+左侧“模型”页面列出基础 checkpoint 和 `policy-registry` 中的 IQL overlay。基础模型只读；overlay 可修改显示名称、复制为独立 policy ID 或永久删除。详情页显示训练 step、数据/奖励及兼容性哈希、组件大小与 SHA-256，以及本机能够匹配到的训练作业记录。活动仿真、草稿或后台作业正在使用的模型不能删除或重命名。
 
 主要接口：
 
@@ -553,6 +555,14 @@ POST /api/draft/start
 GET  /api/sessions
 GET  /api/runs
 GET  /api/datasets/summary
+GET  /api/datasets/runs?page=1&page_size=5
+GET  /api/datasets/runs/{id}
+POST /api/datasets/evaluations
+GET  /api/models
+GET  /api/models/{policy_id}
+PATCH /api/models/{policy_id}
+POST /api/models/{policy_id}/copy
+DELETE /api/models/{policy_id}
 DELETE /api/sessions/{id}
 POST /api/sessions/{id}/stop
 POST /api/sessions/{id}/branches
@@ -588,7 +598,7 @@ npm run build
         ▼
 prepare_dataset
   ├── 校验轨迹、双视角图像、20 Hz 与成功状态
-  ├── 原始轨迹完整导入；分支仅保留 resume_step 后缀
+  ├── 原始轨迹与分支的完整物理轨迹均保留
   ├── 按 root trajectory 划分训练集与验证集
   └── 生成最大 8-step、按接管/动作来源截断的变长 transition 与 dataset_manifest.json
         │
@@ -625,11 +635,19 @@ Pixel-IQL                         冻结的 VLA backbone
 
 三个主要处理环节分别负责：
 
-1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始失败 rollout 保留完整的策略 chunk；若接管发生在 8 步 chunk 中间，分支额外加入从该 chunk 起点到 `resume_step` 的真实已执行 policy prefix，再加入接管/重新推理后缀，其余复制前缀不导入。相同 root、相同接管帧的 sibling 分支 prefix 只保留一次，且 transition 不跨越 `policy`、`policy_requery`、`human` 来源边界。固定 8 步只作为最大 horizon，实际长度写入 `chunk_length`。训练集与验证集仍按 root trajectory 划分。该阶段不运行模型、不计算奖励，也不修改源数据，输出 schema-v2 `outputs/work/dataset_manifest.json`。
-2. **Annotate（奖励标注）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 预测预计剩余时间，再与环境成功状态构造的 sparse step cost 合成为 PBRS chunk reward。该阶段不训练 RynnValue，也不更新 VLA；输出位于 `outputs/work/rewards/` 的逐轨迹 NPZ、元数据和 `reward_manifest.json`，相同数据与配置可命中缓存跳过重复标注。
+1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始rollout与接管/重新推理分支都从第0步开始保留完整物理轨迹，因此RynnValue能评价接管前自然rollout、接管后新后缀及固定时长采集中的成功后尾段；训练transition仍在确认terminal结束。transition 不跨越 `policy`、`policy_requery`、`human` 来源边界；若接管发生在 8 步 chunk 中间，接管前最后一个 policy transition 以实际长度结束。固定 8 步只作为最大 horizon，实际长度写入 `chunk_length`。组成训练 replay 时，再按 `(root_run_id,start,end,action_source)` 去重父轨迹与 sibling 分支物理复制的相同前缀，既不丢失整轨迹评价，也不把相同自然 rollout 重复放大。训练集与验证集仍按 root trajectory 划分。该阶段不运行模型、不计算奖励，也不修改源动作，输出schema-v4 `outputs/work/dataset_manifest.json`。
+2. **Annotate（奖励标注）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 预测预计剩余时间。一个 action chunk 视作一个宏动作：未完成任务的 chunk sparse reward 为 `-1`，完成任务的 chunk 为 `0`，再与该 chunk 两端的 PBRS 势函数差分合成 Final Reward。该阶段不训练 RynnValue，也不更新 VLA；输出位于 `outputs/work/rewards/` 的逐轨迹 NPZ、元数据和 `reward_manifest.json`，相同数据与配置可命中缓存跳过重复标注。
 3. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已标注 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；VLA 视觉/语言 backbone 只做冻结的特征提取，反向传播仅更新 continuous action head 与 proprio projector。训练 checkpoint 会保留 Q/V、optimizer 和随机状态以便恢复，最终部署 overlay 只发布 action head、proprio projector 和兼容性清单。
 
 RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本系统不包含 Robometer、在线 RL、奖励模型微调或真机控制。
+
+这里的“一致”指算法与数据语义一致，而不是把论文的 π₀.₅ 模型原样复制进 VLA-Adapter：
+
+- RynnValue 使用固定的官方源码 commit、模型 snapshot、processor、absolute/relative value head 和 causal prefix-uniform 推理；奖励只使用论文指定的 absolute temporal distance，relative、entropy、logits 和 Analysis 原文仅完整留档。
+- IQL 使用 target 双 Q 的最小值拟合 expectile V，随后用更新后的 V 构造 Q 的 Bellman target，再对 online 双 Q 做 Polyak target 更新；策略权重来自更新后的 online `min(Q1,Q2)-V`。Q/V optimizer 为官方 Adam，策略 optimizer 使用论文的 AdamW `β=(0.9,0.95)、ε=1e-8、weight_decay=1e-10`。
+- 论文实验使用 π₀.₅、`H=16`、224px ResNet-18 critic、绝对关节动作且不输入 proprio；本项目必须适配 Object-Pro 的 `H≤8`、7D normalized OSC_POSE、8D proprio 和 16 GB 单卡，因此 actor loss 改为 VLA-Adapter 原生 masked L1，critic 使用轻量双视角 encoder。它们是明确的框架适配，不应表述成论文逐层复现。
+- 同理，当前 16 GB profile 的 critic micro-batch、actor 梯度累积、128px critic 输入，以及未启用论文的随机裁剪/策略 EMA，均属于资源与框架配置差异；论文的 batch 64、224px、2000-step LR warmup、EMA 0.99 不能被声称已经原样复现。若实验目标改成论文超参数复现，应另建高显存 profile，而不是静默改变现有 Object-Pro profile 的训练含义。
+- 被接管或终点截断的 transition 按实际执行长度 `L` 使用 mask，并把后继状态取为 `s_{t+L}`；但每个 chunk 仍只是一条宏动作 transition，因此 reward 与 Bellman bootstrap 都只使用一次 `γ`，不使用 `γ^L`。padding 从不当作已执行动作。
 
 ### 4.2 复用 VLA 环境，只新建奖励环境
 
@@ -683,7 +701,7 @@ data:
 
 reward:
   model: Alibaba-DAMO-Academy/RynnValue-4B
-  max_frames: 64
+  max_frames: 4
   gamma: 0.99
   shaping_weight: 0.1
 
@@ -752,7 +770,7 @@ data:
     - LEVEL1::EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
 ```
 
-`task_ids: []` 才表示全部任务。prepare 只接收 `status=COMPLETED` 且没有 `error` 的会话，并验证 `project_id`、20 Hz 时间网格、`N` 个动作对应 `N+1` 个状态/图像、7 维 OSC action 范围和 policy action round-trip。原始轨迹完整导入。分支不会重新导入整段父前缀，但会保留“当前 policy chunk 起点到 `resume_step`”这一条被打断的变长 transition，并从 `resume_step` 开始导入 human 或 policy-requery 后缀。若接管正好发生在 8 步边界，则不存在额外的短 prefix。相同 root 与接管帧的 sibling prefix 自动去重。
+`task_ids: []` 才表示全部任务。prepare 只接收 `status=COMPLETED` 且没有 `error` 的会话，并验证 `project_id`、20 Hz 时间网格、`N` 个动作对应 `N+1` 个状态/图像、7 维 OSC action 范围和 policy action round-trip。原始轨迹和分支都完整导入；分支的 `[0,resume_step)` 是自然 policy rollout，之后是 human 或 policy-requery 后缀。prepare 在接管点建立硬边界，接管前最后一个 chunk 可短于 8 步；RynnValue 对整条分支从第 0 步开始评价。真正构造 `ReplayDataset` 时，相同 root 的父轨迹与多个分支所复制的完全相同前缀 transition 只保留一份。
 
 运行 prepare：
 
@@ -766,7 +784,8 @@ conda run -n vla-liberox python \
 
 - `episode_count`：筛选后包含的原始/分支轨迹数；
 - `success_count`：经过连续成功阈值确认的成功轨迹数；
-- `chunk_count`：实际可供 IQL 采样的变长 transition 总数；每条最多 8 步，被接管、动作来源变化或轨迹终点截断时可以更短；
+- `trajectory_chunk_count`：逐轨迹完整评价所包含的 chunk 总数，包含分支物理复制的自然 rollout 前缀；
+- `chunk_count`：前缀去重后实际可供 IQL 采样的变长 transition 总数；每条最多 8 步，被接管、动作来源变化或轨迹终点截断时可以更短；
 - 每条 episode 的 `task_id`、`kind`、`resume_step`、`split`、`action_count` 和 `terminal_step`。
 
 同一个 `work_dir` 再次 prepare 会原子替换旧的 `dataset_manifest.json`，但不会修改 `dataset-root` 中的任何文件。训练/验证划分按 `root_run_id` 完成，因此父轨迹及其所有分支一定处于同一个 split。当前训练器只从 `split=train` 采样，validation 仅预留给独立评估，不会自动早停或选择 checkpoint。
@@ -778,11 +797,11 @@ conda run -n vla-liberox python \
 annotate 的作用不是重新判断任务是否成功，也不是训练 RynnValue。它冻结加载 RynnValue-4B，对 prepare 后每条轨迹的 action-chunk 边界执行以下处理：
 
 1. 只读取第三人称 `agentview` 和该轨迹的 BDDL 提示词；不读取 wrist、动作来源或人工/策略标签。
-2. 为每个边界预测剩余完成时间 `remaining_seconds` 并保存 entropy；每条轨迹另生成一次文本 Analysis 供诊断。
-3. 使用 `Φ=-remaining_seconds` 计算 PBRS shaping，再与环境 success 产生的 `-1` step cost 合成为每个 chunk 的 `chunk_reward`。
+2. 严格按官方 prefix-uniform 推理方式，在每个边界保存 absolute temporal distance、absolute head 原始 logits/entropy、relative temporal distance、relative head 原始 logits，以及整条轨迹的原始 Analysis 文本与生成 token IDs。长轨迹不再对重叠窗口结果求平均；Description / Match / Success 的解析只用于显示。
+3. 使用 absolute temporal distance 构造 `Φ=-v`。与论文的 action-chunk IQL 语义一致，每个 chunk 是一个宏动作决策：原始 Shape Reward 为 `γΦ(s_{t+L})-Φ(s_t)`，Final Reward 为 `r_sparse+κ·r_shape`，Bellman target 也只折扣一次。变长 chunk 的 `L` 仅用于 action mask 和选取真实后继状态 `s_{t+L}`。模型直接输出与 PBRS 训练奖励分开保存，便于审计计算链路。
 4. 将逐轨迹奖励原子写入 `paths.annotation_cache/<content_hash>.npz`，并在 `paths.work_dir/rewards/reward_manifest.json` 保存当前数据集的引用索引；训练阶段只读取这些离线结果，不再加载 RynnValue。
 
-因此，失败原始轨迹、接管后成功轨迹和重新推理分支都会用同一个冻结模型标注；区别来自 prepare 构造的 transition、实际 `action_source`、环境 terminal 和后继状态，而不是人为给 RynnValue 设置不同类别。分支会标注接管前被打断的 policy prefix 与 `resume_step` 后的新后缀，但不会标注其余复制父前缀。
+因此，失败原始轨迹、接管后成功轨迹和重新推理分支都会用同一个冻结模型标注；区别来自 prepare 构造的 transition、实际 `action_source`、环境 terminal 和后继状态，而不是人为给 RynnValue 设置不同类别。每条分支从第 0 步到有效终点完整标注；训练采样阶段才对父轨迹与 sibling 分支重复的自然 rollout 前缀去重。
 
 主要奖励参数：
 
@@ -791,17 +810,15 @@ reward:
   model: Alibaba-DAMO-Academy/RynnValue-4B
   device: cuda:0
   dtype: bfloat16
-  max_frames: 64
+  max_frames: 4
   annotation_batch_size: 1
-  window_overlap: 8
   gamma: 0.99
   shaping_weight: 0.1
 ```
 
-- `max_frames`：每个 RynnValue 时间窗口最多覆盖的边界帧数；窗口内每个时间前缀会按官方方法均匀重采样为固定数量的图像槽，长轨迹再拆成重叠窗口。
+- `max_frames`：每个时间点的完整历史前缀均匀重采样成的固定图像槽数量；论文附录 B.3 的离线奖励重标注使用 `4`。官方独立趋势可视化 demo 默认 `64`，那是不同的演示协议，不能据此把训练默认值改成 64。
 - `annotation_batch_size`：一次 RynnValue 前向处理的时间前缀数量；16 GB 显存保持 `1`。
-- `window_overlap`：长轨迹相邻窗口的重叠边界数，重叠预测会取平均。
-- `gamma`：chunk 内 sparse return 和 PBRS 的时间折扣，也会被 IQL Bellman target 使用。
+- `gamma`：以 action chunk 为时间单位的折扣；Shape Reward 和 IQL Bellman target 对每个宏动作各使用一次。
 - `shaping_weight`：RynnValue 势函数奖励的强度；`0` 表示只使用 sparse step cost。
 
 运行标注：
@@ -812,7 +829,7 @@ conda run -n rynnvalue-reward python \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 ```
 
-缓存键按单条轨迹内容寻址，包含轨迹/图像 hash、提示词、chunk 边界、奖励配置和 RynnValue 版本，但不包含整个数据集 hash。因此同一条轨迹进入不同的冻结数据集版本时可直接复用；中断后再次标注也会跳过已完成条目。修改源数据、成功阈值、有效片段/action 边界、提示词、奖励参数或 RynnValue 版本时对应条目的键会变化，必须重新计算；只修改 split 或加入其他轨迹不会让未变化条目失效。新的 `reward_manifest.json` 始终只引用当前冻结数据集，训练仍会拒绝 manifest 与奖励索引的 dataset hash 不一致。
+缓存键按单条轨迹内容寻址，包含轨迹/图像 hash、提示词、chunk 边界、奖励配置和 RynnValue 版本，但不包含整个数据集 hash。因此同一条轨迹进入不同的冻结数据集版本时可直接复用；中断后再次标注也会跳过已完成条目。修改源数据、成功阈值、有效片段/action 边界、提示词、`max_frames` 或 RynnValue 版本时必须重新执行模型评价；只修改 `gamma` / `shaping_weight` 时会复用轨迹 sidecar 中 hash 校验通过的官方 head 输出，仅重新计算 Shape/Final Reward。只修改 split 或加入其他轨迹不会让未变化条目失效。新的 `reward_manifest.json` 始终只引用当前冻结数据集，训练仍会拒绝 manifest 与奖励索引的 dataset hash 不一致。
 
 #### 4.4.3 配置并运行 IQL 后训练
 
@@ -856,7 +873,7 @@ logging:
 
 - 数据与显存：`critic_image_size` 只控制 Q/V 使用的双视角缩放尺寸；VLA actor 仍走自身 processor。当前 16 GB profile 强制 `micro_batch_size=1`。actor 累计 `gradient_accumulation_steps=32` 个 micro-step 后更新一次，等效 actor batch 为 32；critic/value 则每个 micro-step 都更新。
 - 训练长度：`train_steps=10000` 表示 10000 次 replay 抽样和 critic/value 更新，不是 10000 个完整 epoch。默认情况下 actor optimizer 大约执行 `ceil(10000/32)=313` 次。每个变长 transition 被均匀采样，因此 transition 更多的长轨迹会贡献更多训练样本；`action_source` 与 `transition_type` 会保留在 replay 元数据中，但当前没有按成功/失败、human/policy 或 episode 做额外重加权。
-- critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value optimizer。`expectile` 越高，value 越偏向高 Q 动作；actor 权重为 `exp(beta × advantage)`，再由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
+- critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value 的 Adam optimizer。每步先以冻结 target Q 更新 V，再用更新后的 V 更新 online Q，最后 Polyak 更新 target Q。`expectile` 越高，value 越偏向高 Q 动作；actor 权重使用 online `min(Q1,Q2)-V`，计算 `exp(beta × advantage)` 后由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
 - actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。`critic_warmup_steps` 期间 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 并没有在前 200 步冻结。
 - 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
 - 终端进度：`logging.console_interval_steps` 控制打印间隔。无论间隔为何，首步和最终一步都会打印；每行包含当前/总 step、百分比、BC warmup/IQL 阶段、已用时间、基于最近 100 步的 ETA、预计完成时刻、step/s、Q/value/actor loss、Q/V/advantage 均值、advantage weight、actor 学习率及 CUDA 峰值显存。该设置只影响显示频率，不改变训练或 `metrics.jsonl` 的逐步记录。
@@ -911,7 +928,7 @@ conda run -n vla-liberox python \
 |---|---:|---:|---:|---:|
 | `dataset_sources`、`project_id`、`task_ids` 或源轨迹 | 必须 | 必须 | 必须 | 按需 |
 | `success_consecutive_steps`、`split_seed`、`validation_fraction` | 必须 | 必须 | 必须 | 按需 |
-| RynnValue 版本、`max_frames`、`window_overlap`、`gamma`、`shaping_weight` | 不需要 | 必须 | 必须 | 按需 |
+| RynnValue 版本、`max_frames`、`gamma`、`shaping_weight` | 不需要 | 必须 | 必须 | 按需 |
 | VLA checkpoint/stats 或任一 `iql.*` 参数 | 不需要 | 不需要 | 必须 | 必须 |
 | 仅 `logging.*` | 不需要 | 不需要 | 仅影响新训练 | 不需要 |
 | 仅 `inference.yaml` | 不需要 | 不需要 | 不需要 | 必须 |
@@ -968,27 +985,31 @@ conda run -n vla-liberox python \
 
 ### 4.5 数据与奖励语义
 
-RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个边界按官方实现使用截至该点的均匀采样前缀并读取最后 value slot，超过 64 个边界时通过重叠窗口合并。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。未成功的原始轨迹完整进入 replay；分支只额外加入 `resume_step` 之后的 `human` 或 `policy_requery` 后缀，避免重复训练父轨迹前缀。
+RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个 action-chunk 边界都使用截至该点均匀采样的完整因果前缀并读取最后 value slot，不对长轨迹做重叠窗口平均。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。原始轨迹与分支都完整评价；`ReplayDataset` 单独去重父轨迹和 sibling 分支复制的相同自然 rollout 前缀，接管后的 `human` 或 `policy_requery` 后缀始终保留。
 
 这里的 `float32` 与 `bfloat16` 是浮点计算精度，不是 INT8/4-bit 权重量化。固定的 RynnValue-4B checkpoint 使用 BF16：Qwen 文本隐藏维度为 2560，连续 8 个 `<value>` token 的隐藏状态拼接后形成 value head 的 20480 维输入。官方自定义 value-head 构造函数默认以 FP32 建层，因此适配器在加载后显式把**整个模型**（Qwen backbone、普通 value head 和 relative value head）统一转换为 YAML 固定的 BF16，并在标注前检查所有浮点参数；如果仍混有 FP32 参数会立即报出具体参数名。value bin 解码和 entropy softmax 则按官方实现转为 FP32，以避免低精度概率计算不稳定。第一版 16 GB profile 不接受把 `reward.dtype` 改为 `float32` 或 `float16`。
 
 固定总时长的采集可能在任务成功后继续记录；此时 `done` 既可能一直保持 `True`，也可能因为物体继续移动、短暂离开成功区域而出现 `True → False → True`。`data.success_consecutive_steps` 是成功去抖阈值，默认要求连续 5 个控制步为 `True`（20 Hz 下为 250 ms；改为 10 即 500 ms）。短暂命中后出现一次 `False` 会清空计数，必须重新连续满足阈值。第 5 个确认 action 才作为 terminal，因此保持物体稳定的动作也会进入训练；若整条轨迹都没有达到连续阈值，则按失败轨迹处理，即使源会话曾记录过瞬时 `success=true`。
 
-确认 terminal 后的采集尾段不进入 replay、RynnValue 边界或 IQL 训练，无论尾段的 `done` 如何变化。源 `trajectory.npz` 不会被裁剪或改写；manifest 使用 `recorded_success` 保留源判定、`success` 保存去抖后的训练判定，并记录 `raw_done_true_count`、`success_streak_start`、`terminal_step`、`recorded_action_count`、有效 `action_count`、`trailing_action_count` 与 `post_terminal_false_count` 供审计。PBRS sparse reward 和 replay bootstrap 只使用这个确认后的 terminal，不会被确认前的单帧 `done=True` 提前截断。
+确认terminal后的采集尾段不进入replay或IQL参数更新，但仍保留在RynnValue评价边界和详情曲线中，使评价时长与源视频/轨迹一致；该尾段按absorbing terminal处理，不重新引入成功前的`-1` step cost。源 `trajectory.npz` 不会被裁剪或改写；manifest 使用 `recorded_success` 保留源判定、`success` 保存去抖后的训练判定，并记录 `raw_done_true_count`、`success_streak_start`、`terminal_step`、`recorded_action_count`、有效 `action_count`、`trailing_action_count` 与 `post_terminal_false_count` 供审计。PBRS sparse reward 和 replay bootstrap 只使用这个确认后的 terminal，不会被确认前的单帧 `done=True` 提前截断。
 
-设 RynnValue 预测的剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。长度为 `L` 的 action chunk 使用：
+设 RynnValue 预测的剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。长度为 `L` 的 action chunk 被视作一条宏动作 transition，使用：
 
 ```text
-R_t = Σ(h=0..L-1) γ^h r_sparse(t+h)
-      + κ(γ^L Φ(t+L) - Φ(t))
+r_sparse(t) = 0，若该 chunk 结束时任务已完成；否则为 -1
+r_shape(t)  = γ Φ(t+L) - Φ(t)
+r_final(t)  = r_sparse(t) + κ r_shape(t)
+y_t         = r_final(t) + γ m_t V(s_{t+L})
 ```
 
-成功前的 sparse step cost 为 `-1`，成功终止步为 `0`；失败轨迹一直保留 step cost。轨迹末尾、接管点或 `action_source` 变化产生的短 chunk 都使用 mask 统一到 `8×7` 张量，但 reward、next state 与 Bellman bootstrap 使用实际 `L`：`R_L + gamma^L V(s_{t+L})`，而不是固定 8。原始错误策略的完整 chunk 仍保留；被接管分支另建实际执行 prefix 与 human/policy-requery transition，二者不会混在同一 chunk 中。
+其中 `m_t` 在非终止 transition 为 `1`、终止 transition 为 `0`。失败轨迹的每个宏动作 sparse reward 都为 `-1`；完成任务的宏动作 sparse reward 为 `0`。轨迹末尾、接管点或 `action_source` 变化产生的短 chunk 都使用 mask 统一到 `8×7` 张量，实际 `L` 决定有效 action prefix 和后继状态 `s_{t+L}`，但不把一次宏动作再次按低层控制步累计 reward 或指数折扣。原始错误策略的完整 chunk 仍保留；被接管分支另建实际执行 prefix 与 human/policy-requery transition，二者不会混在同一 chunk 中。
+
+奖励缓存 schema v5 固化上述宏动作语义：`pbrs_shaping_reward` 保存未乘 `κ` 的原始 Shape Reward，`pbrs_chunk_reward` 保存 Final Reward。已有 hash 与官方推理契约都匹配的 schema-v4 轨迹评价会复用 absolute/relative distance、entropy、logits 和 Analysis，只重新计算这两个确定性奖励数组，不会再次运行 RynnValue。
 
 主要中间结果：
 
 - `outputs/work/dataset_manifest.json`：只读 replay 索引、episode/chunk 数与数据哈希。
-- `outputs/work/rewards/`：时间价值、entropy、PBRS 奖励、诊断 Analysis 与缓存元数据。
+- `outputs/work/rewards/`：完整 absolute/relative head 输出、entropy、原始 Analysis、按论文公式计算的 PBRS chunk reward 和缓存元数据。
 - `outputs/training/<run>/`：训练指标、effective config、Q/V/target、actor 组件、优化器和 RNG checkpoint。
 - `outputs/evaluation/<run>/`：轨迹、`agentview.mp4`、双视角 `vla_views.mp4`、逐回合结果和成功率。
 
@@ -1043,7 +1064,7 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 标注和 IQL 训练编排为�
 1. 打开侧栏“数据集”，先选择一个任务。轨迹表将来源明确分为“原始推理”“人工接管”“二次推理”和不可训练的“错误/未完成”；人工/二次推理分支会显示策略前缀、`resume_step` 以及实际进入训练的后缀长度。
 2. 点击“创建训练数据集”，选择随机、按时间顺序、分类配额或手动勾选。预览会给出 M、预计 action/chunk 数和分类构成；确认后生成不可变、单任务数据集。修改成员必须使用“派生版本”，不会覆盖旧版本。未标注版本可“取消冻结”，已结束标注的版本可“删除数据集”；存在活动任务或派生子版本时会拒绝删除。若已有训练历史，页面会要求第二次确认；强制删除仍保留训练输出、checkpoint 和 policy overlay，只在训练记录中标记源数据集已删除。删除不会移除源轨迹或全局共享奖励缓存。
 3. 点击“验证完整性”会重新计算 `run.json`、trajectory 和双视角 observation 的大小及 SHA-256。普通删除被引用轨迹时返回冲突并列出数据集；确认强制删除后关联数据集立即变为 `BROKEN`，不能继续标注或训练。
-4. 点击“开始标注”。平台先在 `vla-liberox` 中按冻结成员清单 prepare，再在 `rynnvalue-reward` 中调用 RynnValue-4B。任务窗口关闭或刷新浏览器不会停止后台进程；重新打开页面会恢复状态和完整日志。失败/取消后再次开始会复用全局逐轨迹缓存。
+4. 创建/派生数据集后，平台会自动启动“不覆盖已有单轨迹评价”的后台作业。第一阶段仍是在 `vla-liberox` 中运行 `prepare_dataset.py`：冻结的 `dataset.json` 被写入 `data.selection_manifest`，输出该数据集专属的 `annotations/<job_id>/work/dataset_manifest.json`；第二阶段才在 `rynnvalue-reward` 中运行 `annotate_rewards.py`。已有轨迹评价会先回填全局 content cache，因此 prepare 仍会重建本数据集的 transition/split manifest，但 RynnValue 前向会跳过可复用条目。手动点击“开始标注”只是重试同一条 `prepare → annotate` 作业链。任务窗口关闭或刷新浏览器不会停止后台进程；重新打开页面会恢复状态和完整日志。
 5. 打开侧栏“训练”，选择任务和 `READY + HEALTHY` 的数据集。训练固定使用该版本全部 M 条；若要改变规模，应回到数据集页面派生并重新标注。基础参数和高级 IQL 参数会生成严格 YAML，Franka、BF16、micro batch 1、8×7 action、8D proprio、双视角 critic 和冻结 backbone 等兼容项只读。
 6. 任务监视器实时显示阶段、step、速度、已用时间、滚动 ETA/预计完成时间、Q/value/actor loss、Q/V/advantage、advantage weight、学习率、梯度范数和峰值显存，历史日志可滚动查看。安全停止会在优化边界保存取消 checkpoint。页面刷新或后端重启只自动恢复仍在运行的训练；已结束记录可用“关闭记录”收起，不会再次自动占据训练页面，但其落盘日志、checkpoint 和 overlay 不会删除。完成后可回到仿真平台选择发布的 policy overlay。
 

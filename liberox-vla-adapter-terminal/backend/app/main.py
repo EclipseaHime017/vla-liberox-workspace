@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 import eval_pickplace_direct as direct
 
 from .api import (
-    controller, datasets, drafts, evaluations, offline_jobs, runs,
+    controller, datasets, drafts, evaluations, offline_jobs, policies, runs,
     training_datasets, websocket,
 )
 from .api.models import (
@@ -28,6 +28,7 @@ from .services.run_service import RunService
 from .services.dataset_service import DatasetService
 from .services.offline_job_service import OfflineJobService
 from .services.training_dataset_service import TrainingDatasetService
+from .services.trajectory_evaluation_service import TrajectoryEvaluationService
 from .workers.simulation_worker import SimulationManager
 
 
@@ -52,15 +53,21 @@ def create_app(
         app.state.run_service = RunService(worker)
         app.state.dataset_service = DatasetService(app.state.run_service)
         if hasattr(ui_config, "project_root"):
+            app.state.trajectory_evaluation_service = TrajectoryEvaluationService(
+                app.state.run_service, ui_config.project_root
+            )
             app.state.training_dataset_service = TrainingDatasetService(
-                app.state.run_service, ui_config
+                app.state.run_service, ui_config,
+                app.state.trajectory_evaluation_service,
             )
             app.state.offline_job_service = OfflineJobService(
-                ui_config, worker, app.state.training_dataset_service
+                ui_config, worker, app.state.training_dataset_service,
+                app.state.trajectory_evaluation_service,
             )
             worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
         else:
             app.state.training_dataset_service = None
+            app.state.trajectory_evaluation_service = None
             app.state.offline_job_service = None
         try:
             yield
@@ -73,7 +80,7 @@ def create_app(
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="0.2.1",
+        version="0.3.0",
         lifespan=lifespan,
     )
     app.include_router(runs.router)
@@ -83,6 +90,7 @@ def create_app(
     app.include_router(training_datasets.router)
     app.include_router(evaluations.router)
     app.include_router(offline_jobs.router)
+    app.include_router(policies.router)
     app.include_router(websocket.router)
 
     @app.get("/api/build-info", tags=["diagnostics"])

@@ -48,8 +48,7 @@ TRAIN_SCHEMA = {
              "split_seed": None, "allow_no_success": None},
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
-               "window_overlap": None, "gamma": None,
-               "shaping_weight": None, "robot_description": None,
+               "gamma": None, "shaping_weight": None, "robot_description": None,
                "camera_description": None},
     "vla": {"base_checkpoint": None, "stats_key": None, "use_pro_version": None,
             "freeze_backbone": None},
@@ -185,9 +184,6 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
             raise TypeError(f"reward.{key} must be a non-empty string")
     _number(reward, "max_frames", low=2, integer=True)
     _number(reward, "annotation_batch_size", low=1, integer=True)
-    _number(reward, "window_overlap", low=1, integer=True)
-    if reward["window_overlap"] >= reward["max_frames"]:
-        raise ValueError("reward.window_overlap must be smaller than max_frames")
     _number(reward, "gamma", low=0, high=1)
     _number(reward, "shaping_weight", low=0)
     if reward["dtype"] != "bfloat16":

@@ -15,6 +15,9 @@ from typing import Any
 EXPORT_ARTIFACT_NAMES = frozenset({"run.json", "config.yaml", "summary.json"})
 EXPORT_TRAJECTORY_NAMES = frozenset({"trajectory.csv", "trajectory_inference.csv"})
 EXPORT_VIDEO_NAMES = frozenset({"agentview.mp4", "vla_views.mp4"})
+EXPORT_EVALUATION_NAMES = frozenset({
+    "rynnvalue_evaluation.json", "rynnvalue_evaluation.npz",
+})
 
 DATA_FORMAT_MARKDOWN = """# LIBERO-X offline RL export
 
@@ -51,6 +54,22 @@ Both videos contain one frame per executed action and use the control-step frame
 rate. `agentview.mp4` is the high-resolution external view. `vla_views.mp4` is
 the exact synchronized policy input mosaic: its left half is `agentview` and its
 right half is `robot0_eye_in_hand`. Frame `i` aligns with action row `i`.
+
+## RynnValue evaluation
+
+When present, `rynnvalue_evaluation.json` binds the evaluator/model revision,
+source hashes and reward configuration to this trajectory.
+`rynnvalue_evaluation.npz` stores the model outputs and the PBRS training reward.
+Model-output arrays are `absolute_temporal_distance_seconds`,
+`absolute_value_entropy_nats`, `absolute_value_logits`,
+`relative_temporal_distance_seconds`, and `relative_value_logits` at
+`boundary_steps`. The adjacent JSON stores the exact generated Analysis text,
+token IDs, and display-only parsing of Description / Match / Success.
+`pbrs_shaping_reward` stores the raw paper PBRS term, while
+`pbrs_chunk_reward` adds the environment sparse macro-action reward. Each chunk
+is one IQL decision and receives one discount; its actual duration only selects
+the next observation and action mask. These files are optional and can be reused by a later dataset
+package; their absence means the trajectory has not been evaluated yet.
 """
 
 
@@ -116,7 +135,8 @@ class DatasetService:
             path = Path(str(value)).resolve()
             basename = path.name
             if basename not in (
-                EXPORT_ARTIFACT_NAMES | EXPORT_TRAJECTORY_NAMES | EXPORT_VIDEO_NAMES
+                EXPORT_ARTIFACT_NAMES | EXPORT_TRAJECTORY_NAMES
+                | EXPORT_VIDEO_NAMES | EXPORT_EVALUATION_NAMES
             ):
                 continue
             logical_path = PurePosixPath(str(logical_name))
@@ -160,6 +180,7 @@ class DatasetService:
                                 "trajectory.csv when available",
                                 "trajectory_inference.csv when available",
                                 "agentview.mp4 and vla_views.mp4 when available",
+                                "RynnValue trajectory evaluation sidecars when available",
                             ],
                             "excluded": [
                                 "trajectory.npz",

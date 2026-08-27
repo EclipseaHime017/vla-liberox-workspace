@@ -74,7 +74,7 @@ def test_console_progress_interval_is_a_positive_integer(
         load_train_config(path)
 
 
-def test_branch_adds_only_interrupted_policy_prefix_and_new_suffix(configured):
+def test_branch_keeps_full_trajectory_and_marks_interrupted_policy_prefix(configured):
     prepare_dataset(configured)
     manifest = load_manifest(configured)
     episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
@@ -83,10 +83,86 @@ def test_branch_adds_only_interrupted_policy_prefix_and_new_suffix(configured):
     assert episodes["branch"]["chunks"][0] == {
         "start": 0, "length": 5, "end": 5, "action_source": "policy",
         "transition_type": "policy_interrupted", "interrupted": True,
+        "copied_prefix": True,
     }
     assert episodes["branch"]["chunks"][1]["action_source"] == "human"
-    assert episodes["branch"]["reward_boundaries"] == [0, 5, 13, 18]
+    assert episodes["branch"]["reward_boundaries"] == [0, 5, 13, 18, 22]
     assert episodes["root"]["split"] == episodes["branch"]["split"]
+
+
+def test_branch_reward_boundaries_include_natural_rollout_before_takeover(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    run = json.loads(run_json.read_text(encoding="utf-8"))
+    run["resume_step"] = 13
+    run_json.write_text(json.dumps(run), encoding="utf-8")
+    trajectory = run_json.parent / "episodes" / "episode_000" / "trajectory.npz"
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    sources = np.asarray(["policy"] * len(arrays["env_action"]), dtype="<U32")
+    sources[13:] = "human"
+    arrays["action_source"] = sources
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert [
+        (chunk["start"], chunk["end"], chunk["transition_type"])
+        for chunk in branch["chunks"]
+    ] == [
+        (0, 8, "policy_prefix"),
+        (8, 13, "policy_interrupted"),
+        (13, 18, "human"),
+    ]
+    assert branch["reward_boundaries"] == [0, 8, 13, 18, 22]
+
+
+def test_500_step_branch_evaluation_still_spans_full_25_seconds(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    run = json.loads(run_json.read_text(encoding="utf-8"))
+    run.update({"resume_step": 210, "success": False})
+    run_json.write_text(json.dumps(run), encoding="utf-8")
+    episode = run_json.parent / "episodes" / "episode_000"
+    actions = np.zeros((500, 7), dtype=np.float32)
+    actions[:, -1] = -1.0
+    raw_actions = actions.copy()
+    raw_actions[:, -1] = 1.0
+    sources = np.asarray(["policy"] * 210 + ["human"] * 290, dtype="<U32")
+    np.savez_compressed(
+        episode / "trajectory.npz",
+        time_seconds=np.arange(501, dtype=np.float64) / 20.0,
+        eef_position=np.zeros((501, 3), np.float32),
+        eef_axis_angle=np.zeros((501, 3), np.float32),
+        gripper_qpos=np.zeros((501, 2), np.float32),
+        env_action=actions,
+        raw_action=raw_actions,
+        reward=np.zeros(500, np.float32),
+        done=np.zeros(500, dtype=bool),
+        action_source=sources,
+    )
+    np.savez_compressed(
+        episode / "trajectory_observations.npz",
+        agentview_image=np.zeros((501, 16, 16, 3), np.uint8),
+        wrist_image=np.zeros((501, 16, 16, 3), np.uint8),
+    )
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert branch["reward_boundaries"][0] == 0
+    assert branch["reward_boundaries"][-1] == 500
+    assert branch["reward_boundaries"][-1] / 20.0 == 25.0
+    assert any(
+        chunk["start"] == 208 and chunk["end"] == 210
+        and chunk["transition_type"] == "policy_interrupted"
+        for chunk in branch["chunks"]
+    )
 
 
 def test_latched_done_tail_is_excluded_from_replay_without_changing_source(configured):
@@ -109,6 +185,15 @@ def test_latched_done_tail_is_excluded_from_replay_without_changing_source(confi
     assert branch["chunks"][-1] == {
         "start": 13, "length": 5, "end": 18, "action_source": "human",
         "transition_type": "human", "interrupted": False,
+        "copied_prefix": False,
+    }
+    assert branch["reward_boundaries"][0] == 0
+    assert branch["reward_boundaries"][-1] == 22
+    assert branch["evaluation_chunks"][:len(branch["chunks"])] == branch["chunks"]
+    assert branch["evaluation_chunks"][-1] == {
+        "start": 18, "length": 4, "end": 22, "action_source": "human",
+        "transition_type": "post_terminal_evaluation", "interrupted": False,
+        "copied_prefix": False,
     }
     assert trajectory.read_bytes() == original_bytes
 
@@ -139,7 +224,7 @@ def test_action_source_change_is_a_hard_chunk_boundary(configured):
     ]
 
 
-def test_sibling_branches_deduplicate_same_interrupted_prefix(configured):
+def test_sibling_branches_keep_stable_interrupted_prefix_for_annotation(configured):
     source = Path(configured.section("paths")["dataset_sources"][0])
     branch_run = next(source.rglob("branch/run.json")).parent
     sibling_run = branch_run.parent / "branch-sibling"
@@ -158,7 +243,8 @@ def test_sibling_branches_deduplicate_same_interrupted_prefix(configured):
         chunk for episode in branches for chunk in episode["chunks"]
         if chunk["interrupted"]
     ]
-    assert len(interrupted) == 1
+    assert len(interrupted) == 2
+    assert {(chunk["start"], chunk["end"]) for chunk in interrupted} == {(0, 5)}
 
 
 def test_transient_success_requires_a_new_complete_streak(configured):

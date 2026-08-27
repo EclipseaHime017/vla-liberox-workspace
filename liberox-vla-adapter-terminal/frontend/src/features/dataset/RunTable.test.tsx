@@ -27,13 +27,13 @@ describe("training run catalog", () => {
   it("distinguishes manual and policy-requery suffixes and disables invalid rows", () => {
     const onToggle = vi.fn();
     render(<RunTable selectable onToggle={onToggle} runs={[
-      run({ id: "manual", kind: "branch", control_mode: "manual", source_type: "manual", training_start_step: 40, training_action_count: 260 }),
-      run({ id: "retry", kind: "branch", source_type: "policy_requery", training_start_step: 80, training_action_count: 220 }),
+      run({ id: "manual", kind: "branch", control_mode: "manual", source_type: "manual", resume_step: 40, training_start_step: 0, training_action_count: 300 }),
+      run({ id: "retry", kind: "branch", source_type: "policy_requery", resume_step: 80, training_start_step: 0, training_action_count: 300 }),
       run({ id: "bad", status: "ERROR", source_type: "incomplete", training_eligible: false, ineligible_reason: "运行未正常完成" }),
     ]} />);
     expect(screen.getByText("人工接管")).toBeTruthy();
     expect(screen.getByText("二次推理")).toBeTruthy();
-    expect(screen.getByText("前缀 0–40 · 后缀 260 步")).toBeTruthy();
+    expect(screen.getByText("接管点 40 · 保留完整轨迹")).toBeTruthy();
     const bad = screen.getByLabelText("选择 bad") as HTMLInputElement;
     expect(bad.disabled).toBe(true);
     fireEvent.click(screen.getByLabelText("选择 manual"));

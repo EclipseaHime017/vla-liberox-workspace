@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from .config import LoadedConfig
-from .data import load_manifest
+from .data import iter_unique_replay_chunks, load_manifest
 from .rewards import load_reward_index, policy_view
 from .vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_from_trajectory
 
@@ -29,12 +29,11 @@ class ReplayDataset(Dataset):
         self.action_stats, self.proprio_stats = action_stats, proprio_stats
         self.image_size = int(config.section("iql")["critic_image_size"])
         self.items: list[tuple[dict[str, Any], int, Path]] = []
-        for episode in self.manifest["episodes"]:
-            if episode["split"] != split:
-                continue
+        for episode, chunk_index in iter_unique_replay_chunks(
+            self.manifest["episodes"], split=split,
+        ):
             annotation = Path(annotations[episode["run_id"]])
-            for chunk_index in range(len(episode["chunks"])):
-                self.items.append((episode, chunk_index, annotation))
+            self.items.append((episode, chunk_index, annotation))
         if split == "train" and not self.items:
             raise RuntimeError("Training replay is empty")
 
@@ -64,7 +63,7 @@ class ReplayDataset(Dataset):
         actions[:length] = env_to_dataset_actions(trajectory["env_action"][start:end], self.action_stats)
         action_mask[:length] = True
         with np.load(annotation_path, allow_pickle=False) as rewards:
-            reward = float(rewards["chunk_reward"][chunk_index])
+            reward = float(rewards["pbrs_chunk_reward"][chunk_index])
         # Raw done may flicker before the configured confirmation streak. Only the
         # effective endpoint selected during preparation terminates a replay chunk.
         terminal = end == episode["action_count"]
