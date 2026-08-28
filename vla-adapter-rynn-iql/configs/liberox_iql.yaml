@@ -63,6 +63,16 @@ iql:
 logging:
   # TensorBoard events are written beside metrics.jsonl for each training run.
   tensorboard: true
+  wandb:
+    # Online mode requires `wandb login` before unattended training.
+    enabled: false
+    mode: online
+    project: vla-adapter-rynn-iql
+    entity: null
+    run_name: null
+    group: null
+    tags: [liberox, rynnvalue, iql]
+    log_interval_steps: 10
   flush_seconds: 5
   # Print progress, rolling throughput, ETA, losses and VRAM every N train steps.
   console_interval_steps: 10

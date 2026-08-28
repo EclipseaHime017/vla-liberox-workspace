@@ -676,7 +676,7 @@ conda run -n vla-liberox pip install -e ./vla-adapter-rynn-iql
 
 ### 4.3 YAML 配置
 
-默认配置固定 RynnValue-4B snapshot revision、Franka 的 `8×7` action chunk、8 维 proprio、20 Hz 数据、IQL 超参数和 16 GB profile。所有 YAML 内相对路径以该 YAML 所在目录为基准，重复键、未知键、维度错误和非 20 Hz 轨迹会立即拒绝。分阶段执行：
+基础配置固定 RynnValue-4B snapshot revision、Franka 的 `8×7` action chunk、8维proprio、20 Hz数据、IQL超参数和兼容16 GB显存的 `1×32` profile；远程服务器配置覆盖为单任务 `8×4` profile。所有YAML内相对路径以该YAML所在目录为基准，重复键、未知键、维度错误和非20 Hz轨迹会立即拒绝。分阶段执行：
 
 - `configs/liberox_iql.yaml`：数据源、工作目录、RynnValue、PBRS、VLA、IQL、训练和 overlay registry。
 - `configs/inference.yaml`：基础策略/overlay 对比、LIBERO-X 任务、回合数、总步数、开环执行步数和评测输出。
@@ -720,6 +720,15 @@ iql:
 
 logging:
   tensorboard: true
+  wandb:
+    enabled: false
+    mode: online
+    project: vla-adapter-rynn-iql
+    entity: null
+    run_name: null
+    group: null
+    tags: [liberox, rynnvalue, iql]
+    log_interval_steps: 10
   flush_seconds: 5
   console_interval_steps: 10
 ```
@@ -871,12 +880,12 @@ logging:
 
 参数语义分为四组：
 
-- 数据与显存：`critic_image_size` 只控制 Q/V 使用的双视角缩放尺寸；VLA actor 仍走自身 processor。当前 16 GB profile 强制 `micro_batch_size=1`。actor 累计 `gradient_accumulation_steps=32` 个 micro-step 后更新一次，等效 actor batch 为 32；critic/value 则每个 micro-step 都更新。
-- 训练长度：`train_steps=10000` 表示 10000 次 replay 抽样和 critic/value 更新，不是 10000 个完整 epoch。默认情况下 actor optimizer 大约执行 `ceil(10000/32)=313` 次。每个变长 transition 被均匀采样，因此 transition 更多的长轨迹会贡献更多训练样本；`action_source` 与 `transition_type` 会保留在 replay 元数据中，但当前没有按成功/失败、human/policy 或 episode 做额外重加权。
+- 数据与显存：`critic_image_size`只控制Q/V使用的双视角缩放尺寸；VLA actor仍走自身processor。`micro_batch_size`是每次同时送入Q/V和VLA actor的transition数量，不再被人为限制为1；`gradient_accumulation_steps`决定多少个micro-step后更新actor。基础16 GB profile采用 `1×32`，单任务A100服务器profile采用 `8×4`，两者等效actor batch均为32。批处理只允许prepared training split包含唯一 `task_id + prompt`；旧多任务manifest仍可用 `micro_batch_size=1`训练。
+- 训练长度：`train_steps`表示critic/value优化次数，不是epoch。实际抽样transition数为 `train_steps × micro_batch_size`，actor optimizer更新次数约为 `ceil(train_steps / gradient_accumulation_steps)`。因此将 `1×32` 改为 `8×4`并保持相同 `train_steps`会增加数据吞吐和actor更新次数，不应直接与旧run按step数视为相同训练预算。每个变长transition仍被均匀采样，`action_source`和`transition_type`语义没有改变。
 - critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value 的 Adam optimizer。每步先以冻结 target Q 更新 V，再用更新后的 V 更新 online Q，最后 Polyak 更新 target Q。`expectile` 越高，value 越偏向高 Q 动作；actor 权重使用 online `min(Q1,Q2)-V`，计算 `exp(beta × advantage)` 后由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
 - actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。`critic_warmup_steps` 期间 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 并没有在前 200 步冻结。
 - 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
-- 终端进度：`logging.console_interval_steps` 控制打印间隔。无论间隔为何，首步和最终一步都会打印；每行包含当前/总 step、百分比、BC warmup/IQL 阶段、已用时间、基于最近 100 步的 ETA、预计完成时刻、step/s、Q/value/actor loss、Q/V/advantage 均值、advantage weight、actor 学习率及 CUDA 峰值显存。该设置只影响显示频率，不改变训练或 `metrics.jsonl` 的逐步记录。
+- 终端进度：`logging.console_interval_steps`控制打印间隔。首步和最终一步始终打印；每行包含当前/总step、百分比、BC warmup/IQL阶段、已用时间、ETA、step/s、sample/s、Q/value/actor loss、Q/V/advantage均值、advantage weight、actor学习率及CUDA峰值显存。比较不同batch时应以 `samples_per_second`衡量吞吐，不能只比较step/s。
 
 运行训练：
 
@@ -943,7 +952,103 @@ python vla-adapter-rynn-iql/scripts/run_pipeline.py \
 
 只想完成 `prepare → annotate → train` 而暂不仿真评测时，加 `--skip-evaluation`。
 
-#### 4.4.6 使用 TensorBoard 查看训练变化
+#### 4.4.6 不启动图形界面的远程终端训练
+
+远程服务器不需要启动 FastAPI、React 或浏览器。推荐使用有状态终端流水线，它会在两个 Conda 环境之间依次执行数据选择、Prepare、RynnValue评价、评价绑定和IQL训练：
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_terminal.py \
+  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml
+```
+
+`configs/terminal_pipeline.yaml` 引用 `liberox_iql.yaml` 作为基础配置。任务、数据规模和训练参数都在一个文件中覆盖，不会修改基础YAML。默认示例按类别选择5条基础策略失败轨迹和50条人工接管成功轨迹：
+
+```yaml
+selection:
+  task_id: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+  mode: quota
+  seed: 7
+  source_types: [inference, manual, policy_requery]
+  outcomes: [success, failure]
+  size: null
+  quotas:
+    - {source_type: inference, outcome: failure, count: 5, order: random}
+    - {source_type: manual, outcome: success, count: 50, order: random}
+
+overrides:
+  paths: {}
+  data:
+    validation_fraction: 0.2
+    split_seed: 7
+    success_consecutive_steps: 5
+  reward: {}
+  vla: {}
+  iql:
+    train_steps: 20000
+    critic_warmup_steps: 1000
+    beta: 3.0
+    max_advantage_weight: 20.0
+    # 单任务A100服务器默认；等效actor batch仍为32。
+    micro_batch_size: 8
+    gradient_accumulation_steps: 4
+  logging:
+    tensorboard: true
+    wandb:
+      enabled: true
+      mode: online
+      project: vla-adapter-rynn-iql
+      entity: null
+      run_name: null
+      group: terminal-pipeline
+      tags: [liberox, rynnvalue, iql, terminal]
+      log_interval_steps: 10
+    console_interval_steps: 10
+```
+
+`quota`用于分别控制不同来源/结果的数据量；配额不足会退出，不会静默缩小数据集。还支持：
+
+- `mode: random`：在筛选后的候选轨迹中按固定seed抽取 `size` 条，同时设置 `quotas: []`；
+- `mode: all`：纳入该任务下全部符合筛选条件的轨迹，同时设置 `size: null` 和 `quotas: []`。
+
+任务默认接受完整 `LEVEL1::...` ID；省略LEVEL前缀时，只有在数据源中能唯一匹配才会自动补全。每条流水线只允许一个任务。分支和父轨迹仍按照root ID进入同一个train/validation split，相同物理前缀只在构造ReplayDataset时去重。
+
+脚本首先显示候选/选中数量、类别组成、动作和chunk规模、已有绑定评价、训练参数与阶段执行计划，然后等待确认。无人值守任务使用：
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_terminal.py \
+  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml \
+  --yes
+```
+
+其他控制选项：
+
+- `--dry-run`：只扫描、校验和打印计划，不创建流水线、冻结数据集或训练结果；
+- `--force-prepare`：忽略匹配的Prepare缓存并重新生成manifest；
+- `--force-annotate`：不复用当前评价，重新执行RynnValue并更新绑定sidecar。
+
+默认复用规则如下：
+
+1. 数据成员、源文件哈希、成功阈值、split或chunk结构未变化时，跳过Prepare；仅修改 `iql.*` 不会使Prepare失效。
+2. 当前prepared dataset已有完整、同reward配置且文件哈希有效的reward manifest时，跳过整个评价阶段。
+3. 需要评价时仍按轨迹检查 `rynnvalue_evaluation.json/.npz` 和全局content cache；已经评价的轨迹不会再次运行RynnValue forward。兼容的旧官方输出只重新计算reward。
+4. 评价结束后结果会原子绑定回各轨迹目录，因此删除终端流水线缓存后仍可复用，也能在现有数据详情页查看。
+5. IQL训练默认每次创建新的输出和overlay；只有 `overrides.iql.resume_checkpoint` 明确指定checkpoint时才恢复。
+
+每次执行的状态写入：
+
+```text
+vla-adapter-rynn-iql/outputs/terminal-pipelines/
+├── datasets/terminal-ds-<hash>/dataset.json
+├── cache/prepared/<hash>/work/
+└── runs/<timestamp>__<id>/
+    ├── pipeline.json
+    ├── effective_config.yaml
+    └── train_result.json
+```
+
+`Ctrl+C`会转发给当前Conda子进程；训练阶段仍通过安全checkpoint停止，流水线记录为 `INTERRUPTED`。原来的 `run_pipeline.py` 保留为无选择清单、无阶段状态检查的简单编排入口，新远程训练应优先使用 `train_terminal.py`。
+
+#### 4.4.7 使用 TensorBoard 查看训练变化
 
 新训练默认同时保存两种指标：`metrics.jsonl` 是可审计的逐步原始记录，`tensorboard/` 是图表事件。训练开始后可在另一个终端启动：
 
@@ -981,7 +1086,63 @@ conda run -n vla-liberox python \
 - `system/steps_per_second` 与 `cuda_peak_memory_gib`：查看速度和显存峰值。
 - `system/progress_percent` 与 `estimated_remaining_seconds`：查看训练完成比例和滚动 ETA；checkpoint 保存期间的短暂停顿会暂时反映在 ETA 中，后续窗口更新后会恢复。
 
-可在 YAML 中把 `logging.tensorboard` 设为 `false` 关闭事件写入，`metrics.jsonl` 仍会保留。`logging.console_interval_steps` 必须为正整数，例如设为 `1` 可逐步打印，长训练建议保持 `10` 或调大以减少终端日志。当前没有默认启用 W&B：它需要联网、账号登录和实验同步策略；若以后需要跨机器共享，可在不改变这些指标名称的前提下增加 W&B 后端。
+可在 YAML 中把 `logging.tensorboard` 设为 `false` 关闭事件写入，`metrics.jsonl` 仍会保留。`logging.console_interval_steps` 必须为正整数，例如设为 `1` 可逐步打印，长训练建议保持 `10` 或调大以减少终端日志。
+
+#### 4.4.8 使用 W&B 远程监控
+
+训练器也可以把同一组分层指标发送到 Weights & Biases。先更新训练依赖并登录：
+
+```bash
+conda run -n vla-liberox pip install -r \
+  vla-adapter-rynn-iql/requirements-train.txt
+conda run -n vla-liberox wandb login
+```
+
+然后在 `liberox_iql.yaml` 或 `terminal_pipeline.yaml` 的 `logging`/`overrides.logging` 中启用：
+
+```yaml
+logging:
+  tensorboard: true
+  wandb:
+    enabled: true
+    mode: online                 # 无外网服务器改为 offline
+    project: vla-adapter-rynn-iql
+    entity: null                 # 团队账号可填写 entity
+    run_name: null               # null 时使用本地唯一 run ID
+    group: a100-sweep
+    tags: [liberox, rynnvalue, iql]
+    log_interval_steps: 10
+  flush_seconds: 5
+  console_interval_steps: 10
+```
+
+`online` 模式在训练开始时强制检查登录，失败会直接给出错误，不会静默转成离线记录。训练目录中的 `wandb.json` 保存 W&B run ID、URL和本地目录；W&B 页面使用与 TensorBoard 相同的 `loss/*`、`value/*`、`iql/*`、`optimization/*`、`action_l1/*`、`gripper/*` 和 `system/*` 指标名。`log_interval_steps` 只控制网络提交频率，`metrics.jsonl` 与 TensorBoard 仍逐step写入。
+
+无法联网时设置 `mode: offline`。训练完成并转移日志后再同步：
+
+```bash
+conda run -n vla-liberox wandb sync \
+  vla-adapter-rynn-iql/outputs/training/<run>/wandb/offline-run-*
+```
+
+#### 4.4.9 8×A100 资源配置
+
+当前实现是**单进程、单GPU训练器**。`reward.device`和`iql.device`各接受一个`cuda:N`；没有DDP/FSDP，设置8张可见卡不会让单次训练自动使用8卡。单卡内已支持同一任务prompt的批量双视角VLA输入，远程终端默认使用 `micro_batch_size=8`、`gradient_accumulation_steps=4`提高A100显存利用率；Q/V、actor梯度、随机采样和checkpoint尚未做多rank同步。
+
+在共享服务器上，推荐由调度器为每条流水线分配一张A100。用物理GPU 3时：
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python \
+  vla-adapter-rynn-iql/scripts/train_terminal.py \
+  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml \
+  --yes
+```
+
+此时YAML中的 `reward.device: cuda:0` 和 `iql.device: cuda:0` **保持不变**：进程内的 `cuda:0` 已映射到物理GPU 3。不要在只暴露一张卡时写 `cuda:3`。
+
+要利用8张A100，当前最有效的方式是并行运行8个独立实验，而不是让一个实验占8卡：先用一条流水线完成Prepare和RynnValue评价绑定；确认第二次 `--dry-run` 显示这两个阶段可跳过后，再准备8份配置，分别修改 `iql.seed`、待比较的超参数、`wandb.run_name`，并保持相同 `wandb.group`。每个进程绑定不同物理GPU。这样缓存评价只计算一次，8张卡用于8组IQL实验，W&B可在同一group中直接比较。
+
+Slurm环境建议每个array job申请一张卡（例如 `--gres=gpu:a100:1`），并继续在YAML内使用 `cuda:0`；Slurm会完成可见设备映射。若目标是用8卡缩短**同一个**训练run，需要另行实现DDP/FSDP，不能只改YAML或启动命令。
 
 ### 4.5 数据与奖励语义
 

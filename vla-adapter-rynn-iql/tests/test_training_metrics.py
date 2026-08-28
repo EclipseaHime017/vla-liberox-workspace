@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from vla_rynn_iql.monitoring import (
     TrainingProgressReporter,
     convert_run_metrics,
     format_duration,
+    log_wandb_metric,
     log_tensorboard_metric,
     write_metrics_to_tensorboard,
 )
-from vla_rynn_iql.training import _action_diagnostics, _module_parameter_norm
+from vla_rynn_iql.training import (
+    _action_diagnostics,
+    _module_parameter_norm,
+    _validate_single_task_micro_batch,
+)
 
 
 class FakeWriter:
@@ -19,6 +25,14 @@ class FakeWriter:
 
     def add_scalar(self, name: str, value: float, step: int) -> None:
         self.scalars.append((name, value, step))
+
+
+class FakeWandbRun:
+    def __init__(self):
+        self.records: list[tuple[dict[str, float], int]] = []
+
+    def log(self, payload: dict[str, float], step: int) -> None:
+        self.records.append((payload, step))
 
 
 def test_action_diagnostics_expose_gripper_and_each_action_axis():
@@ -40,6 +54,21 @@ def test_module_parameter_norm_reports_whole_module_l2_norm():
     with torch.no_grad():
         module.weight.copy_(torch.tensor([[3.0, 4.0]]))
     assert np.isclose(_module_parameter_norm(module), 5.0)
+
+
+def test_micro_batch_requires_one_training_task_but_batch_one_remains_compatible():
+    manifest = {
+        "episodes": [
+            {"split": "train", "chunks": [{}], "task_id": "task-a", "prompt": "A"},
+            {"split": "train", "chunks": [{}], "task_id": "task-b", "prompt": "B"},
+        ]
+    }
+    _validate_single_task_micro_batch(manifest, 1)
+    with pytest.raises(ValueError, match="single-task"):
+        _validate_single_task_micro_batch(manifest, 2)
+
+    manifest["episodes"] = [manifest["episodes"][0]]
+    _validate_single_task_micro_batch(manifest, 8)
 
 
 def test_tensorboard_groups_metrics_and_skips_missing_values():
@@ -64,17 +93,37 @@ def test_tensorboard_groups_metrics_and_skips_missing_values():
     assert not any(name == "optimization/actor_grad_norm" for name, _, _ in writer.scalars)
 
 
+def test_wandb_uses_same_grouped_metrics_and_explicit_train_step():
+    run = FakeWandbRun()
+    log_wandb_metric(
+        run,
+        {
+            "step": 12,
+            "actor_loss": 0.4,
+            "actor_grad_norm": None,
+            "advantage_weight_mean": 2.5,
+        },
+    )
+    assert run.records == [({
+        "loss/actor_loss": 0.4,
+        "iql/advantage_weight_mean": 2.5,
+        "train/step": 12,
+    }, 12)]
+
+
 def test_progress_reporter_uses_rolling_rate_and_reports_configured_steps():
     reporter = TrainingProgressReporter(
         total_steps=100,
         start_step=20,
         interval_steps=10,
         warmup_steps=30,
+        samples_per_step=8,
         window_steps=2,
     )
     first = {"step": 21, "elapsed_seconds": 2.0, "cuda_peak_memory_gib": 4.0}
     assert reporter.update(first) is True
     assert np.isclose(first["steps_per_second"], 0.5)
+    assert np.isclose(first["samples_per_second"], 4.0)
     assert np.isclose(first["estimated_remaining_seconds"], 158.0)
     assert "phase=BC-warmup" in reporter.format(first)
 
@@ -89,6 +138,7 @@ def test_progress_reporter_uses_rolling_rate_and_reports_configured_steps():
     assert reporter.update(complete) is True
     assert complete["estimated_remaining_seconds"] == 0.0
     assert "100/100" in reporter.format(complete)
+    assert "sample/s" in reporter.format(complete)
 
 
 def test_format_duration_handles_hours_days_and_unknown_values():

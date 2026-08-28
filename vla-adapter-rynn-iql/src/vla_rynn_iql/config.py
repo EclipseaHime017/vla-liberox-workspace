@@ -60,6 +60,16 @@ TRAIN_SCHEMA = {
             "resume_checkpoint": None, "seed": None, "device": None, "dtype": None},
     "logging": {
         "tensorboard": None,
+        "wandb": {
+            "enabled": None,
+            "mode": None,
+            "project": None,
+            "entity": None,
+            "run_name": None,
+            "group": None,
+            "tags": None,
+            "log_interval_steps": None,
+        },
         "flush_seconds": None,
         "console_interval_steps": None,
     },
@@ -220,10 +230,29 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     if iql["dtype"] != "bfloat16":
         raise ValueError("Version 1 trains the VLA actor in bfloat16; iql.dtype must be bfloat16")
     _cuda_device(iql["device"], "iql.device")
-    if iql["micro_batch_size"] != 1:
-        raise ValueError("The validated 16GB profile requires iql.micro_batch_size=1")
     if type(logging_cfg["tensorboard"]) is not bool:
         raise TypeError("logging.tensorboard must be boolean")
+    wandb_cfg = logging_cfg["wandb"]
+    if type(wandb_cfg["enabled"]) is not bool:
+        raise TypeError("logging.wandb.enabled must be boolean")
+    if wandb_cfg["mode"] not in {"online", "offline", "disabled"}:
+        raise ValueError("logging.wandb.mode must be online, offline, or disabled")
+    if not isinstance(wandb_cfg["project"], str) or not wandb_cfg["project"].strip():
+        raise TypeError("logging.wandb.project must be a non-empty string")
+    for key in ("entity", "run_name", "group"):
+        value = wandb_cfg[key]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise TypeError(f"logging.wandb.{key} must be null or a non-empty string")
+    tags = wandb_cfg["tags"]
+    if (
+        not isinstance(tags, list)
+        or any(not isinstance(tag, str) or not tag.strip() for tag in tags)
+        or len(tags) != len(set(tags))
+    ):
+        raise TypeError("logging.wandb.tags must be a list of unique non-empty strings")
+    _number(
+        wandb_cfg, "log_interval_steps", low=1, integer=True,
+    )
     _number(logging_cfg, "flush_seconds", low=1, high=3600)
     _number(logging_cfg, "console_interval_steps", low=1, integer=True)
     return LoadedConfig(path, raw)

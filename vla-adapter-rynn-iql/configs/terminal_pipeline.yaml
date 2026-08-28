@@ -1,0 +1,59 @@
+schema_version: 1
+
+# Paths in this file are resolved relative to this YAML file.
+base_config: ./liberox_iql.yaml
+pipeline_root: ../outputs/terminal-pipelines
+
+environments:
+  prepare: vla-liberox
+  annotate: rynnvalue-reward
+  train: vla-liberox
+
+selection:
+  # The LEVEL prefix may be omitted when the remaining task name is unique.
+  task_id: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+  mode: quota
+  seed: 7
+  source_types: [inference, manual, policy_requery]
+  outcomes: [success, failure]
+  size: null
+  quotas:
+    - source_type: inference
+      outcome: failure
+      count: 5
+      order: random
+    - source_type: manual
+      outcome: success
+      count: 50
+      order: random
+
+# These are partial overrides of liberox_iql.yaml. Unknown and pipeline-managed
+# keys fail validation instead of being silently ignored.
+overrides:
+  paths: {}
+  data:
+    validation_fraction: 0.2
+    split_seed: 7
+    success_consecutive_steps: 5
+  reward: {}
+  vla: {}
+  iql:
+    train_steps: 20000
+    critic_warmup_steps: 1000
+    beta: 3.0
+    max_advantage_weight: 20.0
+    # A100 server profile: keep the actor effective batch at 8 * 4 = 32.
+    micro_batch_size: 8
+    gradient_accumulation_steps: 4
+  logging:
+    tensorboard: true
+    wandb:
+      enabled: true
+      mode: online
+      project: vla-adapter-rynn-iql
+      entity: null
+      run_name: null
+      group: terminal-pipeline
+      tags: [liberox, rynnvalue, iql, terminal]
+      log_interval_steps: 10
+    console_interval_steps: 10

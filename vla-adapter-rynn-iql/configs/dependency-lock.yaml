@@ -7,3 +7,6 @@ rynnvalue:
 vla_adapter:
   base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
   transformers: 4.40.1
+monitoring:
+  tensorboard: ">=2.15,<3"
+  wandb: ">=0.19,<1"

@@ -29,6 +29,7 @@ from .monitoring import (
     ACTION_NAMES,
     TrainingProgressReporter,
     log_tensorboard_metric,
+    log_wandb_metric,
 )
 from .replay import ReplayDataset
 from .rewards import load_reward_index
@@ -103,9 +104,88 @@ def _device(name: str) -> torch.device:
     return device
 
 
+def _initialize_wandb(
+    config: LoadedConfig,
+    run_dir: Path,
+    run_id: str,
+) -> Any:
+    """Create a W&B run lazily so disabled logging has no SDK dependency."""
+    wandb_cfg = config.section("logging")["wandb"]
+    if not wandb_cfg["enabled"]:
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "W&B logging is enabled but wandb is not installed; "
+            "install requirements-train.txt"
+        ) from exc
+    try:
+        run = wandb.init(
+            project=wandb_cfg["project"],
+            entity=wandb_cfg["entity"],
+            id=run_id,
+            name=wandb_cfg["run_name"] or run_id,
+            group=wandb_cfg["group"],
+            tags=wandb_cfg["tags"],
+            job_type="train",
+            config=config.raw,
+            dir=str(run_dir),
+            mode=wandb_cfg["mode"],
+            force=wandb_cfg["mode"] == "online",
+            resume="never",
+            save_code=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Cannot initialize W&B. For online mode run `wandb login`; "
+            "for an offline server set logging.wandb.mode=offline. "
+            f"Original error: {exc}"
+        ) from exc
+    if run is None:
+        raise RuntimeError("wandb.init returned no run")
+    run.define_metric("train/step")
+    run.define_metric("*", step_metric="train/step")
+    atomic_json(run_dir / "wandb.json", {
+        "schema_version": 1,
+        "run_id": str(run.id),
+        "mode": wandb_cfg["mode"],
+        "project": str(run.project or wandb_cfg["project"]),
+        "entity": run.entity,
+        "url": run.url or None,
+        "local_dir": str(run.dir),
+    })
+    LOG.info(
+        "W&B monitoring enabled: mode=%s, run=%s%s",
+        wandb_cfg["mode"],
+        run.id,
+        f", url={run.url}" if run.url else "",
+    )
+    return run
+
+
 def _sample_batch(dataset: ReplayDataset, batch_size: int, generator: torch.Generator):
     indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
     return default_collate([dataset[index] for index in indices])
+
+
+def _validate_single_task_micro_batch(
+    manifest: dict[str, Any], micro_batch_size: int,
+) -> None:
+    """Reject ambiguous prompt padding while retaining legacy batch-one training."""
+    if micro_batch_size == 1:
+        return
+    train_episodes = [
+        episode for episode in manifest["episodes"]
+        if episode["split"] == "train" and episode.get("chunks")
+    ]
+    task_ids = {str(episode["task_id"]) for episode in train_episodes}
+    prompts = {str(episode["prompt"]) for episode in train_episodes}
+    if len(task_ids) != 1 or len(prompts) != 1:
+        raise ValueError(
+            "iql.micro_batch_size>1 requires a single-task prepared training split; "
+            f"found task_ids={sorted(task_ids)} and {len(prompts)} prompts"
+        )
 
 
 def _code_version() -> dict[str, Any]:
@@ -296,6 +376,8 @@ def train(config: LoadedConfig) -> Path:
     LOG.info("Loading prepared replay manifest and RynnValue reward cache")
     manifest = load_manifest(config)
     reward_index = load_reward_index(config)
+    micro_batch_size = int(iql_cfg["micro_batch_size"])
+    _validate_single_task_micro_batch(manifest, micro_batch_size)
     LOG.info("Loading frozen VLA backbone and trainable action components")
     component_load_started = time.monotonic()
     components = load_components(config)
@@ -358,6 +440,7 @@ def train(config: LoadedConfig) -> Path:
         start_step=start_step,
         interval_steps=int(logging_cfg["console_interval_steps"]),
         warmup_steps=warmup,
+        samples_per_step=micro_batch_size,
     )
     LOG.info(
         "Training started: run=%s, replay_chunks=%d, steps=%d->%d, warmup=%d, "
@@ -367,8 +450,8 @@ def train(config: LoadedConfig) -> Path:
         start_step,
         total_steps,
         warmup,
-        int(iql_cfg["micro_batch_size"]),
-        int(iql_cfg["micro_batch_size"]) * accumulation,
+        micro_batch_size,
+        micro_batch_size * accumulation,
         int(iql_cfg["checkpoint_interval"]),
         device,
     )
@@ -394,10 +477,14 @@ def train(config: LoadedConfig) -> Path:
                 "```yaml\n" + yaml.safe_dump(config.raw, sort_keys=False) + "```",
                 start_step,
             )
+        wandb_run = _initialize_wandb(config, run_dir, run_id)
+        if wandb_run is not None:
+            stack.callback(wandb_run.finish)
+        wandb_interval = int(logging_cfg["wandb"]["log_interval_steps"])
         current_actor_lr = float(actor_optimizer.param_groups[0]["lr"])
         for step in range(start_step, total_steps):
             batch = _sample_batch(
-                dataset, int(iql_cfg["micro_batch_size"]), data_generator
+                dataset, micro_batch_size, data_generator
             )
             critic_batch = {
                 key: value.to(device, non_blocking=True)
@@ -421,14 +508,11 @@ def train(config: LoadedConfig) -> Path:
                     weights = advantage_weights(
                         advantage, float(iql_cfg["beta"]), float(iql_cfg["max_advantage_weight"])
                     )
-            # VLA-Adapter's current continuous path supports one prompt per
-            # call. The 16GB profile therefore fixes micro-batch to one and
-            # obtains the effective batch through gradient accumulation.
-            if len(batch["prompt"]) != 1:
-                raise ValueError("VLA actor training currently requires micro_batch_size=1")
-            agent_image = batch["agent_image"][0].cpu().numpy()
-            wrist_image = batch["wrist_image"][0].cpu().numpy()
-            inputs = processor_inputs(components, batch["prompt"][0], agent_image, wrist_image)
+            agent_image = batch["agent_image"].cpu().numpy()
+            wrist_image = batch["wrist_image"].cpu().numpy()
+            inputs = processor_inputs(
+                components, list(batch["prompt"]), agent_image, wrist_image,
+            )
             hidden = extract_action_hidden_states(components, inputs)
             proprio = critic_batch["proprio"].to(dtype=torch.bfloat16)
             prediction = predict_normalized(components, hidden, proprio)
@@ -475,6 +559,8 @@ def train(config: LoadedConfig) -> Path:
                 "action_head_parameter_norm": action_head_parameter_norm,
                 "proprio_projector_parameter_norm": proprio_projector_parameter_norm,
                 "elapsed_seconds": time.monotonic() - start_time,
+                "micro_batch_size": micro_batch_size,
+                "actor_effective_batch_size": micro_batch_size * accumulation,
                 "cuda_peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
                 **action_metrics,
             }
@@ -485,6 +571,16 @@ def train(config: LoadedConfig) -> Path:
             metrics_file.write(json.dumps(metric, sort_keys=True) + "\n")
             metrics_file.flush()
             log_tensorboard_metric(writer, metric)
+            completed_this_run = int(metric["step"]) - start_step
+            if (
+                wandb_run is not None
+                and (
+                    completed_this_run == 1
+                    or int(metric["step"]) == total_steps
+                    or completed_this_run % wandb_interval == 0
+                )
+            ):
+                log_wandb_metric(wandb_run, metric)
             if should_report:
                 LOG.info(progress.format(metric))
             if (step + 1) % int(iql_cfg["checkpoint_interval"]) == 0 or step + 1 == total_steps:
@@ -507,12 +603,20 @@ def train(config: LoadedConfig) -> Path:
                     "reward_sha256": stable_hash(reward_index),
                     "cancel_checkpoint": str(latest_checkpoint),
                     "resumed_from_step": start_step,
+                    "micro_batch_size": micro_batch_size,
+                    "transitions_processed": (step + 1 - start_step) * micro_batch_size,
                 })
                 LOG.warning(
                     "Training stop requested; saved cancellation checkpoint %s",
                     latest_checkpoint,
                 )
+                if wandb_run is not None:
+                    wandb_run.summary["status"] = "canceled"
+                    wandb_run.summary["last_step"] = step + 1
                 raise TrainingCancelled("Training canceled after safe checkpoint")
+        if wandb_run is not None:
+            wandb_run.summary["status"] = "optimization_completed"
+            wandb_run.summary["last_step"] = total_steps
     assert latest_checkpoint is not None
     registry = Path(config.section("paths")["policy_registry"])
     registry.mkdir(parents=True, exist_ok=True)
@@ -525,6 +629,8 @@ def train(config: LoadedConfig) -> Path:
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": stable_hash(reward_index), "policy_overlay": str(policy),
         "resumed_from_step": start_step,
+        "micro_batch_size": micro_batch_size,
+        "transitions_processed": (total_steps - start_step) * micro_batch_size,
         "peak_cuda_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
     })
     return policy

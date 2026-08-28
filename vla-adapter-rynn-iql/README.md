@@ -62,6 +62,39 @@ suffix so RynnValue can score the natural rollout before takeover. The training
 replay de-duplicates physically copied parent prefixes across the parent and
 sibling branches.
 
+For terminal-only training on a remote machine, use the stateful orchestrator;
+it does not import or start the web backend or frontend:
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_terminal.py \
+  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml
+```
+
+The terminal YAML selects exactly one task and supports quota, random-size, and
+all-eligible membership. It can override data, reward, VLA, IQL, logging, and
+non-managed path settings from `liberox_iql.yaml`. Before execution it prints a
+reproducible selection and stage plan and asks for confirmation; pass `--yes`
+for SSH batch jobs or `--dry-run` to validate without creating pipeline output.
+Its A100-oriented default uses `micro_batch_size: 8` and
+`gradient_accumulation_steps: 4`, retaining an actor effective batch of 32.
+The base 16 GB-compatible config remains `1 x 32`. Batched VLA processing is
+restricted to a prepared training split with exactly one task and prompt;
+legacy multi-task manifests remain supported with micro batch one.
+
+Prepare is skipped only when its selection/source/structural fingerprint and
+manifest hash match. Reward annotation is skipped when the complete reward
+manifest matches, and otherwise reuses hash-valid per-trajectory sidecars so
+RynnValue runs only for missing or incompatible trajectories. Completed
+annotations are atomically bound beside each source trajectory as
+`rynnvalue_evaluation.{json,npz}`. Training always creates a new run unless an
+explicit `resume_checkpoint` override is provided. `--force-prepare` and
+`--force-annotate` are available for deliberate rebuilds. Pipeline state,
+effective configuration, timings, cache decisions, and the resulting overlay
+are recorded below `outputs/terminal-pipelines/`.
+
+The older `run_pipeline.py` remains a simple stateless stage launcher. Prefer
+`train_terminal.py` for unattended or resumable remote workflows.
+
 The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan
 the rest of `dataset-root`: it verifies and imports exactly the listed members,
@@ -79,7 +112,7 @@ model evaluations are reused; preparation itself is still required because a
 dataset version has its own members, interrupted chunks, terminal threshold,
 and root-grouped split.
 
-## TensorBoard monitoring
+## Training monitoring
 
 New training runs write both the auditable `metrics.jsonl` stream and
 TensorBoard events under `outputs/training/<run>/tensorboard/`. Logging is
@@ -88,6 +121,15 @@ controlled by the strict YAML section:
 ```yaml
 logging:
   tensorboard: true
+  wandb:
+    enabled: false
+    mode: online
+    project: vla-adapter-rynn-iql
+    entity: null
+    run_name: null
+    group: null
+    tags: [liberox, rynnvalue, iql]
+    log_interval_steps: 10
   flush_seconds: 5
   console_interval_steps: 10
 ```
@@ -98,6 +140,8 @@ phase, elapsed time, rolling ETA and estimated finish time, throughput, the
 Q/value/actor losses, Q/V/advantage means, advantage weight, actor learning
 rate, and peak allocated CUDA memory. The rolling ETA uses the most recent 100
 steps, so checkpoint pauses and early startup do not permanently distort it.
+Both `steps_per_second` and `samples_per_second` are recorded; use the latter
+when comparing runs with different micro-batch sizes.
 
 Start the local viewer from the workspace root:
 
@@ -120,8 +164,25 @@ conda run -n vla-liberox python \
 The dashboards group Q/value/actor losses, IQL advantage weights, all seven
 action-axis L1 errors, gripper predictions and targets, actor learning rate and
 gradient/parameter norms, progress/ETA, throughput, and CUDA peak memory. Legacy
-conversion can only show fields that existed in the old JSONL. W&B is intentionally not a required
-dependency; TensorBoard keeps local runs usable without an account or network.
+conversion can only show fields that existed in the old JSONL.
+
+For remote monitoring, install `requirements-train.txt`, run `wandb login`, and
+set `logging.wandb.enabled: true`. Online mode fails clearly when credentials
+are unavailable rather than silently changing modes. Air-gapped servers can use
+`mode: offline` and later run `wandb sync <run>/wandb/offline-run-*`. W&B uses
+the same grouped metric names as TensorBoard and writes connection metadata to
+`<run>/wandb.json`. `logging.wandb.log_interval_steps` controls network logging
+frequency without changing the per-step JSONL/TensorBoard records. See the
+root Chinese README sections 4.4.8 and 4.4.9 for complete configuration and
+8xA100 deployment guidance.
+
+The trainer is currently single-process and single-GPU, but one GPU can process
+multiple same-task replay transitions in each forward pass. Restrict a job to one
+physical GPU with `CUDA_VISIBLE_DEVICES=N` and leave both configured devices as
+`cuda:0`; the visible device is remapped to process-local index zero. Eight A100s
+are best used for eight independent seeded/hyperparameter runs after preparing
+and annotating once. A single run does not use DDP/FSDP yet and cannot be made
+eight-GPU merely by exposing all devices.
 
 For a fast CPU test without model downloads:
 

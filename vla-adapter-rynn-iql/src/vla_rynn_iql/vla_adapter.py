@@ -135,14 +135,60 @@ def qwen_prompt(task: str) -> str:
     )
 
 
-def processor_inputs(components: VLAComponents, prompt: str, agent: np.ndarray, wrist: np.ndarray):
-    primary = components.processor(qwen_prompt(prompt), Image.fromarray(agent)).to(
+def processor_inputs(
+    components: VLAComponents,
+    prompt: str | list[str] | tuple[str, ...],
+    agent: np.ndarray,
+    wrist: np.ndarray,
+):
+    """Build a one-task batch containing synchronized agent and wrist views."""
+    prompts = [prompt] if isinstance(prompt, str) else list(prompt)
+    agents = np.asarray(agent)
+    wrists = np.asarray(wrist)
+    if agents.ndim == 3:
+        agents = agents[None, ...]
+    if wrists.ndim == 3:
+        wrists = wrists[None, ...]
+    if agents.ndim != 4 or wrists.ndim != 4:
+        raise ValueError("VLA images must have shape HxWxC or BxHxWxC")
+    if len(prompts) != len(agents) or len(prompts) != len(wrists):
+        raise ValueError(
+            "VLA prompt/agent/wrist batch sizes differ: "
+            f"{len(prompts)}/{len(agents)}/{len(wrists)}"
+        )
+    if not prompts or any(not isinstance(value, str) or not value.strip() for value in prompts):
+        raise ValueError("Every VLA batch prompt must be a non-empty string")
+    # The current terminal pipeline deliberately trains one task per run. Keeping
+    # every token sequence identical preserves the exact single-sample action-query
+    # positions while allowing the upstream Prismatic processor to batch images.
+    texts = [qwen_prompt(value) for value in prompts]
+    if len(set(texts)) != 1:
+        raise ValueError(
+            "VLA micro-batches must contain one task prompt; use micro_batch_size=1 "
+            "for a legacy multi-task manifest"
+        )
+    primary = components.processor(
+        texts,
+        [Image.fromarray(value) for value in agents],
+        padding=True,
+        return_tensors="pt",
+    ).to(
         components.model.device, dtype=components.model.dtype
     )
-    secondary = components.processor(qwen_prompt(prompt), Image.fromarray(wrist)).to(
+    secondary = components.processor(
+        texts,
+        [Image.fromarray(value) for value in wrists],
+        padding=True,
+        return_tensors="pt",
+    ).to(
         components.model.device, dtype=components.model.dtype
     )
-    primary["pixel_values"] = __import__("torch").cat(
+    torch = __import__("torch")
+    if not torch.equal(primary["input_ids"], secondary["input_ids"]):
+        raise RuntimeError("Agent and wrist token batches differ")
+    if not torch.equal(primary["attention_mask"], secondary["attention_mask"]):
+        raise RuntimeError("Agent and wrist attention masks differ")
+    primary["pixel_values"] = torch.cat(
         [primary["pixel_values"], secondary["pixel_values"]], dim=1
     )
     return primary

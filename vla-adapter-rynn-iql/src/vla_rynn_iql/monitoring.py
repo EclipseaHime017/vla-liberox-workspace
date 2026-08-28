@@ -28,6 +28,9 @@ TENSORBOARD_GROUPS = {
     ),
     "system": (
         "steps_per_second",
+        "samples_per_second",
+        "micro_batch_size",
+        "actor_effective_batch_size",
         "progress_percent",
         "estimated_remaining_seconds",
         "cuda_peak_memory_gib",
@@ -63,13 +66,14 @@ class TrainingProgressReporter:
     start_step: int
     interval_steps: int
     warmup_steps: int
+    samples_per_step: int = 1
     window_steps: int = 100
     _points: deque[tuple[int, float]] = field(init=False)
 
     def __post_init__(self) -> None:
         if self.total_steps <= self.start_step:
             raise ValueError("total_steps must be larger than start_step")
-        if self.interval_steps <= 0 or self.window_steps <= 0:
+        if self.interval_steps <= 0 or self.window_steps <= 0 or self.samples_per_step <= 0:
             raise ValueError("progress intervals must be positive")
         self._points = deque(maxlen=self.window_steps + 1)
 
@@ -86,6 +90,7 @@ class TrainingProgressReporter:
         remaining = max(self.total_steps - step, 0)
         eta_seconds = remaining / rate if rate > 0 else None
         metric["steps_per_second"] = rate
+        metric["samples_per_second"] = rate * self.samples_per_step
         metric["progress_percent"] = 100.0 * step / self.total_steps
         metric["estimated_remaining_seconds"] = eta_seconds
         metric["estimated_completion_time"] = (
@@ -114,6 +119,7 @@ class TrainingProgressReporter:
             f"elapsed={format_duration(metric.get('elapsed_seconds'))} | "
             f"ETA={format_duration(metric.get('estimated_remaining_seconds'))} "
             f"(finish {finish}) | {metric['steps_per_second']:.3f} step/s | "
+            f"{metric['samples_per_second']:.2f} sample/s | "
             f"loss(q/v/actor)={_metric_number(metric, 'q_loss')}/"
             f"{_metric_number(metric, 'value_loss')}/"
             f"{_metric_number(metric, 'actor_loss')} | "
@@ -136,6 +142,27 @@ def log_tensorboard_metric(writer: Any, metric: dict[str, Any]) -> None:
             value = metric.get(key)
             if value is not None:
                 writer.add_scalar(f"{group}/{key}", float(value), step)
+
+
+def grouped_scalar_metrics(metric: dict[str, Any]) -> dict[str, float]:
+    """Return the shared TensorBoard/W&B scalar namespace for one train step."""
+    result: dict[str, float] = {}
+    for group, keys in TENSORBOARD_GROUPS.items():
+        for key in keys:
+            value = metric.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                result[f"{group}/{key}"] = float(value)
+    return result
+
+
+def log_wandb_metric(run: Any, metric: dict[str, Any]) -> None:
+    """Write one metric record to an initialized W&B run."""
+    if run is None:
+        return
+    step = int(metric["step"])
+    payload = grouped_scalar_metrics(metric)
+    payload["train/step"] = step
+    run.log(payload, step=step)
 
 
 def read_metrics_jsonl(path: Path) -> Iterable[dict[str, Any]]:
