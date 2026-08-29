@@ -36,6 +36,15 @@ an incompatible environment. The verifier checks the complete matrix before
 model loading and performs a CUDA BF16 operation; it does not accept a merely
 successful `pip install` as proof that the environment works.
 
+The pinned official loader contains a PEFT wrapper-prefix assumption that can
+map `model.model.*` to an extra `model` level and report `Loaded 0/504 adapter
+keys`. This adapter installs an in-memory compatibility loader before invoking
+the official model factory. It matches exact keys first and otherwise requires
+a unique structural suffix with the same tensor shape. All LoRA adapter and
+progress/success-head tensors must map successfully; failure raises a normal
+exception and never enters the upstream `ipdb` breakpoint. The official Git
+checkout remains unchanged and auditable.
+
 The default configuration pins an audited Git commit and Hugging Face snapshot
 revision. Check out the commit listed in `configs/dependency-lock.yaml` after
 cloning. Runtime refuses a different source commit and resolves the exact model

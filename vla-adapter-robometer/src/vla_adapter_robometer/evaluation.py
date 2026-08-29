@@ -67,6 +67,10 @@ class OfficialRobometerAnnotator:
             raise FileNotFoundError(f"Official Robometer checkout is unavailable: {root}")
         sys.path.insert(0, str(root))
         import torch
+        import robometer.utils.setup_utils as setup_utils
+        from .checkpoint import install_robometer_checkpoint_loader
+
+        install_robometer_checkpoint_loader(setup_utils)
         from robometer.utils.save import load_model_from_hf
         from robometer.utils.setup_utils import setup_batch_collator
         from huggingface_hub import snapshot_download
