@@ -45,6 +45,14 @@ iql:
   critic_image_size: 128
   critic_lr: 0.0003
   value_lr: 0.0003
+  # Q/V optimizers are explicit so AdamW never silently applies its default
+  # weight decay. Supported values: adam, adamw.
+  critic_optimizer: adam
+  critic_weight_decay: 0.0
+  value_optimizer: adam
+  value_weight_decay: 0.0
+  critic_max_grad_norm: 10.0
+  value_max_grad_norm: 10.0
   policy_peak_lr: 0.00003
   policy_final_lr: 0.000003
   expectile: 0.8

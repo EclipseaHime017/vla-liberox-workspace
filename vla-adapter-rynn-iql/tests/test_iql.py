@@ -29,6 +29,20 @@ def test_iql_update_and_advantage_are_finite():
     assert isinstance(model.value_optimizer, torch.optim.Adam)
 
 
+def test_iql_optimizer_and_gradient_clip_are_configurable():
+    model = PixelIQL(
+        critic_optimizer="adamw", critic_weight_decay=1e-4,
+        value_optimizer="adamw", value_weight_decay=2e-4,
+        critic_max_grad_norm=7.0, value_max_grad_norm=8.0,
+    )
+    assert isinstance(model.q_optimizer, torch.optim.AdamW)
+    assert isinstance(model.value_optimizer, torch.optim.AdamW)
+    assert model.q_optimizer.param_groups[0]["weight_decay"] == 1e-4
+    assert model.value_optimizer.param_groups[0]["weight_decay"] == 2e-4
+    assert model.critic_max_grad_norm == 7.0
+    assert model.value_max_grad_norm == 8.0
+
+
 def test_weighted_masked_l1_ignores_padding():
     prediction = torch.tensor([[[1.0], [100.0]]])
     target = torch.zeros_like(prediction)

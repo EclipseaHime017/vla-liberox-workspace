@@ -70,6 +70,36 @@ def test_positive_micro_batch_is_not_artificially_limited_to_one(configured, tmp
     assert load_train_config(path).section("iql")["micro_batch_size"] == 8
 
 
+@pytest.mark.parametrize("field", ["critic_optimizer", "value_optimizer"])
+def test_iql_optimizer_name_is_validated(configured, tmp_path: Path, field: str):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["iql"][field] = "sgd"
+    path = tmp_path / f"invalid-{field}.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=field):
+        load_train_config(path)
+
+
+@pytest.mark.parametrize("field", ["critic_weight_decay", "value_weight_decay"])
+def test_iql_weight_decay_is_nonnegative(configured, tmp_path: Path, field: str):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["iql"][field] = -1
+    path = tmp_path / f"invalid-{field}.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=field):
+        load_train_config(path)
+
+
+@pytest.mark.parametrize("field", ["critic_max_grad_norm", "value_max_grad_norm"])
+def test_iql_gradient_clip_is_positive(configured, tmp_path: Path, field: str):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["iql"][field] = 0
+    path = tmp_path / f"invalid-{field}.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=field):
+        load_train_config(path)
+
+
 @pytest.mark.parametrize(
     "field,value,error",
     [

@@ -83,7 +83,10 @@ class IQLMetrics:
 class PixelIQL(nn.Module):
     def __init__(self, *, horizon: int = 8, action_dim: int = 7, proprio_dim: int = 8,
                  discount: float = 0.99, expectile: float = 0.8, tau: float = 0.005,
-                 critic_lr: float = 3e-4, value_lr: float = 3e-4):
+                 critic_lr: float = 3e-4, value_lr: float = 3e-4,
+                 critic_optimizer: str = "adam", critic_weight_decay: float = 0.0,
+                 value_optimizer: str = "adam", value_weight_decay: float = 0.0,
+                 critic_max_grad_norm: float = 10.0, value_max_grad_norm: float = 10.0):
         super().__init__()
         self.q1 = QNetwork(horizon, action_dim, proprio_dim)
         self.q2 = QNetwork(horizon, action_dim, proprio_dim)
@@ -91,13 +94,18 @@ class PixelIQL(nn.Module):
         self.target_q2 = copy.deepcopy(self.q2).requires_grad_(False)
         self.value = ValueNetwork(proprio_dim)
         self.discount, self.expectile, self.tau = discount, expectile, tau
-        # Match the official RynnValue pi-rl IQL implementation: the auxiliary
-        # critic and value networks use Adam without weight decay.  AdamW's
-        # default 0.01 decay materially changes the fitted Q/V functions.
-        self.q_optimizer = torch.optim.Adam(
-            list(self.q1.parameters()) + list(self.q2.parameters()), lr=critic_lr
+        self.critic_max_grad_norm = float(critic_max_grad_norm)
+        self.value_max_grad_norm = float(value_max_grad_norm)
+        optimizer_types = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
+        if critic_optimizer not in optimizer_types or value_optimizer not in optimizer_types:
+            raise ValueError("critic_optimizer and value_optimizer must be adam or adamw")
+        self.q_optimizer = optimizer_types[critic_optimizer](
+            list(self.q1.parameters()) + list(self.q2.parameters()),
+            lr=critic_lr, weight_decay=critic_weight_decay,
         )
-        self.value_optimizer = torch.optim.Adam(self.value.parameters(), lr=value_lr)
+        self.value_optimizer = optimizer_types[value_optimizer](
+            self.value.parameters(), lr=value_lr, weight_decay=value_weight_decay,
+        )
 
     @torch.no_grad()
     def advantage(self, batch: dict[str, torch.Tensor], target: bool = False) -> torch.Tensor:
@@ -135,7 +143,7 @@ class PixelIQL(nn.Module):
         value_loss = expectile_loss(target_q_for_value - value, self.expectile)
         self.value_optimizer.zero_grad(set_to_none=True)
         value_loss.backward()
-        nn.utils.clip_grad_norm_(self.value.parameters(), 1.0)
+        nn.utils.clip_grad_norm_(self.value.parameters(), self.value_max_grad_norm)
         self.value_optimizer.step()
 
         with torch.no_grad():
@@ -149,7 +157,10 @@ class PixelIQL(nn.Module):
         q_loss = 0.5 * (F.mse_loss(q1, target) + F.mse_loss(q2, target))
         self.q_optimizer.zero_grad(set_to_none=True)
         q_loss.backward()
-        nn.utils.clip_grad_norm_(list(self.q1.parameters()) + list(self.q2.parameters()), 1.0)
+        nn.utils.clip_grad_norm_(
+            list(self.q1.parameters()) + list(self.q2.parameters()),
+            self.critic_max_grad_norm,
+        )
         self.q_optimizer.step()
         self.soft_update()
         with torch.no_grad():

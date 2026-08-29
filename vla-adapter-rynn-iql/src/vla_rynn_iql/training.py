@@ -390,6 +390,12 @@ def train(config: LoadedConfig) -> Path:
         discount=float(config.section("reward")["gamma"]),
         expectile=float(iql_cfg["expectile"]), tau=float(iql_cfg["target_tau"]),
         critic_lr=float(iql_cfg["critic_lr"]), value_lr=float(iql_cfg["value_lr"]),
+        critic_optimizer=str(iql_cfg["critic_optimizer"]),
+        critic_weight_decay=float(iql_cfg["critic_weight_decay"]),
+        value_optimizer=str(iql_cfg["value_optimizer"]),
+        value_weight_decay=float(iql_cfg["value_weight_decay"]),
+        critic_max_grad_norm=float(iql_cfg["critic_max_grad_norm"]),
+        value_max_grad_norm=float(iql_cfg["value_max_grad_norm"]),
     ).to(device)
     actor_parameters = list(components.action_head.parameters()) + list(components.proprio_projector.parameters())
     # Paper Table 9 / official pi-rl policy optimizer.  In particular, do not
@@ -482,6 +488,16 @@ def train(config: LoadedConfig) -> Path:
             stack.callback(wandb_run.finish)
         wandb_interval = int(logging_cfg["wandb"]["log_interval_steps"])
         current_actor_lr = float(actor_optimizer.param_groups[0]["lr"])
+        # W&B and model dependencies may reconfigure the root logger after the
+        # VLA is imported.  Progress is a terminal contract, so emit it through
+        # an explicitly flushed stream instead of relying on LOG.info.
+        print(
+            "TRAIN ready | "
+            f"run={run_id} | steps={start_step}->{total_steps} | "
+            f"micro_batch={micro_batch_size} | "
+            f"actor_batch={micro_batch_size * accumulation} | device={device}",
+            flush=True,
+        )
         for step in range(start_step, total_steps):
             batch = _sample_batch(
                 dataset, micro_batch_size, data_generator
@@ -582,7 +598,7 @@ def train(config: LoadedConfig) -> Path:
             ):
                 log_wandb_metric(wandb_run, metric)
             if should_report:
-                LOG.info(progress.format(metric))
+                print(progress.format(metric), flush=True)
             if (step + 1) % int(iql_cfg["checkpoint_interval"]) == 0 or step + 1 == total_steps:
                 latest_checkpoint = _save_checkpoint(
                     checkpoint_root, step + 1, components, agent, actor_optimizer,

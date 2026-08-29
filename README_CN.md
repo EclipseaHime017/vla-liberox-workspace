@@ -855,6 +855,12 @@ iql:
   critic_image_size: 128
   critic_lr: 0.0003
   value_lr: 0.0003
+  critic_optimizer: adam
+  critic_weight_decay: 0.0
+  value_optimizer: adam
+  value_weight_decay: 0.0
+  critic_max_grad_norm: 10.0
+  value_max_grad_norm: 10.0
   policy_peak_lr: 0.00003
   policy_final_lr: 0.000003
   expectile: 0.8
@@ -882,7 +888,7 @@ logging:
 
 - 数据与显存：`critic_image_size`只控制Q/V使用的双视角缩放尺寸；VLA actor仍走自身processor。`micro_batch_size`是每次同时送入Q/V和VLA actor的transition数量，不再被人为限制为1；`gradient_accumulation_steps`决定多少个micro-step后更新actor。基础16 GB profile采用 `1×32`，单任务A100服务器profile采用 `8×4`，两者等效actor batch均为32。批处理只允许prepared training split包含唯一 `task_id + prompt`；旧多任务manifest仍可用 `micro_batch_size=1`训练。
 - 训练长度：`train_steps`表示critic/value优化次数，不是epoch。实际抽样transition数为 `train_steps × micro_batch_size`，actor optimizer更新次数约为 `ceil(train_steps / gradient_accumulation_steps)`。因此将 `1×32` 改为 `8×4`并保持相同 `train_steps`会增加数据吞吐和actor更新次数，不应直接与旧run按step数视为相同训练预算。每个变长transition仍被均匀采样，`action_source`和`transition_type`语义没有改变。
-- critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value 的 Adam optimizer。每步先以冻结 target Q 更新 V，再用更新后的 V 更新 online Q，最后 Polyak 更新 target Q。`expectile` 越高，value 越偏向高 Q 动作；actor 权重使用 online `min(Q1,Q2)-V`，计算 `exp(beta × advantage)` 后由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
+- critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value 的 optimizer；`critic_optimizer`、`value_optimizer` 可选 `adam` 或 `adamw`，对应的 `*_weight_decay` 必须显式配置，默认使用 `adam + 0.0`。`critic_max_grad_norm`、`value_max_grad_norm` 分别限制 Q/V 的总梯度范数，默认均为 `10.0`。每步先以冻结 target Q 更新 V，再用更新后的 V 更新 online Q，最后 Polyak 更新 target Q。`expectile` 越高，value 越偏向高 Q 动作；actor 权重使用 online `min(Q1,Q2)-V`，计算 `exp(beta × advantage)` 后由 `max_advantage_weight` 截断。`beta` 太大时少数高 advantage chunk 会主导训练。`target_tau` 控制 target Q 的 Polyak 更新速度，值越小越平滑。
 - actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。`critic_warmup_steps` 期间 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 并没有在前 200 步冻结。
 - 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
 - 终端进度：`logging.console_interval_steps`控制打印间隔。首步和最终一步始终打印；每行包含当前/总step、百分比、BC warmup/IQL阶段、已用时间、ETA、step/s、sample/s、Q/value/actor loss、Q/V/advantage均值、advantage weight、actor学习率及CUDA峰值显存。比较不同batch时应以 `samples_per_second`衡量吞吐，不能只比较step/s。

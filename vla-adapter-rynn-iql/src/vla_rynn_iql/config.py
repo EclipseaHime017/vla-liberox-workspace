@@ -53,6 +53,9 @@ TRAIN_SCHEMA = {
     "vla": {"base_checkpoint": None, "stats_key": None, "use_pro_version": None,
             "freeze_backbone": None},
     "iql": {"critic_image_size": None, "critic_lr": None, "value_lr": None,
+            "critic_optimizer": None, "critic_weight_decay": None,
+            "value_optimizer": None, "value_weight_decay": None,
+            "critic_max_grad_norm": None, "value_max_grad_norm": None,
             "policy_peak_lr": None, "policy_final_lr": None, "expectile": None,
             "beta": None, "max_advantage_weight": None, "target_tau": None,
             "critic_warmup_steps": None, "train_steps": None, "micro_batch_size": None,
@@ -224,8 +227,14 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
             "so resumed actor gradients are exact"
         )
     for key in ("critic_lr", "value_lr", "policy_peak_lr", "policy_final_lr", "beta",
-                "max_advantage_weight", "target_tau"):
+                "max_advantage_weight", "target_tau", "critic_weight_decay",
+                "value_weight_decay"):
         _number(iql, key, low=0)
+    for key in ("critic_max_grad_norm", "value_max_grad_norm"):
+        _number(iql, key, low=1e-12)
+    for key in ("critic_optimizer", "value_optimizer"):
+        if iql[key] not in {"adam", "adamw"}:
+            raise ValueError(f"iql.{key} must be adam or adamw")
     _number(iql, "expectile", low=0, high=1)
     if iql["dtype"] != "bfloat16":
         raise ValueError("Version 1 trains the VLA actor in bfloat16; iql.dtype must be bfloat16")
