@@ -55,11 +55,13 @@ class OfflineJobService:
     def __init__(
         self, ui_config: Any, manager: Any, datasets: Any,
         trajectory_evaluations: Any | None = None,
+        robometer_evaluations: Any | None = None,
     ):
         self.ui_config = ui_config
         self.manager = manager
         self.datasets = datasets
         self.trajectory_evaluations = trajectory_evaluations
+        self.robometer_evaluations = robometer_evaluations
         self.project_root = ui_config.project_root
         self.jobs_root = self.project_root / "jobs"
         self.training_root = self.project_root / "training"
@@ -87,6 +89,32 @@ class OfflineJobService:
     @property
     def base_config_path(self) -> Path:
         return self.ui_config.offline_rl_root / "configs" / "liberox_iql.yaml"
+
+    def evaluator_capabilities(self) -> dict[str, dict[str, Any]]:
+        checkout = self.ui_config.robometer_root.parent / "Robometer"
+        checkout_ready = (checkout / "robometer" / "__init__.py").is_file()
+        environment_ready = False
+        try:
+            result = subprocess.run(
+                ["conda", "env", "list", "--json"], check=True, capture_output=True,
+                text=True, timeout=5,
+            )
+            environment_ready = any(
+                Path(value).name == self.ui_config.robometer_environment
+                for value in json.loads(result.stdout).get("envs", [])
+            )
+        except Exception:
+            environment_ready = False
+        configured = checkout_ready and environment_ready
+        reason = None
+        if not checkout_ready:
+            reason = f"Official Robometer checkout not found: {checkout}"
+        elif not environment_ready:
+            reason = f"Conda environment not found: {self.ui_config.robometer_environment}"
+        return {
+            "rynnvalue": {"available": True, "reason": None},
+            "robometer": {"available": configured, "reason": reason},
+        }
 
     def _load_base_config(self) -> dict[str, Any]:
         if not self.base_config_path.is_file():
@@ -214,12 +242,31 @@ class OfflineJobService:
         ):
             work = Path(str(job["output_path"])) / "work"
             try:
-                binding = self.trajectory_evaluations.bind(
-                    work / "dataset_manifest.json",
-                    work / "rewards" / "reward_manifest.json",
-                    overwrite=bool(job.get("parameters", {}).get("overwrite", False)),
-                )
-                job["trajectory_binding"] = binding
+                parameters = job.get("parameters", {})
+                evaluators = parameters.get("evaluators")
+                selected_by_evaluator = parameters.get("selected_by_evaluator") or {}
+                if job["kind"] == "trajectory_evaluation" and evaluators:
+                    bindings: dict[str, Any] = {}
+                    if selected_by_evaluator.get("rynnvalue"):
+                        bindings["rynnvalue"] = self.trajectory_evaluations.bind(
+                            work / "rynnvalue" / "dataset_manifest.json",
+                            work / "rynnvalue" / "rewards" / "reward_manifest.json",
+                            overwrite=bool(parameters.get("overwrite", False)),
+                        )
+                    if selected_by_evaluator.get("robometer"):
+                        if self.robometer_evaluations is None:
+                            raise RuntimeError("Robometer evaluation service is unavailable")
+                        bindings["robometer"] = self.robometer_evaluations.bind(
+                            work / "robometer" / "robometer_manifest.json",
+                            overwrite=bool(parameters.get("overwrite", False)),
+                        )
+                    job["trajectory_binding"] = bindings
+                else:
+                    job["trajectory_binding"] = self.trajectory_evaluations.bind(
+                        work / "dataset_manifest.json",
+                        work / "rewards" / "reward_manifest.json",
+                        overwrite=bool(parameters.get("overwrite", False)),
+                    )
                 atomic_write_json(path, job)
                 self.repository.upsert(job, path)
             except Exception as exc:
@@ -514,6 +561,7 @@ class OfflineJobService:
         task_id: str,
         run_ids: list[str] | None,
         overwrite: bool,
+        evaluators: list[str] | None = None,
     ) -> dict[str, Any]:
         """Evaluate selected trajectories independently from frozen datasets."""
         with self.lock:
@@ -527,30 +575,53 @@ class OfflineJobService:
             missing = [run_id for run_id in requested if run_id not in available]
             if missing:
                 raise ValueError(f"Unavailable trajectories: {missing}")
-            skipped: list[str] = []
-            selected = requested
-            if not overwrite and self.trajectory_evaluations is not None:
-                selected = []
-                for run_id in requested:
-                    if self.trajectory_evaluations.status(available[run_id])["status"] == "READY":
-                        skipped.append(run_id)
-                    else:
-                        selected.append(run_id)
-            if not selected:
+            evaluators = list(evaluators or ["rynnvalue"])
+            if not evaluators or len(evaluators) != len(set(evaluators)):
+                raise ValueError("evaluators must be a non-empty unique list")
+            if any(value not in {"rynnvalue", "robometer"} for value in evaluators):
+                raise ValueError(f"Unsupported evaluator list: {evaluators}")
+            services = {
+                "rynnvalue": self.trajectory_evaluations,
+                "robometer": self.robometer_evaluations,
+            }
+            for evaluator in evaluators:
+                if services[evaluator] is None:
+                    raise RuntimeError(f"{evaluator} evaluation service is unavailable")
+            selected_by_evaluator: dict[str, list[str]] = {}
+            skipped_by_evaluator: dict[str, list[str]] = {}
+            for evaluator in evaluators:
+                service = services[evaluator]
+                selected_by_evaluator[evaluator] = [
+                    run_id for run_id in requested
+                    if overwrite or not service.exists(available[run_id])
+                ]
+                skipped_by_evaluator[evaluator] = [
+                    run_id for run_id in requested
+                    if run_id not in selected_by_evaluator[evaluator]
+                ]
+            selected_union = list(dict.fromkeys(
+                run_id for evaluator in evaluators
+                for run_id in selected_by_evaluator[evaluator]
+            ))
+            if not selected_union:
                 return {
                     "kind": "trajectory_evaluation",
                     "status": "COMPLETED",
                     "job": None,
+                    "evaluators": evaluators,
                     "selected_count": 0,
-                    "skipped_count": len(skipped),
-                    "skipped_run_ids": skipped,
+                    "skipped_count": len(requested) * len(evaluators),
+                    "selected_by_evaluator": selected_by_evaluator,
+                    "skipped_by_evaluator": skipped_by_evaluator,
                     "message": "All selected trajectories already have reusable evaluations",
                 }
             self._prepare_launch()
             try:
                 job = self._launch_trajectory_evaluation(
-                    task_id=task_id, run_ids=selected, overwrite=overwrite,
-                    skipped=skipped,
+                    task_id=task_id, requested_run_ids=requested,
+                    selected_by_evaluator=selected_by_evaluator,
+                    skipped_by_evaluator=skipped_by_evaluator,
+                    evaluators=evaluators, overwrite=overwrite,
                 )
             finally:
                 self.launch_reserved = False
@@ -558,77 +629,120 @@ class OfflineJobService:
                 "kind": "trajectory_evaluation",
                 "status": job["status"],
                 "job": job,
-                "selected_count": len(selected),
-                "skipped_count": len(skipped),
-                "skipped_run_ids": skipped,
+                "evaluators": evaluators,
+                "selected_count": len(selected_union),
+                "skipped_count": sum(map(len, skipped_by_evaluator.values())),
+                "selected_by_evaluator": selected_by_evaluator,
+                "skipped_by_evaluator": skipped_by_evaluator,
             }
 
     def _launch_trajectory_evaluation(
         self,
         *,
         task_id: str,
-        run_ids: list[str],
+        requested_run_ids: list[str],
+        selected_by_evaluator: dict[str, list[str]],
+        skipped_by_evaluator: dict[str, list[str]],
+        evaluators: list[str],
         overwrite: bool,
-        skipped: list[str],
     ) -> dict[str, Any]:
-        job_id = f"rynn_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        job_id = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         job_dir = self.jobs_root / job_id
         job_dir.mkdir(parents=True, exist_ok=False)
         output_root = self.project_root / "trajectory-evaluations" / job_id
         work_dir = output_root / "work"
         work_dir.mkdir(parents=True, exist_ok=False)
-        raw = copy.deepcopy(self._load_base_config())
-        raw["data"]["task_ids"] = [task_id]
-        raw["paths"]["annotation_cache"] = str(self.cache_root.resolve())
-        raw["paths"]["work_dir"] = str(work_dir.resolve())
-        selection_path = job_dir / "trajectory_selection.json"
-        selection = self.datasets.write_evaluation_selection(
-            selection_path,
-            task_id=task_id,
-            run_ids=run_ids,
-            split_seed=int(raw["data"]["split_seed"]),
-            validation_fraction=float(raw["data"]["validation_fraction"]),
-            success_consecutive_steps=int(raw["data"]["success_consecutive_steps"]),
-        )
-        raw["data"]["selection_manifest"] = str(selection_path.resolve())
-        config_path = job_dir / "effective_config.yaml"
-        atomic_write_yaml(config_path, raw)
-        scripts = self.ui_config.offline_rl_root / "scripts"
-        annotate_argv = [
-            "python", str(scripts / "annotate_rewards.py"), "--config", str(config_path),
-        ]
-        if overwrite:
-            annotate_argv.append("--overwrite")
-        stages = [
-            {
-                "id": "prepare", "label": "准备轨迹评价输入",
-                "environment": self.ui_config.train_environment,
-                "argv": [
-                    "python", str(scripts / "prepare_dataset.py"),
-                    "--config", str(config_path),
-                ],
-                "cwd": str(self.ui_config.offline_rl_root),
-            },
-            {
-                "id": "annotate", "label": "RynnValue-4B 轨迹评价",
-                "environment": self.ui_config.reward_environment,
-                "argv": annotate_argv,
-                "cwd": str(self.ui_config.offline_rl_root),
-            },
-        ]
+        stages: list[dict[str, Any]] = []
+        config_paths: dict[str, str] = {}
+        selections: dict[str, Any] = {}
+        if selected_by_evaluator.get("rynnvalue"):
+            raw = copy.deepcopy(self._load_base_config())
+            rynn_work = work_dir / "rynnvalue"
+            rynn_work.mkdir(parents=True)
+            raw["data"]["task_ids"] = [task_id]
+            raw["paths"]["annotation_cache"] = str(self.cache_root.resolve())
+            raw["paths"]["work_dir"] = str(rynn_work.resolve())
+            selection_path = job_dir / "rynnvalue_selection.json"
+            selections["rynnvalue"] = self.datasets.write_evaluation_selection(
+                selection_path, task_id=task_id,
+                run_ids=selected_by_evaluator["rynnvalue"],
+                split_seed=int(raw["data"]["split_seed"]),
+                validation_fraction=float(raw["data"]["validation_fraction"]),
+                success_consecutive_steps=int(raw["data"]["success_consecutive_steps"]),
+            )
+            raw["data"]["selection_manifest"] = str(selection_path.resolve())
+            config_path = job_dir / "rynnvalue_config.yaml"
+            atomic_write_yaml(config_path, raw)
+            config_paths["rynnvalue"] = str(config_path)
+            scripts = self.ui_config.offline_rl_root / "scripts"
+            annotate_argv = ["python", str(scripts / "annotate_rewards.py"), "--config", str(config_path)]
+            if overwrite:
+                annotate_argv.append("--overwrite")
+            stages.extend([
+                {"id": "rynn_prepare", "label": "准备 RynnValue 轨迹输入",
+                 "environment": self.ui_config.train_environment,
+                 "argv": ["python", str(scripts / "prepare_dataset.py"), "--config", str(config_path)],
+                 "cwd": str(self.ui_config.offline_rl_root)},
+                {"id": "rynn_annotate", "label": "RynnValue-4B 轨迹评价",
+                 "environment": self.ui_config.reward_environment, "argv": annotate_argv,
+                 "cwd": str(self.ui_config.offline_rl_root)},
+            ])
+        if selected_by_evaluator.get("robometer"):
+            base_path = self.ui_config.robometer_root / "configs" / "robometer_evaluation.yaml"
+            if not base_path.is_file():
+                raise FileNotFoundError(f"Robometer config not found: {base_path}")
+            robo = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+            selection_path = job_dir / "robometer_selection.json"
+            base_rynn = self._load_base_config()
+            selections["robometer"] = self.datasets.write_evaluation_selection(
+                selection_path, task_id=task_id,
+                run_ids=selected_by_evaluator["robometer"],
+                split_seed=int(base_rynn["data"]["split_seed"]),
+                validation_fraction=float(base_rynn["data"]["validation_fraction"]),
+                success_consecutive_steps=int(base_rynn["data"]["success_consecutive_steps"]),
+            )
+            robo["paths"]["selection_manifest"] = str(selection_path.resolve())
+            robo["paths"]["output_dir"] = str((work_dir / "robometer").resolve())
+            raw_root = Path(str(robo["paths"]["robometer_root"]))
+            if not raw_root.is_absolute():
+                robo["paths"]["robometer_root"] = str((base_path.parent / raw_root).resolve())
+            checkout = Path(robo["paths"]["robometer_root"])
+            if not (checkout / "robometer" / "__init__.py").is_file():
+                raise FileNotFoundError(
+                    "Official Robometer checkout is unavailable; install it as documented in "
+                    f"{self.ui_config.robometer_root / 'README.md'}"
+                )
+            config_path = job_dir / "robometer_config.yaml"
+            atomic_write_yaml(config_path, robo)
+            config_paths["robometer"] = str(config_path)
+            argv = ["python", str(self.ui_config.robometer_root / "scripts" / "evaluate_trajectories.py"),
+                    "--config", str(config_path)]
+            if overwrite:
+                argv.append("--overwrite")
+            stages.append({
+                "id": "robometer_annotate", "label": "Robometer-4B 轨迹评价",
+                "environment": self.ui_config.robometer_environment, "argv": argv,
+                "cwd": str(self.ui_config.robometer_root),
+            })
+        if not stages:
+            raise ValueError("No evaluator has trajectories requiring evaluation")
+        config_path = Path(next(iter(config_paths.values())))
         try:
             return self._new_job(
                 kind="trajectory_evaluation", dataset_id=None, stages=stages,
                 config_path=config_path, output_path=output_root,
                 parameters={
                     "task_id": task_id,
-                    "run_ids": run_ids,
-                    "member_count": len(run_ids),
-                    "skipped_run_ids": skipped,
+                    "run_ids": requested_run_ids,
+                    "member_count": len(requested_run_ids),
+                    "evaluators": evaluators,
+                    "selected_by_evaluator": selected_by_evaluator,
+                    "skipped_by_evaluator": skipped_by_evaluator,
                     "overwrite": overwrite,
-                    "model": raw["reward"]["model"],
-                    "revision": raw["reward"]["revision"],
-                    "selection_sha256": selection["dataset_sha256"],
+                    "selection_sha256": {
+                        key: value["dataset_sha256"] for key, value in selections.items()
+                    },
+                    "config_paths": config_paths,
                 },
             )
         except Exception:

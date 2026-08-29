@@ -131,6 +131,22 @@ IQL training writes TensorBoard events beside the raw `metrics.jsonl` log. Run
 existing JSONL-only runs can be imported with
 `vla-adapter-rynn-iql/scripts/metrics_to_tensorboard.py`.
 
+## Robometer trajectory evaluation
+
+The independent [Robometer evaluator](vla-adapter-robometer/README.md) adds the
+official `Robometer-4B-LIBERO` single-trajectory progress and success
+probability outputs to existing episodes. In the data page, RynnValue and
+Robometer may be selected independently or run sequentially in one GPU job.
+Their files, cache validation and overwrite behavior remain independent;
+Robometer does not alter IQL rewards or frozen training manifests. Episode
+details show both original Robometer curves and an explicitly UI-derived,
+time-aligned comparison with normalized RynnValue remaining time.
+
+Robometer uses the separate `robometer-reward` Conda environment. Its pinned
+model/source revisions, CUDA device, BF16 mode, 3 Hz evaluation rate, four-frame
+prefix protocol and batch-size tuning are documented in the
+[evaluator configuration guide](vla-adapter-robometer/README.md#configuration).
+
 ### References
 
 - [RynnValue paper — temporal distance and potential-based reward shaping](https://arxiv.org/abs/2608.09853)
@@ -138,3 +154,5 @@ existing JSONL-only runs can be imported with
 - [Implicit Q-Learning paper](https://arxiv.org/abs/2110.06169)
 - [VLA-Adapter official implementation](https://github.com/OpenHelix-Team/VLA-Adapter)
 - [LIBERO-X official implementation](https://github.com/meituan/LIBERO-X)
+- [Robometer paper](https://arxiv.org/abs/2603.02115)
+- [Robometer official implementation](https://github.com/robometer/robometer)

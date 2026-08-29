@@ -7,6 +7,8 @@
 /policy-registry/*
 !/policy-registry/.gitkeep
 /vla-adapter-rynn-iql/outputs/
+/vla-adapter-robometer/outputs/
+/Robometer/
 /RynnValue/
 /tmp/
 /annotation-cache/

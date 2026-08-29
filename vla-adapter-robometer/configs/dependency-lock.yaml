@@ -1,0 +1,7 @@
+schema_version: 1
+robometer:
+  repository: https://github.com/robometer/robometer.git
+  commit: 352d160389daa964788de1ec933d1925f3a6de4f
+model:
+  checkpoint: aliangdw/Robometer-4B-LIBERO
+  revision: bb7dce7e6bde3bd236c0fbe0be46fdf19b57b873

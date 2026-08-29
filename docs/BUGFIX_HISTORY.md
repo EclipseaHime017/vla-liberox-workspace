@@ -613,3 +613,10 @@ python liberox-vla-adapter-terminal/scripts/eval_pickplace_direct.py
 - 实际长度 `L` 仍决定有效 action prefix、`action_mask` 与真实后继状态 `s[t+L]`，所以被接管、动作来源切换和轨迹末尾的短 chunk 不会被 padding 污染，但不再人为放大 sparse cost；
 - RynnValue 评价 schema 升级到 v5。hash、模型 revision、prefix 协议和边界都匹配的 v4 sidecar 会复用已经保存的 absolute/relative distance、entropy、logits 与 Analysis，仅重新计算确定性的 Shape/Final Reward，不再次执行 4B 模型前向；
 - IQL checkpoint 继续绑定 reward manifest hash，因此旧奖励训练出的 checkpoint 不能静默续训到新语义。
+
+## 2026-08-29：Robometer 单轨迹评价与 RynnValue 对比
+
+- 新增独立 `vla-adapter-robometer/`，通过官方代码和 `Robometer-4B-LIBERO` 保存逐评价点 `progress_pred` 与 `success_probs`，不实现 preference，也不将 progress 改写为训练 reward；
+- Robometer 结果以独立 JSON/NPZ sidecar 绑定到 episode，轨迹、agentview observation、prompt、模型 revision 或采样配置变化时自动失效，不修改 RynnValue sidecar；
+- 数据集页面增加双评价器选择、独立状态和分页计数；同一任务按选择顺序串行执行，冻结训练数据集仍只自动补齐 RynnValue；
+- 详情页增加两条 Robometer 原始曲线、环境 done 叠加，以及明确标记为 UI 派生的 RynnValue 归一化时间对齐、Pearson 与终点对比。

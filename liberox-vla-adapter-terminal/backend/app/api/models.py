@@ -136,6 +136,9 @@ class TrajectoryEvaluationRequest(StrictModel):
     task_id: StrictStr = Field(min_length=1)
     run_ids: list[StrictStr] | None = None
     overwrite: StrictBool | None = None
+    evaluators: list[Literal["rynnvalue", "robometer"]] = Field(
+        default_factory=lambda: ["rynnvalue"]
+    )
 
     @model_validator(mode="after")
     def validate_run_ids(self):
@@ -144,6 +147,10 @@ class TrajectoryEvaluationRequest(StrictModel):
                 raise ValueError("run_ids must not be empty when provided")
             if len(self.run_ids) != len(set(self.run_ids)):
                 raise ValueError("run_ids must not contain duplicates")
+        if not self.evaluators:
+            raise ValueError("evaluators must not be empty")
+        if len(self.evaluators) != len(set(self.evaluators)):
+            raise ValueError("evaluators must not contain duplicates")
         return self
 
 

@@ -13,7 +13,12 @@ from .models import CreateBranchRequest, DeleteSessionRequest
 router = APIRouter(prefix="/api", tags=["runs"])
 
 @router.get("/bootstrap")
-async def bootstrap(request: Request): return service(request).bootstrap()
+async def bootstrap(request: Request):
+    payload = service(request).bootstrap()
+    offline = getattr(request.app.state, "offline_job_service", None)
+    if offline is not None:
+        payload["evaluation_capabilities"] = offline.evaluator_capabilities()
+    return payload
 
 @router.get("/sessions")
 @router.get("/runs")

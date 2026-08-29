@@ -7,6 +7,7 @@ from starlette.background import BackgroundTask
 from .dependencies import (
     dataset_service, http_error, offline_job_service, service,
     training_dataset_service, trajectory_evaluation_service,
+    robometer_evaluation_service,
 )
 from .models import TrajectoryEvaluationRequest
 
@@ -38,7 +39,9 @@ async def runs(
 @router.get("/runs/{run_id}")
 async def run_detail(run_id: str, request: Request):
     try:
-        return trajectory_evaluation_service(request).detail(run_id)
+        return trajectory_evaluation_service(request).detail(
+            run_id, robometer_evaluation_service(request)
+        )
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -50,6 +53,7 @@ async def evaluate_trajectories(body: TrajectoryEvaluationRequest, request: Requ
             task_id=body.task_id,
             run_ids=None if body.run_ids is None else list(body.run_ids),
             overwrite=(body.run_ids is not None) if body.overwrite is None else body.overwrite,
+            evaluators=list(body.evaluators),
         )
     except Exception as exc:
         raise http_error(exc) from exc

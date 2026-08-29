@@ -33,6 +33,8 @@ manual_rotation_gain: 0.25
 offline_rl_root: ./offline
 train_environment: vla-liberox
 reward_environment: rynnvalue-reward
+robometer_root: ./robometer-evaluator
+robometer_environment: robometer-reward
 tensorboard_host: 127.0.0.1
 tensorboard_port: 6006
 additional_tasks: []

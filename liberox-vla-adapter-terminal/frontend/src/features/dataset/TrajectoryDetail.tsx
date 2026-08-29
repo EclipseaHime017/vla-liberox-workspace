@@ -37,6 +37,31 @@ export function observationPotentialSeries(remainingTimeSeconds: number[][]) {
   )));
 }
 
+function interpolate(times: number[], values: number[], targets: number[]) {
+  return targets.map((target) => {
+    if (!times.length) return Number.NaN;
+    if (target <= times[0]) return values[0];
+    if (target >= times[times.length - 1]) return values[values.length - 1];
+    let right = 1;
+    while (right < times.length && times[right] < target) right += 1;
+    const left = right - 1;
+    const ratio = (target - times[left]) / (times[right] - times[left]);
+    return values[left] + ratio * (values[right] - values[left]);
+  });
+}
+
+function pearson(left: number[], right: number[]) {
+  if (left.length !== right.length || left.length < 2) return null;
+  const lm = left.reduce((sum, value) => sum + value, 0) / left.length;
+  const rm = right.reduce((sum, value) => sum + value, 0) / right.length;
+  let numerator = 0; let ld = 0; let rd = 0;
+  left.forEach((value, index) => {
+    const a = value - lm; const b = right[index] - rm;
+    numerator += a * b; ld += a * a; rd += b * b;
+  });
+  return ld <= 1e-12 || rd <= 1e-12 ? null : numerator / Math.sqrt(ld * rd);
+}
+
 function bounds(values: number[]) {
   let low = Number.POSITIVE_INFINITY; let high = Number.NEGATIVE_INFINITY;
   values.forEach((value) => { if (Number.isFinite(value)) { low = Math.min(low, value); high = Math.max(high, value); } });
@@ -109,7 +134,7 @@ export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: (
       { title: "末端位置", unit: "m", times: detail.series.time_seconds, labels: ["X", "Y", "Z"], values: detail.series.eef_position },
       { title: "末端轴角", unit: "rad", times: detail.series.time_seconds, labels: ["Rx", "Ry", "Rz"], values: detail.series.eef_axis_angle },
     ];
-    const evaluation = detail.evaluation;
+    const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
     if (evaluation) {
       const official = evaluation.official_outputs;
       const boundaryTimes = evaluation.boundary_steps.map(
@@ -164,14 +189,66 @@ export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: (
         },
       );
     }
+    const robometer = detail.robometer_evaluation;
+    if (robometer) {
+      values.push(
+        { title: "Robometer Progress · 模型原始输出", unit: "probability [-]",
+          times: robometer.time_seconds, labels: ["progress_pred"],
+          values: robometer.progress_pred.map((value) => [value]) },
+        { title: "Robometer Success Probability · 模型原始输出", unit: "probability [-]",
+          times: robometer.time_seconds, labels: ["success_probs"],
+          values: robometer.success_probs.map((value) => [value]) },
+        { title: "环境 done", unit: "boolean [-]", times: detail.series.time_seconds,
+          labels: ["done"], values: detail.series.done.map((value) => [value ? 1 : 0]),
+          interpolation: "step" },
+      );
+    }
+    if (evaluation && robometer) {
+      const distance = evaluation.official_outputs.absolute_temporal_distance_seconds
+        .map((heads) => heads[0]);
+      const d0 = distance[0];
+      if (distance.length >= 2 && Number.isFinite(d0) && d0 > 1e-6) {
+        const boundaryTimes = evaluation.boundary_steps.map(
+          (step) => detail.series.time_seconds[step] ?? step / 20,
+        );
+        const progress = distance.map((value) => Math.max(0, Math.min(1, 1 - value / d0)));
+        const aligned = interpolate(boundaryTimes, progress, robometer.time_seconds);
+        values.push({
+          title: "RynnValue / Robometer · UI 派生归一化对比", unit: "normalized progress [-]",
+          times: robometer.time_seconds, labels: ["Robometer progress", "Rynn normalized progress"],
+          values: robometer.progress_pred.map((value, index) => [value, aligned[index]]),
+        });
+      }
+    }
     return values;
   }, [detail]);
   const video = Object.entries(detail.artifacts).find(([name]) => name.endsWith("/agentview.mp4"))?.[1]
     ?? Object.entries(detail.artifacts).find(([name]) => name.endsWith(".mp4"))?.[1];
+  const comparison = useMemo(() => {
+    const rynn = detail.rynnvalue_evaluation ?? detail.evaluation;
+    const robo = detail.robometer_evaluation;
+    if (!rynn || !robo) return null;
+    const distance = rynn.official_outputs.absolute_temporal_distance_seconds.map((row) => row[0]);
+    const d0 = distance[0];
+    if (distance.length < 2 || robo.progress_pred.length < 2 || !Number.isFinite(d0) || d0 <= 1e-6) {
+      return { available: false as const, reason: "初始距离过小或样本不足，无法计算相关性" };
+    }
+    const times = rynn.boundary_steps.map((step) => detail.series.time_seconds[step] ?? step / 20);
+    const normalized = distance.map((value) => Math.max(0, Math.min(1, 1 - value / d0)));
+    const aligned = interpolate(times, normalized, robo.time_seconds);
+    const correlation = pearson(aligned, robo.progress_pred);
+    return {
+      available: correlation != null, correlation,
+      reason: correlation == null ? "至少一条序列没有方差，无法计算相关性" : null,
+      rynnEnd: aligned[aligned.length - 1], roboEnd: robo.progress_pred.at(-1),
+      successEnd: robo.success_probs.at(-1), environmentSuccess: detail.run.success,
+    };
+  }, [detail]);
   return <section className="content-page trajectory-detail-page">
     <div className="page-heading detail-heading"><div><p className="eyebrow">TRAJECTORY DETAIL</p><h1>轨迹 {detail.run.id}</h1><p>{detail.run.task} · {detail.run.action_count} steps</p></div><button onClick={onBack}>返回数据集</button></div>
     <div className="detail-summary surface"><Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge><span>{detail.run.source_type ?? detail.run.control_mode}</span><span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span></div>
     <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}</article>
+    {comparison && <article className="surface detail-summary"><strong>RynnValue / Robometer 对比</strong>{comparison.available ? <><span>Pearson r = {comparison.correlation?.toFixed(4)}</span><span>终点进度：Rynn {comparison.rynnEnd?.toFixed(3)} / Robometer {comparison.roboEnd?.toFixed(3)}</span><span>Robometer 成功概率 {comparison.successEnd?.toFixed(3)}</span><span>环境成功：{comparison.environmentSuccess ? "是" : "否"}</span></> : <span>{comparison.reason}</span>}</article>}
     <div className="trajectory-plots">{plots.map((plot) => <PlotCard key={plot.title} plot={plot} onOpen={() => setOpened(plot)} />)}</div>
     {opened && <PlotInspector plot={opened} onClose={() => setOpened(null)} />}
   </section>;

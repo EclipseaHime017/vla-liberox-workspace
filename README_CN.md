@@ -639,7 +639,7 @@ Pixel-IQL                         冻结的 VLA backbone
 2. **Annotate（奖励标注）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 预测预计剩余时间。一个 action chunk 视作一个宏动作：未完成任务的 chunk sparse reward 为 `-1`，完成任务的 chunk 为 `0`，再与该 chunk 两端的 PBRS 势函数差分合成 Final Reward。该阶段不训练 RynnValue，也不更新 VLA；输出位于 `outputs/work/rewards/` 的逐轨迹 NPZ、元数据和 `reward_manifest.json`，相同数据与配置可命中缓存跳过重复标注。
 3. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已标注 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；VLA 视觉/语言 backbone 只做冻结的特征提取，反向传播仅更新 continuous action head 与 proprio projector。训练 checkpoint 会保留 Q/V、optimizer 和随机状态以便恢复，最终部署 overlay 只发布 action head、proprio projector 和兼容性清单。
 
-RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本系统不包含 Robometer、在线 RL、奖励模型微调或真机控制。
+RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本训练系统不使用 Robometer、在线 RL、奖励模型微调或真机控制；Robometer 仅作为后述独立诊断评价器，不进入 IQL reward。
 
 这里的“一致”指算法与数据语义一致，而不是把论文的 π₀.₅ 模型原样复制进 VLA-Adapter：
 
@@ -1251,6 +1251,79 @@ dataset-root/projects/libero_x_vla/
 ```
 
 生产 UI 的 `frontend/dist` 仍是本机构建产物。拉取包含此页面的代码后，直接重启 `run_ui.py` 会检测源码指纹并运行 `npm run build`；新机器应先在 `liberox-vla-adapter-terminal/frontend` 执行 `npm ci`。完整持久化格式和引用关系见 `docs/DATA_LAYOUT.md`。
+
+#### Robometer 独立轨迹评价
+
+Robometer 使用独立的 `robometer-reward` 环境和
+`aliangdw/Robometer-4B-LIBERO`，安装步骤见
+[`vla-adapter-robometer/README.md`](vla-adapter-robometer/README.md)。数据集页面的评价区可分别勾选
+`RynnValue` 与 `Robometer`；同时勾选时后台按勾选顺序串行加载两个 4B 模型，不会让它们同时占用 GPU。批量评价默认分别跳过已有有效 sidecar，“评价所选（覆盖）”也只覆盖本次勾选的评价器。
+
+Robometer 完整读取 `agentview` observation，在 20 Hz 原时间轴上以 3 Hz 选取评价点，始终包含首帧和末帧；每个评价点按官方 `use_frame_steps` 语义使用从起点到当前点的前缀，并均匀选择 4 帧。首次 `done=true` 不会截断评价。每条 episode 独立保存：
+
+```text
+robometer_evaluation.json   # 模型/revision/官方代码 commit、配置与输入 hash
+robometer_evaluation.npz    # step、真实秒数、progress_pred、success_probs
+```
+
+详情页的 Robometer Progress 与 Success Probability 均为模型原始单轨迹输出。对比卡中的 RynnValue 进度
+`clip(1-d(t)/d(0), 0, 1)` 和真实秒数插值只用于 UI 显示，不写回 sidecar，也不进入训练。冻结数据集的自动流程仍只执行 `prepare → RynnValue annotate`；Robometer 不参与 IQL reward、样本筛选或训练 manifest。
+
+首次配置环境：
+
+```bash
+conda create -n robometer-reward python=3.10 -y
+conda activate robometer-reward
+
+git clone https://github.com/robometer/robometer.git Robometer
+git -C Robometer checkout 352d160389daa964788de1ec933d1925f3a6de4f
+
+pip install -e ./Robometer
+pip install -e ./vla-adapter-robometer
+```
+
+评价参数位于 `vla-adapter-robometer/configs/robometer_evaluation.yaml`：
+
+```yaml
+schema_version: 1
+paths:
+  selection_manifest: null
+  output_dir: ../outputs/evaluations
+  robometer_root: ../../Robometer
+model:
+  checkpoint: aliangdw/Robometer-4B-LIBERO
+  revision: bb7dce7e6bde3bd236c0fbe0be46fdf19b57b873
+  robometer_commit: 352d160389daa964788de1ec933d1925f3a6de4f
+  device: cuda:0
+  dtype: bfloat16
+evaluation:
+  control_hz: 20
+  fps: 3.0
+  prefix_frames: 4
+  batch_size: 8
+```
+
+各字段含义：
+
+- `selection_manifest`：UI 后台为当前勾选轨迹生成的不可变选择清单。模板保持 `null`；GUI 作业会生成 effective YAML 并自动填入，只有直接运行脚本时才需要手动指定。
+- `output_dir`：当前作业的临时输出目录；完成校验后，JSON/NPZ 会原子绑定到源 episode。
+- `robometer_root`：官方 Robometer checkout 的路径，不是 `vla-adapter-robometer` 适配项目路径。
+- `checkpoint + revision + robometer_commit`：共同定义评价器版本。两个 revision/commit 必须是完整 40 位哈希，任一变化都会使旧评价失效。
+- `device`：明确选择一张 GPU，例如服务器上可改为 `cuda:1`；不自动跨卡或回退 CPU。
+- `dtype`：第一版固定 `bfloat16`。
+- `control_hz`：原始轨迹的控制频率，当前固定 20 Hz，不能用它改变评价密度。
+- `fps`：Robometer 评价点密度，默认 3 Hz；25 秒记录约产生 76 个评价点，且强制包含首尾。
+- `prefix_frames`：每个评价时刻从完整历史前缀均匀取 4 帧，固定为官方协议，不等同于 batch size。
+- `batch_size`：一次送入 GPU 的 prefix 样本数。显存不足时可从 `8` 降为 `4/2/1`；只影响速度和峰值显存，不改变评价时间点及语义。
+
+GUI 后端还需要在 `configs/ui_config.yaml` 保留：
+
+```yaml
+robometer_root: ../vla-adapter-robometer
+robometer_environment: robometer-reward
+```
+
+这里的 `robometer_root` 指向适配项目，用于寻找脚本和默认 YAML；适配 YAML 内的 `paths.robometer_root` 才指向官方仓库。官方 checkout 或 Conda 环境缺失时，页面会禁用 Robometer 并提示原因，但不会影响 RynnValue 评价。
 
 ### 4.10 在 Web UI 中批量测试策略
 

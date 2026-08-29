@@ -7,6 +7,7 @@ from ..services.dataset_service import DatasetService
 from ..services.offline_job_service import OfflineJobService
 from ..services.training_dataset_service import TrainingDatasetService
 from ..services.trajectory_evaluation_service import TrajectoryEvaluationService
+from ..services.robometer_evaluation_service import RobometerEvaluationService
 
 
 def service(request: Request) -> RunService:
@@ -43,6 +44,13 @@ def trajectory_evaluation_service(request: Request) -> TrajectoryEvaluationServi
     current = getattr(request.app.state, "trajectory_evaluation_service", None)
     if current is None:
         raise HTTPException(status_code=503, detail="Trajectory evaluation service is unavailable")
+    return current
+
+
+def robometer_evaluation_service(request: Request) -> RobometerEvaluationService:
+    current = getattr(request.app.state, "robometer_evaluation_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Robometer evaluation service is unavailable")
     return current
 
 

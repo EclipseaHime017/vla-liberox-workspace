@@ -60,6 +60,8 @@ class UIConfig:
     offline_rl_root: Path
     train_environment: str
     reward_environment: str
+    robometer_root: Path
+    robometer_environment: str
     tensorboard_host: str
     tensorboard_port: int
     additional_tasks: tuple[AdditionalTaskConfig, ...]
@@ -175,6 +177,8 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         offline_rl_root=_resolve(_strict_string(raw, "offline_rl_root"), base),
         train_environment=_strict_string(raw, "train_environment"),
         reward_environment=_strict_string(raw, "reward_environment"),
+        robometer_root=_resolve(_strict_string(raw, "robometer_root"), base),
+        robometer_environment=_strict_string(raw, "robometer_environment"),
         tensorboard_host=_strict_string(raw, "tensorboard_host"),
         tensorboard_port=_strict_int(raw, "tensorboard_port"),
         additional_tasks=tuple(parsed_tasks),

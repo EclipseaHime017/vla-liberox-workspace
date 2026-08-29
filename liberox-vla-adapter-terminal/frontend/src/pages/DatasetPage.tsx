@@ -44,6 +44,7 @@ export function DatasetPage() {
   const [section, setSection] = useState<"evaluation" | "package">("evaluation");
   const [evaluationSelection, setEvaluationSelection] = useState<string[]>([]);
   const [batchOverwrite, setBatchOverwrite] = useState(false);
+  const [evaluators, setEvaluators] = useState<Array<"rynnvalue" | "robometer">>(["rynnvalue"]);
   const [detail, setDetail] = useState<TrajectoryDetailData | null>(null);
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [selection, setSelection] = useState<DatasetSelection>(initialSelection);
@@ -81,6 +82,7 @@ export function DatasetPage() {
   useEffect(() => { if (taskId) void refresh(taskId, page, pageSize).catch((reason) => setError(String(reason))); }, [taskId, page, pageSize]);
 
   const taskStats = summary?.tasks.find((task) => task.task_id === taskId);
+  const robometerCapability = bootstrap?.evaluation_capabilities?.robometer;
   const eligible = runs.filter((run) => run.training_eligible);
   const eligibleCount = runPage?.eligible_count ?? eligible.length;
   const selectedSet = useMemo(() => new Set(selection.run_ids), [selection.run_ids]);
@@ -140,9 +142,12 @@ export function DatasetPage() {
     finally { setBusy(false); }
   };
   const evaluate = async (runIds: string[] | null, overwrite: boolean) => {
+    if (!evaluators.length) { setError("请至少选择一个评价器"); return; }
     setBusy(true); setError("");
     try {
-      const result = await evaluateTrajectories({ task_id: taskId, run_ids: runIds, overwrite });
+      const result = await evaluateTrajectories({
+        task_id: taskId, run_ids: runIds, overwrite, evaluators,
+      });
       if (result.job) setAnnotationJob(result.job);
       else window.alert(result.message ?? `已跳过 ${result.skipped_count} 条已有评价`);
       setEvaluationSelection([]);
@@ -185,16 +190,21 @@ export function DatasetPage() {
   if (detail) return <TrajectoryDetail detail={detail} onBack={() => setDetail(null)} />;
 
   return <section className="content-page">
-    <div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>轨迹评价与数据集打包相互独立；RynnValue 结果跟随轨迹保存并可跨数据集复用。</p></div>
+    <div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>RynnValue 与 Robometer 评价分别跟随轨迹保存；冻结训练数据集仍只自动补齐 RynnValue。</p></div>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     {summary && <>
-      <div className="dataset-overview surface"><SuccessRateChart rate={taskStats?.success_rate ?? 0} /><div className="dataset-stats"><div><strong>{taskStats?.runs ?? 0}</strong><span>当前任务运行</span></div><div><strong>{eligibleCount}</strong><span>可训练轨迹</span></div><div><strong>{runPage?.evaluated_count ?? 0}</strong><span>已评价轨迹</span></div><div><strong>{datasets.length}</strong><span>冻结数据集</span></div></div></div>
+      <div className="dataset-overview surface"><SuccessRateChart rate={taskStats?.success_rate ?? 0} /><div className="dataset-stats"><div><strong>{taskStats?.runs ?? 0}</strong><span>当前任务运行</span></div><div><strong>{eligibleCount}</strong><span>可训练轨迹</span></div><div><strong>{runPage?.rynn_evaluated_count ?? 0} / {runPage?.robometer_evaluated_count ?? 0}</strong><span>RynnValue / Robometer</span></div><div><strong>{datasets.length}</strong><span>冻结数据集</span></div></div></div>
       <div className="dataset-section-tabs surface"><button className={section === "evaluation" ? "active" : ""} onClick={() => { setSection("evaluation"); setBuilder(false); }}>轨迹评价</button><button className={section === "package" ? "active" : ""} onClick={() => setSection("package")}>打包训练数据集</button></div>
       <div className="surface dataset-browser">
         <div className="dataset-toolbar">
           <label>任务<select value={taskId} onChange={(event) => { setTaskId(event.target.value); setPage(1); setBuilder(false); setEvaluationSelection([]); }}>{bootstrap?.task_catalog.map((task) => <option value={task.task_id} key={task.task_id}>{task.prompt}</option>)}</select></label>
           <span>{runPage?.total ?? 0} 条记录</span>
-          {section === "evaluation" ? <div className="evaluation-actions"><label><input type="checkbox" checked={batchOverwrite} onChange={(event) => setBatchOverwrite(event.target.checked)} />批量覆盖已有评价</label><button disabled={busy} onClick={() => void evaluate(null, batchOverwrite)}>批量评价</button><button className="primary" disabled={busy || !evaluationSelection.length} onClick={() => void evaluate(evaluationSelection, true)}>评价所选（覆盖）</button></div> : <><button className="primary" onClick={() => openBuilder()}>创建训练数据集</button><a className="export-button" href={taskId ? datasetExportUrl(taskId) : undefined} download aria-disabled={!taskId}>导出任务 ZIP</a></>}
+          {section === "evaluation" ? <div className="evaluation-actions">
+            <label><input type="checkbox" checked={evaluators.includes("rynnvalue")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "rynnvalue"] : current.filter((value) => value !== "rynnvalue"))} />RynnValue</label>
+            <label title={robometerCapability?.reason ?? undefined}><input type="checkbox" disabled={robometerCapability?.available === false} checked={evaluators.includes("robometer")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "robometer"] : current.filter((value) => value !== "robometer"))} />Robometer{robometerCapability?.available === false ? "（未配置）" : ""}</label>
+            <label><input type="checkbox" checked={batchOverwrite} onChange={(event) => setBatchOverwrite(event.target.checked)} />覆盖所选评价器已有结果</label>
+            <button disabled={busy || !evaluators.length} onClick={() => void evaluate(null, batchOverwrite)}>批量评价</button><button className="primary" disabled={busy || !evaluationSelection.length || !evaluators.length} onClick={() => void evaluate(evaluationSelection, true)}>评价所选（覆盖）</button>
+          </div> : <><button className="primary" onClick={() => openBuilder()}>创建训练数据集</button><a className="export-button" href={taskId ? datasetExportUrl(taskId) : undefined} download aria-disabled={!taskId}>导出任务 ZIP</a></>}
         </div>
         <RunTable runs={runs} selectable={section === "evaluation" || (builder && selection.mode === "manual")} selected={section === "evaluation" ? evaluationSelection : selection.run_ids} onToggle={(runId, checked) => section === "evaluation" ? setEvaluationSelection((current) => checked ? [...current, runId] : current.filter((value) => value !== runId)) : patchSelection({ run_ids: checked ? [...selection.run_ids, runId] : selection.run_ids.filter((value) => value !== runId) })} onOpen={(runId) => void openDetail(runId)} />
         <div className="table-pagination"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>上一页</button><span>第 {runPage?.page ?? page} / {runPage?.pages ?? 1} 页</span><button disabled={page >= (runPage?.pages ?? 1)} onClick={() => setPage((value) => value + 1)}>下一页</button><label>每页<select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>{[5, 10, 20, 50].map((value) => <option key={value} value={value}>{value}</option>)}</select></label></div>

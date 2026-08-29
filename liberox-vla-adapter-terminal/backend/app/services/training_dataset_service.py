@@ -48,7 +48,10 @@ def _split(root_id: str, seed: int, fraction: float) -> str:
 class TrainingDatasetService:
     """Owns immutable manifests while run files remain read-only source data."""
 
-    def __init__(self, run_service: Any, ui_config: Any, evaluations: Any | None = None):
+    def __init__(
+        self, run_service: Any, ui_config: Any, evaluations: Any | None = None,
+        robometer_evaluations: Any | None = None,
+    ):
         self.run_service = run_service
         self.ui_config = ui_config
         self.root = ui_config.project_root / "datasets"
@@ -57,6 +60,7 @@ class TrainingDatasetService:
             ui_config.catalog_path, ui_config.project_id
         )
         self.evaluations = evaluations
+        self.robometer_evaluations = robometer_evaluations
         self.lock = threading.RLock()
         self._index_existing()
 
@@ -158,11 +162,27 @@ class TrainingDatasetService:
             evaluated_count = sum(self.evaluations.exists(item) for item in values)
         else:
             evaluated_count = 0
+        robometer_evaluated_count = 0
+        both_evaluated_count = 0
+        if self.robometer_evaluations is not None:
+            for item in items:
+                item["robometer_evaluation"] = self.robometer_evaluations.status(item)
+            robometer_evaluated_count = sum(
+                self.robometer_evaluations.exists(item) for item in values
+            )
+            if self.evaluations is not None:
+                both_evaluated_count = sum(
+                    self.evaluations.exists(item) and self.robometer_evaluations.exists(item)
+                    for item in values
+                )
         return {
             "items": items,
             "total": total,
             "eligible_count": eligible_count,
             "evaluated_count": evaluated_count,
+            "rynn_evaluated_count": evaluated_count,
+            "robometer_evaluated_count": robometer_evaluated_count,
+            "both_evaluated_count": both_evaluated_count,
             "page": page,
             "page_size": page_size,
             "pages": pages,

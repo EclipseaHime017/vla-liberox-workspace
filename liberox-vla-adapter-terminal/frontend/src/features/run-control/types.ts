@@ -48,6 +48,9 @@ export type Bootstrap = {
   task: TaskInfo;
   task_catalog: TaskInfo[];
   capabilities: { model_switching: boolean; task_switching: boolean };
+  evaluation_capabilities?: Record<"rynnvalue" | "robometer", {
+    available: boolean; reason: string | null;
+  }>;
 };
 
 export type Draft = {
@@ -98,10 +101,17 @@ export type Session = {
     evaluated_at?: string | null; model?: string | null; revision?: string | null;
     boundary_count?: number; source_key?: string | null;
   };
+  robometer_evaluation?: {
+    status: "NOT_EVALUATED" | "READY";
+    evaluated_at?: string | null; model?: string | null; revision?: string | null;
+    sample_count?: number; source_key?: string | null;
+  };
 };
 
 export type PaginatedRuns = {
   items: Session[]; total: number; eligible_count: number; evaluated_count: number;
+  rynn_evaluated_count: number; robometer_evaluated_count: number;
+  both_evaluated_count: number;
   page: number; page_size: number; pages: number;
 };
 
@@ -112,8 +122,19 @@ export type TrajectoryDetail = {
     time_seconds: number[]; action_time_seconds: number[];
     env_action: number[][]; raw_action: number[][];
     eef_position: number[][]; eef_axis_angle: number[][]; gripper_qpos: number[][];
+    done: boolean[];
   };
-  evaluation: null | {
+  evaluation: null | RynnValueEvaluation;
+  rynnvalue_evaluation: null | RynnValueEvaluation;
+  robometer_evaluation: null | {
+    status: "READY"; evaluated_at: string; model: string | null; revision: string | null;
+    observation_steps: number[]; time_seconds: number[];
+    progress_pred: number[]; success_probs: number[];
+    evaluation_config: Record<string, unknown>;
+  };
+};
+
+export type RynnValueEvaluation = {
     status: "READY"; evaluated_at: string; model: string | null;
     boundary_steps: number[];
     official_outputs: {
@@ -137,7 +158,6 @@ export type TrajectoryDetail = {
       description?: string | null;
     };
     reward_config: Record<string, unknown>;
-  };
 };
 
 export type DatasetSelection = {

@@ -18,6 +18,7 @@ export const getTrajectoryDetail = (runId: string) => api<TrajectoryDetail>(
 );
 export const evaluateTrajectories = (body: {
   task_id: string; run_ids: string[] | null; overwrite: boolean;
+  evaluators: Array<"rynnvalue" | "robometer">;
 }) => api<{
   kind: "trajectory_evaluation"; status: string; job: OfflineJob | null;
   selected_count: number; skipped_count: number; skipped_run_ids: string[]; message?: string;

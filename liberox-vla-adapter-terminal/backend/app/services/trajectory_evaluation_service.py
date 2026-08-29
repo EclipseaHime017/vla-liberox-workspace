@@ -263,7 +263,7 @@ class TrajectoryEvaluationService:
             bound.append(run_id)
         return {"bound": bound, "skipped": skipped, "count": len(bound)}
 
-    def detail(self, run_id: str) -> dict[str, Any]:
+    def detail(self, run_id: str, robometer: Any | None = None) -> dict[str, Any]:
         run = self.run_service.get_run(run_id)
         episode = self._episode_dir(run)
         trajectory_path = episode / "trajectory.npz"
@@ -275,6 +275,10 @@ class TrajectoryEvaluationService:
             eef_position = source["eef_position"].astype(float).tolist()
             eef_axis_angle = source["eef_axis_angle"].astype(float).tolist()
             gripper_qpos = source["gripper_qpos"].astype(float).tolist()
+            done = (
+                source["done"].astype(bool).tolist()
+                if "done" in source.files else [False] * len(time_seconds)
+            )
         artifacts = run.get("artifacts") or {}
         public_artifacts = {
             name: f"/api/sessions/{run_id}/artifacts/{name}"
@@ -361,6 +365,9 @@ class TrajectoryEvaluationService:
                 "eef_position": eef_position,
                 "eef_axis_angle": eef_axis_angle,
                 "gripper_qpos": gripper_qpos,
+                "done": done,
             },
             "evaluation": evaluation,
+            "rynnvalue_evaluation": evaluation,
+            "robometer_evaluation": None if robometer is None else robometer.detail(run),
         }

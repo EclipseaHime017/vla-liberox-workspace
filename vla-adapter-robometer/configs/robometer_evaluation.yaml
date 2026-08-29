@@ -1,0 +1,16 @@
+schema_version: 1
+paths:
+  selection_manifest: null
+  output_dir: ../outputs/evaluations
+  robometer_root: ../../Robometer
+model:
+  checkpoint: aliangdw/Robometer-4B-LIBERO
+  revision: bb7dce7e6bde3bd236c0fbe0be46fdf19b57b873
+  robometer_commit: 352d160389daa964788de1ec933d1925f3a6de4f
+  device: cuda:0
+  dtype: bfloat16
+evaluation:
+  control_hz: 20
+  fps: 3.0
+  prefix_frames: 4
+  batch_size: 8
