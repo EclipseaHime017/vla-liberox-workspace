@@ -141,21 +141,35 @@ class OfflineJobService:
             "basic": {
                 name: raw["iql"][name] for name in (
                     "train_steps", "critic_warmup_steps",
-                    "gradient_accumulation_steps", "checkpoint_interval", "seed",
+                    "micro_batch_size", "gradient_accumulation_steps",
+                    "checkpoint_interval", "seed",
                 )
             },
             "advanced": {
                 name: raw["iql"][name] for name in (
-                    "critic_lr", "value_lr", "policy_peak_lr", "policy_final_lr",
+                    "critic_optimizer", "critic_lr", "critic_weight_decay",
+                    "critic_max_grad_norm", "value_optimizer", "value_lr",
+                    "value_weight_decay", "value_max_grad_norm",
+                    "policy_peak_lr", "policy_final_lr",
                     "expectile", "beta", "max_advantage_weight", "target_tau",
                 )
             } | {
                 "console_interval_steps": raw["logging"]["console_interval_steps"],
                 "flush_seconds": raw["logging"]["flush_seconds"],
             },
+            "monitoring": {
+                "tensorboard": raw["logging"]["tensorboard"],
+                "wandb_enabled": raw["logging"]["wandb"]["enabled"],
+                "wandb_mode": raw["logging"]["wandb"]["mode"],
+                "wandb_project": raw["logging"]["wandb"]["project"],
+                "wandb_entity": raw["logging"]["wandb"]["entity"],
+                "wandb_run_name": raw["logging"]["wandb"]["run_name"],
+                "wandb_group": raw["logging"]["wandb"]["group"],
+                "wandb_tags": ", ".join(raw["logging"]["wandb"]["tags"]),
+                "wandb_log_interval_steps": raw["logging"]["wandb"]["log_interval_steps"],
+            },
             "fixed": {
                 "dtype": raw["iql"]["dtype"],
-                "micro_batch_size": raw["iql"]["micro_batch_size"],
                 "critic_image_size": raw["iql"]["critic_image_size"],
                 "action_horizon": raw["data"]["action_horizon"],
                 "action_dim": raw["data"]["action_dim"],
@@ -801,17 +815,22 @@ class OfflineJobService:
     def _validate_training_parameters(parameters: dict[str, Any]) -> None:
         allowed = {
             "train_steps", "critic_warmup_steps", "gradient_accumulation_steps",
-            "checkpoint_interval", "seed", "critic_lr", "value_lr",
+            "micro_batch_size", "checkpoint_interval", "seed",
+            "critic_optimizer", "critic_lr", "critic_weight_decay",
+            "critic_max_grad_norm", "value_optimizer", "value_lr",
+            "value_weight_decay", "value_max_grad_norm",
             "policy_peak_lr", "policy_final_lr", "expectile", "beta",
             "max_advantage_weight", "target_tau", "console_interval_steps",
-            "flush_seconds", "resume_checkpoint",
+            "flush_seconds", "resume_checkpoint", "tensorboard", "wandb_enabled",
+            "wandb_mode", "wandb_project", "wandb_entity", "wandb_run_name",
+            "wandb_group", "wandb_tags", "wandb_log_interval_steps",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
             raise ValueError(f"Unknown training parameters: {unknown}")
         integer_positive = (
-            "train_steps", "gradient_accumulation_steps", "checkpoint_interval",
-            "console_interval_steps",
+            "train_steps", "micro_batch_size", "gradient_accumulation_steps",
+            "checkpoint_interval", "console_interval_steps", "wandb_log_interval_steps",
         )
         for name in integer_positive:
             value = parameters.get(name)
@@ -824,18 +843,45 @@ class OfflineJobService:
         for name in (
             "critic_lr", "value_lr", "policy_peak_lr", "policy_final_lr", "beta",
             "max_advantage_weight", "target_tau", "flush_seconds",
+            "critic_weight_decay", "value_weight_decay",
         ):
             value = parameters.get(name)
             if value is not None and (
                 isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0
             ):
                 raise ValueError(f"{name} must be a non-negative number")
+        for name in ("critic_max_grad_norm", "value_max_grad_norm"):
+            value = parameters.get(name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive number")
         expectile = parameters.get("expectile")
         if expectile is not None and (
             isinstance(expectile, bool) or not isinstance(expectile, (int, float))
             or not 0 <= expectile <= 1
         ):
             raise ValueError("expectile must be in [0, 1]")
+        target_tau = parameters.get("target_tau")
+        if target_tau is not None and target_tau > 1:
+            raise ValueError("target_tau must be in [0, 1]")
+        for name in ("critic_optimizer", "value_optimizer"):
+            value = parameters.get(name)
+            if value is not None and value not in {"adam", "adamw"}:
+                raise ValueError(f"{name} must be adam or adamw")
+        if parameters.get("wandb_mode") not in (None, "online", "offline", "disabled"):
+            raise ValueError("wandb_mode must be online, offline, or disabled")
+        for name in ("tensorboard", "wandb_enabled"):
+            value = parameters.get(name)
+            if value is not None and type(value) is not bool:
+                raise ValueError(f"{name} must be boolean")
+        for name in ("wandb_project", "wandb_entity", "wandb_run_name", "wandb_group", "wandb_tags"):
+            value = parameters.get(name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{name} must be a string or null")
+        project = parameters.get("wandb_project")
+        if project is not None and not project.strip():
+            raise ValueError("wandb_project must not be empty")
 
     def _resolve_resume(self, value: Any) -> str | None:
         if value in (None, ""):
@@ -927,6 +973,20 @@ class OfflineJobService:
                 raw["iql"][key] = value
             elif key in raw["logging"]:
                 raw["logging"][key] = value
+        wandb = raw["logging"]["wandb"]
+        for parameter_name, config_name in {
+            "wandb_enabled": "enabled", "wandb_mode": "mode",
+            "wandb_project": "project", "wandb_entity": "entity",
+            "wandb_run_name": "run_name", "wandb_group": "group",
+            "wandb_log_interval_steps": "log_interval_steps",
+        }.items():
+            if parameter_name in parameters:
+                wandb[config_name] = parameters[parameter_name]
+        if "wandb_tags" in parameters:
+            wandb["tags"] = [
+                tag.strip() for tag in str(parameters["wandb_tags"] or "").split(",")
+                if tag.strip()
+            ]
         raw["iql"]["resume_checkpoint"] = self._resolve_resume(
             parameters.get("resume_checkpoint")
         )
@@ -957,11 +1017,16 @@ class OfflineJobService:
                 "action_count": dataset["action_count"], "chunk_count": dataset["chunk_count"],
                 "annotation_id": annotation_id,
                 **{name: raw["iql"][name] for name in (
-                    "train_steps", "critic_warmup_steps", "gradient_accumulation_steps",
-                    "checkpoint_interval", "seed", "critic_lr", "value_lr",
+                    "train_steps", "critic_warmup_steps", "micro_batch_size",
+                    "gradient_accumulation_steps", "checkpoint_interval", "seed",
+                    "critic_optimizer", "critic_lr", "critic_weight_decay",
+                    "critic_max_grad_norm", "value_optimizer", "value_lr",
+                    "value_weight_decay", "value_max_grad_norm",
                     "policy_peak_lr", "policy_final_lr", "expectile", "beta",
                     "max_advantage_weight", "target_tau",
                 )},
+                "tensorboard": raw["logging"]["tensorboard"],
+                "wandb": raw["logging"]["wandb"],
             },
         )
 

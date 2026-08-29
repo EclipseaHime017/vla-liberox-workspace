@@ -1,4 +1,13 @@
 schema_version: 1
+runtime:
+  python: "3.10"
+  torch: 2.8.0
+  torchvision: 0.23.0
+  torchao: 0.13.0
+  xformers: 0.0.32.post2
+  transformers: 4.57.1
+  trl: 0.20.0
+  cuda_wheel_index: https://download.pytorch.org/whl/cu128
 robometer:
   repository: https://github.com/robometer/robometer.git
   commit: 352d160389daa964788de1ec933d1925f3a6de4f

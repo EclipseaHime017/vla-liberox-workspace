@@ -13,9 +13,28 @@ conda create -n robometer-reward python=3.10 -y
 conda activate robometer-reward
 git clone https://github.com/robometer/robometer.git Robometer
 git -C Robometer checkout 352d160389daa964788de1ec933d1925f3a6de4f
-pip install -e ./Robometer
+
+# Install one compatible native matrix. Do not downgrade torchao by itself.
+pip uninstall -y torch torchvision torchao xformers
+pip install torch==2.8.0 torchvision==0.23.0 torchao==0.13.0 \
+  --index-url https://download.pytorch.org/whl/cu128
+pip install xformers==0.0.32.post2 \
+  --index-url https://download.pytorch.org/whl/cu128
+
+# The constraint file prevents Robometer's transitive dependencies from
+# upgrading torch, torchao, Transformers, TRL or xFormers afterwards.
+pip install -c vla-adapter-robometer/constraints-robometer.txt \
+  -e './Robometer[robometer]'
 pip install -e ./vla-adapter-robometer
+python vla-adapter-robometer/scripts/verify_environment.py
 ```
+
+`torchao==0.13.0` is coupled to the PyTorch 2.8 native wheel. Installing it
+beside an older PyTorch, or installing Robometer without the constraint file
+and allowing a later dependency resolution to replace either package, leaves
+an incompatible environment. The verifier checks the complete matrix before
+model loading and performs a CUDA BF16 operation; it does not accept a merely
+successful `pip install` as proof that the environment works.
 
 The default configuration pins an audited Git commit and Hugging Face snapshot
 revision. Check out the commit listed in `configs/dependency-lock.yaml` after

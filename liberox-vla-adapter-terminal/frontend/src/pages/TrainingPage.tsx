@@ -12,12 +12,17 @@ import { Badge } from "../components/ui/Badge";
 const basicFields = [
   ["train_steps", "训练步数", 1],
   ["critic_warmup_steps", "Critic warmup", 1],
+  ["micro_batch_size", "Micro batch size", 1],
   ["gradient_accumulation_steps", "梯度累积", 1],
   ["checkpoint_interval", "Checkpoint 间隔", 1],
   ["seed", "随机种子", 1],
 ] as const;
 const advancedFields = [
   ["critic_lr", "Critic LR", "any"], ["value_lr", "Value LR", "any"],
+  ["critic_weight_decay", "Critic weight decay", "any"],
+  ["critic_max_grad_norm", "Critic 梯度裁剪", "any"],
+  ["value_weight_decay", "Value weight decay", "any"],
+  ["value_max_grad_norm", "Value 梯度裁剪", "any"],
   ["policy_peak_lr", "Policy peak LR", "any"], ["policy_final_lr", "Policy final LR", "any"],
   ["expectile", "Expectile", "any"], ["beta", "Advantage beta", "any"],
   ["max_advantage_weight", "最大 advantage weight", "any"], ["target_tau", "Target tau", "any"],
@@ -31,7 +36,7 @@ export function TrainingPage() {
   const [taskId, setTaskId] = useState("");
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [datasetId, setDatasetId] = useState("");
-  const [parameters, setParameters] = useState<Record<string, number | string | null>>({});
+  const [parameters, setParameters] = useState<Record<string, number | string | boolean | null>>({});
   const [job, setJob] = useState<OfflineJob | null>(null);
   const [tensorboard, setTensorboard] = useState<TensorBoardStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -41,7 +46,7 @@ export function TrainingPage() {
     void Promise.all([getBootstrap(), getTrainingDefaults(), listOfflineJobs(), getTensorBoard()])
       .then(([nextBootstrap, nextDefaults, jobs, board]) => {
         setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskId(nextBootstrap.task.task_id);
-        setParameters({ ...nextDefaults.basic, ...nextDefaults.advanced, resume_checkpoint: null });
+        setParameters({ ...nextDefaults.basic, ...nextDefaults.advanced, ...nextDefaults.monitoring, resume_checkpoint: null });
         setTensorboard(board);
         const active = jobs.find(
           (item) => item.kind === "training" && activeJobStates.has(item.status),
@@ -76,7 +81,7 @@ export function TrainingPage() {
       }));
     }).catch((reason) => setError(String(reason)));
   }, [datasetId]);
-  const patchParameter = (name: string, value: number | string | null) => setParameters((current) => ({ ...current, [name]: value }));
+  const patchParameter = (name: string, value: number | string | boolean | null) => setParameters((current) => ({ ...current, [name]: value }));
   const begin = async () => {
     if (!datasetId) return;
     setBusy(true); setError("");
@@ -104,9 +109,24 @@ export function TrainingPage() {
           <label>任务<select value={taskId} onChange={(event) => setTaskId(event.target.value)}>{bootstrap?.task_catalog.map((task) => <option key={task.task_id} value={task.task_id}>{task.prompt}</option>)}</select></label>
           <label>已标注数据集<select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}><option value="">请选择</option>{datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
           {dataset && <div className="training-dataset-summary"><strong>{dataset.member_count} 条轨迹</strong><span>{dataset.action_count} actions</span><span>{dataset.chunk_count} chunks</span><Badge tone="green">完整性正常</Badge><p>训练固定使用该版本全部成员。若需改变 M，请在数据集页面派生并重新标注。</p></div>}
-          <div className="parameter-grid">{basicFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name === "critic_warmup_steps" || name === "seed" ? 0 : 1} step={step} value={parameters[name] ?? ""} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
+          <div className="parameter-grid">{basicFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name === "critic_warmup_steps" || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
           {defaults?.checkpoints.length ? <label>断点恢复<select value={String(parameters.resume_checkpoint ?? "")} onChange={(event) => patchParameter("resume_checkpoint", event.target.value || null)}><option value="">不恢复</option>{defaults.checkpoints.map((checkpoint) => <option value={checkpoint.path} key={checkpoint.path}>{checkpoint.label}</option>)}</select></label> : null}
-          <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">{advancedFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={parameters[name] ?? ""} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div></details>
+          <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">
+            <label>Critic optimizer<select value={String(parameters.critic_optimizer ?? "adam")} onChange={(event) => patchParameter("critic_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
+            <label>Value optimizer<select value={String(parameters.value_optimizer ?? "adam")} onChange={(event) => patchParameter("value_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
+            {advancedFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}
+          </div></details>
+          <details><summary>训练监控</summary><div className="parameter-grid advanced-parameters">
+            <label className="training-toggle"><input type="checkbox" checked={Boolean(parameters.tensorboard)} onChange={(event) => patchParameter("tensorboard", event.target.checked)} />写入 TensorBoard</label>
+            <label className="training-toggle"><input type="checkbox" checked={Boolean(parameters.wandb_enabled)} onChange={(event) => patchParameter("wandb_enabled", event.target.checked)} />启用 W&amp;B</label>
+            <label>W&amp;B mode<select value={String(parameters.wandb_mode ?? "online")} onChange={(event) => patchParameter("wandb_mode", event.target.value)}><option value="online">online</option><option value="offline">offline</option><option value="disabled">disabled</option></select></label>
+            <label>W&amp;B project<input value={String(parameters.wandb_project ?? "")} onChange={(event) => patchParameter("wandb_project", event.target.value)} /></label>
+            <label>W&amp;B entity<input value={String(parameters.wandb_entity ?? "")} onChange={(event) => patchParameter("wandb_entity", event.target.value || null)} /></label>
+            <label>Run name<input value={String(parameters.wandb_run_name ?? "")} onChange={(event) => patchParameter("wandb_run_name", event.target.value || null)} /></label>
+            <label>Group<input value={String(parameters.wandb_group ?? "")} onChange={(event) => patchParameter("wandb_group", event.target.value || null)} /></label>
+            <label>Tags（逗号分隔）<input value={String(parameters.wandb_tags ?? "")} onChange={(event) => patchParameter("wandb_tags", event.target.value)} /></label>
+            <label>W&amp;B 日志间隔<input type="number" min={1} step={1} value={String(parameters.wandb_log_interval_steps ?? "")} onChange={(event) => patchParameter("wandb_log_interval_steps", Number(event.target.value))} /></label>
+          </div></details>
           {defaults && <div className="fixed-parameters"><h2>固定兼容项</h2>{Object.entries(defaults.fixed).map(([name, value]) => <span key={name}><b>{name}</b>{String(value)}</span>)}</div>}
           <button className="primary start-training" disabled={busy || !datasetId || Boolean(job && activeJobStates.has(job.status))} onClick={() => void begin()}>开始训练</button>
         </div>

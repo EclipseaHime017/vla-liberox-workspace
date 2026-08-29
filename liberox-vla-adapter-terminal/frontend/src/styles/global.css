@@ -241,6 +241,8 @@ td code { font-size: 11px; }
 .training-form details { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
 .training-config .training-form details { padding: 16px; border-radius: 12px; }
 .training-config .training-form summary { font-size: 18px; }
+.training-toggle { display: flex !important; grid-auto-flow: column; grid-template-columns: auto 1fr; align-items: center; justify-content: start; }
+.training-toggle input { width: auto !important; }
 .advanced-parameters { grid-template-columns: repeat(5, minmax(0, 1fr)); padding-top: 12px; }
 .fixed-parameters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 12px; border-radius: 10px; background: var(--surface-muted); }
 .fixed-parameters h2 { grid-column: 1 / -1; margin-bottom: 2px; }

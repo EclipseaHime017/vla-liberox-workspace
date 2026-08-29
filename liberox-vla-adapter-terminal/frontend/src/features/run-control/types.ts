@@ -328,7 +328,9 @@ export type EvaluationFilters = {
 };
 
 export type TrainingDefaults = {
-  basic: Record<string, number>; advanced: Record<string, number>;
+  basic: Record<string, number>;
+  advanced: Record<string, number | string>;
+  monitoring: Record<string, number | string | boolean | null>;
   fixed: Record<string, string | number | boolean>;
   environments: Record<string, string>;
   checkpoints: Array<{ path: string; label: string }>;

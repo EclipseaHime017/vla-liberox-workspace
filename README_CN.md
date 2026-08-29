@@ -1,6 +1,6 @@
 # LIBERO-X × VLA-Adapter Terminal
 
-当前版本：**v0.3.0**
+当前版本：**v0.4.0**
 
 这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse 接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。
 

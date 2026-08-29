@@ -1,0 +1,8 @@
+# Keep this matrix synchronized with configs/dependency-lock.yaml.
+# torch/torchvision/torchao should be installed from the PyTorch cu128 index.
+torch==2.8.0
+torchvision==0.23.0
+torchao==0.13.0
+xformers==0.0.32.post2
+transformers==4.57.1
+trl==0.20.0

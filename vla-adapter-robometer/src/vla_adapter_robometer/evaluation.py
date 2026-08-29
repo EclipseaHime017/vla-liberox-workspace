@@ -57,6 +57,9 @@ def _manifest_prompt(path: Path) -> str:
 
 class OfficialRobometerAnnotator:
     def __init__(self, config: Config):
+        from .runtime import validate_runtime_versions
+
+        self.runtime_versions = validate_runtime_versions()
         raw = config.raw
         root = Path(raw["paths"]["robometer_root"])
         package = root / "robometer" / "__init__.py"

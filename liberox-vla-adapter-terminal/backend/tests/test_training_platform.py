@@ -278,8 +278,17 @@ def test_training_parameters_reject_unknown_and_unsafe_values():
         OfflineJobService._validate_training_parameters({"train_steps": 0})
     OfflineJobService._validate_training_parameters({
         "train_steps": 20, "critic_warmup_steps": 5,
-        "policy_peak_lr": 1e-4, "resume_checkpoint": None,
+        "micro_batch_size": 8, "policy_peak_lr": 1e-4,
+        "critic_optimizer": "adam", "value_optimizer": "adamw",
+        "critic_weight_decay": 0.0, "critic_max_grad_norm": 10.0,
+        "tensorboard": True, "wandb_enabled": False,
+        "wandb_mode": "offline", "wandb_tags": "liberox, iql",
+        "resume_checkpoint": None,
     })
+    with pytest.raises(ValueError, match="critic_optimizer"):
+        OfflineJobService._validate_training_parameters({"critic_optimizer": "sgd"})
+    with pytest.raises(ValueError, match="wandb_mode"):
+        OfflineJobService._validate_training_parameters({"wandb_mode": "local"})
 
 
 def test_gpu_launch_reservation_blocks_simulation_race():

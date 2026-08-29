@@ -168,7 +168,7 @@ class DeletePolicyRequest(StrictModel):
 
 class TrainingRunRequest(StrictModel):
     dataset_id: str = Field(min_length=1)
-    parameters: dict[str, StrictInt | StrictFloat | StrictStr | None]
+    parameters: dict[str, StrictInt | StrictFloat | StrictStr | StrictBool | None]
 
 
 class EvaluationRequest(StrictModel):
