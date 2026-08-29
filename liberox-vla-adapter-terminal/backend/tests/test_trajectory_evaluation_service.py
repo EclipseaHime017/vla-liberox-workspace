@@ -106,6 +106,8 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
     )
     assert detail["official_outputs"]["analysis"]["parsed_for_display"]["match"] == "Yes"
     assert detail["pbrs_reward"] == {
+        "sparse_reward": [-1.0],
+        "dense_reward": [0.2],
         "shape_reward": [2.0],
         "final_reward": [-0.8],
         "chunk_start_steps": [0],

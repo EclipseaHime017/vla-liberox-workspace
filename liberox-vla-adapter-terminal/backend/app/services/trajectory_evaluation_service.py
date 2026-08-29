@@ -311,6 +311,15 @@ class TrajectoryEvaluationService:
                         "RynnValue shape reward component length mismatch: "
                         f"{len(pbrs_shaping)} for {len(chunk_return)} chunks"
                     )
+                shaping_weight = float(reward_config.get("shaping_weight", 0.1))
+                dense_reward = shaping_weight * pbrs_shaping
+                sparse_reward = chunk_return - shaping_weight * pbrs_shaping
+                # These values are mathematically -1/0 in the macro-action
+                # reward. Remove only floating-point reconstruction noise.
+                sparse_reward = np.where(
+                    np.isclose(sparse_reward, -1.0, atol=1e-5), -1.0,
+                    np.where(np.isclose(sparse_reward, 0.0, atol=1e-5), 0.0, sparse_reward),
+                )
                 evaluation = {
                     **self._public(payload),
                     "boundary_steps": boundary_steps.tolist(),
@@ -345,6 +354,8 @@ class TrajectoryEvaluationService:
                         ),
                     },
                     "pbrs_reward": {
+                        "sparse_reward": sparse_reward.tolist(),
+                        "dense_reward": dense_reward.tolist(),
                         "shape_reward": pbrs_shaping.tolist(),
                         "final_reward": chunk_return.tolist(),
                         "chunk_start_steps": boundary_steps[:-1].tolist(),

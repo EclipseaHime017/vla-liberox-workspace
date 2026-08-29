@@ -442,11 +442,15 @@ td code { font-size: 11px; }
 .trajectory-plot-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .trajectory-plot-title > span { color: var(--muted); font-size: 12px; }
 .trajectory-plot-open { display: block; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; }
-.trajectory-plot svg { width: 100%; height: 170px; margin-top: 12px; background: linear-gradient(#fff,#fafbfd); border-radius: 10px; }
+.trajectory-plot svg { width: 100%; height: 220px; margin-top: 12px; background: linear-gradient(#fff,#fafbfd); border-radius: 10px; }
+.plot-grid { stroke: #e5e8ee; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.plot-axis { stroke: #8b919b; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.plot-tick { fill: #737983; font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.plot-axis-label { fill: #555b65; font-size: 11px; font-weight: 600; }
 .plot-legend, .plot-sample { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; color: var(--muted); font-size: 12px; }
 .plot-legend span, .plot-sample span { display: flex; align-items: center; gap: 5px; }
 .plot-legend i, .plot-sample i { width: 8px; height: 8px; border-radius: 50%; }
-.plot-inspector-chart svg { width: min(900px, 76vw); height: 280px; background: #fbfcfe; border: 1px solid var(--line); border-radius: 12px; }
+.plot-inspector-chart svg { width: min(940px, 76vw); height: 330px; background: #fbfcfe; border: 1px solid var(--line); border-radius: 12px; }
 .delete-dialog:has(.plot-inspector-chart) { width: min(960px, calc(100vw - 32px)); }
 .plot-time-slider { width: 100%; margin: 16px 0; }
 .plot-sample > strong { margin-right: 8px; }

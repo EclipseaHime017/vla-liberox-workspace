@@ -153,7 +153,9 @@ export type RynnValueEvaluation = {
       };
     };
     pbrs_reward: {
-      shape_reward: number[]; final_reward: number[]; chunk_start_steps: number[];
+      sparse_reward: number[]; dense_reward: number[]; shape_reward: number[];
+      final_reward: number[];
+      chunk_start_steps: number[];
       chunk_end_steps: number[]; chunk_lengths: number[];
       description?: string | null;
     };

@@ -8,6 +8,11 @@ const colors = ["#3775e8", "#e06c4f", "#3c9a70", "#9b63d4", "#c38b27", "#3c94a6"
 type Plot = {
   title: string; unit: string; times: number[]; labels: string[]; values: number[][];
   interpolation?: "linear" | "step"; sampleLabels?: string[];
+  xLabel?: string; yLabel?: string;
+};
+
+type ChartGeometry = {
+  width: number; height: number; left: number; right: number; top: number; bottom: number;
 };
 
 export function chunkRewardSeries(
@@ -70,15 +75,21 @@ function bounds(values: number[]) {
 }
 
 function pathData(
-  values: number[], width = 640, height = 170, range = bounds(values),
+  times: number[], values: number[], geometry: ChartGeometry,
+  range = bounds(values), timeRange = bounds(times),
   interpolation: "linear" | "step" = "linear",
 ) {
   if (!values.length) return "";
   const [low, high] = range;
+  const [firstTime, lastTime] = timeRange;
   const span = high - low;
+  const timeSpan = lastTime - firstTime;
+  const innerWidth = geometry.width - geometry.left - geometry.right;
+  const innerHeight = geometry.height - geometry.top - geometry.bottom;
   const coordinates = values.map((value, index) => {
-    const x = values.length === 1 ? 0 : index / (values.length - 1) * width;
-    const y = height - (value - low) / span * height;
+    const time = times[index] ?? index;
+    const x = geometry.left + (time - firstTime) / timeSpan * innerWidth;
+    const y = geometry.top + innerHeight - (value - low) / span * innerHeight;
     return [x, y] as const;
   });
   let result = `M ${coordinates[0][0].toFixed(2)} ${coordinates[0][1].toFixed(2)}`;
@@ -93,14 +104,50 @@ function pathData(
   return result;
 }
 
+function tickValues([low, high]: readonly [number, number], count = 5) {
+  return Array.from({ length: count }, (_, index) => low + (high - low) * index / (count - 1));
+}
+
+function tickLabel(value: number) {
+  const absolute = Math.abs(value);
+  if (absolute >= 1000 || (absolute > 0 && absolute < 0.01)) return value.toExponential(1);
+  return value.toFixed(absolute >= 10 ? 1 : 2);
+}
+
+function Chart({ plot, large = false, cursorIndex }: {
+  plot: Plot; large?: boolean; cursorIndex?: number;
+}) {
+  const geometry: ChartGeometry = large
+    ? { width: 940, height: 330, left: 72, right: 22, top: 18, bottom: 48 }
+    : { width: 680, height: 220, left: 58, right: 16, top: 12, bottom: 40 };
+  const valueRange = bounds(plot.values.flat());
+  const timeRange = bounds(plot.times);
+  const xTicks = tickValues(timeRange);
+  const yTicks = tickValues(valueRange);
+  const innerWidth = geometry.width - geometry.left - geometry.right;
+  const innerHeight = geometry.height - geometry.top - geometry.bottom;
+  const x = (value: number) => geometry.left
+    + (value - timeRange[0]) / (timeRange[1] - timeRange[0]) * innerWidth;
+  const y = (value: number) => geometry.top + innerHeight
+    - (value - valueRange[0]) / (valueRange[1] - valueRange[0]) * innerHeight;
+  const cursorX = cursorIndex == null ? null : x(plot.times[cursorIndex] ?? cursorIndex);
+  return <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} preserveAspectRatio="xMidYMid meet" aria-label={plot.title}>
+    {yTicks.map((value) => <g key={`y-${value}`}><line x1={geometry.left} x2={geometry.width - geometry.right} y1={y(value)} y2={y(value)} className="plot-grid" /><text x={geometry.left - 8} y={y(value) + 4} textAnchor="end" className="plot-tick">{tickLabel(value)}</text></g>)}
+    {xTicks.map((value) => <g key={`x-${value}`}><line x1={x(value)} x2={x(value)} y1={geometry.top} y2={geometry.top + innerHeight} className="plot-grid" /><text x={x(value)} y={geometry.top + innerHeight + 18} textAnchor="middle" className="plot-tick">{tickLabel(value)}</text></g>)}
+    <line x1={geometry.left} x2={geometry.left} y1={geometry.top} y2={geometry.top + innerHeight} className="plot-axis" />
+    <line x1={geometry.left} x2={geometry.width - geometry.right} y1={geometry.top + innerHeight} y2={geometry.top + innerHeight} className="plot-axis" />
+    {plot.labels.map((label, index) => <path key={label} d={pathData(plot.times, plot.values.map((row) => row[index]), geometry, valueRange, timeRange, plot.interpolation)} fill="none" stroke={colors[index % colors.length]} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}
+    {cursorX != null && <line x1={cursorX} x2={cursorX} y1={geometry.top} y2={geometry.top + innerHeight} stroke="#111" strokeWidth="1" vectorEffect="non-scaling-stroke" />}
+    <text x={geometry.left + innerWidth / 2} y={geometry.height - 5} textAnchor="middle" className="plot-axis-label">{plot.xLabel ?? "时间 [s]"}</text>
+    <text transform={`translate(14 ${geometry.top + innerHeight / 2}) rotate(-90)`} textAnchor="middle" className="plot-axis-label">{plot.yLabel ?? plot.unit}</text>
+  </svg>;
+}
+
 function PlotCard({ plot, onOpen }: { plot: Plot; onOpen: () => void }) {
-  const range = bounds(plot.values.flat());
   return <article className="trajectory-plot">
-    <div className="trajectory-plot-title"><strong>{plot.title}</strong><span>{plot.unit} · 点击查看逐chunk数据</span></div>
-    <button className="trajectory-plot-open" onClick={onOpen} aria-label={`查看${plot.title}逐chunk数据`}>
-      <svg viewBox="0 0 640 170" preserveAspectRatio="none" aria-label={plot.title}>
-        {plot.labels.map((label, index) => <path key={label} d={pathData(plot.values.map((row) => row[index]), 640, 170, range, plot.interpolation)} fill="none" stroke={colors[index % colors.length]} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}
-      </svg>
+    <div className="trajectory-plot-title"><strong>{plot.title}</strong><span>{plot.unit} · 点击查看逐时间点数据</span></div>
+    <button className="trajectory-plot-open" onClick={onOpen} aria-label={`查看${plot.title}逐时间点数据`}>
+      <Chart plot={plot} />
       <div className="plot-legend">{plot.labels.map((label, index) => <span key={label}><i style={{ background: colors[index % colors.length] }} />{label}</span>)}</div>
     </button>
   </article>;
@@ -115,12 +162,8 @@ function PlotInspector({ plot, onClose }: { plot: Plot; onClose: () => void }) {
     return () => window.clearInterval(timer);
   }, [playing, plot.values.length]);
   const current = plot.values[index] ?? [];
-  const range = bounds(plot.values.flat());
   return <Dialog title={`${plot.title} · 逐时间点预览`} actions={<><button onClick={() => setPlaying((value) => !value)}>{playing ? "暂停" : "自动播放"}</button><button className="primary" onClick={onClose}>关闭</button></>}>
-    <div className="plot-inspector-chart"><svg viewBox="0 0 900 280" preserveAspectRatio="none">
-      {plot.labels.map((label, line) => <path key={label} d={pathData(plot.values.map((row) => row[line]), 900, 280, range, plot.interpolation)} fill="none" stroke={colors[line % colors.length]} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}
-      <line x1={plot.values.length <= 1 ? 0 : index / (plot.values.length - 1) * 900} x2={plot.values.length <= 1 ? 0 : index / (plot.values.length - 1) * 900} y1="0" y2="280" stroke="#111" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-    </svg></div>
+    <div className="plot-inspector-chart"><Chart plot={plot} large cursorIndex={index} /></div>
     <input className="plot-time-slider" type="range" min={0} max={Math.max(0, plot.values.length - 1)} value={index} onChange={(event) => { setPlaying(false); setIndex(Number(event.target.value)); }} />
     <div className="plot-sample"><strong>{(plot.times[index] ?? index).toFixed(3)} s</strong>{plot.sampleLabels?.[index] && <span>{plot.sampleLabels[index]}</span>}{plot.labels.map((label, line) => <span key={label}><i style={{ background: colors[line % colors.length] }} />{label}: <b>{Number(current[line] ?? 0).toFixed(5)}</b> {plot.unit}</span>)}</div>
   </Dialog>;
@@ -131,8 +174,6 @@ export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: (
   const plots = useMemo<Plot[]>(() => {
     const values: Plot[] = [
       { title: "VLA 环境 action", unit: "normalized command [-]", times: detail.series.action_time_seconds, labels: ["dx", "dy", "dz", "dRx", "dRy", "dRz", "gripper"], values: detail.series.env_action },
-      { title: "末端位置", unit: "m", times: detail.series.time_seconds, labels: ["X", "Y", "Z"], values: detail.series.eef_position },
-      { title: "末端轴角", unit: "rad", times: detail.series.time_seconds, labels: ["Rx", "Ry", "Rz"], values: detail.series.eef_axis_angle },
     ];
     const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
     if (evaluation) {
@@ -157,6 +198,15 @@ export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: (
         reward,
         detail.series.time_seconds,
       );
+      const shapeSeries = rewardSeries(evaluation.pbrs_reward.shape_reward);
+      const sparseReward = evaluation.pbrs_reward.sparse_reward;
+      if (
+        sparseReward.length !== evaluation.pbrs_reward.shape_reward.length
+        || sparseReward.length !== evaluation.pbrs_reward.dense_reward.length
+        || sparseReward.length !== evaluation.pbrs_reward.final_reward.length
+      ) {
+        throw new Error("reward component length mismatch");
+      }
       values.push(
         {
           title: "RynnValue Absolute Remaining Time", unit: "s",
@@ -180,12 +230,15 @@ export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: (
           values: official.absolute_value_entropy_nats,
         },
         {
-          title: "RynnValue Shape Reward", unit: "reward [-]", labels: ["shape reward"],
-          ...rewardSeries(evaluation.pbrs_reward.shape_reward),
-        },
-        {
-          title: "Final Reward", unit: "reward [-]", labels: ["final reward"],
-          ...rewardSeries(evaluation.pbrs_reward.final_reward),
+          title: "Reward Components", unit: "reward [-]",
+          times: shapeSeries.times,
+          labels: ["sparse reward", "dense reward (κ × shape)", "final reward"],
+          values: sparseReward.map((sparse, index) => [
+            sparse, evaluation.pbrs_reward.dense_reward[index],
+            evaluation.pbrs_reward.final_reward[index],
+          ]),
+          sampleLabels: shapeSeries.sampleLabels,
+          interpolation: "step",
         },
       );
     }
