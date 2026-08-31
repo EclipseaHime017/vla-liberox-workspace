@@ -17,7 +17,7 @@ from vla_rynn_iql.rewards import (
     ANNOTATION_SCHEMA_VERSION,
     REWARD_REDUCTION,
     RynnValueAnnotator, annotate_manifest, chunk_reward_components,
-    shaped_chunk_reward,
+    load_reward_index, shaped_chunk_reward,
     validate_rynnvalue_config_contract, validate_rynnvalue_runtime_dtype,
 )
 from vla_rynn_iql.runtime import run_cuda_stage
@@ -82,6 +82,49 @@ def test_fake_annotation_pipeline(configured):
     prepare_dataset(configured)
     result = annotate_manifest(configured, FakeAnnotator())
     assert result.is_file()
+
+
+def test_reward_index_rebuilds_different_reduction_without_model_forward(
+    configured, monkeypatch,
+):
+    prepare_dataset(configured)
+    path = annotate_manifest(configured, FakeAnnotator())
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("reward_reduction")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    # Bind the compatible official outputs beside each trajectory, as the UI
+    # and terminal evaluation stages do before a later oldR training run.
+    prepared = load_manifest(configured)
+    prepared_by_id = {item["run_id"]: item for item in prepared["episodes"]}
+    for reward in payload["episodes"]:
+        episode = prepared_by_id[reward["run_id"]]
+        episode_dir = Path(episode["trajectory_path"]).parent
+        source = Path(reward["annotation_path"])
+        values = episode_dir / "rynnvalue_evaluation.npz"
+        shutil.copyfile(source, values)
+        (episode_dir / "rynnvalue_evaluation.json").write_text(json.dumps({
+            "schema_version": ANNOTATION_SCHEMA_VERSION,
+            "run_id": episode["run_id"],
+            "trajectory_sha256": episode["trajectory_sha256"],
+            "observations_sha256": episode["observations_sha256"],
+            "values_sha256": sha256_file(values),
+            "annotator": {
+                "model": configured.raw["reward"]["model"],
+                "requested_revision": configured.raw["reward"]["revision"],
+                "resolved_revision": configured.raw["reward"]["revision"],
+            },
+            "reward_config": configured.raw["reward"],
+            "official_outputs": reward["official_outputs"],
+        }), encoding="utf-8")
+
+    class UnexpectedModelLoad:
+        def __init__(self, _config):
+            raise AssertionError("oldR rebuild must not load RynnValue")
+
+    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    rebuilt = load_reward_index(configured)
+    assert rebuilt["reward_reduction"] == REWARD_REDUCTION
 
 
 def test_annotation_preserves_every_official_output_and_separates_pbrs(configured):

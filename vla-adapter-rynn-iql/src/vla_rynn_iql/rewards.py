@@ -810,21 +810,22 @@ def annotate_manifest(
 
 def load_reward_index(config: LoadedConfig) -> dict[str, Any]:
     path = Path(config.section("paths")["work_dir"]) / "rewards" / "reward_manifest.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"Reward manifest not found: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION:
-        raise ValueError(
-            "Reward manifest uses obsolete transition semantics: "
-            f"expected schema v{ANNOTATION_SCHEMA_VERSION}, got "
-            f"v{payload.get('schema_version')}. Re-run annotation; reusable official "
-            "RynnValue outputs will be migrated without another model forward pass."
+    payload = (
+        json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    )
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION
+        or payload.get("reward_reduction") != REWARD_REDUCTION
+    ):
+        LOG.info(
+            "Rebuilding %s reward arrays from existing RynnValue evaluation sidecars",
+            REWARD_REDUCTION,
         )
-    if payload.get("reward_reduction") != REWARD_REDUCTION:
-        raise ValueError(
-            "Reward manifest was produced by a different reward reduction; "
-            "recompute rewards from the existing RynnValue evaluation sidecars"
+        path = annotate_manifest(
+            config, overwrite=True, require_reusable_official=True,
         )
+        payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("complete") is not True:
         raise ValueError("Reward annotation manifest is incomplete")
     return payload
