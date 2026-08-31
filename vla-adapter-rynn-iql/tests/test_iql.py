@@ -73,7 +73,7 @@ def test_iql_checkpoint_restores_models_and_optimizers():
         torch.testing.assert_close(left, right)
 
 
-def test_policy_advantage_uses_online_q_by_default():
+def test_policy_advantage_uses_target_q_by_default():
     model = PixelIQL()
     with torch.no_grad():
         for parameter in model.q1.parameters():
@@ -90,7 +90,7 @@ def test_policy_advantage_uses_online_q_by_default():
         model.target_q2.head[-1].bias.fill_(30.0)
         for parameter in model.value.parameters():
             parameter.zero_()
-    torch.testing.assert_close(model.advantage(_batch()), torch.full((2,), 2.0))
+    torch.testing.assert_close(model.advantage(_batch()), torch.full((2,), 20.0))
     torch.testing.assert_close(
-        model.advantage(_batch(), target=True), torch.full((2,), 20.0)
+        model.advantage(_batch(), target=False), torch.full((2,), 2.0)
     )
