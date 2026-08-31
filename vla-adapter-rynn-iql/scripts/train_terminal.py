@@ -333,7 +333,7 @@ def main() -> int:
             runner.skip("annotate", "complete reward manifest and annotation hashes match")
         else:
             runner.stage(
-                "annotate", "RynnValue trajectory evaluation", config.environments["annotate"],
+                "annotate", "oldR reward reduction (reuse RynnValue evaluation)", config.environments["annotate"],
                 "annotate_rewards.py", effective_path,
                 ["--overwrite"] if args.force_annotate else None,
             )

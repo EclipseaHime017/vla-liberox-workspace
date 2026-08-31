@@ -15,6 +15,7 @@ from vla_rynn_iql.config import load_train_config
 from vla_rynn_iql.io import sha256_file, stable_hash
 from vla_rynn_iql.rewards import (
     ANNOTATION_SCHEMA_VERSION,
+    REWARD_REDUCTION,
     RynnValueAnnotator, annotate_manifest, chunk_reward_components,
     shaped_chunk_reward,
     validate_rynnvalue_config_contract, validate_rynnvalue_runtime_dtype,
@@ -52,22 +53,22 @@ class CountingAnnotator(FakeAnnotator):
         return super().predict(prompt, frames)
 
 
-def test_chunk_reward_treats_the_action_chunk_as_one_macro_transition():
+def test_chunk_reward_accumulates_discounted_primitive_step_costs():
     sparse, shaping, reward = chunk_reward_components(
         np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
         gamma=0.9, shaping_weight=0.1,
     )
-    assert np.isclose(sparse, -1.0)
-    assert np.isclose(shaping, 2.1)
-    assert np.isclose(reward, -0.79)
+    assert np.isclose(sparse, -1.0 - 0.9 - 0.9**2)
+    assert np.isclose(shaping, 3.0 - 0.9**3)
+    assert np.isclose(reward, sparse + 0.1 * shaping)
 
     terminal_sparse, terminal_shaping, terminal_reward = chunk_reward_components(
         np.asarray([False, False, True]), 0, 3, value_start=3, value_end=0,
         gamma=0.9, shaping_weight=0.1,
     )
-    assert np.isclose(terminal_sparse, 0.0)
+    assert np.isclose(terminal_sparse, -1.0 - 0.9)
     assert np.isclose(terminal_shaping, 3.0)
-    assert np.isclose(terminal_reward, 0.3)
+    assert np.isclose(terminal_reward, terminal_sparse + 0.3)
     assert np.isclose(
         shaped_chunk_reward(
             np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
@@ -88,6 +89,7 @@ def test_annotation_preserves_every_official_output_and_separates_pbrs(configure
     result = annotate_manifest(configured, FakeAnnotator())
     manifest = json.loads(result.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == ANNOTATION_SCHEMA_VERSION
+    assert manifest["reward_reduction"] == REWARD_REDUCTION
     episode = manifest["episodes"][0]
     assert episode["official_outputs"]["inference_method"] == "prefix_uniform_last_slot"
     assert episode["official_outputs"]["analysis"]["generated_token_ids"] == [1, 2]
@@ -183,7 +185,7 @@ def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
             raise AssertionError("v4 official outputs should avoid loading RynnValue")
 
     monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
-    migrated_path = annotate_manifest(configured)
+    migrated_path = annotate_manifest(configured, require_reusable_official=True)
     migrated = json.loads(migrated_path.read_text(encoding="utf-8"))
     assert migrated["schema_version"] == ANNOTATION_SCHEMA_VERSION
     for reward in migrated["episodes"]:
@@ -262,9 +264,16 @@ def test_sparse_reward_uses_only_debounced_terminal(configured):
     branch = next(item for item in index["episodes"] if item["run_id"] == "branch")
     with np.load(branch["annotation_path"], allow_pickle=False) as annotation:
         rewards = annotation["pbrs_chunk_reward"]
-    # The final chunk is one completing macro action, irrespective of its five
-    # executed low-level actions or earlier transient done=True samples.
-    expected = 0.0
+    # oldR restores the original discounted primitive-step return. A completing
+    # chunk therefore retains every -1 cost before the debounced terminal.
+    completing = prepared_branch["chunks"][-1]
+    expected = sum(
+        configured.raw["reward"]["gamma"] ** offset * (
+            0.0 if int(completing["start"]) + offset >= int(prepared_branch["terminal_step"])
+            else -1.0
+        )
+        for offset in range(int(completing["length"]))
+    )
     # Evaluation continues through the recorded post-terminal tail. The final
     # replay chunk is therefore not necessarily the final diagnostic chunk.
     assert np.isclose(rewards[len(prepared_branch["chunks"]) - 1], expected)

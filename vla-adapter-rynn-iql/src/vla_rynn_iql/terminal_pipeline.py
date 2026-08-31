@@ -20,7 +20,7 @@ from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config
 from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
-from .rewards import ANNOTATION_SCHEMA_VERSION
+from .rewards import ANNOTATION_SCHEMA_VERSION, REWARD_REDUCTION
 
 
 SOURCE_TYPES = frozenset({"inference", "manual", "policy_requery"})
@@ -473,6 +473,7 @@ def reward_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
         return False
     if (
         rewards.get("schema_version") != ANNOTATION_SCHEMA_VERSION
+        or rewards.get("reward_reduction") != REWARD_REDUCTION
         or rewards.get("complete") is not True
         or rewards.get("dataset_sha256") != prepared.get("dataset_sha256")
         or rewards.get("reward_config") != reward_config

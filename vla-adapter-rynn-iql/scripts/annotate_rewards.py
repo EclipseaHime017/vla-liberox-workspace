@@ -15,18 +15,22 @@ from vla_rynn_iql.runtime import run_cuda_stage
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Annotate prepared trajectories with frozen RynnValue")
+    parser = argparse.ArgumentParser(
+        description="Reduce existing RynnValue evaluations into oldR training rewards"
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_TRAIN_CONFIG)
     parser.add_argument(
         "--overwrite", action="store_true",
-        help="Recompute matching trajectory annotations instead of reusing the cache",
+        help="Recompute reward arrays instead of reusing the derived reward cache",
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     config = load_train_config(args.config)
     print(run_cuda_stage(
-        "RynnValue reward annotation",
-        lambda: annotate_manifest(config, overwrite=args.overwrite),
+        "oldR reward reduction from existing RynnValue outputs",
+        lambda: annotate_manifest(
+            config, overwrite=args.overwrite, require_reusable_official=True,
+        ),
     ))
     return 0
 

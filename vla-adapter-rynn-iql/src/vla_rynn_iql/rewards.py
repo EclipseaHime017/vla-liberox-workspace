@@ -29,6 +29,7 @@ LOG = logging.getLogger(__name__)
 # because only the deterministic reward reduction changed.
 ANNOTATION_SCHEMA_VERSION = 5
 REUSABLE_OFFICIAL_OUTPUT_SCHEMA_VERSIONS = frozenset({4, 5})
+REWARD_REDUCTION = "discounted_primitive_steps_v1"
 OFFICIAL_OUTPUT_KEYS = (
     "absolute_temporal_distance_seconds",
     "absolute_value_entropy_nats",
@@ -535,14 +536,19 @@ def validate_official_outputs(
     return normalized
 
 
-def sparse_macro_reward(done: np.ndarray, start: int, length: int) -> float:
-    """Return the paper sparse reward for one action-chunk transition."""
-    terminal = start + length - 1
-    if length < 1 or start < 0 or terminal >= len(done):
+def sparse_chunk_return(
+    done: np.ndarray, start: int, length: int, gamma: float,
+) -> float:
+    """Discount and accumulate every primitive step cost in an action chunk."""
+    end = start + length
+    if length < 1 or start < 0 or end > len(done):
         raise ValueError(
-            f"Invalid macro-action interval [{start}, {start + length}) for {len(done)} actions"
+            f"Invalid action-chunk interval [{start}, {end}) for {len(done)} actions"
         )
-    return 0.0 if bool(done[terminal]) else -1.0
+    return sum(
+        (gamma ** offset) * (0.0 if bool(done[start + offset]) else -1.0)
+        for offset in range(length)
+    )
 
 
 def chunk_reward_components(
@@ -554,10 +560,10 @@ def chunk_reward_components(
     gamma: float,
     shaping_weight: float,
 ) -> tuple[float, float, float]:
-    """Return paper sparse, raw PBRS shape, and final rewards for one macro action."""
-    sparse = sparse_macro_reward(done, start, length)
+    """Return discounted step cost, PBRS shape, and final chunk return."""
+    sparse = sparse_chunk_return(done, start, length, gamma)
     phi_start, phi_end = -float(value_start), -float(value_end)
-    pbrs_shaping = gamma * phi_end - phi_start
+    pbrs_shaping = (gamma ** length) * phi_end - phi_start
     return sparse, pbrs_shaping, sparse + shaping_weight * pbrs_shaping
 
 
@@ -635,6 +641,7 @@ def annotate_manifest(
     annotator: TemporalValueAnnotator | None = None,
     *,
     overwrite: bool = False,
+    require_reusable_official: bool = False,
 ) -> Path:
     manifest = load_manifest(config)
     reward_cfg = config.section("reward")
@@ -655,8 +662,13 @@ def annotate_manifest(
     for episode in manifest["episodes"]:
         reusable = (
             _reusable_official_sidecar(episode, reward_cfg)
-            if annotator is None and not overwrite else None
+            if annotator is None and (not overwrite or require_reusable_official) else None
         )
+        if require_reusable_official and reusable is None:
+            raise RuntimeError(
+                "Existing compatible RynnValue evaluation is required to recompute "
+                f"oldR rewards without a model forward: {episode['run_id']}"
+            )
         episode_annotator_metadata = (
             reusable[2] if reusable is not None else live_annotator().metadata
         )
@@ -666,6 +678,7 @@ def annotate_manifest(
             raise ValueError("Prepared trajectories use incompatible RynnValue evaluator metadata")
         source_key = stable_hash({
             "annotation_schema_version": ANNOTATION_SCHEMA_VERSION,
+            "reward_reduction": REWARD_REDUCTION,
             "run": episode["run_id"],
             "trajectory": episode["trajectory_sha256"],
             "observations": episode["observations_sha256"],
@@ -768,9 +781,10 @@ def annotate_manifest(
                     "pbrs_shaping_reward", "pbrs_chunk_reward",
                 ],
                 "description": (
-                    "Unweighted RynnValue PBRS shape reward and combined final IQL reward; "
-                    "each action chunk is one macro-action decision step"
+                    "Primitive-step discounted sparse return plus the unweighted "
+                    "RynnValue PBRS term over the complete action chunk"
                 ),
+                "reduction": REWARD_REDUCTION,
             },
         }
         atomic_json(meta_path, metadata)
@@ -779,6 +793,7 @@ def annotate_manifest(
         atomic_json(reward_dir / "reward_manifest.json", {
             "schema_version": ANNOTATION_SCHEMA_VERSION,
             "dataset_sha256": manifest["dataset_sha256"],
+            "reward_reduction": REWARD_REDUCTION,
             "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
             "complete": False, "episodes": index,
         })
@@ -786,6 +801,7 @@ def annotate_manifest(
     atomic_json(index_path, {
         "schema_version": ANNOTATION_SCHEMA_VERSION,
         "dataset_sha256": manifest["dataset_sha256"],
+        "reward_reduction": REWARD_REDUCTION,
         "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
         "complete": True, "episodes": index,
     })
@@ -803,6 +819,11 @@ def load_reward_index(config: LoadedConfig) -> dict[str, Any]:
             f"expected schema v{ANNOTATION_SCHEMA_VERSION}, got "
             f"v{payload.get('schema_version')}. Re-run annotation; reusable official "
             "RynnValue outputs will be migrated without another model forward pass."
+        )
+    if payload.get("reward_reduction") != REWARD_REDUCTION:
+        raise ValueError(
+            "Reward manifest was produced by a different reward reduction; "
+            "recompute rewards from the existing RynnValue evaluation sidecars"
         )
     if payload.get("complete") is not True:
         raise ValueError("Reward annotation manifest is incomplete")
