@@ -42,6 +42,21 @@ class RobometerEvaluationService:
     def __init__(self, run_service: Any, project_root: Path):
         self.run_service = run_service
         self.root = project_root.resolve()
+        # Strict validation touches multi-GB observation archives.  Keep it out
+        # of list endpoints and reuse it until one of the relevant files
+        # changes on disk.
+        self._validation_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any] | None]] = {}
+
+    @staticmethod
+    def _fingerprint(paths: tuple[Path, ...]) -> tuple[Any, ...]:
+        values: list[Any] = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                values.extend((str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+            except OSError:
+                values.extend((str(path), None))
+        return tuple(values)
 
     @staticmethod
     def _episode_dir(run: dict[str, Any]) -> Path:
@@ -65,38 +80,63 @@ class RobometerEvaluationService:
                 return path.resolve()
         raise FileNotFoundError(f"Run manifest is unavailable for {run.get('id')}")
 
+    def _load_status(self, run: dict[str, Any]) -> dict[str, Any] | None:
+        """Read only the small sidecar for catalog/list presentation."""
+        episode = self._episode_dir(run)
+        sidecar, values = episode / SIDECAR_NAME, episode / VALUES_NAME
+        if any(path.is_symlink() or not path.is_file() for path in (sidecar, values)):
+            return None
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            if payload.get("schema_version") != SCHEMA_VERSION or payload.get("run_id") != run.get("id"):
+                return None
+            if type(payload.get("sample_count")) is not int or payload["sample_count"] < 1:
+                return None
+            return payload
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+
     def _load(self, run: dict[str, Any]) -> dict[str, Any] | None:
         episode = self._episode_dir(run)
         sidecar, values = episode / SIDECAR_NAME, episode / VALUES_NAME
         observations = episode / "trajectory_observations.npz"
         manifest = self._manifest_path(run, episode)
-        if any(path.is_symlink() or not path.is_file() for path in (sidecar, values, observations)):
+        paths = (sidecar, values, observations, manifest, episode / "trajectory.npz")
+        fingerprint = self._fingerprint(paths)
+        cache_key = str(run.get("id"))
+        cached = self._validation_cache.get(cache_key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        payload = self._load_status(run)
+        if payload is None or any(path.is_symlink() or not path.is_file() for path in paths):
+            self._validation_cache[cache_key] = (fingerprint, None)
             return None
         try:
-            payload = json.loads(sidecar.read_text(encoding="utf-8"))
             if (
-                payload.get("schema_version") != SCHEMA_VERSION
-                or payload.get("run_id") != run.get("id")
-                or payload.get("trajectory_sha256") != _sha256(episode / "trajectory.npz")
+                payload.get("trajectory_sha256") != _sha256(episode / "trajectory.npz")
                 or payload.get("observations_sha256") != _sha256(observations)
                 or payload.get("manifest_sha256") != _sha256(manifest)
                 or payload.get("values_sha256") != _sha256(values)
             ):
+                self._validation_cache[cache_key] = (fingerprint, None)
                 return None
             with np.load(values, allow_pickle=False) as arrays:
                 if not ARRAY_KEYS.issubset(arrays.files):
-                    return None
-                lengths = {len(arrays[key]) for key in ARRAY_KEYS}
-                finite = all(np.isfinite(arrays[key]).all() for key in ARRAY_KEYS)
-                steps = arrays["observation_steps"].astype(int)
-            with np.load(observations, allow_pickle=False) as source:
-                observation_count = len(source["agentview_image"])
-            if lengths != {int(payload.get("sample_count", -1))} or not finite:
-                return None
-            if not len(steps) or int(steps[0]) != 0 or int(steps[-1]) != observation_count - 1:
-                return None
+                    payload = None
+                else:
+                    lengths = {len(arrays[key]) for key in ARRAY_KEYS}
+                    finite = all(np.isfinite(arrays[key]).all() for key in ARRAY_KEYS)
+                    steps = arrays["observation_steps"].astype(int)
+            if payload is not None:
+                with np.load(observations, allow_pickle=False) as source:
+                    observation_count = len(source["agentview_image"])
+                if lengths != {int(payload.get("sample_count", -1))} or not finite:
+                    payload = None
+                if not len(steps) or int(steps[0]) != 0 or int(steps[-1]) != observation_count - 1:
+                    payload = None
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            return None
+            payload = None
+        self._validation_cache[cache_key] = (fingerprint, payload)
         return payload
 
     @staticmethod
@@ -115,7 +155,7 @@ class RobometerEvaluationService:
 
     def status(self, run: dict[str, Any]) -> dict[str, Any]:
         try:
-            return self._public(self._load(run))
+            return self._public(self._load_status(run))
         except (OSError, ValueError, FileNotFoundError):
             return {"status": "NOT_EVALUATED"}
 
@@ -187,6 +227,7 @@ class RobometerEvaluationService:
                 "evaluation_config": manifest.get("evaluation_config") or {},
             }
             atomic_write_json(episode / SIDECAR_NAME, payload)
+            self._validation_cache.pop(run_id, None)
             bound.append(run_id)
         return {"bound": bound, "skipped": skipped, "count": len(bound)}
 

@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from .dependencies import (
     dataset_service, http_error, offline_job_service, service,
@@ -28,7 +29,8 @@ async def runs(
     page_size: int = Query(default=5, ge=1, le=50),
 ):
     try:
-        return training_dataset_service(request).list_runs_page(
+        return await run_in_threadpool(
+            training_dataset_service(request).list_runs_page,
             task_id, source_type, outcome, eligible,
             page=page, page_size=page_size,
         )
@@ -39,8 +41,9 @@ async def runs(
 @router.get("/runs/{run_id}")
 async def run_detail(run_id: str, request: Request):
     try:
-        return trajectory_evaluation_service(request).detail(
-            run_id, robometer_evaluation_service(request)
+        return await run_in_threadpool(
+            trajectory_evaluation_service(request).detail,
+            run_id, robometer_evaluation_service(request),
         )
     except Exception as exc:
         raise http_error(exc) from exc

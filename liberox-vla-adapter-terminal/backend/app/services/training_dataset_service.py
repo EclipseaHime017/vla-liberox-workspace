@@ -159,7 +159,9 @@ class TrainingDatasetService:
         if self.evaluations is not None:
             for item in items:
                 item["rynn_evaluation"] = self.evaluations.status(item)
-            evaluated_count = sum(self.evaluations.exists(item) for item in values)
+            evaluated_count = sum(
+                self.evaluations.status(item).get("status") == "READY" for item in values
+            )
         else:
             evaluated_count = 0
         robometer_evaluated_count = 0
@@ -168,11 +170,13 @@ class TrainingDatasetService:
             for item in items:
                 item["robometer_evaluation"] = self.robometer_evaluations.status(item)
             robometer_evaluated_count = sum(
-                self.robometer_evaluations.exists(item) for item in values
+                self.robometer_evaluations.status(item).get("status") == "READY"
+                for item in values
             )
             if self.evaluations is not None:
                 both_evaluated_count = sum(
-                    self.evaluations.exists(item) and self.robometer_evaluations.exists(item)
+                    self.evaluations.status(item).get("status") == "READY"
+                    and self.robometer_evaluations.status(item).get("status") == "READY"
                     for item in values
                 )
         return {

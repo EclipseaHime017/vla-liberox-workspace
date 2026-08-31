@@ -1,6 +1,7 @@
 """Policy overlay catalog and local model management endpoints."""
 
 from fastapi import APIRouter, Request
+from starlette.concurrency import run_in_threadpool
 
 from .dependencies import http_error
 from .models import CopyPolicyRequest, DeletePolicyRequest, RenamePolicyRequest
@@ -25,7 +26,7 @@ def _service(request: Request):
 @router.get("")
 async def list_models(request: Request):
     try:
-        return _service(request).list()
+        return await run_in_threadpool(_service(request).list)
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -33,7 +34,7 @@ async def list_models(request: Request):
 @router.get("/{policy_id}")
 async def model_detail(policy_id: str, request: Request):
     try:
-        return _service(request).detail(policy_id)
+        return await run_in_threadpool(_service(request).detail, policy_id)
     except Exception as exc:
         raise http_error(exc) from exc
 

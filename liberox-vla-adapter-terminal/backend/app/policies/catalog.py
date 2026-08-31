@@ -97,7 +97,19 @@ class PolicyCatalog:
         self.stats_key = str(stats_key)
         self._entries: dict[str, PolicyEntry] = {}
         self._errors: dict[str, str] = {}
+        self._hash_cache: dict[tuple[str, int, int, int, int], str] = {}
         self.refresh()
+
+    def _component_sha256(self, path: Path) -> str:
+        stat = path.stat()
+        key = (str(path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        cached = self._hash_cache.get(key)
+        if cached is not None:
+            return cached
+        digest = _sha256(path)
+        self._hash_cache = {candidate: value for candidate, value in self._hash_cache.items() if candidate[0] != key[0]}
+        self._hash_cache[key] = digest
+        return digest
 
     def refresh(self) -> None:
         entries = {
@@ -193,7 +205,7 @@ class PolicyCatalog:
             if (
                 not isinstance(hashes[key], str)
                 or re.fullmatch(r"[0-9a-f]{64}", hashes[key]) is None
-                or _sha256(path) != hashes[key]
+                or self._component_sha256(path) != hashes[key]
             ):
                 raise ValueError(f"Overlay component {key} hash mismatch")
             return path

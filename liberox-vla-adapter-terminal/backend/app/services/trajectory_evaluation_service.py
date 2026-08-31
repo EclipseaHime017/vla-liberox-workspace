@@ -52,6 +52,18 @@ class TrajectoryEvaluationService:
     def __init__(self, run_service: Any, project_root: Path):
         self.run_service = run_service
         self.root = project_root.resolve()
+        self._validation_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any] | None]] = {}
+
+    @staticmethod
+    def _fingerprint(paths: tuple[Path, ...]) -> tuple[Any, ...]:
+        values: list[Any] = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                values.extend((str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+            except OSError:
+                values.extend((str(path), None))
+        return tuple(values)
 
     @staticmethod
     def _episode_dir(run: dict[str, Any]) -> Path:
@@ -63,7 +75,7 @@ class TrajectoryEvaluationService:
             raise FileNotFoundError(f"Trajectory is unavailable for {run.get('id')}")
         return trajectory.parent
 
-    def _load(self, run: dict[str, Any]) -> dict[str, Any] | None:
+    def _load_status(self, run: dict[str, Any]) -> dict[str, Any] | None:
         episode = self._episode_dir(run)
         sidecar = episode / SIDECAR_NAME
         values = episode / VALUES_NAME
@@ -73,33 +85,52 @@ class TrajectoryEvaluationService:
             payload = json.loads(sidecar.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        trajectory = episode / "trajectory.npz"
         if (
             payload.get("schema_version") != EVALUATION_SCHEMA_VERSION
             or payload.get("run_id") != run.get("id")
-            or payload.get("trajectory_sha256") != _sha256(trajectory)
-            or payload.get("values_sha256") != _sha256(values)
         ):
+            return None
+        return payload
+
+    def _load(self, run: dict[str, Any]) -> dict[str, Any] | None:
+        episode = self._episode_dir(run)
+        sidecar, values = episode / SIDECAR_NAME, episode / VALUES_NAME
+        trajectory = episode / "trajectory.npz"
+        paths = (sidecar, values, trajectory)
+        fingerprint = self._fingerprint(paths)
+        cache_key = str(run.get("id"))
+        cached = self._validation_cache.get(cache_key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        payload = self._load_status(run)
+        if payload is None:
+            self._validation_cache[cache_key] = (fingerprint, None)
+            return None
+        if payload.get("trajectory_sha256") != _sha256(trajectory) or payload.get("values_sha256") != _sha256(values):
+            self._validation_cache[cache_key] = (fingerprint, None)
             return None
         try:
             with np.load(values, allow_pickle=False) as arrays:
                 if not ({"boundary_steps"} | OFFICIAL_ARRAY_KEYS | PBRS_ARRAY_KEYS).issubset(
                     arrays.files
                 ):
-                    return None
-                boundaries = arrays["boundary_steps"]
-            with np.load(trajectory, allow_pickle=False) as source:
-                recorded_action_count = len(source["env_action"])
-            if (
-                len(boundaries) < 2
-                or int(boundaries[0]) != 0
-                or int(boundaries[-1]) != recorded_action_count
-            ):
-                # Older annotations stopped at the first confirmed terminal and
-                # therefore hid the recorded post-success trajectory tail.
-                return None
+                    payload = None
+                else:
+                    boundaries = arrays["boundary_steps"]
+            if payload is not None:
+                with np.load(trajectory, allow_pickle=False) as source:
+                    recorded_action_count = len(source["env_action"])
+                if (
+                    len(boundaries) < 2
+                    or int(boundaries[0]) != 0
+                    or int(boundaries[-1]) != recorded_action_count
+                ):
+                    # Older annotations stopped at the first confirmed terminal and
+                    # therefore hid the recorded post-success trajectory tail.
+                    payload = None
         except (OSError, ValueError):
-            return None
+            payload = None
+        self._validation_cache[cache_key] = (fingerprint, payload)
         return payload
 
     @staticmethod
@@ -120,7 +151,7 @@ class TrajectoryEvaluationService:
 
     def status(self, run: dict[str, Any]) -> dict[str, Any]:
         try:
-            return self._public(self._load(run))
+            return self._public(self._load_status(run))
         except (FileNotFoundError, OSError):
             return {"status": "NOT_EVALUATED"}
 
@@ -260,6 +291,7 @@ class TrajectoryEvaluationService:
                 "environment_success": reward.get("environment_success"),
             }
             atomic_write_json(sidecar, payload)
+            self._validation_cache.pop(run_id, None)
             bound.append(run_id)
         return {"bound": bound, "skipped": skipped, "count": len(bound)}
 
