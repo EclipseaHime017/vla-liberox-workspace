@@ -108,13 +108,8 @@ class PixelIQL(nn.Module):
         )
 
     @torch.no_grad()
-    def advantage(self, batch: dict[str, torch.Tensor], target: bool = False) -> torch.Tensor:
-        """Return the policy weight advantage from the online critic by default.
-
-        RynnValue's official ``PiIQLLearner.compute_advantages`` evaluates the
-        just-updated online critic and value function.  Target critics are used
-        to fit V, not to weight the policy demonstrations.
-        """
+    def advantage(self, batch: dict[str, torch.Tensor], target: bool = True) -> torch.Tensor:
+        """Return the policy weight advantage from the target critic by default."""
         q1 = (self.target_q1 if target else self.q1)(
             batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]
         )
