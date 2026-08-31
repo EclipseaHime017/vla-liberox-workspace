@@ -119,10 +119,26 @@ class PixelIQL(nn.Module):
         return torch.minimum(q1, q2) - self.value(batch["pixels"], batch["proprio"])
 
     def update(self, batch: dict[str, torch.Tensor]) -> IQLMetrics:
-        # Official IQL order: (1) fit V to the frozen target-Q expectile,
-        # (2) fit online Q to a Bellman target built with the newly updated V,
-        # then (3) Polyak-update target Q.  Reversing the first two stages adds
-        # an unintended extra lag to every Bellman update.
+        # Experimental legacy order: fit online Q using the value function at
+        # the start of this update, then fit V to the still-frozen target Q,
+        # and only then Polyak-update the target critics.
+        with torch.no_grad():
+            next_value = self.value(batch["next_pixels"], batch["next_proprio"])
+            target = chunk_bellman_target(
+                batch["reward"], next_value, batch["bootstrap_mask"], self.discount,
+            )
+        q1 = self.q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
+        q2 = self.q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
+        # The official ensemble loss averages over both Q heads.
+        q_loss = 0.5 * (F.mse_loss(q1, target) + F.mse_loss(q2, target))
+        self.q_optimizer.zero_grad(set_to_none=True)
+        q_loss.backward()
+        nn.utils.clip_grad_norm_(
+            list(self.q1.parameters()) + list(self.q2.parameters()),
+            self.critic_max_grad_norm,
+        )
+        self.q_optimizer.step()
+
         with torch.no_grad():
             target_q_for_value = torch.minimum(
                 self.target_q1(
@@ -141,22 +157,6 @@ class PixelIQL(nn.Module):
         nn.utils.clip_grad_norm_(self.value.parameters(), self.value_max_grad_norm)
         self.value_optimizer.step()
 
-        with torch.no_grad():
-            next_value = self.value(batch["next_pixels"], batch["next_proprio"])
-            target = chunk_bellman_target(
-                batch["reward"], next_value, batch["bootstrap_mask"], self.discount,
-            )
-        q1 = self.q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
-        q2 = self.q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
-        # The official ensemble loss averages over both Q heads.
-        q_loss = 0.5 * (F.mse_loss(q1, target) + F.mse_loss(q2, target))
-        self.q_optimizer.zero_grad(set_to_none=True)
-        q_loss.backward()
-        nn.utils.clip_grad_norm_(
-            list(self.q1.parameters()) + list(self.q2.parameters()),
-            self.critic_max_grad_norm,
-        )
-        self.q_optimizer.step()
         self.soft_update()
         with torch.no_grad():
             online_q = torch.minimum(

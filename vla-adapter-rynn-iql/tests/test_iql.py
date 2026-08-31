@@ -29,6 +29,32 @@ def test_iql_update_and_advantage_are_finite():
     assert isinstance(model.value_optimizer, torch.optim.Adam)
 
 
+def test_iql_updates_q_before_value_then_target(monkeypatch):
+    model = PixelIQL()
+    order = []
+    q_step = model.q_optimizer.step
+    value_step = model.value_optimizer.step
+    soft_update = model.soft_update
+
+    def tracked_q_step(*args, **kwargs):
+        order.append("q")
+        return q_step(*args, **kwargs)
+
+    def tracked_value_step(*args, **kwargs):
+        order.append("value")
+        return value_step(*args, **kwargs)
+
+    def tracked_soft_update():
+        order.append("target")
+        return soft_update()
+
+    monkeypatch.setattr(model.q_optimizer, "step", tracked_q_step)
+    monkeypatch.setattr(model.value_optimizer, "step", tracked_value_step)
+    monkeypatch.setattr(model, "soft_update", tracked_soft_update)
+    model.update(_batch())
+    assert order == ["q", "value", "target"]
+
+
 def test_iql_optimizer_and_gradient_clip_are_configurable():
     model = PixelIQL(
         critic_optimizer="adamw", critic_weight_decay=1e-4,
