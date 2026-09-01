@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from vla_rynn_iql.iql import (
@@ -81,12 +82,43 @@ def test_advantage_weight_is_capped():
     assert weights[1].item() == 100.0
 
 
-def test_bellman_target_discounts_once_per_macro_action():
+def test_bellman_target_uses_actual_chunk_duration():
     target = chunk_bellman_target(
         torch.tensor([1.0, 1.0]), torch.tensor([2.0, 2.0]),
-        torch.tensor([1.0, 0.0]), 0.9,
+        torch.tensor([3, 8]), torch.tensor([1.0, 0.0]), 0.9,
     )
-    torch.testing.assert_close(target, torch.tensor([1.0 + 2.0 * 0.9, 1.0]))
+    torch.testing.assert_close(target, torch.tensor([1.0 + 2.0 * 0.9**3, 1.0]))
+
+
+def test_discounted_step_cost_and_chunk_discount_have_minus_100_fixed_point():
+    gamma = 0.99
+    length = 8
+    reward = -sum(gamma**offset for offset in range(length))
+    value = torch.tensor([0.0])
+    for _ in range(5000):
+        value = chunk_bellman_target(
+            torch.tensor([reward]), value, torch.tensor([length]),
+            torch.tensor([1.0]), gamma,
+        )
+    torch.testing.assert_close(value, torch.tensor([-100.0]), rtol=1e-4, atol=1e-4)
+
+
+def test_iql_legacy_metrics_use_target_q_and_pre_update_value():
+    model = PixelIQL()
+    batch = _batch()
+    with torch.no_grad():
+        expected_q = torch.minimum(
+            model.target_q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]),
+            model.target_q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"]),
+        )
+        expected_value = model.value(batch["pixels"], batch["proprio"])
+    metrics = model.update(batch)
+    assert metrics.q_mean == pytest.approx(float(expected_q.mean()))
+    assert metrics.value_mean == pytest.approx(float(expected_value.mean()))
+    assert metrics.advantage_mean == pytest.approx(float((expected_q - expected_value).mean()))
+    assert metrics.target_q_mean_before_value_update == pytest.approx(metrics.q_mean)
+    assert metrics.value_mean_before_update == pytest.approx(metrics.value_mean)
+    assert metrics.critic_advantage_mean == pytest.approx(metrics.advantage_mean)
 
 
 def test_iql_checkpoint_restores_models_and_optimizers():

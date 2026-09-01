@@ -41,6 +41,7 @@ from .vla_adapter import (
 
 LOG = logging.getLogger(__name__)
 _STOP_REQUESTED = threading.Event()
+TRAINING_SEMANTICS = "oldr_discounted_primitive_steps_gamma_length_v1"
 
 
 class TrainingCancelled(RuntimeError):
@@ -238,7 +239,7 @@ def _save_checkpoint(
     torch.save(_state_dict_cpu(components.action_head), target / "action_head.pt")
     torch.save(_state_dict_cpu(components.proprio_projector), target / "proprio_projector.pt")
     torch.save({
-        "schema_version": 1, "step": step, "iql": iql.checkpoint(),
+        "schema_version": 2, "step": step, "iql": iql.checkpoint(),
         "actor_optimizer": actor_optimizer.state_dict(),
         "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -246,7 +247,8 @@ def _save_checkpoint(
         "data_rng": data_generator.get_state(),
     }, target / "trainer.pt")
     checkpoint_metadata = {
-        "schema_version": 1, "step": step, "config_sha256": config.digest,
+        "schema_version": 2, "step": step, "config_sha256": config.digest,
+        "training_semantics": TRAINING_SEMANTICS,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": stable_hash(reward_index),
         "base_checkpoint": config.section("vla")["base_checkpoint"],
@@ -325,6 +327,8 @@ def _restore_checkpoint(
     checkpoint = checkpoint.expanduser().resolve()
     metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
     expected = {
+        "schema_version": 2,
+        "training_semantics": TRAINING_SEMANTICS,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": stable_hash(reward_index),
         "base_checkpoint": config.section("vla")["base_checkpoint"],
@@ -335,7 +339,10 @@ def _restore_checkpoint(
         for key, value in expected.items() if metadata.get(key) != value
     }
     if mismatches:
-        raise ValueError(f"Resume checkpoint is incompatible: {mismatches}")
+        raise ValueError(
+            "Resume checkpoint is incompatible with the corrected variable-duration "
+            f"Bellman target; start a new training run: {mismatches}"
+        )
     components.action_head.load_state_dict(
         torch.load(checkpoint / "action_head.pt", map_location="cpu", weights_only=True),
         strict=True,
@@ -431,6 +438,7 @@ def train(config: LoadedConfig) -> Path:
     )
     atomic_json(run_dir / "provenance.json", {
         "schema_version": 1,
+        "training_semantics": TRAINING_SEMANTICS,
         "code_version": _code_version(),
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
@@ -510,7 +518,8 @@ def train(config: LoadedConfig) -> Path:
             }
             critic_metrics = agent.update(critic_batch)
             actor_loss_value = None
-            weight_mean = None
+            with torch.no_grad():
+                actor_advantage = agent.advantage(critic_batch)
             # Use ordinary behavior cloning while the critics warm up.  Only
             # the learned advantage weights are delayed; the action head still
             # receives gradients from the first optimization step.
@@ -519,11 +528,10 @@ def train(config: LoadedConfig) -> Path:
                     critic_batch["actions"].shape[0], device=device, dtype=torch.float32
                 )
             else:
-                with torch.no_grad():
-                    advantage = agent.advantage(critic_batch)
-                    weights = advantage_weights(
-                        advantage, float(iql_cfg["beta"]), float(iql_cfg["max_advantage_weight"])
-                    )
+                weights = advantage_weights(
+                    actor_advantage, float(iql_cfg["beta"]),
+                    float(iql_cfg["max_advantage_weight"]),
+                )
             agent_image = batch["agent_image"].cpu().numpy()
             wrist_image = batch["wrist_image"].cpu().numpy()
             inputs = processor_inputs(
@@ -569,7 +577,29 @@ def train(config: LoadedConfig) -> Path:
                 "value_loss": critic_metrics.value_loss, "q_mean": critic_metrics.q_mean,
                 "value_mean": critic_metrics.value_mean,
                 "advantage_mean": critic_metrics.advantage_mean,
-                "actor_loss": actor_loss_value, "advantage_weight_mean": weight_mean,
+                "online_q_mean_after_update": critic_metrics.online_q_mean_after_update,
+                "target_q_mean_before_value_update": (
+                    critic_metrics.target_q_mean_before_value_update
+                ),
+                "value_mean_before_update": critic_metrics.value_mean_before_update,
+                "value_mean_after_update": critic_metrics.value_mean_after_update,
+                "critic_advantage_mean": critic_metrics.critic_advantage_mean,
+                "actor_advantage_mean": float(actor_advantage.mean()),
+                "actor_advantage_std": float(actor_advantage.std(unbiased=False)),
+                "actor_advantage_min": float(actor_advantage.min()),
+                "actor_advantage_max": float(actor_advantage.max()),
+                "actor_loss": actor_loss_value,
+                "advantage_weight_mean": weight_mean,
+                "advantage_weight_min": float(weights.min()),
+                "advantage_weight_max": float(weights.max()),
+                "chunk_length_mean": float(critic_batch["chunk_length"].float().mean()),
+                "bellman_discount_mean": float(
+                    (float(config.section("reward")["gamma"])
+                     ** critic_batch["chunk_length"].float()).mean()
+                ),
+                "reward_mean": float(critic_batch["reward"].mean()),
+                "reward_min": float(critic_batch["reward"].min()),
+                "reward_max": float(critic_batch["reward"].max()),
                 "actor_learning_rate": current_actor_lr,
                 "actor_grad_norm": actor_grad_norm,
                 "action_head_parameter_norm": action_head_parameter_norm,

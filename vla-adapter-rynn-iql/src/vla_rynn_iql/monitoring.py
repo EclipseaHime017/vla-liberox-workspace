@@ -12,8 +12,18 @@ ACTION_NAMES = ("dx", "dy", "dz", "drx", "dry", "drz", "gripper")
 
 TENSORBOARD_GROUPS = {
     "loss": ("q_loss", "value_loss", "actor_loss"),
-    "value": ("q_mean", "value_mean", "advantage_mean"),
-    "iql": ("advantage_weight_mean",),
+    "value": (
+        "q_mean", "value_mean", "advantage_mean",
+        "online_q_mean_after_update", "target_q_mean_before_value_update",
+        "value_mean_before_update", "value_mean_after_update",
+        "critic_advantage_mean", "actor_advantage_mean", "actor_advantage_std",
+        "actor_advantage_min", "actor_advantage_max",
+    ),
+    "iql": (
+        "advantage_weight_mean", "advantage_weight_min", "advantage_weight_max",
+        "chunk_length_mean", "bellman_discount_mean",
+        "reward_mean", "reward_min", "reward_max",
+    ),
     "optimization": (
         "actor_learning_rate",
         "actor_grad_norm",

@@ -102,11 +102,15 @@ def test_wandb_uses_same_grouped_metrics_and_explicit_train_step():
             "actor_loss": 0.4,
             "actor_grad_norm": None,
             "advantage_weight_mean": 2.5,
+            "actor_advantage_mean": -0.5,
+            "bellman_discount_mean": 0.9,
         },
     )
     assert run.records == [({
         "loss/actor_loss": 0.4,
+        "value/actor_advantage_mean": -0.5,
         "iql/advantage_weight_mean": 2.5,
+        "iql/bellman_discount_mean": 0.9,
         "train/step": 12,
     }, 12)]
 
