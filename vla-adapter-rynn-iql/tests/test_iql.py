@@ -30,7 +30,7 @@ def test_iql_update_and_advantage_are_finite():
     assert isinstance(model.value_optimizer, torch.optim.Adam)
 
 
-def test_iql_updates_q_before_value_then_target(monkeypatch):
+def test_iql_updates_value_before_q_then_target(monkeypatch):
     model = PixelIQL()
     order = []
     q_step = model.q_optimizer.step
@@ -53,7 +53,7 @@ def test_iql_updates_q_before_value_then_target(monkeypatch):
     monkeypatch.setattr(model.value_optimizer, "step", tracked_value_step)
     monkeypatch.setattr(model, "soft_update", tracked_soft_update)
     model.update(_batch())
-    assert order == ["q", "value", "target"]
+    assert order == ["value", "q", "target"]
 
 
 def test_iql_optimizer_and_gradient_clip_are_configurable():
@@ -131,7 +131,7 @@ def test_iql_checkpoint_restores_models_and_optimizers():
         torch.testing.assert_close(left, right)
 
 
-def test_policy_advantage_uses_target_q_by_default():
+def test_policy_advantage_uses_online_q_by_default():
     model = PixelIQL()
     with torch.no_grad():
         for parameter in model.q1.parameters():
@@ -148,7 +148,7 @@ def test_policy_advantage_uses_target_q_by_default():
         model.target_q2.head[-1].bias.fill_(30.0)
         for parameter in model.value.parameters():
             parameter.zero_()
-    torch.testing.assert_close(model.advantage(_batch()), torch.full((2,), 20.0))
+    torch.testing.assert_close(model.advantage(_batch()), torch.full((2,), 2.0))
     torch.testing.assert_close(
-        model.advantage(_batch(), target=False), torch.full((2,), 2.0)
+        model.advantage(_batch(), target=True), torch.full((2,), 20.0)
     )
