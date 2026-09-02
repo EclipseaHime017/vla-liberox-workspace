@@ -52,7 +52,6 @@ def create_app(
         worker = manager or SimulationManager(ui_config, eval_config)
         app.state.manager = worker  # compatibility for local diagnostics
         app.state.run_service = RunService(worker)
-        app.state.dataset_service = DatasetService(app.state.run_service)
         if hasattr(ui_config, "project_root"):
             app.state.robometer_evaluation_service = RobometerEvaluationService(
                 app.state.run_service, ui_config.project_root
@@ -65,6 +64,10 @@ def create_app(
                 app.state.trajectory_evaluation_service,
                 app.state.robometer_evaluation_service,
             )
+            app.state.dataset_service = DatasetService(
+                app.state.run_service,
+                app.state.training_dataset_service.is_test,
+            )
             app.state.offline_job_service = OfflineJobService(
                 ui_config, worker, app.state.training_dataset_service,
                 app.state.trajectory_evaluation_service,
@@ -72,6 +75,7 @@ def create_app(
             )
             worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
         else:
+            app.state.dataset_service = DatasetService(app.state.run_service)
             app.state.training_dataset_service = None
             app.state.trajectory_evaluation_service = None
             app.state.robometer_evaluation_service = None
@@ -87,7 +91,7 @@ def create_app(
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="0.4.0",
+        version="0.4.1",
         lifespan=lifespan,
     )
     app.include_router(runs.router)

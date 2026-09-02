@@ -23,12 +23,15 @@ from .io import atomic_json, sha256_file, stable_hash
 
 LOG = logging.getLogger(__name__)
 
-# v5 makes every action chunk one paper-IQL decision step: sparse reward and
-# Bellman discount are applied once per macro action, while the stored shape
-# reward is the unweighted PBRS term. v4 official model outputs remain reusable
-# because only the deterministic reward reduction changed.
+# Schema v5 stores the complete official RynnValue outputs and deterministic
+# reward arrays. Reward semantics are selected by a boolean in reward_config;
+# the schema number is not used as a reward-mode switch.
 ANNOTATION_SCHEMA_VERSION = 5
 REUSABLE_OFFICIAL_OUTPUT_SCHEMA_VERSIONS = frozenset({4, 5})
+OFFICIAL_INFERENCE_CONFIG_KEYS = frozenset({
+    "model", "revision", "dtype", "max_frames",
+    "robot_description", "camera_description",
+})
 OFFICIAL_OUTPUT_KEYS = (
     "absolute_temporal_distance_seconds",
     "absolute_value_entropy_nats",
@@ -545,6 +548,21 @@ def sparse_macro_reward(done: np.ndarray, start: int, length: int) -> float:
     return 0.0 if bool(done[terminal]) else -1.0
 
 
+def sparse_primitive_return(
+    done: np.ndarray, start: int, length: int, gamma: float,
+) -> float:
+    """Return the discounted primitive-step costs inside one chunk."""
+    end = start + length
+    if length < 1 or start < 0 or end > len(done):
+        raise ValueError(
+            f"Invalid action-chunk interval [{start}, {end}) for {len(done)} actions"
+        )
+    return float(sum(
+        (gamma ** offset) * (0.0 if bool(done[start + offset]) else -1.0)
+        for offset in range(length)
+    ))
+
+
 def chunk_reward_components(
     done: np.ndarray,
     start: int,
@@ -553,12 +571,72 @@ def chunk_reward_components(
     value_end: float,
     gamma: float,
     shaping_weight: float,
+    accumulate_primitive_steps: bool = False,
 ) -> tuple[float, float, float]:
-    """Return paper sparse, raw PBRS shape, and final rewards for one macro action."""
-    sparse = sparse_macro_reward(done, start, length)
+    """Return sparse, raw PBRS shape, and final rewards for one chunk."""
+    sparse = (
+        sparse_primitive_return(done, start, length, gamma)
+        if accumulate_primitive_steps
+        else sparse_macro_reward(done, start, length)
+    )
     phi_start, phi_end = -float(value_start), -float(value_end)
-    pbrs_shaping = gamma * phi_end - phi_start
+    duration = length if accumulate_primitive_steps else 1
+    pbrs_shaping = (gamma ** duration) * phi_end - phi_start
     return sparse, pbrs_shaping, sparse + shaping_weight * pbrs_shaping
+
+
+def _official_inference_config_matches(
+    previous: dict[str, Any], requested: dict[str, Any],
+) -> bool:
+    return all(previous.get(key) == requested.get(key) for key in OFFICIAL_INFERENCE_CONFIG_KEYS)
+
+
+def _reusable_manifest_entry(
+    episode: dict[str, Any], reward_cfg: dict[str, Any],
+    reward_manifest: dict[str, Any] | None,
+) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, Any]] | None:
+    """Reuse official heads from the previous reward reduction in this work dir."""
+    if not isinstance(reward_manifest, dict):
+        return None
+    previous_cfg = reward_manifest.get("reward_config")
+    if not isinstance(previous_cfg, dict) or not _official_inference_config_matches(
+        previous_cfg, reward_cfg,
+    ):
+        return None
+    entry = next(
+        (item for item in reward_manifest.get("episodes", [])
+         if item.get("run_id") == episode["run_id"]),
+        None,
+    )
+    if not isinstance(entry, dict):
+        return None
+    path = Path(str(entry.get("annotation_path") or ""))
+    if (
+        path.is_symlink() or not path.is_file()
+        or entry.get("annotation_sha256") != sha256_file(path)
+    ):
+        return None
+    official_metadata = entry.get("official_outputs")
+    annotator_metadata = entry.get("annotator") or reward_manifest.get("annotator")
+    if not isinstance(official_metadata, dict) or not isinstance(annotator_metadata, dict):
+        return None
+    if official_metadata.get("prefix_image_slots") != int(reward_cfg["max_frames"]):
+        return None
+    expected_boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
+    try:
+        with np.load(path, allow_pickle=False) as arrays:
+            boundaries = np.asarray(arrays["boundary_steps"], dtype=np.int64)
+            if not np.array_equal(boundaries, expected_boundaries):
+                return None
+            official_outputs = validate_official_outputs(
+                {name: arrays[name] for name in OFFICIAL_OUTPUT_KEYS}, len(boundaries),
+            )
+    except (KeyError, OSError, ValueError):
+        return None
+    analysis = official_metadata.get("analysis")
+    if not isinstance(analysis, dict):
+        return None
+    return official_outputs, analysis, annotator_metadata
 
 
 def _reusable_official_sidecar(
@@ -624,9 +702,11 @@ def shaped_chunk_reward(
     value_end: float,
     gamma: float,
     shaping_weight: float,
+    accumulate_primitive_steps: bool = False,
 ) -> float:
     return chunk_reward_components(
         done, start, length, value_start, value_end, gamma, shaping_weight,
+        accumulate_primitive_steps,
     )[2]
 
 
@@ -649,14 +729,25 @@ def annotate_manifest(
 
     reward_dir = Path(config.section("paths")["work_dir"]) / "rewards"
     reward_dir.mkdir(parents=True, exist_ok=True)
+    previous_manifest_path = reward_dir / "reward_manifest.json"
+    try:
+        previous_manifest = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        previous_manifest = None
+    if (
+        not isinstance(previous_manifest, dict)
+        or previous_manifest.get("dataset_sha256") != manifest["dataset_sha256"]
+    ):
+        previous_manifest = None
     cache_dir = Path(config.section("paths")["annotation_cache"])
     cache_dir.mkdir(parents=True, exist_ok=True)
     index: list[dict[str, Any]] = []
     for episode in manifest["episodes"]:
-        reusable = (
-            _reusable_official_sidecar(episode, reward_cfg)
-            if annotator is None and not overwrite else None
-        )
+        reusable = None
+        if annotator is None and not overwrite:
+            reusable = _reusable_manifest_entry(
+                episode, reward_cfg, previous_manifest,
+            ) or _reusable_official_sidecar(episode, reward_cfg)
         episode_annotator_metadata = (
             reusable[2] if reusable is not None else live_annotator().metadata
         )
@@ -727,6 +818,7 @@ def annotate_manifest(
                 done, int(chunk["start"]), int(chunk["length"]),
                 value_lookup[int(chunk["start"])], value_lookup[int(chunk["end"])],
                 float(reward_cfg["gamma"]), float(reward_cfg["shaping_weight"]),
+                bool(reward_cfg["accumulate_primitive_steps"]),
             ) for chunk in episode.get("evaluation_chunks", episode["chunks"])
         ]
         pbrs_shaping_rewards = np.asarray(
@@ -768,8 +860,10 @@ def annotate_manifest(
                     "pbrs_shaping_reward", "pbrs_chunk_reward",
                 ],
                 "description": (
-                    "Unweighted RynnValue PBRS shape reward and combined final IQL reward; "
-                    "each action chunk is one macro-action decision step"
+                    "Unweighted RynnValue PBRS shape reward and combined final IQL reward"
+                ),
+                "accumulate_primitive_steps": bool(
+                    reward_cfg["accumulate_primitive_steps"]
                 ),
             },
         }
@@ -779,6 +873,9 @@ def annotate_manifest(
         atomic_json(reward_dir / "reward_manifest.json", {
             "schema_version": ANNOTATION_SCHEMA_VERSION,
             "dataset_sha256": manifest["dataset_sha256"],
+            "accumulate_primitive_steps": bool(
+                reward_cfg["accumulate_primitive_steps"]
+            ),
             "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
             "complete": False, "episodes": index,
         })
@@ -786,6 +883,7 @@ def annotate_manifest(
     atomic_json(index_path, {
         "schema_version": ANNOTATION_SCHEMA_VERSION,
         "dataset_sha256": manifest["dataset_sha256"],
+        "accumulate_primitive_steps": bool(reward_cfg["accumulate_primitive_steps"]),
         "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
         "complete": True, "episodes": index,
     })
@@ -804,6 +902,24 @@ def load_reward_index(config: LoadedConfig) -> dict[str, Any]:
             f"v{payload.get('schema_version')}. Re-run annotation; reusable official "
             "RynnValue outputs will be migrated without another model forward pass."
         )
+    manifest_reward_cfg = payload.get("reward_config")
+    if not isinstance(manifest_reward_cfg, dict):
+        raise ValueError("Reward manifest has no valid reward_config")
+    requested_cfg = config.section("reward")
+    if manifest_reward_cfg != requested_cfg:
+        if not _official_inference_config_matches(manifest_reward_cfg, requested_cfg):
+            raise ValueError(
+                "Reward manifest uses different RynnValue inference settings; run "
+                "annotate_rewards.py before training"
+            )
+        LOG.info(
+            "Reward semantics changed; rebuilding deterministic reward arrays from "
+            "the existing RynnValue outputs"
+        )
+        path = annotate_manifest(config)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("reward_config") != requested_cfg:
+            raise ValueError("Rebuilt reward manifest does not match the requested semantics")
     if payload.get("complete") is not True:
         raise ValueError("Reward annotation manifest is incomplete")
     return payload

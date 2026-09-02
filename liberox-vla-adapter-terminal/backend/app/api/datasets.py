@@ -10,7 +10,7 @@ from .dependencies import (
     training_dataset_service, trajectory_evaluation_service,
     robometer_evaluation_service,
 )
-from .models import TrajectoryEvaluationRequest
+from .models import RunTestLabelRequest, TrajectoryEvaluationRequest
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -41,9 +41,23 @@ async def runs(
 @router.get("/runs/{run_id}")
 async def run_detail(run_id: str, request: Request):
     try:
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             trajectory_evaluation_service(request).detail,
             run_id, robometer_evaluation_service(request),
+        )
+        result["run"]["is_test"] = training_dataset_service(request).is_test(run_id)
+        return result
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.patch("/runs/{run_id}/labels")
+async def update_run_labels(
+    run_id: str, body: RunTestLabelRequest, request: Request,
+):
+    try:
+        return await run_in_threadpool(
+            training_dataset_service(request).set_test, run_id, body.is_test,
         )
     except Exception as exc:
         raise http_error(exc) from exc
@@ -55,7 +69,7 @@ async def evaluate_trajectories(body: TrajectoryEvaluationRequest, request: Requ
         return offline_job_service(request).start_trajectory_evaluation(
             task_id=body.task_id,
             run_ids=None if body.run_ids is None else list(body.run_ids),
-            overwrite=(body.run_ids is not None) if body.overwrite is None else body.overwrite,
+            overwrite=False if body.overwrite is None else body.overwrite,
             evaluators=list(body.evaluators),
         )
     except Exception as exc:

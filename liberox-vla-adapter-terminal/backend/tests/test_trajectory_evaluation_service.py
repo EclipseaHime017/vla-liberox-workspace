@@ -111,7 +111,8 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
         "shape_reward": [2.0],
         "final_reward": [-0.8],
         "chunk_start_steps": [0],
-        "chunk_end_steps": [2],
-        "chunk_lengths": [2],
-        "description": None,
+            "chunk_end_steps": [2],
+            "chunk_lengths": [2],
+            "accumulate_primitive_steps": False,
+            "description": None,
     }

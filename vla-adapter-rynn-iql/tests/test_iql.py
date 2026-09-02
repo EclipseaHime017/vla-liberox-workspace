@@ -58,9 +58,18 @@ def test_advantage_weight_is_capped():
 def test_bellman_target_discounts_once_per_macro_action():
     target = chunk_bellman_target(
         torch.tensor([1.0, 1.0]), torch.tensor([2.0, 2.0]),
-        torch.tensor([1.0, 0.0]), 0.9,
+        torch.tensor([3, 8]), torch.tensor([1.0, 0.0]), 0.9,
     )
     torch.testing.assert_close(target, torch.tensor([1.0 + 2.0 * 0.9, 1.0]))
+
+
+def test_bellman_target_uses_actual_duration_for_accumulated_step_rewards():
+    target = chunk_bellman_target(
+        torch.tensor([1.0, 1.0]), torch.tensor([2.0, 2.0]),
+        torch.tensor([3, 8]), torch.tensor([1.0, 0.0]), 0.9,
+        accumulate_primitive_steps=True,
+    )
+    torch.testing.assert_close(target, torch.tensor([1.0 + 2.0 * 0.9**3, 1.0]))
 
 
 def test_iql_checkpoint_restores_models_and_optimizers():

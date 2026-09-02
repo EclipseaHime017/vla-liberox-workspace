@@ -350,7 +350,7 @@ def test_catalog_schema_indexes_evaluations(tmp_path: Path):
         table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='evaluation_runs'"
         ).fetchone()
-    assert version == SCHEMA_VERSION == 3
+    assert version == SCHEMA_VERSION == 4
     assert table[0] == "evaluation_runs"
 
 
@@ -366,5 +366,5 @@ def test_catalog_migrates_v2_to_evaluation_index(tmp_path: Path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(evaluation_runs)")
         }
-    assert version == 3
+    assert version == SCHEMA_VERSION == 4
     assert {"id", "task_id", "policy_id", "result_path"} <= columns

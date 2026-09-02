@@ -16,7 +16,8 @@ from backend.app.main import (
     UpdateDraftRequest,
     create_app,
 )
-from backend.app.api.models import TrainingRunRequest
+from backend.app.api.models import TrainingRunRequest, TrajectoryEvaluationRequest
+from backend.app.services.offline_job_service import OfflineJobService
 
 
 class FakeManager:
@@ -293,10 +294,26 @@ def test_request_validation(tmp_path: Path):
             "open_loop_steps": 1,
             "manual_source": "spacemouse",
         })
-    with pytest.raises(ValidationError):
-        TrainingRunRequest.model_validate({
-            "dataset_id": "ds", "parameters": {"train_steps": True},
+    request = TrainingRunRequest.model_validate({
+        "dataset_id": "ds", "parameters": {"train_steps": True},
+    })
+    with pytest.raises(ValueError, match="train_steps"):
+        OfflineJobService._validate_training_parameters(request.parameters)
+
+
+def test_explicit_trajectory_evaluation_cannot_overwrite():
+    with pytest.raises(ValidationError, match="cannot overwrite"):
+        TrajectoryEvaluationRequest.model_validate({
+            "task_id": "LEVEL1::pick", "run_ids": ["run-1"],
+            "overwrite": True, "evaluators": ["rynnvalue"],
         })
+    batch = TrajectoryEvaluationRequest.model_validate({
+        "task_id": "LEVEL1::pick",
+        "run_ids": None,
+        "overwrite": True,
+        "evaluators": ["rynnvalue"],
+    })
+    assert batch.overwrite is True
 
 
 def test_frontend_entry_is_never_served_from_browser_cache(

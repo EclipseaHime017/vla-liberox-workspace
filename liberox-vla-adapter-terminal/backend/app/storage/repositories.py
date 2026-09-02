@@ -95,6 +95,44 @@ class RunRepository:
         }
 
 
+class RunLabelRepository:
+    """Mutable catalog labels kept separate from immutable trajectory files."""
+
+    def __init__(self, database_path: Path, project_id: str):
+        self.database_path = database_path
+        self.project_id = project_id
+        migrate(database_path)
+
+    def is_test(self, run_id: str) -> bool:
+        with connect(self.database_path) as database:
+            row = database.execute(
+                "SELECT is_test FROM run_labels WHERE project_id = ? AND run_id = ?",
+                (self.project_id, run_id),
+            ).fetchone()
+        return bool(row["is_test"]) if row is not None else False
+
+    def test_ids(self) -> set[str]:
+        with connect(self.database_path) as database:
+            rows = database.execute(
+                "SELECT run_id FROM run_labels WHERE project_id = ? AND is_test = 1",
+                (self.project_id,),
+            ).fetchall()
+        return {str(row["run_id"]) for row in rows}
+
+    def set_test(self, run_id: str, is_test: bool) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO run_labels(project_id, run_id, is_test, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(project_id, run_id) DO UPDATE SET
+                    is_test=excluded.is_test,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (self.project_id, run_id, int(is_test)),
+            )
+
+
 class TrainingDatasetRepository:
     """SQLite index for immutable dataset manifests and their run references."""
 

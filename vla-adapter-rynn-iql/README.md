@@ -216,7 +216,11 @@ train/validation splits by root trajectory, validates the N+1 state/image
 invariant, and constructs masked 8×7 tensors for variable-duration chunks of
 at most eight actions. Each recorded chunk is one IQL macro-action decision:
 the actual `chunk_length` selects `s[t+L]` and controls the action mask, while
-the sparse reward and Bellman discount are each applied once per chunk.
+the sparse reward and Bellman discount are each applied once per chunk by
+default (`reward.accumulate_primitive_steps: false`). Setting the boolean to
+`true` switches both the reward reduction and Bellman bootstrap to the matching
+variable-duration Semi-MDP form: primitive rewards are discounted and summed
+inside the chunk, PBRS uses `gamma ** L`, and bootstrap uses `gamma ** L`.
 
 RynnValue receives only upright `agentview` frames and the BDDL task prompt. At
 each action-chunk boundary, the adapter follows the pinned official inference
@@ -233,7 +237,11 @@ stores the Final Reward `r_sparse+κ·r_shape`. Here `r_sparse` is `-1` for an
 incomplete macro action and `0` when that chunk completes the task, and
 `Φ=-absolute temporal distance`. Valid schema-v4 sidecars reuse their complete
 official model heads and are migrated by recomputing only these deterministic
-reward arrays; RynnValue is not run again. Chunks recorded
+reward arrays; RynnValue is not run again. Changing only
+`accumulate_primitive_steps`, `gamma`, or `shaping_weight` likewise rebuilds
+the deterministic arrays from saved heads without another model forward.
+Evaluation schema v5 describes the stored-output contract; it is not the reward
+mode. Chunks recorded
 after the confirmed terminal are inspection-only and never enter ReplayDataset.
 
 The training default uses four uniformly sampled prefix frames, matching the

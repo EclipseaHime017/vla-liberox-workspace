@@ -21,6 +21,12 @@ class FakeRuns:
     def list_runs(self):
         return list(self.runs)
 
+    def get_run(self, run_id):
+        for run in self.runs:
+            if run["id"] == run_id:
+                return run
+        raise KeyError(run_id)
+
 
 def make_run(
     root: Path,
@@ -109,6 +115,32 @@ def test_selection_is_reproducible_and_classifies_branch_suffixes(tmp_path: Path
     assert page["pages"] == 2
 
 
+def test_test_label_excludes_run_from_new_packages(tmp_path: Path):
+    train = make_run(tmp_path, "train")
+    held_out = make_run(tmp_path, "held-out")
+    current = service(tmp_path, [train, held_out])
+
+    label = current.set_test("held-out", True)
+    assert label["is_test"] is True
+    listed = {item["id"]: item for item in current.list_runs()}
+    assert listed["held-out"]["is_test"] is True
+    assert current.list_runs_page()["test_count"] == 1
+
+    preview = current.preview(
+        "LEVEL1::pick",
+        {"mode": "sequential", "size": 1, "order": "newest"},
+    )
+    assert preview["run_ids"] == ["train"]
+    with pytest.raises(ValueError, match="unavailable"):
+        current.preview(
+            "LEVEL1::pick",
+            {"mode": "manual", "run_ids": ["held-out"]},
+        )
+
+    assert current.set_test("held-out", False)["is_test"] is False
+    assert {item["id"] for item in current.list_runs() if item["is_test"]} == set()
+
+
 def test_frozen_dataset_hashes_sources_and_marks_changed_source_broken(tmp_path: Path):
     root_id = next(
         f"root-{index}" for index in range(1000)
@@ -140,12 +172,27 @@ def test_failed_reannotation_preserves_previous_ready_version(tmp_path: Path):
         name="stable annotation", task_id="LEVEL1::pick",
         selection={"mode": "manual", "run_ids": ["root"]},
     )
-    current.update_annotation(dataset["id"], "RUNNING", annotation_id="ann-good")
-    current.update_annotation(dataset["id"], "READY", annotation_id="ann-good")
-    current.update_annotation(dataset["id"], "RUNNING", annotation_id="ann-bad")
-    result = current.update_annotation(dataset["id"], "ERROR", annotation_id="ann-bad")
+    current.update_annotation(
+        dataset["id"], "RUNNING", annotation_id="ann-good",
+        annotation_config={"max_frames": 4, "accumulate_primitive_steps": False},
+    )
+    current.update_annotation(
+        dataset["id"], "READY", annotation_id="ann-good",
+        annotation_config={"max_frames": 4, "accumulate_primitive_steps": False},
+    )
+    current.update_annotation(
+        dataset["id"], "RUNNING", annotation_id="ann-bad",
+        annotation_config={"max_frames": 16, "accumulate_primitive_steps": True},
+    )
+    result = current.update_annotation(
+        dataset["id"], "ERROR", annotation_id="ann-bad",
+        annotation_config={"max_frames": 16, "accumulate_primitive_steps": True},
+    )
     assert result["annotation_status"] == "READY"
     assert result["annotation_id"] == "ann-good"
+    assert result["annotation_config"] == {
+        "max_frames": 4, "accumulate_primitive_steps": False,
+    }
     assert result["last_annotation_status"] == "ERROR"
     assert len(result["annotation_history"]) == 2
 
@@ -300,6 +347,99 @@ def test_gpu_launch_reservation_blocks_simulation_race():
         jobs.assert_simulation_allowed()
 
 
+def test_batch_trajectory_evaluation_skips_test_labels_by_default():
+    jobs = object.__new__(OfflineJobService)
+    jobs.lock = threading.RLock()
+    runs = [
+        {"id": "train", "is_test": False},
+        {"id": "held-out", "is_test": True},
+    ]
+    jobs.datasets = SimpleNamespace(
+        list_runs=lambda **_: runs,
+    )
+    evaluator = SimpleNamespace(exists=lambda _: False)
+    jobs.trajectory_evaluations = evaluator
+    jobs.robometer_evaluations = None
+    jobs._prepare_launch = lambda: None
+    captured = {}
+    jobs._launch_trajectory_evaluation = lambda **kwargs: captured.update(kwargs) or {
+        "status": "STARTING",
+    }
+    jobs.launch_reserved = False
+
+    result = jobs.start_trajectory_evaluation(
+        task_id="LEVEL1::pick", run_ids=None, overwrite=False,
+        evaluators=["rynnvalue"],
+    )
+    assert captured["requested_run_ids"] == ["train"]
+    assert result["selected_by_evaluator"] == {"rynnvalue": ["train"]}
+
+    jobs.start_trajectory_evaluation(
+        task_id="LEVEL1::pick", run_ids=["held-out"], overwrite=False,
+        evaluators=["rynnvalue"],
+    )
+    assert captured["requested_run_ids"] == ["held-out"]
+
+    with pytest.raises(ValueError, match="cannot overwrite"):
+        jobs.start_trajectory_evaluation(
+            task_id="LEVEL1::pick", run_ids=["train"], overwrite=True,
+            evaluators=["rynnvalue"],
+        )
+
+    jobs.trajectory_evaluations = SimpleNamespace(exists=lambda _: True)
+    reused = jobs.start_trajectory_evaluation(
+        task_id="LEVEL1::pick", run_ids=["train"], overwrite=False,
+        evaluators=["rynnvalue"],
+    )
+    assert reused["status"] == "COMPLETED"
+    assert reused["selected_count"] == 0
+    assert reused["skipped_by_evaluator"] == {"rynnvalue": ["train"]}
+
+
+def test_dataset_annotation_completion_does_not_overwrite_trajectory_sidecar(
+    tmp_path: Path,
+):
+    jobs = object.__new__(OfflineJobService)
+    jobs.jobs_root = tmp_path / "jobs"
+    job_dir = jobs.jobs_root / "ann"
+    job_dir.mkdir(parents=True)
+    job = {
+        "schema_version": 1,
+        "id": "ann",
+        "kind": "annotation",
+        "status": "COMPLETED",
+        "dataset_id": "ds",
+        "created_at": "2026-08-24T10:00:00+00:00",
+        "completed_at": "2026-08-24T10:01:00+00:00",
+        "output_path": str(tmp_path / "datasets" / "ds" / "annotations" / "ann"),
+        "parameters": {"max_frames": 16, "accumulate_primitive_steps": True},
+    }
+    (job_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+    jobs.repository = SimpleNamespace(upsert=lambda *_: None)
+    updates = []
+    jobs.datasets = SimpleNamespace(
+        get=lambda *_args, **_kwargs: {
+            "pending_annotation_id": "ann",
+            "last_annotation_id": None,
+            "last_annotation_status": None,
+        },
+        update_annotation=lambda *args, **kwargs: updates.append((args, kwargs)),
+    )
+    jobs.trajectory_evaluations = SimpleNamespace(
+        bind=lambda *_args, **_kwargs: pytest.fail(
+            "dataset annotation must not bind to trajectory"
+        )
+    )
+    jobs.robometer_evaluations = None
+
+    jobs._reconcile("ann")
+    assert updates == [(('ds', 'READY'), {
+        "annotation_id": "ann", "annotation_config": {
+            "max_frames": 16, "accumulate_primitive_steps": True,
+        },
+    })]
+
+
 def test_detached_runner_persists_fake_conda_stage(tmp_path: Path, monkeypatch):
     job_dir = tmp_path / "job"
     job_dir.mkdir()
@@ -384,6 +524,9 @@ def test_training_revalidates_completed_annotation_hashes(tmp_path: Path):
     }
     reward = {
         "complete": True, "dataset_sha256": "prepared",
+        "reward_config": {
+            "max_frames": 4, "accumulate_primitive_steps": False,
+        },
         "episodes": [{
             "run_id": "run", "annotation_path": str(annotation),
             "annotation_sha256": digest,
@@ -394,8 +537,31 @@ def test_training_revalidates_completed_annotation_hashes(tmp_path: Path):
         json.dumps(reward), encoding="utf-8"
     )
     jobs.datasets = SimpleNamespace(root=datasets_root)
-    dataset = {"id": "ds", "annotation_id": "ann", "dataset_sha256": "frozen"}
+    dataset = {
+        "id": "ds", "annotation_id": "ann", "dataset_sha256": "frozen",
+        "annotation_config": {
+            "max_frames": 4, "accumulate_primitive_steps": False,
+        },
+    }
     assert jobs._validated_annotation_work(dataset)[0] == work
+    missing_mode = json.loads(json.dumps(reward))
+    del missing_mode["reward_config"]["accumulate_primitive_steps"]
+    (work / "rewards" / "reward_manifest.json").write_text(
+        json.dumps(missing_mode), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="explicit accumulate_primitive_steps"):
+        jobs._validated_annotation_work(dataset)
+    (work / "rewards" / "reward_manifest.json").write_text(
+        json.dumps(reward), encoding="utf-8"
+    )
+    mismatched = {
+        **dataset,
+        "annotation_config": {
+            "max_frames": 4, "accumulate_primitive_steps": True,
+        },
+    }
+    with pytest.raises(Exception, match="accumulate_primitive_steps"):
+        jobs._validated_annotation_work(mismatched)
     annotation.write_bytes(b"changed")
     with pytest.raises(Exception, match="hash changed"):
         jobs._validated_annotation_work(dataset)

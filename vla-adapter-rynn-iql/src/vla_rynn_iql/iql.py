@@ -64,11 +64,17 @@ def expectile_loss(diff: torch.Tensor, expectile: float) -> torch.Tensor:
 def chunk_bellman_target(
     reward: torch.Tensor,
     next_value: torch.Tensor,
+    chunk_length: torch.Tensor,
     bootstrap_mask: torch.Tensor,
     discount: float,
+    accumulate_primitive_steps: bool = False,
 ) -> torch.Tensor:
-    """One-step Bellman target where one IQL decision is one action chunk."""
-    return reward.float() + discount * bootstrap_mask.float() * next_value
+    """Bellman target matching the configured chunk reward semantics."""
+    if accumulate_primitive_steps:
+        bootstrap_discount = discount ** chunk_length.float()
+    else:
+        bootstrap_discount = torch.full_like(next_value, discount, dtype=torch.float32)
+    return reward.float() + bootstrap_discount * bootstrap_mask.float() * next_value
 
 
 @dataclass
@@ -86,7 +92,8 @@ class PixelIQL(nn.Module):
                  critic_lr: float = 3e-4, value_lr: float = 3e-4,
                  critic_optimizer: str = "adam", critic_weight_decay: float = 0.0,
                  value_optimizer: str = "adam", value_weight_decay: float = 0.0,
-                 critic_max_grad_norm: float = 10.0, value_max_grad_norm: float = 10.0):
+                 critic_max_grad_norm: float = 10.0, value_max_grad_norm: float = 10.0,
+                 accumulate_primitive_steps: bool = False):
         super().__init__()
         self.q1 = QNetwork(horizon, action_dim, proprio_dim)
         self.q2 = QNetwork(horizon, action_dim, proprio_dim)
@@ -96,6 +103,7 @@ class PixelIQL(nn.Module):
         self.discount, self.expectile, self.tau = discount, expectile, tau
         self.critic_max_grad_norm = float(critic_max_grad_norm)
         self.value_max_grad_norm = float(value_max_grad_norm)
+        self.accumulate_primitive_steps = bool(accumulate_primitive_steps)
         optimizer_types = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
         if critic_optimizer not in optimizer_types or value_optimizer not in optimizer_types:
             raise ValueError("critic_optimizer and value_optimizer must be adam or adamw")
@@ -149,7 +157,9 @@ class PixelIQL(nn.Module):
         with torch.no_grad():
             next_value = self.value(batch["next_pixels"], batch["next_proprio"])
             target = chunk_bellman_target(
-                batch["reward"], next_value, batch["bootstrap_mask"], self.discount,
+                batch["reward"], next_value, batch["chunk_length"],
+                batch["bootstrap_mask"], self.discount,
+                self.accumulate_primitive_steps,
             )
         q1 = self.q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
         q2 = self.q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])

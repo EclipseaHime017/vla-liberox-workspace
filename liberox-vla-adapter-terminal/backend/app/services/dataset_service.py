@@ -74,8 +74,9 @@ package; their absence means the trajectory has not been evaluated yet.
 
 
 class DatasetService:
-    def __init__(self, run_service: Any):
+    def __init__(self, run_service: Any, is_test: Any | None = None):
         self.run_service = run_service
+        self.is_test = is_test or (lambda _run_id: False)
 
     def list_runs(self, task_id: str | None = None) -> list[dict[str, Any]]:
         runs = self.run_service.list_runs()
@@ -148,9 +149,14 @@ class DatasetService:
     def export_task(self, task_id: str) -> tuple[Path, str]:
         if not task_id.strip():
             raise ValueError("task_id is required")
-        runs = self.list_runs(task_id)
+        runs = [
+            run for run in self.list_runs(task_id)
+            if not self.is_test(str(run["id"]))
+        ]
         if not runs:
-            raise FileNotFoundError(f"No runs found for task {task_id!r}")
+            raise FileNotFoundError(
+                f"No non-test runs found for task {task_id!r}"
+            )
         slug = re.sub(r"[^A-Za-z0-9._-]+", "_", task_id).strip("_.") or "task"
         handle = tempfile.NamedTemporaryFile(
             prefix=f"liberox_{slug}_",

@@ -72,3 +72,30 @@ def test_dataset_service_filters_by_task_and_exports_offline_rl_bundle(tmp_path:
             assert "unassisted_failure" in manifest
     finally:
         export_path.unlink(missing_ok=True)
+
+
+def test_task_export_skips_test_labelled_runs(tmp_path: Path):
+    artifact = tmp_path / "summary.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    runs = [
+        {
+            "id": "train", "task_id": "task", "created_at": "2026-08-17T01:00:00Z",
+            "artifacts": {"summary.json": str(artifact)},
+        },
+        {
+            "id": "test", "task_id": "task", "created_at": "2026-08-17T02:00:00Z",
+            "artifacts": {"summary.json": str(artifact)},
+        },
+    ]
+    service = DatasetService(
+        FakeRunService(runs), is_test=lambda run_id: run_id == "test",
+    )
+    export_path, _ = service.export_task("task")
+    try:
+        with zipfile.ZipFile(export_path) as archive:
+            manifest = archive.read("runs.csv").decode("utf-8")
+            assert "train" in manifest
+            assert "test" not in manifest
+            assert not any(name.startswith("runs/test/") for name in archive.namelist())
+    finally:
+        export_path.unlink(missing_ok=True)

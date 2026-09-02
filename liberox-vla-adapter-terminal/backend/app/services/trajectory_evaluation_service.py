@@ -156,7 +156,7 @@ class TrajectoryEvaluationService:
             return {"status": "NOT_EVALUATED"}
 
     def exists(self, run: dict[str, Any]) -> bool:
-        """Only the complete v5 macro-action reward sidecar counts as evaluated."""
+        """Only a complete, hash-valid v5 RynnValue sidecar counts as evaluated."""
         try:
             return self._load(run) is not None
         except (FileNotFoundError, OSError, ValueError):
@@ -346,8 +346,8 @@ class TrajectoryEvaluationService:
                 shaping_weight = float(reward_config.get("shaping_weight", 0.1))
                 dense_reward = shaping_weight * pbrs_shaping
                 sparse_reward = chunk_return - shaping_weight * pbrs_shaping
-                # These values are mathematically -1/0 in the macro-action
-                # reward. Remove only floating-point reconstruction noise.
+                # Remove only exact macro-action reconstruction noise. Values
+                # from cumulative primitive-step mode remain unchanged.
                 sparse_reward = np.where(
                     np.isclose(sparse_reward, -1.0, atol=1e-5), -1.0,
                     np.where(np.isclose(sparse_reward, 0.0, atol=1e-5), 0.0, sparse_reward),
@@ -393,6 +393,9 @@ class TrajectoryEvaluationService:
                         "chunk_start_steps": boundary_steps[:-1].tolist(),
                         "chunk_end_steps": boundary_steps[1:].tolist(),
                         "chunk_lengths": chunk_lengths.tolist(),
+                        "accumulate_primitive_steps": bool(
+                            reward_config.get("accumulate_primitive_steps", False)
+                        ),
                         "description": (payload.get("pbrs_reward") or {}).get("description"),
                     },
                     "reward_config": reward_config,

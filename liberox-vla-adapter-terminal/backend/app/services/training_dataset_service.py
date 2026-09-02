@@ -15,7 +15,7 @@ from typing import Any, Iterable
 
 from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json
-from ..storage.repositories import TrainingDatasetRepository
+from ..storage.repositories import RunLabelRepository, TrainingDatasetRepository
 
 
 SOURCE_TYPES = frozenset({"inference", "manual", "policy_requery"})
@@ -59,6 +59,7 @@ class TrainingDatasetService:
         self.repository = TrainingDatasetRepository(
             ui_config.catalog_path, ui_config.project_id
         )
+        self.labels = RunLabelRepository(ui_config.catalog_path, ui_config.project_id)
         self.evaluations = evaluations
         self.robometer_evaluations = robometer_evaluations
         self.lock = threading.RLock()
@@ -104,6 +105,7 @@ class TrainingDatasetService:
         if outcome is not None and outcome not in OUTCOMES:
             raise ValueError(f"Unknown outcome: {outcome}")
         result = []
+        test_ids = self.labels.test_ids()
         for run in self.run_service.list_runs():
             if task_id and run.get("task_id") != task_id:
                 continue
@@ -123,6 +125,7 @@ class TrainingDatasetService:
             )
             public = {
                 **run,
+                "is_test": run["id"] in test_ids,
                 "source_type": current_source,
                 "outcome": current_outcome,
                 "training_eligible": trainable,
@@ -154,7 +157,11 @@ class TrainingDatasetService:
         if page > pages and total:
             page = pages
         start = (page - 1) * page_size
-        eligible_count = sum(bool(item.get("training_eligible")) for item in values)
+        eligible_count = sum(
+            bool(item.get("training_eligible")) and not bool(item.get("is_test"))
+            for item in values
+        )
+        test_count = sum(bool(item.get("is_test")) for item in values)
         items = values[start:start + page_size]
         if self.evaluations is not None:
             for item in items:
@@ -187,6 +194,7 @@ class TrainingDatasetService:
             "rynn_evaluated_count": evaluated_count,
             "robometer_evaluated_count": robometer_evaluated_count,
             "both_evaluated_count": both_evaluated_count,
+            "test_count": test_count,
             "page": page,
             "page_size": page_size,
             "pages": pages,
@@ -247,7 +255,12 @@ class TrainingDatasetService:
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id is required")
         self._validate_selection(selection)
-        all_runs = self.list_runs(task_id=task_id, eligible=True)
+        # Test-labelled trajectories are deliberately held out from every new
+        # frozen training dataset, including explicit/manual selections.
+        all_runs = [
+            run for run in self.list_runs(task_id=task_id, eligible=True)
+            if not run["is_test"]
+        ]
         source_types = set(selection.get("source_types") or SOURCE_TYPES)
         outcomes = set(selection.get("outcomes") or OUTCOMES)
         candidates = [
@@ -312,6 +325,24 @@ class TrainingDatasetService:
             "categories": categories,
             "run_ids": [run["id"] for run in selected],
             "runs": selected,
+        }
+
+    def is_test(self, run_id: str) -> bool:
+        # Resolve first so labels cannot be attached to nonexistent records.
+        self.run_service.get_run(run_id)
+        return self.labels.is_test(run_id)
+
+    def set_test(self, run_id: str, is_test: bool) -> dict[str, Any]:
+        if type(is_test) is not bool:
+            raise TypeError("is_test must be a boolean")
+        run = self.run_service.get_run(run_id)
+        self.labels.set_test(run_id, is_test)
+        return {
+            "run_id": run_id,
+            "task_id": run.get("task_id"),
+            "is_test": is_test,
+            "excluded_from_training_packages": is_test,
+            "excluded_from_default_batch_evaluation": is_test,
         }
 
     @staticmethod
@@ -474,7 +505,9 @@ class TrainingDatasetService:
                     "integrity_error": None,
                     "annotation_status": "NOT_STARTED",
                     "annotation_id": None,
+                    "annotation_config": None,
                     "pending_annotation_id": None,
+                    "pending_annotation_config": None,
                     "annotation_history": [],
                     "parent_dataset_id": parent_dataset_id,
                     "created_at": now,
@@ -670,7 +703,8 @@ class TrainingDatasetService:
         return self._public(payload)
 
     def update_annotation(
-        self, dataset_id: str, status: str, *, annotation_id: str | None = None
+        self, dataset_id: str, status: str, *, annotation_id: str | None = None,
+        annotation_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         path, payload = self._load(dataset_id)
         history = payload.setdefault("annotation_history", [])
@@ -679,15 +713,21 @@ class TrainingDatasetService:
         if status == "RUNNING":
             payload["annotation_status"] = "RUNNING"
             payload["pending_annotation_id"] = annotation_id
+            payload["pending_annotation_config"] = annotation_config
         elif status == "READY":
             payload["annotation_status"] = "READY"
             payload["annotation_id"] = pending_id
+            payload["annotation_config"] = (
+                annotation_config or payload.get("pending_annotation_config")
+            )
             payload["pending_annotation_id"] = None
+            payload["pending_annotation_config"] = None
         else:
             # Preserve the last successful reward version if a later
             # re-annotation is canceled or fails.
             payload["annotation_status"] = "READY" if active_id else status
             payload["pending_annotation_id"] = None
+            payload["pending_annotation_config"] = None
         if pending_id and status != "RUNNING" and not any(
             item.get("annotation_id") == pending_id and item.get("status") == status
             for item in history
@@ -695,6 +735,7 @@ class TrainingDatasetService:
             history.append({
                 "annotation_id": pending_id,
                 "status": status,
+                "config": annotation_config,
                 "completed_at": _utc_now(),
             })
         if status != "RUNNING":

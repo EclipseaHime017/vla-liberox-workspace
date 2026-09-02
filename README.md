@@ -1,6 +1,6 @@
 # LIBERO-X Local Data Studio
 
-Current release: **v0.4.0**
+Current release: **v0.4.1**
 
 Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse takeover,
 offline post-training, and reproducible batch policy testing for the three

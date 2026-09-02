@@ -4,6 +4,7 @@ import {
   deleteTrainingDataset, evaluateTrajectories, getBootstrap, getDatasetSummary,
   getTrajectoryDetail, listDatasetRuns, listOfflineJobs, listTrainingDatasets,
   previewTrainingDataset, verifyTrainingDataset,
+  setTrajectoryTestLabel,
 } from "../features/run-control/api";
 import type {
   Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, OfflineJob,
@@ -56,6 +57,8 @@ export function DatasetPage() {
   const [splitSeed, setSplitSeed] = useState(7);
   const [successSteps, setSuccessSteps] = useState(5);
   const [annotationJob, setAnnotationJob] = useState<OfflineJob | null>(null);
+  const [annotationFrames, setAnnotationFrames] = useState<Record<string, number>>({});
+  const [annotationCumulative, setAnnotationCumulative] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [runsLoading, setRunsLoading] = useState(false);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
@@ -148,7 +151,11 @@ export function DatasetPage() {
   };
   const annotate = async (dataset: TrainingDataset) => {
     setBusy(true); setError("");
-    try { setAnnotationJob(await annotateTrainingDataset(dataset.id)); await refresh(); }
+    const maxFrames = annotationFrames[dataset.id]
+      ?? dataset.annotation_config?.max_frames ?? 4;
+    const cumulative = annotationCumulative[dataset.id]
+      ?? dataset.annotation_config?.accumulate_primitive_steps ?? false;
+    try { setAnnotationJob(await annotateTrainingDataset(dataset.id, maxFrames, cumulative)); await refresh(); }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
@@ -198,10 +205,14 @@ export function DatasetPage() {
     finally { setBusy(false); }
   };
 
-  if (detail) return <TrajectoryDetail detail={detail} onBack={() => setDetail(null)} />;
+  if (detail) return <TrajectoryDetail detail={detail} onBack={() => setDetail(null)} onSetTest={async (isTest) => {
+    await setTrajectoryTestLabel(detail.run.id, isTest);
+    setDetail((current) => current ? { ...current, run: { ...current.run, is_test: isTest } } : current);
+    await refresh();
+  }} />;
 
   return <section className="content-page">
-    <div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>RynnValue 与 Robometer 评价分别跟随轨迹保存；冻结训练数据集仍只自动补齐 RynnValue。</p></div>
+    <div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>轨迹评价用于检查；训练评价按版本绑定冻结数据集，不覆盖轨迹。测试标签数据不会进入新的训练包。</p></div>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     {summary && <>
       <div className="dataset-overview surface"><SuccessRateChart rate={taskStats?.success_rate ?? 0} /><div className="dataset-stats"><div><strong>{taskStats?.runs ?? 0}</strong><span>当前任务运行</span></div><div><strong>{eligibleCount}</strong><span>可训练轨迹</span></div><div><strong>{runPage?.rynn_evaluated_count ?? 0} / {runPage?.robometer_evaluated_count ?? 0}</strong><span>RynnValue / Robometer</span></div><div><strong>{datasets.length}</strong><span>冻结数据集</span></div></div></div>
@@ -213,11 +224,11 @@ export function DatasetPage() {
           {section === "evaluation" ? <div className="evaluation-actions">
             <label><input type="checkbox" checked={evaluators.includes("rynnvalue")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "rynnvalue"] : current.filter((value) => value !== "rynnvalue"))} />RynnValue</label>
             <label title={robometerCapability?.reason ?? undefined}><input type="checkbox" disabled={robometerCapability?.available === false} checked={evaluators.includes("robometer")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "robometer"] : current.filter((value) => value !== "robometer"))} />Robometer{robometerCapability?.available === false ? "（未配置）" : ""}</label>
-            <label><input type="checkbox" checked={batchOverwrite} onChange={(event) => setBatchOverwrite(event.target.checked)} />覆盖所选评价器已有结果</label>
-            <button disabled={busy || !evaluators.length} onClick={() => void evaluate(null, batchOverwrite)}>批量评价</button><button className="primary" disabled={busy || !evaluationSelection.length || !evaluators.length} onClick={() => void evaluate(evaluationSelection, true)}>评价所选（覆盖）</button>
+            <label><input type="checkbox" checked={batchOverwrite} onChange={(event) => setBatchOverwrite(event.target.checked)} />批量评价时覆盖已有结果</label>
+            <button disabled={busy || !evaluators.length} onClick={() => void evaluate(null, batchOverwrite)}>批量评价</button><button className="primary" disabled={busy || !evaluationSelection.length || !evaluators.length} onClick={() => void evaluate(evaluationSelection, false)}>评价所选（仅补缺失）</button>
           </div> : <><button className="primary" onClick={() => openBuilder()}>创建训练数据集</button><a className="export-button" href={taskId ? datasetExportUrl(taskId) : undefined} download aria-disabled={!taskId}>导出任务 ZIP</a></>}
         </div>
-        {runsLoading && !runPage ? <div className="empty-table">正在加载轨迹索引…</div> : <RunTable runs={runs} selectable={section === "evaluation" || (builder && selection.mode === "manual")} selected={section === "evaluation" ? evaluationSelection : selection.run_ids} onToggle={(runId, checked) => section === "evaluation" ? setEvaluationSelection((current) => checked ? [...current, runId] : current.filter((value) => value !== runId)) : patchSelection({ run_ids: checked ? [...selection.run_ids, runId] : selection.run_ids.filter((value) => value !== runId) })} onOpen={(runId) => void openDetail(runId)} />}
+        {runsLoading && !runPage ? <div className="empty-table">正在加载轨迹索引…</div> : <RunTable runs={runs} selectable={section === "evaluation" || (builder && selection.mode === "manual")} excludeTests={section === "package"} selected={section === "evaluation" ? evaluationSelection : selection.run_ids} onToggle={(runId, checked) => section === "evaluation" ? setEvaluationSelection((current) => checked ? [...current, runId] : current.filter((value) => value !== runId)) : patchSelection({ run_ids: checked ? [...selection.run_ids, runId] : selection.run_ids.filter((value) => value !== runId) })} onOpen={(runId) => void openDetail(runId)} />}
         <div className="table-pagination"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>上一页</button><span>第 {runPage?.page ?? page} / {runPage?.pages ?? 1} 页</span><button disabled={page >= (runPage?.pages ?? 1)} onClick={() => setPage((value) => value + 1)}>下一页</button><label>每页<select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>{[5, 10, 20, 50].map((value) => <option key={value} value={value}>{value}</option>)}</select></label></div>
       </div>
 
@@ -242,9 +253,9 @@ export function DatasetPage() {
       {section === "package" && <div className="surface frozen-datasets">
         <div className="panel-title"><strong>冻结数据集版本</strong><span>{datasets.length}</span></div>
         {datasetsLoading && !datasets.length ? <div className="empty-table">正在加载冻结数据集…</div> : datasets.length ? datasets.map((dataset) => <article key={dataset.id} className="dataset-card">
-          <div><h2>{dataset.name}</h2><code>{dataset.id}</code><p>{dataset.member_count} 条 · 预计 {dataset.action_count} actions · {dataset.chunk_count} chunks</p></div>
+          <div><h2>{dataset.name}</h2><code>{dataset.id}</code><p>{dataset.member_count} 条 · 预计 {dataset.action_count} actions · {dataset.chunk_count} chunks{dataset.annotation_id ? ` · 评价版本 ${dataset.annotation_id}` : ""}{dataset.annotation_config?.max_frames ? ` · max_frames=${dataset.annotation_config.max_frames}` : ""}{dataset.annotation_config?.accumulate_primitive_steps ? " · 逐步累积奖励" : " · 宏动作奖励"}</p></div>
           <div className="dataset-badges"><Badge tone={dataset.integrity_status === "HEALTHY" ? "green" : "red"}>{dataset.integrity_status}</Badge><Badge tone={dataset.annotation_status === "READY" ? "green" : dataset.annotation_status === "ERROR" ? "red" : "neutral"}>{dataset.annotation_status}</Badge></div>
-          <div className="dataset-card-actions"><button className="danger" disabled={busy || dataset.annotation_status === "RUNNING"} onClick={() => void removeDataset(dataset)}>{dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集"}</button><button onClick={() => void verifyTrainingDataset(dataset.id).then(() => refresh()).catch((reason) => setError(String(reason)))}>验证完整性</button><button onClick={() => openBuilder(dataset)}>派生版本</button><button className="primary" disabled={busy || dataset.integrity_status !== "HEALTHY" || dataset.annotation_status === "RUNNING"} onClick={() => void annotate(dataset)}>{dataset.annotation_status === "READY" ? "重新生成训练清单" : "补齐评价并准备"}</button></div>
+          <div className="dataset-card-actions"><button className="danger" disabled={busy || dataset.annotation_status === "RUNNING"} onClick={() => void removeDataset(dataset)}>{dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集"}</button><button onClick={() => void verifyTrainingDataset(dataset.id).then(() => refresh()).catch((reason) => setError(String(reason)))}>验证完整性</button><button onClick={() => openBuilder(dataset)}>派生版本</button><label className="annotation-version-field">max_frames<input aria-label={`${dataset.id} max_frames`} type="number" min={2} max={64} value={annotationFrames[dataset.id] ?? dataset.annotation_config?.max_frames ?? 4} onChange={(event) => setAnnotationFrames((current) => ({ ...current, [dataset.id]: Number(event.target.value) }))} /></label><label className="annotation-reward-toggle"><input aria-label={`${dataset.id} accumulate primitive steps`} type="checkbox" checked={annotationCumulative[dataset.id] ?? dataset.annotation_config?.accumulate_primitive_steps ?? false} onChange={(event) => setAnnotationCumulative((current) => ({ ...current, [dataset.id]: event.target.checked }))} /><span>累计 chunk 内 20 Hz 奖励</span></label><button className="primary" disabled={busy || dataset.integrity_status !== "HEALTHY" || dataset.annotation_status === "RUNNING"} onClick={() => void annotate(dataset)}>{dataset.annotation_status === "READY" ? "生成新评价并切换" : "评价并生成训练清单"}</button></div>
           {dataset.integrity_error && <p className="dataset-integrity-error">{dataset.integrity_error}</p>}
         </article>) : <div className="empty-table">尚未创建训练数据集。</div>}
       </div>}

@@ -34,6 +34,9 @@ reward:
   # One discount per action chunk (macro action), not one discount per 20 Hz action.
   gamma: 0.99
   shaping_weight: 0.1
+  # false: one sparse/PBRS reward and one Bellman discount per action chunk.
+  # true: discounted primitive-step return and gamma^L Semi-MDP bootstrap.
+  accumulate_primitive_steps: false
   robot_description: Franka Emika Panda single-arm robot
   camera_description: fixed third-person agent view
 vla:

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query, Request
 from .dependencies import http_error, offline_job_service, training_dataset_service
 from .models import (
     CreateTrainingDatasetRequest,
+    DatasetAnnotationRequest,
     DatasetPreviewRequest,
     DeleteTrainingDatasetRequest,
     DeriveTrainingDatasetRequest,
@@ -101,8 +102,17 @@ async def verify(dataset_id: str, request: Request):
 
 
 @router.post("/{dataset_id}/annotations", status_code=201)
-async def annotate(dataset_id: str, request: Request):
+async def annotate(
+    dataset_id: str, request: Request,
+    body: DatasetAnnotationRequest | None = None,
+):
     try:
-        return offline_job_service(request).start_annotation(dataset_id)
+        return offline_job_service(request).start_annotation(
+            dataset_id,
+            max_frames=None if body is None else body.max_frames,
+            accumulate_primitive_steps=(
+                None if body is None else body.accumulate_primitive_steps
+            ),
+        )
     except Exception as exc:
         raise http_error(exc) from exc

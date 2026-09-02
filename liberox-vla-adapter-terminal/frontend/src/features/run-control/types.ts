@@ -96,6 +96,7 @@ export type Session = {
   outcome?: "success" | "failure";
   training_eligible?: boolean; ineligible_reason?: string | null;
   training_start_step?: number; training_action_count?: number; training_chunk_count?: number;
+  is_test?: boolean;
   rynn_evaluation?: {
     status: "NOT_EVALUATED" | "READY";
     evaluated_at?: string | null; model?: string | null; revision?: string | null;
@@ -111,7 +112,7 @@ export type Session = {
 export type PaginatedRuns = {
   items: Session[]; total: number; eligible_count: number; evaluated_count: number;
   rynn_evaluated_count: number; robometer_evaluated_count: number;
-  both_evaluated_count: number;
+  both_evaluated_count: number; test_count: number;
   page: number; page_size: number; pages: number;
 };
 
@@ -157,6 +158,7 @@ export type RynnValueEvaluation = {
       final_reward: number[];
       chunk_start_steps: number[];
       chunk_end_steps: number[]; chunk_lengths: number[];
+      accumulate_primitive_steps?: boolean;
       description?: string | null;
     };
     reward_config: Record<string, unknown>;
@@ -186,6 +188,15 @@ export type TrainingDataset = {
   status: "FROZEN"; integrity_status: "HEALTHY" | "BROKEN";
   integrity_error: string | null; annotation_status: "NOT_STARTED" | "RUNNING" | "READY" | "ERROR" | "CANCELED";
   annotation_id: string | null; parent_dataset_id: string | null;
+  annotation_config?: {
+    max_frames?: number | null; accumulate_primitive_steps?: boolean | null;
+  } | null;
+  annotation_history?: Array<{
+    annotation_id: string; status: string; completed_at: string;
+    config?: {
+      max_frames?: number | null; accumulate_primitive_steps?: boolean | null;
+    } | null;
+  }>;
   created_at: string; updated_at: string; member_count: number;
   action_count: number; chunk_count: number; categories: Record<string, number>;
   validation_fraction: number; split_seed: number; success_consecutive_steps: number;

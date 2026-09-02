@@ -44,6 +44,15 @@ def test_reward_dtype_must_match_pinned_bfloat16_checkpoint(configured, tmp_path
         load_train_config(path)
 
 
+def test_reward_accumulation_mode_must_be_boolean(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"]["accumulate_primitive_steps"] = "false"
+    path = tmp_path / "invalid-reward-mode.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(TypeError, match="accumulate_primitive_steps"):
+        load_train_config(path)
+
+
 def test_success_confirmation_threshold_is_validated(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
     raw["data"]["success_consecutive_steps"] = 0

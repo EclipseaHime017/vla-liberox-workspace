@@ -151,6 +151,7 @@ td code { font-size: 11px; }
 .badge { display: inline-flex; padding: 4px 8px; border-radius: 999px; font-size: 10px; background: #eeeeef; color: var(--muted); }
 .badge-green { background: #eaf8ed; color: var(--green); }
 .badge-red { background: #fff0f1; color: var(--danger); }
+.badge-blue { background: #edf3ff; color: var(--blue); }
 .dataset-overview { display: grid; grid-template-columns: 220px 1fr; padding: 24px; align-items: center; }
 .success-chart { display: grid; place-items: center; }
 .success-ring { --rate: 0deg; display: grid; place-content: center; width: 148px; height: 148px; border-radius: 50%; background: radial-gradient(circle at center, white 58%, transparent 59%), conic-gradient(var(--blue) var(--rate), #e5e5ea 0); }
@@ -209,6 +210,10 @@ td code { font-size: 11px; }
 .dataset-card code { color: var(--muted); font-size: 10px; }
 .dataset-card p { margin-top: 6px; color: var(--muted); font-size: 10px; }
 .dataset-badges, .dataset-card-actions { display: flex; gap: 7px; align-items: center; }
+.annotation-version-field { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
+.annotation-version-field input { width: 58px; padding: 7px 8px; }
+.annotation-reward-toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
+.annotation-reward-toggle input { width: 14px; height: 14px; margin: 0; accent-color: var(--blue); }
 .dataset-integrity-error { grid-column: 1 / -1; color: var(--danger) !important; }
 .job-monitor-card { min-height: 310px; display: flex; flex-direction: column; }
 .job-status-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 18px; padding: 11px 15px; border-bottom: 1px solid var(--line); font-size: 10px; color: var(--muted); }
@@ -432,6 +437,10 @@ td code { font-size: 11px; }
 
 .detail-heading { display: flex; align-items: end; justify-content: space-between; }
 .detail-summary { display: flex; align-items: center; gap: 18px; padding: 15px 18px; }
+.test-label-switch { margin-left: auto; display: flex; align-items: center; gap: 9px; }
+.test-label-switch input { width: 18px; height: 18px; accent-color: var(--blue); }
+.test-label-switch span { display: grid; gap: 2px; }
+.test-label-switch small { color: var(--muted); }
 .trajectory-video { padding: 18px; }
 .trajectory-video h2 { margin: 0 0 14px; font-size: 18px; }
 .trajectory-video video { display: block; width: 100%; max-height: 560px; border-radius: 14px; background: #111; }

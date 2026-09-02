@@ -169,8 +169,14 @@ function PlotInspector({ plot, onClose }: { plot: Plot; onClose: () => void }) {
   </Dialog>;
 }
 
-export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: () => void }) {
+export function TrajectoryDetail({ detail, onBack, onSetTest }: {
+  detail: Detail; onBack: () => void;
+  onSetTest?: (isTest: boolean) => Promise<void>;
+}) {
   const [opened, setOpened] = useState<Plot | null>(null);
+  const [isTest, setIsTest] = useState(Boolean(detail.run.is_test));
+  const [labelBusy, setLabelBusy] = useState(false);
+  const [labelError, setLabelError] = useState("");
   const plots = useMemo<Plot[]>(() => {
     const values: Plot[] = [
       { title: "VLA 环境 action", unit: "normalized command [-]", times: detail.series.action_time_seconds, labels: ["dx", "dy", "dz", "dRx", "dRy", "dRz", "gripper"], values: detail.series.env_action },
@@ -230,7 +236,9 @@ export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: (
           values: official.absolute_value_entropy_nats,
         },
         {
-          title: "Reward Components", unit: "reward [-]",
+          title: `Reward Components · ${evaluation.pbrs_reward.accumulate_primitive_steps
+            ? "逐步累计" : "宏动作"}`,
+          unit: "reward [-]",
           times: shapeSeries.times,
           labels: ["sparse reward", "dense reward (κ × shape)", "final reward"],
           values: sparseReward.map((sparse, index) => [
@@ -299,7 +307,8 @@ export function TrajectoryDetail({ detail, onBack }: { detail: Detail; onBack: (
   }, [detail]);
   return <section className="content-page trajectory-detail-page">
     <div className="page-heading detail-heading"><div><p className="eyebrow">TRAJECTORY DETAIL</p><h1>轨迹 {detail.run.id}</h1><p>{detail.run.task} · {detail.run.action_count} steps</p></div><button onClick={onBack}>返回数据集</button></div>
-    <div className="detail-summary surface"><Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge><span>{detail.run.source_type ?? detail.run.control_mode}</span><span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span></div>
+    <div className="detail-summary surface"><Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge><span>{detail.run.source_type ?? detail.run.control_mode}</span><span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span><label className="test-label-switch"><input type="checkbox" checked={isTest} disabled={labelBusy || !onSetTest} onChange={async (event) => { const next = event.target.checked; setLabelBusy(true); setLabelError(""); try { await onSetTest?.(next); setIsTest(next); } catch (reason) { setLabelError(String(reason)); } finally { setLabelBusy(false); } }} /><span><b>测试标签</b><small>启用后不进入新训练数据集，任务级批量评价默认跳过</small></span></label></div>
+    {labelError && <div className="error-banner"><span>{labelError}</span><button onClick={() => setLabelError("")}>关闭</button></div>}
     <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}</article>
     {comparison && <article className="surface detail-summary"><strong>RynnValue / Robometer 对比</strong>{comparison.available ? <><span>Pearson r = {comparison.correlation?.toFixed(4)}</span><span>终点进度：Rynn {comparison.rynnEnd?.toFixed(3)} / Robometer {comparison.roboEnd?.toFixed(3)}</span><span>Robometer 成功概率 {comparison.successEnd?.toFixed(3)}</span><span>环境成功：{comparison.environmentSuccess ? "是" : "否"}</span></> : <span>{comparison.reason}</span>}</article>}
     <div className="trajectory-plots">{plots.map((plot) => <PlotCard key={plot.title} plot={plot} onOpen={() => setOpened(plot)} />)}</div>

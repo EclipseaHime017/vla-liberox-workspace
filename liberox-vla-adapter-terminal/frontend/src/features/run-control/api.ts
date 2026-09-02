@@ -16,6 +16,13 @@ export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5) => api<P
 export const getTrajectoryDetail = (runId: string) => api<TrajectoryDetail>(
   `/api/datasets/runs/${encodeURIComponent(runId)}`,
 );
+export const setTrajectoryTestLabel = (runId: string, isTest: boolean) => api<{
+  run_id: string; task_id: string | null; is_test: boolean;
+  excluded_from_training_packages: boolean;
+  excluded_from_default_batch_evaluation: boolean;
+}>(`/api/datasets/runs/${encodeURIComponent(runId)}/labels`, {
+  method: "PATCH", body: JSON.stringify({ is_test: isTest }),
+});
 export const evaluateTrajectories = (body: {
   task_id: string; run_ids: string[] | null; overwrite: boolean;
   evaluators: Array<"rynnvalue" | "robometer">;
@@ -60,8 +67,18 @@ export const listTrainingDatasets = (taskId?: string) => api<TrainingDataset[]>(
 export const verifyTrainingDataset = (id: string) => api<TrainingDataset>(
   `/api/training-datasets/${encodeURIComponent(id)}/verify`, { method: "POST" },
 );
-export const annotateTrainingDataset = (id: string) => api<OfflineJob>(
-  `/api/training-datasets/${encodeURIComponent(id)}/annotations`, { method: "POST" },
+export const annotateTrainingDataset = (
+  id: string, maxFrames?: number, accumulatePrimitiveSteps?: boolean,
+) => api<OfflineJob>(
+  `/api/training-datasets/${encodeURIComponent(id)}/annotations`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...(maxFrames == null ? {} : { max_frames: maxFrames }),
+      ...(accumulatePrimitiveSteps == null ? {} : {
+        accumulate_primitive_steps: accumulatePrimitiveSteps,
+      }),
+    }),
+  },
 );
 export const listOfflineJobs = () => api<OfflineJob[]>("/api/jobs");
 export const getOfflineJob = (id: string) => api<OfflineJob>(`/api/jobs/${encodeURIComponent(id)}`);

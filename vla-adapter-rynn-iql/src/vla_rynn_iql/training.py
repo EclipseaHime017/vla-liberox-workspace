@@ -396,6 +396,9 @@ def train(config: LoadedConfig) -> Path:
         value_weight_decay=float(iql_cfg["value_weight_decay"]),
         critic_max_grad_norm=float(iql_cfg["critic_max_grad_norm"]),
         value_max_grad_norm=float(iql_cfg["value_max_grad_norm"]),
+        accumulate_primitive_steps=bool(
+            config.section("reward")["accumulate_primitive_steps"]
+        ),
     ).to(device)
     actor_parameters = list(components.action_head.parameters()) + list(components.proprio_projector.parameters())
     # Paper Table 9 / official pi-rl policy optimizer.  In particular, do not
@@ -450,7 +453,8 @@ def train(config: LoadedConfig) -> Path:
     )
     LOG.info(
         "Training started: run=%s, replay_chunks=%d, steps=%d->%d, warmup=%d, "
-        "micro_batch=%d, actor_effective_batch=%d, checkpoint_interval=%d, device=%s",
+        "micro_batch=%d, actor_effective_batch=%d, checkpoint_interval=%d, "
+        "reward_mode=%s, device=%s",
         run_id,
         len(dataset),
         start_step,
@@ -459,6 +463,11 @@ def train(config: LoadedConfig) -> Path:
         micro_batch_size,
         micro_batch_size * accumulation,
         int(iql_cfg["checkpoint_interval"]),
+        (
+            "cumulative_primitive_steps"
+            if config.section("reward")["accumulate_primitive_steps"]
+            else "macro_action"
+        ),
         device,
     )
     with ExitStack() as stack:
@@ -495,7 +504,10 @@ def train(config: LoadedConfig) -> Path:
             "TRAIN ready | "
             f"run={run_id} | steps={start_step}->{total_steps} | "
             f"micro_batch={micro_batch_size} | "
-            f"actor_batch={micro_batch_size * accumulation} | device={device}",
+            f"actor_batch={micro_batch_size * accumulation} | "
+            "reward_mode="
+            f"{'cumulative_primitive_steps' if config.section('reward')['accumulate_primitive_steps'] else 'macro_action'} "
+            f"| device={device}",
             flush=True,
         )
         for step in range(start_step, total_steps):

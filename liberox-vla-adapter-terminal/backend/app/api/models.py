@@ -147,11 +147,25 @@ class TrajectoryEvaluationRequest(StrictModel):
                 raise ValueError("run_ids must not be empty when provided")
             if len(self.run_ids) != len(set(self.run_ids)):
                 raise ValueError("run_ids must not contain duplicates")
+            if self.overwrite is True:
+                raise ValueError(
+                    "explicit trajectory evaluation cannot overwrite an existing "
+                    "evaluation from the same evaluator"
+                )
         if not self.evaluators:
             raise ValueError("evaluators must not be empty")
         if len(self.evaluators) != len(set(self.evaluators)):
             raise ValueError("evaluators must not contain duplicates")
         return self
+
+
+class RunTestLabelRequest(StrictModel):
+    is_test: StrictBool
+
+
+class DatasetAnnotationRequest(StrictModel):
+    max_frames: StrictInt | None = Field(default=None, ge=2, le=64)
+    accumulate_primitive_steps: StrictBool | None = None
 
 
 class RenamePolicyRequest(StrictModel):
