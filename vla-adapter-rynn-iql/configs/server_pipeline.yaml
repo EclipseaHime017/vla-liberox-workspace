@@ -1,0 +1,71 @@
+schema_version: 1
+
+# Server-only pipeline. Paths are resolved relative to this file.
+base_config: ./liberox_iql.yaml
+pipeline_root: ../outputs/server-pipelines
+
+environments:
+  prepare: vla-liberox
+  annotate: rynnvalue-reward
+  train: vla-liberox
+
+selection:
+  task_id: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+  mode: quota
+  seed: 7
+  source_types: [inference, manual, policy_requery]
+  outcomes: [success, failure]
+  size: null
+  quotas:
+    - source_type: inference
+      outcome: failure
+      count: 5
+      order: random
+    - source_type: manual
+      outcome: success
+      count: 50
+      order: random
+
+overrides:
+  paths: {}
+  data:
+    validation_fraction: 0.2
+    split_seed: 7
+    success_consecutive_steps: 5
+  reward: {}
+  vla: {}
+  iql:
+    train_steps: 20000
+    critic_warmup_steps: 1000
+    beta: 3.0
+    max_advantage_weight: 20.0
+    # In server mode this is the global batch across all ranks.
+    micro_batch_size: 8
+    gradient_accumulation_steps: 4
+  logging:
+    tensorboard: true
+    wandb:
+      enabled: true
+      mode: online
+      project: vla-adapter-rynn-iql
+      entity: null
+      run_name: null
+      group: server-ddp
+      tags: [liberox, rynnvalue, iql, server, ddp, zero1]
+      log_interval_steps: 10
+    console_interval_steps: 10
+
+distributed:
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  backend: nccl
+  zero_stage: 1
+  timeout_seconds: 1800
+  data_workers_per_rank: 2
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+replay_cache:
+  enabled: true
+  root: ../outputs/server-replay-cache
+  rebuild: false

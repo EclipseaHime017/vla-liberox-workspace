@@ -95,6 +95,62 @@ are recorded below `outputs/terminal-pipelines/`.
 The older `run_pipeline.py` remains a simple stateless stage launcher. Prefer
 `train_terminal.py` for unattended or resumable remote workflows.
 
+### Isolated single-node multi-GPU server trainer
+
+The `server` Git branch adds an isolated DDP + PyTorch ZeRO-1 entry point. It
+does not replace `train_iql.py`, `training.py`, or the UI job path; those remain
+the original single-process trainer. Select 1–8 physical GPUs explicitly in
+`configs/server_pipeline.yaml`, then inspect and launch the plan:
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml \
+  --dry-run
+
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
+```
+
+The server pipeline performs the same selection, Prepare, and RynnValue binding
+stages serially before launching `torchrun`. Only IQL optimization is
+distributed. Q, V, and the actor overlay each use DDP gradient synchronization
+and an independent `ZeroRedundancyOptimizer`; every rank retains its own frozen
+VLA backbone. Target Q remains local and is updated identically from the
+synchronized online Q replicas.
+
+In server mode, `iql.micro_batch_size` is the **global** micro batch and must be
+divisible by the number of configured GPUs. For example, eight GPUs with global
+micro batch 8 use one transition per rank. With
+`gradient_accumulation_steps: 4`, the actor effective global batch is 32;
+`train_steps`, the learning-rate schedule, and accumulation semantics do not
+change with world size.
+
+Before `torchrun`, `build_server_cache.py` materializes only the de-duplicated
+training chunks into hash-keyed read-only `.npy` mmap arrays. Actor images and
+critic current/next images are shared through the OS page cache, while compact
+actions, proprioception, masks, and rewards are assembled once in each rank.
+Changing the dataset/reward manifest, critic image size, or source hashes creates
+a different cache. Source trajectories and RynnValue sidecars remain read-only.
+
+Only rank zero writes JSONL, TensorBoard, W&B, checkpoints, and the standard
+policy overlay. Checkpoint save first consolidates all three ZeRO optimizer
+states on rank zero; unwrapped model keys allow a server checkpoint to resume
+with a different 1–8 GPU world size. `Ctrl+C` is handled at a shared safe step
+boundary and records one diagnostic checkpoint.
+
+Deploy this branch on the training host with:
+
+```bash
+git fetch origin
+git switch server
+git pull --ff-only origin server
+```
+
+The implementation follows PyTorch's documented one-process-per-GPU DDP model
+and its supported integration with `ZeroRedundancyOptimizer`:
+[DistributedDataParallel](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html),
+[distributed optimizers](https://docs.pytorch.org/docs/stable/distributed.optim.html).
+
 The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan
 the rest of `dataset-root`: it verifies and imports exactly the listed members,
@@ -176,13 +232,11 @@ frequency without changing the per-step JSONL/TensorBoard records. See the
 root Chinese README sections 4.4.8 and 4.4.9 for complete configuration and
 8xA100 deployment guidance.
 
-The trainer is currently single-process and single-GPU, but one GPU can process
-multiple same-task replay transitions in each forward pass. Restrict a job to one
-physical GPU with `CUDA_VISIBLE_DEVICES=N` and leave both configured devices as
-`cuda:0`; the visible device is remapped to process-local index zero. Eight A100s
-are best used for eight independent seeded/hyperparameter runs after preparing
-and annotating once. A single run does not use DDP/FSDP yet and cannot be made
-eight-GPU merely by exposing all devices.
+On `main`, the UI and `train_terminal.py` remain single-process and single-GPU;
+one GPU can still process multiple same-task replay transitions per forward.
+The `server` branch's `train_server.py` is the only entry point that distributes
+one training run. Merely exposing multiple devices to the original entry points
+does not enable DDP.
 
 For a fast CPU test without model downloads:
 

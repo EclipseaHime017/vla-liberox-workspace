@@ -1133,22 +1133,63 @@ conda run -n vla-liberox wandb sync \
 
 #### 4.4.9 8×A100 资源配置
 
-当前实现是**单进程、单GPU训练器**。`reward.device`和`iql.device`各接受一个`cuda:N`；没有DDP/FSDP，设置8张可见卡不会让单次训练自动使用8卡。单卡内已支持同一任务prompt的批量双视角VLA输入，远程终端默认使用 `micro_batch_size=8`、`gradient_accumulation_steps=4`提高A100显存利用率；Q/V、actor梯度、随机采样和checkpoint尚未做多rank同步。
-
-在共享服务器上，推荐由调度器为每条流水线分配一张A100。用物理GPU 3时：
+`main` 分支及 UI 仍使用单进程、单 GPU 的 `train_iql.py`；单机多卡训练只在独立 `server` 分支通过新入口提供，不会改变 UI 的训练行为。服务器部署先切换分支：
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 python \
-  vla-adapter-rynn-iql/scripts/train_terminal.py \
-  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml \
-  --yes
+git fetch origin
+git switch server
+git pull --ff-only origin server
 ```
 
-此时YAML中的 `reward.device: cuda:0` 和 `iql.device: cuda:0` **保持不变**：进程内的 `cuda:0` 已映射到物理GPU 3。不要在只暴露一张卡时写 `cuda:3`。
+编辑 `configs/server_pipeline.yaml`，显式指定可使用的物理 GPU：
 
-要利用8张A100，当前最有效的方式是并行运行8个独立实验，而不是让一个实验占8卡：先用一条流水线完成Prepare和RynnValue评价绑定；确认第二次 `--dry-run` 显示这两个阶段可跳过后，再准备8份配置，分别修改 `iql.seed`、待比较的超参数、`wandb.run_name`，并保持相同 `wandb.group`。每个进程绑定不同物理GPU。这样缓存评价只计算一次，8张卡用于8组IQL实验，W&B可在同一group中直接比较。
+```yaml
+distributed:
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  backend: nccl
+  zero_stage: 1
+  timeout_seconds: 1800
+  data_workers_per_rank: 2
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
 
-Slurm环境建议每个array job申请一张卡（例如 `--gres=gpu:a100:1`），并继续在YAML内使用 `cuda:0`；Slurm会完成可见设备映射。若目标是用8卡缩短**同一个**训练run，需要另行实现DDP/FSDP，不能只改YAML或启动命令。
+replay_cache:
+  enabled: true
+  root: ../outputs/server-replay-cache
+  rebuild: false
+
+overrides:
+  iql:
+    # server模式下是所有rank合计的全局micro batch。
+    micro_batch_size: 8
+    gradient_accumulation_steps: 4
+```
+
+GPU 数量由 `gpu_ids` 长度决定，脚本只暴露这些设备给 `torchrun`，不会自动占用其余 GPU。全局 micro batch 必须能被 GPU 数整除；上述 8 卡配置为每卡 1 条 transition，每次 actor 更新的全局有效 batch 为 `8×4=32`。增加或减少 GPU 不会自动改变 `train_steps`、学习率或梯度累积语义。
+
+先检查选择、环境和batch配置，不创建流水线输出：
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml \
+  --dry-run
+```
+
+确认后启动：
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
+```
+
+流程仍是 `选择 → Prepare → RynnValue评价/绑定 → mmap缓存 → 多卡IQL训练`。前三个阶段沿用现有单进程流程并串行使用 GPU；只有 IQL 训练通过一张卡一个进程的 DDP 分布。Q、V、actor overlay 分别使用独立的 PyTorch `ZeroRedundancyOptimizer`（ZeRO-1）；冻结的 VLA backbone 仍在每张卡各保留一份。target Q 不包 DDP，而是从同步后的 online Q 在每个rank执行完全相同的 Polyak 更新，因此不改变 `main` 当前 V/Q/target/actor 的更新顺序、Advantage、Bellman target、reward reduction、优化器超参数或梯度裁剪。
+
+服务器缓存以 prepared dataset、reward manifest、critic图像尺寸和源哈希为键，把实际参与训练的去重chunk整理为只读 `.npy` mmap。训练时不再逐样本重复解压大型 `trajectory_observations.npz`；图像通过操作系统页缓存共享，动作、proprio、mask和reward由每个rank启动时一次性整理。缓存不会修改源轨迹、RynnValue sidecar或UI数据集。
+
+只有rank 0写入W&B、TensorBoard、`metrics.jsonl`、checkpoint和标准policy overlay。新增的 `server/*` 指标包含全局/每卡batch、全局吞吐、数据等待、host-to-device、backbone、Q/V、actor、DDP通信和最慢rank耗时。保存checkpoint前会把Q、V、actor三套ZeRO optimizer state汇总到rank 0；保存的模型键不带 `module.` 前缀，可在1卡和多卡服务器配置间恢复。`Ctrl+C`会转发到torchrun进程组，并在共同安全边界保存一次checkpoint。
+
+该实现遵循 PyTorch 的单卡单进程 DDP 与 ZeRO-1 组合方式：[DistributedDataParallel](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html)、[ZeroRedundancyOptimizer](https://docs.pytorch.org/docs/stable/distributed.optim.html)。第一版仅支持单机1–8卡，不支持跨节点；ZeRO-1只分片优化器状态，不分片冻结backbone参数。
 
 ### 4.5 数据与奖励语义
 
