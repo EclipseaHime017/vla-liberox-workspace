@@ -90,8 +90,8 @@ class PixelIQL(nn.Module):
     def __init__(self, *, horizon: int = 8, action_dim: int = 7, proprio_dim: int = 8,
                  discount: float = 0.99, expectile: float = 0.8, tau: float = 0.005,
                  critic_lr: float = 3e-4, value_lr: float = 3e-4,
-                 critic_optimizer: str = "adam", critic_weight_decay: float = 0.0,
-                 value_optimizer: str = "adam", value_weight_decay: float = 0.0,
+                 critic_optimizer: str = "adamw", critic_weight_decay: float = 0.01,
+                 value_optimizer: str = "adamw", value_weight_decay: float = 0.01,
                  critic_max_grad_norm: float = 10.0, value_max_grad_norm: float = 10.0,
                  accumulate_primitive_steps: bool = False):
         super().__init__()

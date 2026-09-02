@@ -252,8 +252,9 @@ IQL relabeling setting.
 IQL update semantics follow the pinned `pi-rl` implementation: V is first fit
 by expectile regression against the minimum frozen target Q, online Q is then
 fit with the newly updated next-state V, target Q receives a Polyak update, and
-policy weights use the updated online `min(Q1,Q2)-V`. Auxiliary Q/V networks use
-Adam without weight decay. The VLA component optimizer uses AdamW with
+policy weights use the updated online `min(Q1,Q2)-V`. The current default restores
+the earlier Q/V AdamW setup with PyTorch's `betas=(0.9,0.999)`, `eps=1e-8`, and
+weight decay `0.01`; YAML can still select the official Adam ablation. The VLA component optimizer uses AdamW with
 `betas=(0.9,0.95)`, `eps=1e-8`, weight decay `1e-10`, and gradient clipping at
 1.0.
 

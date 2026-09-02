@@ -24,9 +24,10 @@ def test_iql_update_and_advantage_are_finite():
     metrics = model.update(_batch())
     assert torch.isfinite(torch.tensor([metrics.q_loss, metrics.value_loss])).all()
     assert model.advantage(_batch()).shape == (2,)
-    assert isinstance(model.q_optimizer, torch.optim.Adam)
-    assert not isinstance(model.q_optimizer, torch.optim.AdamW)
-    assert isinstance(model.value_optimizer, torch.optim.Adam)
+    assert isinstance(model.q_optimizer, torch.optim.AdamW)
+    assert isinstance(model.value_optimizer, torch.optim.AdamW)
+    assert model.q_optimizer.param_groups[0]["weight_decay"] == 0.01
+    assert model.value_optimizer.param_groups[0]["weight_decay"] == 0.01
 
 
 def test_iql_optimizer_and_gradient_clip_are_configurable():

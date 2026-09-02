@@ -48,21 +48,21 @@ iql:
   critic_image_size: 128
   critic_lr: 0.0003
   value_lr: 0.0003
-  # Q/V optimizers are explicit so AdamW never silently applies its default
-  # weight decay. Supported values: adam, adamw.
-  critic_optimizer: adam
-  critic_weight_decay: 0.0
-  value_optimizer: adam
-  value_weight_decay: 0.0
+  # Match the earlier AdamW Q/V setup: PyTorch default betas/eps and 0.01 decay.
+  # Supported values remain adam and adamw for controlled ablations.
+  critic_optimizer: adamw
+  critic_weight_decay: 0.01
+  value_optimizer: adamw
+  value_weight_decay: 0.01
   critic_max_grad_norm: 10.0
   value_max_grad_norm: 10.0
   policy_peak_lr: 0.00003
   policy_final_lr: 0.000003
   expectile: 0.8
-  beta: 10.0
-  max_advantage_weight: 100.0
+  beta: 3.0
+  max_advantage_weight: 10.0
   target_tau: 0.005
-  critic_warmup_steps: 200
+  critic_warmup_steps: 1000
   train_steps: 10000
   micro_batch_size: 1
   gradient_accumulation_steps: 32

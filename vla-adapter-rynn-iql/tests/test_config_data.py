@@ -79,6 +79,17 @@ def test_positive_micro_batch_is_not_artificially_limited_to_one(configured, tmp
     assert load_train_config(path).section("iql")["micro_batch_size"] == 8
 
 
+def test_default_iql_stability_profile(configured):
+    iql = configured.section("iql")
+    assert iql["critic_optimizer"] == "adamw"
+    assert iql["critic_weight_decay"] == 0.01
+    assert iql["value_optimizer"] == "adamw"
+    assert iql["value_weight_decay"] == 0.01
+    assert iql["beta"] == 3.0
+    assert iql["max_advantage_weight"] == 10.0
+    assert iql["critic_warmup_steps"] == 1000
+
+
 @pytest.mark.parametrize("field", ["critic_optimizer", "value_optimizer"])
 def test_iql_optimizer_name_is_validated(configured, tmp_path: Path, field: str):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
