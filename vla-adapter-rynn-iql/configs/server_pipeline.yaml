@@ -36,13 +36,13 @@ overrides:
     accumulate_primitive_steps: false
   vla: {}
   iql:
-    train_steps: 20000
+    train_steps: 10000
     critic_warmup_steps: 1000
     beta: 3.0
     max_advantage_weight: 20.0
     # In server mode this is the global batch across all ranks.
-    micro_batch_size: 8
-    gradient_accumulation_steps: 4
+    micro_batch_size: 32
+    gradient_accumulation_steps: 1
   logging:
     tensorboard: true
     wandb:
