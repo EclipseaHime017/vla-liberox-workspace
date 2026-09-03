@@ -715,7 +715,7 @@ vla:
 iql:
   expectile: 0.8
   beta: 3.0
-  max_advantage_weight: 10.0
+  max_advantage_weight: 20.0
   target_tau: 0.005
   micro_batch_size: 1
   gradient_accumulation_steps: 32
@@ -867,7 +867,7 @@ iql:
   policy_final_lr: 0.000003
   expectile: 0.8
   beta: 3.0
-  max_advantage_weight: 10.0
+  max_advantage_weight: 20.0
   target_tau: 0.005
   critic_warmup_steps: 1000
   train_steps: 10000
@@ -890,7 +890,7 @@ logging:
 
 - 数据与显存：`critic_image_size`只控制Q/V使用的双视角缩放尺寸；VLA actor仍走自身processor。`micro_batch_size`是每次同时送入Q/V和VLA actor的transition数量，不再被人为限制为1；`gradient_accumulation_steps`决定多少个micro-step后更新actor。基础16 GB profile采用 `1×32`，单任务A100服务器profile采用 `8×4`，两者等效actor batch均为32。批处理只允许prepared training split包含唯一 `task_id + prompt`；旧多任务manifest仍可用 `micro_batch_size=1`训练。
 - 训练长度：`train_steps`表示critic/value优化次数，不是epoch。实际抽样transition数为 `train_steps × micro_batch_size`，actor optimizer更新次数约为 `ceil(train_steps / gradient_accumulation_steps)`。因此将 `1×32` 改为 `8×4`并保持相同 `train_steps`会增加数据吞吐和actor更新次数，不应直接与旧run按step数视为相同训练预算。每个变长transition仍被均匀采样，`action_source`和`transition_type`语义没有改变。
-- critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value 的 optimizer；`critic_optimizer`、`value_optimizer` 可选 `adam` 或 `adamw`，对应的 `*_weight_decay` 必须显式配置。默认恢复历史参数 `adamw + 0.01`，即使用 PyTorch AdamW 默认 `β=(0.9,0.999)、ε=1e-8`；切换到官方 Adam 时应同时明确设置 weight decay。`critic_max_grad_norm`、`value_max_grad_norm` 分别限制 Q/V 的总梯度范数，默认均为 `10.0`。每步先以冻结 target Q 更新 V，再用更新后的 V 更新 online Q，最后 Polyak 更新 target Q。`expectile` 越高，value 越偏向高 Q 动作；actor 权重使用 online `min(Q1,Q2)-V`，计算 `exp(beta × advantage)` 后由 `max_advantage_weight` 截断。当前默认 `beta=3`、权重上限 `10`，用于降低 noisy advantage 对少数 chunk 的放大。
+- critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value 的 optimizer；`critic_optimizer`、`value_optimizer` 可选 `adam` 或 `adamw`，对应的 `*_weight_decay` 必须显式配置。默认恢复历史参数 `adamw + 0.01`，即使用 PyTorch AdamW 默认 `β=(0.9,0.999)、ε=1e-8`；切换到官方 Adam 时应同时明确设置 weight decay。`critic_max_grad_norm`、`value_max_grad_norm` 分别限制 Q/V 的总梯度范数，默认均为 `10.0`。每步先以冻结 target Q 更新 V，再用更新后的 V 更新 online Q，最后 Polyak 更新 target Q。`expectile` 越高，value 越偏向高 Q 动作；actor 权重使用 online `min(Q1,Q2)-V`，计算 `exp(beta × advantage)` 后由 `max_advantage_weight` 截断。当前默认 `beta=3`、权重上限 `20`。
 - actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。默认前 `1000` 个 `critic_warmup_steps` 中 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 在 warmup 期间并未冻结。
 - 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
 - 终端进度：`logging.console_interval_steps`控制打印间隔。首步和最终一步始终打印；每行包含当前/总step、百分比、BC warmup/IQL阶段、已用时间、ETA、step/s、sample/s、Q/value/actor loss、Q/V/advantage均值、advantage weight、actor学习率及CUDA峰值显存。比较不同batch时应以 `samples_per_second`衡量吞吐，不能只比较step/s。
@@ -995,7 +995,7 @@ overrides:
     train_steps: 20000
     critic_warmup_steps: 1000
     beta: 3.0
-    max_advantage_weight: 10.0
+    max_advantage_weight: 20.0
     # 单任务A100服务器默认；等效actor batch仍为32。
     micro_batch_size: 8
     gradient_accumulation_steps: 4
@@ -1230,7 +1230,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-liberox python -m pytest -q
 1. 将 `configs/inference.yaml` 的 `evaluation.open_loop_steps` 从 `8` 改为 `1` 或 `2`。抓取接触阶段每 50–100 ms 重规划，通常比一次盲执行 8 步更稳；若成功率明显上升，主要问题是开环执行而不是奖励或动作头完全失效。
 2. 检查失败视频对应的 `trajectory.csv`：raw gripper 应在接触前从接近 `1`（开）切到接近 `0`（闭），环境 gripper action 则应变为 `+1`。若始终不闭合，重点检查示教中“闭爪并保持、随后抬升”的有效 chunk 数，而不是只看总轨迹数。
 3. 现有 50 条接管轨迹的长前缀会让“接近目标”的样本远多于真正抓取转换。优先从夹爪接近碗前开始新增短分支，明确包含对准、闭爪保持和抬升；数据准备仍只导入分支后缀，不重复父前缀。
-4. 查看训练目录的 `metrics.jsonl`。当前默认 `beta: 3`、`max_advantage_weight: 10`、`critic_warmup_steps: 1000`；若 `advantage_weight_mean` 仍长期贴近上限，说明 noisy advantage 仍让少数 chunk 主导训练，应先检查 Q/V 和 reward 分布，再一次只调整一个参数。
+4. 查看训练目录的 `metrics.jsonl`。当前默认 `beta: 3`、`max_advantage_weight: 20`、`critic_warmup_steps: 1000`；若 `advantage_weight_mean` 仍长期贴近上限，说明 noisy advantage 仍让少数 chunk 主导训练，应先检查 Q/V 和 reward 分布，再一次只调整一个参数。
 5. 若 gripper 输出方向正确但动作抖动或过冲，再把 `policy_peak_lr` 从 `3e-5` 降至 `1e-5`、`policy_final_lr` 从 `3e-6` 降至 `1e-6`，并保留独立验证轨迹选择 checkpoint，避免 action head 在少量成功数据上过拟合。
 
 摄像头关闭功能适合诊断模型究竟依赖主视角还是腕部视角，不建议把单摄像头消融结果直接当作正式策略提升。训练 overlay 仍是双摄像头模型；若希望永久改成单摄像头结构，需要重新设计并训练模型输入层，而不是只关闭一个槽位。

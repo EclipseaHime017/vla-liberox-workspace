@@ -86,7 +86,7 @@ def test_default_iql_stability_profile(configured):
     assert iql["value_optimizer"] == "adamw"
     assert iql["value_weight_decay"] == 0.01
     assert iql["beta"] == 3.0
-    assert iql["max_advantage_weight"] == 10.0
+    assert iql["max_advantage_weight"] == 20.0
     assert iql["critic_warmup_steps"] == 1000
 
 

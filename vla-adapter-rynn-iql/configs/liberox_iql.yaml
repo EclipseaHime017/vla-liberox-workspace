@@ -60,7 +60,7 @@ iql:
   policy_final_lr: 0.000003
   expectile: 0.8
   beta: 3.0
-  max_advantage_weight: 10.0
+  max_advantage_weight: 20.0
   target_tau: 0.005
   critic_warmup_steps: 1000
   train_steps: 10000

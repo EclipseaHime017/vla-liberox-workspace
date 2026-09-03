@@ -43,7 +43,7 @@ overrides:
     train_steps: 20000
     critic_warmup_steps: 1000
     beta: 3.0
-    max_advantage_weight: 10.0
+    max_advantage_weight: 20.0
     # A100 server profile: keep the actor effective batch at 8 * 4 = 32.
     micro_batch_size: 8
     gradient_accumulation_steps: 4
