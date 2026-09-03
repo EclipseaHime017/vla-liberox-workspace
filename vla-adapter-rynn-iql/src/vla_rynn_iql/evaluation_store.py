@@ -11,13 +11,18 @@ from typing import Any
 import numpy as np
 
 from .io import atomic_json, sha256_file
-from .rewards import ANNOTATION_SCHEMA_VERSION, OFFICIAL_OUTPUT_KEYS
+from .rewards import (
+    ANNOTATION_SCHEMA_VERSION,
+    REWARD_SCHEMA_VERSION,
+    OFFICIAL_OUTPUT_KEYS,
+)
 
 
 SIDECAR_NAME = "rynnvalue_evaluation.json"
 VALUES_NAME = "rynnvalue_evaluation.npz"
 PBRS_ARRAY_KEYS = frozenset({"pbrs_shaping_reward", "pbrs_chunk_reward"})
 REQUIRED_ARRAY_KEYS = frozenset(OFFICIAL_OUTPUT_KEYS) | PBRS_ARRAY_KEYS | {"boundary_steps"}
+COMPATIBLE_SIDECAR_SCHEMA_VERSIONS = frozenset({5, ANNOTATION_SCHEMA_VERSION})
 
 
 def _utc_now() -> str:
@@ -50,7 +55,7 @@ def valid_bound_evaluation(episode: dict[str, Any]) -> dict[str, Any] | None:
     if payload is None:
         return None
     if (
-        payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION
+        payload.get("schema_version") not in COMPATIBLE_SIDECAR_SCHEMA_VERSIONS
         or payload.get("run_id") != episode.get("run_id")
         or payload.get("trajectory_sha256") != sha256_file(trajectory)
         or payload.get("observations_sha256") != episode.get("observations_sha256")
@@ -97,9 +102,12 @@ def bind_reward_manifest(
         raise ValueError(f"Prepared manifest is invalid: {prepared_path}")
     if rewards is None or rewards.get("complete") is not True:
         raise ValueError(f"Reward manifest is incomplete: {reward_path}")
-    if rewards.get("schema_version") != ANNOTATION_SCHEMA_VERSION:
+    if (
+        rewards.get("schema_version") != REWARD_SCHEMA_VERSION
+        or rewards.get("kind") != "derived_iql_reward"
+    ):
         raise ValueError(
-            f"Reward manifest must use schema v{ANNOTATION_SCHEMA_VERSION}"
+            f"Derived reward manifest must use schema v{REWARD_SCHEMA_VERSION}"
         )
     if rewards.get("dataset_sha256") != prepared.get("dataset_sha256"):
         raise ValueError("Reward manifest does not match the prepared dataset")
@@ -154,7 +162,8 @@ def bind_reward_manifest(
             "values_file": VALUES_NAME,
             "values_sha256": sha256_file(destination),
             "boundary_count": int(len(boundaries)),
-            "annotator": rewards.get("annotator") or reward.get("annotator") or {},
+            "annotator": reward.get("annotator") or rewards.get("annotator") or {},
+            "annotation_config": rewards.get("annotation_config") or {},
             "reward_config": rewards.get("reward_config") or {},
             "official_outputs": reward.get("official_outputs") or {},
             "pbrs_reward": reward.get("pbrs_reward") or {},

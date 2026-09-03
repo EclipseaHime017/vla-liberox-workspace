@@ -70,21 +70,9 @@ requires explicit force confirmation and marks every referencing dataset
 `BROKEN`; existing training summaries and overlays remain auditable but the
 dataset can no longer be annotated or trained.
 
-`annotation-cache/<content_hash>.npz` contains the shared, content-addressed
-RynnValue computation cache. A standalone trajectory-evaluation job may bind a
-copy to the source episode as `rynnvalue_evaluation.npz`; its adjacent JSON
-binds the trajectory hash, observation hash, RynnValue revision, reward
-configuration, evaluation time and value-file hash. These sidecars are used by
-the trajectory detail page, but they do not select the rewards used by a frozen
-training dataset. Dataset annotation jobs instead keep their prepared and
-reward manifests below
-`datasets/<dataset_id>/annotations/<annotation_id>/work/`. Consequently the
-same trajectories can be evaluated with different `max_frames` settings and
-each frozen dataset can select its own version without overwriting trajectory
-detail sidecars.
-
-`annotation-cache/<content_hash>.npz` uses evaluation schema v5. It records the
-official RynnValue head results without averaging overlapping windows or replacing
+`annotation-cache/<content_hash>.npz` contains the shared, reward-agnostic
+RynnValue computation cache. Annotation schema v6 records the official
+RynnValue head results without averaging overlapping windows or replacing
 their semantics: `absolute_temporal_distance_seconds [N,H]`,
 `absolute_value_entropy_nats [N,H]`, `absolute_value_logits [N,H,B]`,
 `relative_temporal_distance_seconds [N]`, and `relative_value_logits [N,B]`,
@@ -94,16 +82,44 @@ Match, and Success for UI display and is never treated as the original output.
 For every boundary, the absolute result is the last `<value>` slot of the
 official uniformly resampled prefix; the relative result is the
 `<relative_value>` slot between that same prefix's final two presented images,
-not a finite difference computed afterward from two absolute predictions.
-`pbrs_shaping_reward` stores the raw, unweighted RynnValue Shape Reward and
-`pbrs_chunk_reward` stores the Final Reward `r_sparse + kappa * r_shape`.
+not a finite difference computed afterward from two absolute predictions. The
+canonical annotation NPZ contains no sparse, Shape, or Final Reward arrays.
+Its key depends on trajectory/observation content, prompt, required boundaries,
+RynnValue model/revision, dtype, and `max_frames`; it deliberately excludes
+`gamma`, `kappa`, and reward reduction mode.
+
+Each prepared dataset has
+`annotations/<annotation_id>/work/annotations/annotation_manifest.json`, which
+binds its members to those immutable model outputs. A separate deterministic
+stage writes `work/rewards/<reward_hash>.npz` and `reward_manifest.json`.
+`pbrs_shaping_reward` stores the raw, unweighted RynnValue Shape Reward
+`gamma * Phi(s_next) - Phi(s)`, `dense_reward` stores
+`kappa * pbrs_shaping_reward`, and `pbrs_chunk_reward` stores the Final Reward
+`r_sparse + dense_reward`. Every action chunk is one macro-action decision by
+default:
+`r_sparse` is `-1` for an incomplete chunk and `0` for a completing chunk, and
+the IQL Bellman target uses one `gamma`. Variable chunks keep their actual `L`
+only for the action mask and selection of `s[t+L]`. This second cache is keyed
+by the prepared dataset and annotation hashes plus `gamma`, `kappa`, and the
+macro/primitive-step switch. Exact repeated training reuses it; a mismatch is
+recomputed with NumPy and never invokes RynnValue.
+
+After a successful UI evaluation job, a combined evaluation snapshot may be
+atomically copied beside the source episode as `rynnvalue_evaluation.npz`; its
+adjacent JSON binds the trajectory hash, observation hash, RynnValue revision,
+active reward configuration, evaluation time, and value-file hash. These two
+small sidecars are the durable trajectory-level evaluation used by the Dataset
+detail page. Existing hash-valid schema-v4/v5 sidecars remain valuable: schema
+v6 migration extracts and preserves their official heads, ignores stale derived
+reward arrays, and does not run another model forward.
+
 With `accumulate_primitive_steps=false`, every action chunk is one macro-action
 decision: `r_sparse` is `-1` for an incomplete chunk and `0` for a completing
 chunk, PBRS and the Bellman target use one `gamma`, and actual `L` only controls
 the action mask and `s[t+L]`. With the boolean set to `true`, primitive rewards
 inside the chunk are discounted and summed, while PBRS and Bellman bootstrap
-both use `gamma^L`. The cache key excludes the whole
-dataset hash, so unchanged members are reused by derived dataset versions.
+both use `gamma^L`.
+
 The Dataset detail API retains the absolute/relative remaining-time and entropy
 series. The UI also displays the observation potential directly derived as
 `Phi(s) = -absolute_remaining_time(s)` without changing the persisted official
@@ -112,15 +128,11 @@ RynnValue outputs. The API exposes the reward terms as `pbrs_reward.shape_reward
 with `chunk_start_steps`, `chunk_end_steps`, and `chunk_lengths`. The UI renders
 one sample at each chunk completion and connects adjacent chunk samples; it does
 not duplicate a chunk reward over every control frame.
-Schema v5 defines the stored output contract and paper-IQL relabeling protocol;
-it is not used to choose between the two reward semantics. Hash-valid v4 sidecars with
-the same official inference contract are migrated by reusing their official
-RynnValue heads and recomputing only the deterministic reward arrays. Older v2
+Hash-valid v4/v5 sidecars with the same official inference contract are migrated
+by reusing their RynnValue heads and recomputing only deterministic reward
+arrays. Older v2
 sidecars are intentionally treated as unevaluated because they may have been
 produced with the standalone demo's 32/64-frame protocol.
-Each annotation version has its own
-`datasets/<dataset_id>/annotations/<annotation_id>/work/reward_manifest.json`
-which references only that frozen dataset.
 
 The Dataset page has separate **trajectory evaluation** and **dataset package**
 flows. Batch trajectory evaluation skips valid sidecars unless overwrite is

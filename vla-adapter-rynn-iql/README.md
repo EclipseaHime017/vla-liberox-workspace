@@ -49,6 +49,8 @@ conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py 
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/materialize_rewards.py \
+  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
@@ -82,10 +84,12 @@ restricted to a prepared training split with exactly one task and prompt;
 legacy multi-task manifests remain supported with micro batch one.
 
 Prepare is skipped only when its selection/source/structural fingerprint and
-manifest hash match. Reward annotation is skipped when the complete reward
-manifest matches, and otherwise reuses hash-valid per-trajectory sidecars so
-RynnValue runs only for missing or incompatible trajectories. Completed
-annotations are atomically bound beside each source trajectory as
+manifest hash match. RynnValue annotation and deterministic reward reduction
+use separate caches. The first cache depends only on model inference inputs and
+settings; the second depends on `gamma`, shaping weight, and reward reduction
+mode. Changing only reward semantics therefore performs a fast CPU rebuild and
+never reloads RynnValue. Completed annotations are atomically bound beside each
+source trajectory as
 `rynnvalue_evaluation.{json,npz}`. Training always creates a new run unless an
 explicit `resume_checkpoint` override is provided. `--force-prepare` and
 `--force-annotate` are available for deliberate rebuilds. Pipeline state,
@@ -103,10 +107,11 @@ prepare/training with `vla-liberox` and annotation with `rynnvalue-reward`; it
 does not merge either dependency stack or pass browser-provided shell commands.
 
 Creating or deriving a dataset in the UI still runs preparation. The backend
-launches a detached two-stage job: `prepare_dataset.py` first materializes that
+launches a detached three-stage job: `prepare_dataset.py` first materializes that
 frozen selection's transition/split manifest under
 `datasets/<dataset_id>/annotations/<job_id>/work/`, then
-`annotate_rewards.py` resolves or computes its RynnValue entries. Durable
+`annotate_rewards.py` resolves or computes its RynnValue entries, and
+`materialize_rewards.py` creates the default deterministic reward cache. Durable
 per-trajectory evaluations seed the content cache before this job, so existing
 model evaluations are reused; preparation itself is still required because a
 dataset version has its own members, interrupted chunks, terminal threshold,
@@ -227,21 +232,22 @@ each action-chunk boundary, the adapter follows the pinned official inference
 program: it uniformly resamples the visual prefix ending at that boundary and
 reads the last value slot. `annotation_batch_size: 1` is the 16 GB default;
 every boundary is evaluated from its complete prefix, so long trajectories are
-not merged by averaging overlapping windows. Evaluation schema v5 records the
+not merged by averaging overlapping windows. Annotation schema v6 records only the
 official decoded absolute distance, absolute logits/entropy, decoded relative
 distance, relative logits, and exact generated Analysis text/token IDs. Parsed
 Description / Match / Success values are display-only. Environment `done` is
-the sole success/terminal authority. `pbrs_shaping_reward` stores the raw,
-unweighted RynnValue Shape Reward `γΦ(s')-Φ(s)`, while `pbrs_chunk_reward`
-stores the Final Reward `r_sparse+κ·r_shape`. Here `r_sparse` is `-1` for an
-incomplete macro action and `0` when that chunk completes the task, and
-`Φ=-absolute temporal distance`. Valid schema-v4 sidecars reuse their complete
-official model heads and are migrated by recomputing only these deterministic
-reward arrays; RynnValue is not run again. Changing only
-`accumulate_primitive_steps`, `gamma`, or `shaping_weight` likewise rebuilds
-the deterministic arrays from saved heads without another model forward.
-Evaluation schema v5 describes the stored-output contract; it is not the reward
-mode. Chunks recorded
+the sole success/terminal authority.
+
+Reward materialization is a separate deterministic CPU stage. It reads those
+immutable official outputs and writes a second-level cache containing
+`pbrs_shaping_reward` (the raw Shape Reward `γΦ(s')-Φ(s)`) and
+`pbrs_chunk_reward` (the Final Reward `r_sparse+κ·r_shape`). Here
+`r_sparse` is `-1` for an incomplete macro action and `0` when that chunk
+completes the task, and `Φ=-absolute temporal distance`. Its cache key includes
+`gamma`, `shaping_weight`, and `accumulate_primitive_steps`; changing any of
+them recomputes only these inexpensive arrays. Hash-valid schema-v4/v5
+sidecars reuse their complete official model heads during migration, regardless
+of the reward reduction stored beside them, so RynnValue is not run again. Chunks recorded
 after the confirmed terminal are inspection-only and never enter ReplayDataset.
 
 The training default uses four uniformly sampled prefix frames, matching the
@@ -294,12 +300,16 @@ dataset/reward hashes and workspace Git commit.
   again before training.
 - `paths.annotation_cache/<content_hash>.{npz,json}`: atomic, per-trajectory
   official absolute/relative decoded values and logits, absolute entropy, exact
-  Analysis generation, paper-defined PBRS rewards, and provenance.
+  Analysis generation, and evaluator provenance. These files contain no sparse,
+  Shape, or Final Reward arrays.
   Dataset identity is excluded from the key, so derived dataset versions reuse
   unchanged members.
-- `outputs/work/rewards/reward_manifest.json`: the current dataset's complete
-  reference index into that cache; partial indexes are also written while an
-  annotation job is running.
+- `outputs/work/annotations/annotation_manifest.json`: the current prepared
+  dataset's complete reference index into the immutable RynnValue outputs.
+- `outputs/work/rewards/<reward_hash>.npz` and `reward_manifest.json`: the
+  deterministic second-level reward cache for the active `gamma`, `kappa`, and
+  macro/primitive-step reduction. Exact repeats are reused; a mismatch is
+  rebuilt from annotations without loading RynnValue.
 - `outputs/training/<run>/`: metrics, full checkpoints, provenance and effective
   config.
 - `policy-registry/<policy_id>/`: immutable action-head and proprio-projector

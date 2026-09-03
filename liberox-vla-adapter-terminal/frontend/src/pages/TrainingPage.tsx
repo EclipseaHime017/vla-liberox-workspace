@@ -100,17 +100,22 @@ export function TrainingPage() {
   };
 
   return <section className="content-page training-page">
-    <div className="page-heading"><p className="eyebrow">OFFLINE RL TRAINING</p><h1>RynnValue + Pixel-IQL</h1><p>选择已冻结并完成标注的单任务数据集，在独立进程中后训练 VLA-Adapter action head 与 proprio projector。</p></div>
+    <div className="page-heading"><p className="eyebrow">OFFLINE RL TRAINING</p><h1>RynnValue + Pixel-IQL</h1><p>选择已冻结并完成 RynnValue 评价的单任务数据集，训练启动时会按当前参数快速生成奖励，再后训练 VLA-Adapter action head 与 proprio projector。</p></div>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     <div className="training-layout">
       <section className="surface training-config">
         <div className="panel-title"><strong>训练配置</strong><span>{defaults?.environments.training ?? "vla-liberox"}</span></div>
         <div className="training-form">
           <label>任务<select value={taskId} onChange={(event) => setTaskId(event.target.value)}>{bootstrap?.task_catalog.map((task) => <option key={task.task_id} value={task.task_id}>{task.prompt}</option>)}</select></label>
-          <label>已标注数据集<select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}><option value="">请选择</option>{datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
+          <label>已评价数据集<select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}><option value="">请选择</option>{datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
           {dataset && <div className="training-dataset-summary"><strong>{dataset.member_count} 条轨迹</strong><span>{dataset.action_count} actions</span><span>{dataset.chunk_count} chunks</span><Badge tone="green">完整性正常</Badge><p>训练固定使用该版本全部成员。若需改变 M，请在数据集页面派生并重新标注。</p></div>}
           <div className="parameter-grid">{basicFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name === "critic_warmup_steps" || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
           {defaults?.checkpoints.length ? <label>断点恢复<select value={String(parameters.resume_checkpoint ?? "")} onChange={(event) => patchParameter("resume_checkpoint", event.target.value || null)}><option value="">不恢复</option>{defaults.checkpoints.map((checkpoint) => <option value={checkpoint.path} key={checkpoint.path}>{checkpoint.label}</option>)}</select></label> : null}
+          <details><summary>奖励派生参数</summary><div className="parameter-grid advanced-parameters">
+            <label>Discount γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
+            <label>Shape reward 系数 κ<input type="number" min={0} step="any" value={String(parameters.reward_shaping_weight ?? "")} onChange={(event) => patchParameter("reward_shaping_weight", Number(event.target.value))} /></label>
+            <label className="training-toggle"><input type="checkbox" checked={Boolean(parameters.reward_accumulate_primitive_steps)} onChange={(event) => patchParameter("reward_accumulate_primitive_steps", event.target.checked)} />累计 chunk 内 primitive-step reward</label>
+          </div><p className="field-hint">这些参数只重建快速 reward cache，不会再次运行 RynnValue。</p></details>
           <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">
             <label>Critic optimizer<select value={String(parameters.critic_optimizer ?? "adamw")} onChange={(event) => patchParameter("critic_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
             <label>Value optimizer<select value={String(parameters.value_optimizer ?? "adamw")} onChange={(event) => patchParameter("value_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>

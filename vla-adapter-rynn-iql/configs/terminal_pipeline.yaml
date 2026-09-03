@@ -36,7 +36,7 @@ overrides:
     split_seed: 7
     success_consecutive_steps: 5
   reward:
-    # false=macro-action reward; true=discounted primitive-step accumulation.
+    # Cheap reward reduction override. Existing RynnValue evaluations are reused.
     accumulate_primitive_steps: false
   vla: {}
   iql:

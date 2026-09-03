@@ -13,8 +13,9 @@ from vla_rynn_iql.evaluation_store import (
     bind_reward_manifest,
     valid_bound_evaluation,
 )
-from vla_rynn_iql.rewards import annotate_manifest
+from vla_rynn_iql.rewards import annotate_manifest, materialize_reward_manifest
 from vla_rynn_iql.terminal_pipeline import (
+    annotation_cache_valid,
     build_selection_manifest,
     dataset_roots,
     discover_candidates,
@@ -176,7 +177,10 @@ def test_prepare_fingerprint_cache_and_bound_evaluation(configured, tmp_path: Pa
     mark_prepare_cache(work, fingerprint, selection["dataset_sha256"])
     assert prepare_cache_valid(work, fingerprint)
 
-    reward_path = annotate_manifest(effective, FakeAnnotator())
+    annotation_path = annotate_manifest(effective, FakeAnnotator())
+    assert annotation_cache_valid(work, effective.section("reward"))
+    assert not reward_cache_valid(work, effective.section("reward"))
+    reward_path = materialize_reward_manifest(effective)
     assert reward_cache_valid(work, effective.section("reward"))
     binding = bind_reward_manifest(work / "dataset_manifest.json", reward_path)
     assert binding["bound_count"] == 2
@@ -190,6 +194,7 @@ def test_prepare_fingerprint_cache_and_bound_evaluation(configured, tmp_path: Pa
 
     changed_reward = dict(effective.section("reward"))
     changed_reward["shaping_weight"] = 0.2
+    assert annotation_cache_valid(work, changed_reward)
     assert not reward_cache_valid(work, changed_reward)
 
     episode = prepared["episodes"][0]
