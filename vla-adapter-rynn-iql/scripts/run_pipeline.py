@@ -26,6 +26,7 @@ def main() -> int:
     args = parser.parse_args()
     run(args.train_env, "prepare_dataset.py", args.config.resolve())
     run(args.reward_env, "annotate_rewards.py", args.config.resolve())
+    run(args.train_env, "materialize_rewards.py", args.config.resolve())
     run(args.train_env, "train_iql.py", args.config.resolve())
     if not args.skip_evaluation:
         run(args.train_env, "evaluate.py", args.inference_config.resolve())

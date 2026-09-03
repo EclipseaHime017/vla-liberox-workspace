@@ -23,14 +23,19 @@ from .io import atomic_json, sha256_file, stable_hash
 
 LOG = logging.getLogger(__name__)
 
-# Schema v5 stores the complete official RynnValue outputs and deterministic
-# reward arrays. Reward semantics are selected by a boolean in reward_config;
-# the schema number is not used as a reward-mode switch.
-ANNOTATION_SCHEMA_VERSION = 5
-REUSABLE_OFFICIAL_OUTPUT_SCHEMA_VERSIONS = frozenset({4, 5})
+# Schema v6 separates expensive RynnValue inference from deterministic reward
+# reduction.  Annotation artifacts contain only official model outputs;
+# sparse/PBRS/final rewards live in a second cache keyed by their derivation
+# parameters.
+ANNOTATION_SCHEMA_VERSION = 6
+REWARD_SCHEMA_VERSION = 1
+REUSABLE_OFFICIAL_OUTPUT_SCHEMA_VERSIONS = frozenset({4, 5, 6})
 OFFICIAL_INFERENCE_CONFIG_KEYS = frozenset({
     "model", "revision", "dtype", "max_frames",
     "robot_description", "camera_description",
+})
+REWARD_DERIVATION_CONFIG_KEYS = frozenset({
+    "gamma", "shaping_weight", "accumulate_primitive_steps",
 })
 OFFICIAL_OUTPUT_KEYS = (
     "absolute_temporal_distance_seconds",
@@ -39,6 +44,22 @@ OFFICIAL_OUTPUT_KEYS = (
     "relative_temporal_distance_seconds",
     "relative_value_logits",
 )
+
+
+def official_inference_config(reward_config: dict[str, Any]) -> dict[str, Any]:
+    """Return only settings that can change frozen RynnValue outputs."""
+    return {
+        key: reward_config[key]
+        for key in sorted(OFFICIAL_INFERENCE_CONFIG_KEYS)
+    }
+
+
+def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
+    """Return cheap reward-reduction settings, independent of VLM inference."""
+    return {
+        key: reward_config[key]
+        for key in sorted(REWARD_DERIVATION_CONFIG_KEYS)
+    }
 
 
 def validate_rynnvalue_config_contract(config: Any, processor: Any) -> dict[str, Any]:
@@ -593,18 +614,21 @@ def _official_inference_config_matches(
 
 def _reusable_manifest_entry(
     episode: dict[str, Any], reward_cfg: dict[str, Any],
-    reward_manifest: dict[str, Any] | None,
+    annotation_manifest: dict[str, Any] | None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, Any]] | None:
-    """Reuse official heads from the previous reward reduction in this work dir."""
-    if not isinstance(reward_manifest, dict):
+    """Reuse official heads from a previous annotation manifest in this work dir."""
+    if not isinstance(annotation_manifest, dict):
         return None
-    previous_cfg = reward_manifest.get("reward_config")
+    previous_cfg = annotation_manifest.get("annotation_config")
+    if not isinstance(previous_cfg, dict):
+        # v4/v5 reward manifests stored inference and reduction settings together.
+        previous_cfg = annotation_manifest.get("reward_config")
     if not isinstance(previous_cfg, dict) or not _official_inference_config_matches(
         previous_cfg, reward_cfg,
     ):
         return None
     entry = next(
-        (item for item in reward_manifest.get("episodes", [])
+        (item for item in annotation_manifest.get("episodes", [])
          if item.get("run_id") == episode["run_id"]),
         None,
     )
@@ -617,7 +641,7 @@ def _reusable_manifest_entry(
     ):
         return None
     official_metadata = entry.get("official_outputs")
-    annotator_metadata = entry.get("annotator") or reward_manifest.get("annotator")
+    annotator_metadata = entry.get("annotator") or annotation_manifest.get("annotator")
     if not isinstance(official_metadata, dict) or not isinstance(annotator_metadata, dict):
         return None
     if official_metadata.get("prefix_image_slots") != int(reward_cfg["max_frames"]):
@@ -666,15 +690,17 @@ def _reusable_official_sidecar(
         return None
     requested_revision = annotator_metadata.get("requested_revision")
     resolved_revision = annotator_metadata.get("resolved_revision")
-    previous_reward_cfg = payload.get("reward_config")
-    if not isinstance(previous_reward_cfg, dict):
+    previous_inference_cfg = payload.get("annotation_config")
+    if not isinstance(previous_inference_cfg, dict):
+        previous_inference_cfg = payload.get("reward_config")
+    if not isinstance(previous_inference_cfg, dict):
         return None
     if (
         annotator_metadata.get("model") != reward_cfg.get("model")
         or reward_cfg.get("revision") not in {requested_revision, resolved_revision}
         or official_metadata.get("prefix_image_slots") != int(reward_cfg["max_frames"])
-        or previous_reward_cfg.get("robot_description") != reward_cfg.get("robot_description")
-        or previous_reward_cfg.get("camera_description") != reward_cfg.get("camera_description")
+        or previous_inference_cfg.get("robot_description") != reward_cfg.get("robot_description")
+        or previous_inference_cfg.get("camera_description") != reward_cfg.get("camera_description")
     ):
         return None
     expected_boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
@@ -718,6 +744,7 @@ def annotate_manifest(
 ) -> Path:
     manifest = load_manifest(config)
     reward_cfg = config.section("reward")
+    annotation_cfg = official_inference_config(reward_cfg)
     active_annotator = annotator
     manifest_annotator_metadata: dict[str, Any] | None = None
 
@@ -727,13 +754,21 @@ def annotate_manifest(
             active_annotator = RynnValueAnnotator(config)
         return active_annotator
 
-    reward_dir = Path(config.section("paths")["work_dir"]) / "rewards"
-    reward_dir.mkdir(parents=True, exist_ok=True)
-    previous_manifest_path = reward_dir / "reward_manifest.json"
-    try:
-        previous_manifest = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        previous_manifest = None
+    work_dir = Path(config.section("paths")["work_dir"])
+    annotation_dir = work_dir / "annotations"
+    annotation_dir.mkdir(parents=True, exist_ok=True)
+    previous_manifest = None
+    for previous_manifest_path in (
+        annotation_dir / "annotation_manifest.json",
+        work_dir / "rewards" / "reward_manifest.json",
+    ):
+        try:
+            candidate = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if candidate.get("dataset_sha256") == manifest["dataset_sha256"]:
+            previous_manifest = candidate
+            break
     if (
         not isinstance(previous_manifest, dict)
         or previous_manifest.get("dataset_sha256") != manifest["dataset_sha256"]
@@ -754,7 +789,12 @@ def annotate_manifest(
         if manifest_annotator_metadata is None:
             manifest_annotator_metadata = episode_annotator_metadata
         elif stable_hash(manifest_annotator_metadata) != stable_hash(episode_annotator_metadata):
-            raise ValueError("Prepared trajectories use incompatible RynnValue evaluator metadata")
+            # Every reusable episode has already passed the requested model /
+            # revision / inference-contract checks.  Do not discard valuable
+            # evaluations merely because provenance such as snapshot paths or
+            # package metadata differs across machines.  Per-episode metadata
+            # remains authoritative when the dataset contains mixed provenance.
+            manifest_annotator_metadata = {}
         source_key = stable_hash({
             "annotation_schema_version": ANNOTATION_SCHEMA_VERSION,
             "run": episode["run_id"],
@@ -762,7 +802,7 @@ def annotate_manifest(
             "observations": episode["observations_sha256"],
             "prompt": episode["prompt"],
             "boundaries": episode["reward_boundaries"],
-            "reward_config": reward_cfg,
+            "annotation_config": annotation_cfg,
             "model": episode_annotator_metadata,
         })
         output = cache_dir / f"{source_key}.npz"
@@ -795,47 +835,12 @@ def annotate_manifest(
                 current_annotator.predict(episode["prompt"], frames), len(frames)
             )
             analysis = current_annotator.analyze(episode["prompt"], frames)
-        absolute = official_outputs["absolute_temporal_distance_seconds"]
-        if absolute.shape[1] != 1:
-            raise ValueError(
-                "The pinned RynnValue reward path expects one official absolute value head; "
-                f"got {absolute.shape[1]}. Raw heads were not averaged."
-            )
-        value_lookup = {
-            int(boundary): float(value)
-            for boundary, value in zip(boundaries, absolute[:, 0])
-        }
-        # Reward semantics use the debounced terminal from the prepared manifest,
-        # never transient raw done=True samples from the immutable source trajectory.
-        done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
-        if episode["terminal_step"] is not None:
-            # The environment terminal is absorbing for reward semantics. The
-            # recorded post-success tail remains available for diagnostics but
-            # does not reintroduce the pre-success -1 step cost.
-            done[int(episode["terminal_step"]):] = True
-        reward_components = [
-            chunk_reward_components(
-                done, int(chunk["start"]), int(chunk["length"]),
-                value_lookup[int(chunk["start"])], value_lookup[int(chunk["end"])],
-                float(reward_cfg["gamma"]), float(reward_cfg["shaping_weight"]),
-                bool(reward_cfg["accumulate_primitive_steps"]),
-            ) for chunk in episode.get("evaluation_chunks", episode["chunks"])
-        ]
-        pbrs_shaping_rewards = np.asarray(
-            [component[1] for component in reward_components], dtype=np.float32,
-        )
-        chunk_rewards = np.asarray(
-            [component[2] for component in reward_components], dtype=np.float32,
-        )
         temporary = cache_dir / f".{source_key}.{os.getpid()}.npz"
         try:
             np.savez_compressed(
                 temporary,
                 boundary_steps=boundaries,
                 **official_outputs,
-                pbrs_shaping_reward=pbrs_shaping_rewards,
-                # Backward-compatible name: this is the combined final training reward.
-                pbrs_chunk_reward=chunk_rewards,
             )
             os.replace(temporary, output)
         finally:
@@ -855,71 +860,242 @@ def annotate_manifest(
                 "array_keys": sorted(official_outputs),
                 "analysis": analysis,
             },
-            "pbrs_reward": {
-                "array_keys": [
-                    "pbrs_shaping_reward", "pbrs_chunk_reward",
-                ],
-                "description": (
-                    "Unweighted RynnValue PBRS shape reward and combined final IQL reward"
-                ),
-                "accumulate_primitive_steps": bool(
-                    reward_cfg["accumulate_primitive_steps"]
-                ),
-            },
         }
         atomic_json(meta_path, metadata)
         index.append(metadata)
         LOG.info("Annotated %s (%d boundaries)", episode["run_id"], len(boundaries))
-        atomic_json(reward_dir / "reward_manifest.json", {
+        atomic_json(annotation_dir / "annotation_manifest.json", {
             "schema_version": ANNOTATION_SCHEMA_VERSION,
+            "kind": "rynnvalue_annotation",
             "dataset_sha256": manifest["dataset_sha256"],
-            "accumulate_primitive_steps": bool(
-                reward_cfg["accumulate_primitive_steps"]
-            ),
-            "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
+            "annotation_config": annotation_cfg,
+            "annotator": manifest_annotator_metadata or {},
             "complete": False, "episodes": index,
         })
-    index_path = reward_dir / "reward_manifest.json"
+    index_path = annotation_dir / "annotation_manifest.json"
     atomic_json(index_path, {
         "schema_version": ANNOTATION_SCHEMA_VERSION,
+        "kind": "rynnvalue_annotation",
         "dataset_sha256": manifest["dataset_sha256"],
-        "accumulate_primitive_steps": bool(reward_cfg["accumulate_primitive_steps"]),
-        "reward_config": reward_cfg, "annotator": manifest_annotator_metadata or {},
+        "annotation_config": annotation_cfg,
+        "annotator": manifest_annotator_metadata or {},
         "complete": True, "episodes": index,
     })
     return index_path
 
 
-def load_reward_index(config: LoadedConfig) -> dict[str, Any]:
-    path = Path(config.section("paths")["work_dir"]) / "rewards" / "reward_manifest.json"
+def load_annotation_index(config: LoadedConfig) -> dict[str, Any]:
+    """Load official RynnValue outputs, migrating v4/v5 caches without a new forward."""
+    manifest = load_manifest(config)
+    path = (
+        Path(config.section("paths")["work_dir"])
+        / "annotations" / "annotation_manifest.json"
+    )
     if not path.is_file():
-        raise FileNotFoundError(f"Reward manifest not found: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION:
-        raise ValueError(
-            "Reward manifest uses obsolete transition semantics: "
-            f"expected schema v{ANNOTATION_SCHEMA_VERSION}, got "
-            f"v{payload.get('schema_version')}. Re-run annotation; reusable official "
-            "RynnValue outputs will be migrated without another model forward pass."
-        )
-    manifest_reward_cfg = payload.get("reward_config")
-    if not isinstance(manifest_reward_cfg, dict):
-        raise ValueError("Reward manifest has no valid reward_config")
-    requested_cfg = config.section("reward")
-    if manifest_reward_cfg != requested_cfg:
-        if not _official_inference_config_matches(manifest_reward_cfg, requested_cfg):
-            raise ValueError(
-                "Reward manifest uses different RynnValue inference settings; run "
-                "annotate_rewards.py before training"
-            )
-        LOG.info(
-            "Reward semantics changed; rebuilding deterministic reward arrays from "
-            "the existing RynnValue outputs"
-        )
+        LOG.info("No separated annotation manifest; migrating reusable RynnValue outputs")
         path = annotate_manifest(config)
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("reward_config") != requested_cfg:
-            raise ValueError("Rebuilt reward manifest does not match the requested semantics")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected_config = official_inference_config(config.section("reward"))
+    if (
+        payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION
+        or payload.get("kind") != "rynnvalue_annotation"
+        or payload.get("complete") is not True
+        or payload.get("dataset_sha256") != manifest["dataset_sha256"]
+        or payload.get("annotation_config") != expected_config
+    ):
+        raise ValueError(
+            "RynnValue annotation cache does not match the prepared data or inference "
+            "configuration; run annotate_rewards.py. Reward-only settings do not require "
+            "another model evaluation."
+        )
+    if len(payload.get("episodes", [])) != len(manifest.get("episodes", [])):
+        raise ValueError("RynnValue annotation manifest does not cover every episode")
+    for episode in payload["episodes"]:
+        annotation_path = Path(str(episode.get("annotation_path") or ""))
+        if (
+            annotation_path.is_symlink()
+            or not annotation_path.is_file()
+            or episode.get("annotation_sha256") != sha256_file(annotation_path)
+        ):
+            raise ValueError(
+                f"RynnValue annotation cache is missing or corrupted for {episode.get('run_id')}"
+            )
+    return payload
+
+
+def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) -> Path:
+    """Build the cheap reward cache from immutable official RynnValue outputs."""
+    manifest = load_manifest(config)
+    annotation_index = load_annotation_index(config)
+    reward_cfg = config.section("reward")
+    derivation_cfg = reward_derivation_config(reward_cfg)
+    reward_dir = Path(config.section("paths")["work_dir"]) / "rewards"
+    reward_dir.mkdir(parents=True, exist_ok=True)
+    index_path = reward_dir / "reward_manifest.json"
+
+    if not force and index_path.is_file():
+        try:
+            current = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            current = None
+        if (
+            isinstance(current, dict)
+            and current.get("schema_version") == REWARD_SCHEMA_VERSION
+            and current.get("kind") == "derived_iql_reward"
+            and current.get("complete") is True
+            and current.get("dataset_sha256") == manifest["dataset_sha256"]
+            and current.get("annotation_manifest_sha256") == stable_hash(annotation_index)
+            and current.get("reward_config") == derivation_cfg
+            and len(current.get("episodes", [])) == len(manifest.get("episodes", []))
+        ):
+            valid = True
+            for episode in current["episodes"]:
+                reward_path = Path(str(episode.get("reward_path") or ""))
+                if (
+                    reward_path.is_symlink()
+                    or not reward_path.is_file()
+                    or episode.get("reward_sha256") != sha256_file(reward_path)
+                ):
+                    valid = False
+                    break
+            if valid:
+                return index_path
+
+    annotations = {
+        str(item["run_id"]): item for item in annotation_index["episodes"]
+    }
+    index: list[dict[str, Any]] = []
+    for episode in manifest["episodes"]:
+        annotation = annotations.get(str(episode["run_id"]))
+        if annotation is None:
+            raise KeyError(f"RynnValue annotation is missing for {episode['run_id']}")
+        annotation_path = Path(annotation["annotation_path"])
+        expected_boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
+        with np.load(annotation_path, allow_pickle=False) as source:
+            boundaries = np.asarray(source["boundary_steps"], dtype=np.int64)
+            if not np.array_equal(boundaries, expected_boundaries):
+                raise ValueError(
+                    f"RynnValue annotation boundaries do not match {episode['run_id']}"
+                )
+            official_outputs = validate_official_outputs(
+                {name: source[name] for name in OFFICIAL_OUTPUT_KEYS}, len(boundaries)
+            )
+        absolute = official_outputs["absolute_temporal_distance_seconds"]
+        if absolute.shape[1] != 1:
+            raise ValueError(
+                "The pinned RynnValue reward path expects one official absolute value head; "
+                f"got {absolute.shape[1]}. Raw heads were not averaged."
+            )
+        value_lookup = {
+            int(boundary): float(value)
+            for boundary, value in zip(boundaries, absolute[:, 0])
+        }
+        done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
+        if episode["terminal_step"] is not None:
+            done[int(episode["terminal_step"]):] = True
+        evaluation_chunks = episode.get("evaluation_chunks", episode["chunks"])
+        components = [
+            chunk_reward_components(
+                done,
+                int(chunk["start"]),
+                int(chunk["length"]),
+                value_lookup[int(chunk["start"])],
+                value_lookup[int(chunk["end"])],
+                float(derivation_cfg["gamma"]),
+                float(derivation_cfg["shaping_weight"]),
+                bool(derivation_cfg["accumulate_primitive_steps"]),
+            )
+            for chunk in evaluation_chunks
+        ]
+        sparse = np.asarray([item[0] for item in components], dtype=np.float32)
+        shaping = np.asarray([item[1] for item in components], dtype=np.float32)
+        final = np.asarray([item[2] for item in components], dtype=np.float32)
+        reward_key = stable_hash({
+            "reward_schema_version": REWARD_SCHEMA_VERSION,
+            "run_id": episode["run_id"],
+            "annotation_sha256": annotation["annotation_sha256"],
+            "chunks": evaluation_chunks,
+            "terminal_step": episode["terminal_step"],
+            "reward_config": derivation_cfg,
+        })
+        output = reward_dir / f"{reward_key}.npz"
+        # An exact complete manifest returned above.  Any path reaching this
+        # loop is a cheap rebuild, so rewrite the deterministic artifact even
+        # if a stale/hash-colliding filename is present instead of trusting it.
+        temporary = reward_dir / f".{reward_key}.{os.getpid()}.npz"
+        try:
+            # The combined file preserves the existing UI/binding contract while
+            # the canonical annotation cache remains reward-agnostic.
+            np.savez_compressed(
+                temporary,
+                boundary_steps=boundaries,
+                **official_outputs,
+                sparse_reward=sparse,
+                pbrs_shaping_reward=shaping,
+                dense_reward=float(derivation_cfg["shaping_weight"]) * shaping,
+                pbrs_chunk_reward=final,
+            )
+            os.replace(temporary, output)
+        finally:
+            temporary.unlink(missing_ok=True)
+        metadata = {
+            "schema_version": REWARD_SCHEMA_VERSION,
+            "run_id": episode["run_id"],
+            "source_key": reward_key,
+            # Compatibility: older consumers use annotation_path for the file that
+            # contains final rewards and official outputs together.
+            "annotation_path": str(output.resolve()),
+            "annotation_sha256": sha256_file(output),
+            "reward_path": str(output.resolve()),
+            "reward_sha256": sha256_file(output),
+            "official_annotation_path": str(annotation_path.resolve()),
+            "official_annotation_sha256": annotation["annotation_sha256"],
+            "environment_success": episode["success"],
+            "annotator": annotation.get("annotator") or annotation_index.get("annotator") or {},
+            "official_outputs": annotation.get("official_outputs") or {},
+            "pbrs_reward": {
+                "array_keys": [
+                    "sparse_reward", "pbrs_shaping_reward", "dense_reward",
+                    "pbrs_chunk_reward",
+                ],
+                "description": "Deterministic reward cache derived without RynnValue forward",
+                **derivation_cfg,
+            },
+        }
+        index.append(metadata)
+        atomic_json(index_path, {
+            "schema_version": REWARD_SCHEMA_VERSION,
+            "kind": "derived_iql_reward",
+            "dataset_sha256": manifest["dataset_sha256"],
+            "annotation_manifest_sha256": stable_hash(annotation_index),
+            "annotation_config": annotation_index["annotation_config"],
+            "reward_config": derivation_cfg,
+            "annotator": annotation_index.get("annotator") or {},
+            "complete": False,
+            "episodes": index,
+        })
+    atomic_json(index_path, {
+        "schema_version": REWARD_SCHEMA_VERSION,
+        "kind": "derived_iql_reward",
+        "dataset_sha256": manifest["dataset_sha256"],
+        "annotation_manifest_sha256": stable_hash(annotation_index),
+        "annotation_config": annotation_index["annotation_config"],
+        "reward_config": derivation_cfg,
+        "annotator": annotation_index.get("annotator") or {},
+        "complete": True,
+        "episodes": index,
+    })
+    LOG.info(
+        "Materialized %d reward arrays from cached RynnValue outputs (%s)",
+        len(index), derivation_cfg,
+    )
+    return index_path
+
+
+def load_reward_index(config: LoadedConfig) -> dict[str, Any]:
+    """Load or cheaply rebuild rewards for the active training semantics."""
+    path = materialize_reward_manifest(config)
+    payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("complete") is not True:
-        raise ValueError("Reward annotation manifest is incomplete")
+        raise ValueError("Derived reward manifest is incomplete")
     return payload

@@ -31,6 +31,9 @@ reward:
   # frames for offline reward relabeling (the standalone demo defaults to 64).
   max_frames: 4
   annotation_batch_size: 1
+  # The fields above define expensive RynnValue inference and its reusable cache.
+  # The fields below only derive training rewards from cached model outputs.
+  # Changing them never requires another RynnValue forward pass.
   # One discount per action chunk (macro action), not one discount per 20 Hz action.
   gamma: 0.99
   shaping_weight: 0.1

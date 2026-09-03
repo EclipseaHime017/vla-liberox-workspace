@@ -295,7 +295,7 @@ def test_request_validation(tmp_path: Path):
         })
     with pytest.raises(ValidationError):
         TrainingRunRequest.model_validate({
-            "dataset_id": "ds", "parameters": {"train_steps": True},
+            "dataset_id": "ds", "parameters": {"train_steps": []},
         })
 
 

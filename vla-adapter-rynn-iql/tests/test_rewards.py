@@ -12,11 +12,12 @@ import yaml
 import vla_rynn_iql.rewards as rewards_module
 from vla_rynn_iql.data import load_manifest, prepare_dataset
 from vla_rynn_iql.config import load_train_config
+from vla_rynn_iql.evaluation_store import bind_reward_manifest
 from vla_rynn_iql.io import sha256_file, stable_hash
 from vla_rynn_iql.rewards import (
     ANNOTATION_SCHEMA_VERSION,
     RynnValueAnnotator, annotate_manifest, chunk_reward_components,
-    load_reward_index, shaped_chunk_reward,
+    load_reward_index, materialize_reward_manifest, shaped_chunk_reward,
     validate_rynnvalue_config_contract, validate_rynnvalue_runtime_dtype,
 )
 from vla_rynn_iql.runtime import run_cuda_stage
@@ -93,7 +94,7 @@ def test_fake_annotation_pipeline(configured):
     assert result.is_file()
 
 
-def test_annotation_preserves_every_official_output_and_separates_pbrs(configured):
+def test_annotation_preserves_only_official_outputs_and_rewards_are_separate(configured):
     prepare_dataset(configured)
     result = annotate_manifest(configured, FakeAnnotator())
     manifest = json.loads(result.read_text(encoding="utf-8"))
@@ -101,9 +102,6 @@ def test_annotation_preserves_every_official_output_and_separates_pbrs(configure
     episode = manifest["episodes"][0]
     assert episode["official_outputs"]["inference_method"] == "prefix_uniform_last_slot"
     assert episode["official_outputs"]["analysis"]["generated_token_ids"] == [1, 2]
-    assert episode["pbrs_reward"]["array_keys"] == [
-        "pbrs_shaping_reward", "pbrs_chunk_reward",
-    ]
     with np.load(episode["annotation_path"], allow_pickle=False) as annotation:
         assert set(annotation.files) == {
             "boundary_steps",
@@ -112,12 +110,19 @@ def test_annotation_preserves_every_official_output_and_separates_pbrs(configure
             "absolute_value_logits",
             "relative_temporal_distance_seconds",
             "relative_value_logits",
-            "pbrs_shaping_reward",
-            "pbrs_chunk_reward",
         }
         assert annotation["absolute_temporal_distance_seconds"].ndim == 2
         assert annotation["absolute_value_logits"].shape[-1] == 256
         assert annotation["relative_value_logits"].shape[-1] == 256
+    reward_manifest = json.loads(
+        materialize_reward_manifest(configured).read_text(encoding="utf-8")
+    )
+    reward = reward_manifest["episodes"][0]
+    with np.load(reward["reward_path"], allow_pickle=False) as arrays:
+        assert {
+            "sparse_reward", "pbrs_shaping_reward", "dense_reward",
+            "pbrs_chunk_reward",
+        }.issubset(arrays.files)
 
 
 def test_successful_branch_annotation_keeps_recorded_post_terminal_tail(configured):
@@ -128,8 +133,11 @@ def test_successful_branch_annotation_keeps_recorded_post_terminal_tail(configur
     with np.load(branch["annotation_path"], allow_pickle=False) as annotation:
         assert int(annotation["boundary_steps"][0]) == 0
         assert int(annotation["boundary_steps"][-1]) == 22
-        assert len(annotation["pbrs_shaping_reward"]) == len(annotation["boundary_steps"]) - 1
-        assert len(annotation["pbrs_chunk_reward"]) == len(annotation["boundary_steps"]) - 1
+    rewards = json.loads(materialize_reward_manifest(configured).read_text(encoding="utf-8"))
+    branch_reward = next(item for item in rewards["episodes"] if item["run_id"] == "branch")
+    with np.load(branch_reward["reward_path"], allow_pickle=False) as arrays:
+        assert len(arrays["pbrs_shaping_reward"]) == len(arrays["boundary_steps"]) - 1
+        assert len(arrays["pbrs_chunk_reward"]) == len(arrays["boundary_steps"]) - 1
 
 
 def test_reward_cache_resumes_without_reannotation(configured):
@@ -146,7 +154,8 @@ def test_reward_mode_change_reuses_heads_and_rebuilds_manifest(
     configured, monkeypatch,
 ):
     prepare_dataset(configured)
-    annotate_manifest(configured, FakeAnnotator())
+    annotation_path = annotate_manifest(configured, FakeAnnotator())
+    annotation_before = json.loads(annotation_path.read_text(encoding="utf-8"))
     configured.raw["reward"]["accumulate_primitive_steps"] = True
 
     class UnexpectedModelLoad:
@@ -155,9 +164,10 @@ def test_reward_mode_change_reuses_heads_and_rebuilds_manifest(
 
     monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
     rebuilt = load_reward_index(configured)
-    assert rebuilt["accumulate_primitive_steps"] is True
     assert rebuilt["reward_config"]["accumulate_primitive_steps"] is True
-    with np.load(rebuilt["episodes"][0]["annotation_path"], allow_pickle=False) as arrays:
+    annotation_after = json.loads(annotation_path.read_text(encoding="utf-8"))
+    assert annotation_after == annotation_before
+    with np.load(rebuilt["episodes"][0]["reward_path"], allow_pickle=False) as arrays:
         assert arrays["pbrs_chunk_reward"][0] < -1.0
 
 
@@ -165,8 +175,8 @@ def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
     configured, monkeypatch,
 ):
     prepare_dataset(configured)
-    first_path = annotate_manifest(configured, FakeAnnotator())
-    first_index = json.loads(first_path.read_text(encoding="utf-8"))
+    annotate_manifest(configured, FakeAnnotator())
+    first_index = load_reward_index(configured)
     prepared = load_manifest(configured)
     prepared_by_id = {item["run_id"]: item for item in prepared["episodes"]}
     reward_cfg = configured.section("reward")
@@ -204,6 +214,7 @@ def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
             encoding="utf-8",
         )
 
+    shutil.rmtree(Path(configured.section("paths")["work_dir"]) / "annotations")
     shutil.rmtree(Path(configured.section("paths")["work_dir"]) / "rewards")
     shutil.rmtree(Path(configured.section("paths")["annotation_cache"]))
 
@@ -217,15 +228,59 @@ def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
     assert migrated["schema_version"] == ANNOTATION_SCHEMA_VERSION
     for reward in migrated["episodes"]:
         with np.load(reward["annotation_path"], allow_pickle=False) as arrays:
+            assert "pbrs_shaping_reward" not in arrays.files
+            assert "pbrs_chunk_reward" not in arrays.files
+    rebuilt = load_reward_index(configured)
+    for reward in rebuilt["episodes"]:
+        with np.load(reward["reward_path"], allow_pickle=False) as arrays:
             assert not np.any(arrays["pbrs_shaping_reward"] == 999.0)
             assert not np.any(arrays["pbrs_chunk_reward"] == 999.0)
+
+
+def test_existing_v5_sidecar_survives_reward_parameter_changes_without_model_forward(
+    configured, monkeypatch,
+):
+    prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    first_rewards = materialize_reward_manifest(configured)
+    work_dir = Path(configured.section("paths")["work_dir"])
+    bind_reward_manifest(work_dir / "dataset_manifest.json", first_rewards)
+
+    prepared = load_manifest(configured)
+    for episode in prepared["episodes"]:
+        sidecar = Path(episode["trajectory_path"]).parent / "rynnvalue_evaluation.json"
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        payload["schema_version"] = 5
+        payload["annotator"] = {
+            "model": configured.raw["reward"]["model"],
+            "requested_revision": configured.raw["reward"]["revision"],
+            "resolved_revision": configured.raw["reward"]["revision"],
+        }
+        sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+    shutil.rmtree(work_dir / "annotations")
+    shutil.rmtree(work_dir / "rewards")
+    shutil.rmtree(Path(configured.section("paths")["annotation_cache"]))
+    configured.raw["reward"]["gamma"] = 0.8
+    configured.raw["reward"]["shaping_weight"] = 0.25
+
+    class UnexpectedModelLoad:
+        def __init__(self, _config):
+            raise AssertionError("valid v5 evaluations must not run RynnValue again")
+
+    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    migrated = annotate_manifest(configured)
+    assert migrated.is_file()
+    rewards = load_reward_index(configured)
+    assert rewards["reward_config"]["gamma"] == 0.8
+    assert rewards["reward_config"]["shaping_weight"] == 0.25
 
 
 def test_tampered_reward_cache_is_recomputed(configured):
     prepare_dataset(configured)
     annotate_manifest(configured, CountingAnnotator())
     index = json.loads(
-        (Path(configured.section("paths")["work_dir"]) / "rewards" / "reward_manifest.json")
+        (Path(configured.section("paths")["work_dir"]) / "annotations" / "annotation_manifest.json")
         .read_text(encoding="utf-8")
     )
     with Path(index["episodes"][0]["annotation_path"]).open("ab") as stream:
@@ -287,9 +342,9 @@ def test_sparse_reward_uses_only_debounced_terminal(configured):
         if item["run_id"] == "branch"
     )
     index_path = annotate_manifest(configured, FakeAnnotator())
-    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index = load_reward_index(configured)
     branch = next(item for item in index["episodes"] if item["run_id"] == "branch")
-    with np.load(branch["annotation_path"], allow_pickle=False) as annotation:
+    with np.load(branch["reward_path"], allow_pickle=False) as annotation:
         rewards = annotation["pbrs_chunk_reward"]
     # The final chunk is one completing macro action, irrespective of its five
     # executed low-level actions or earlier transient done=True samples.

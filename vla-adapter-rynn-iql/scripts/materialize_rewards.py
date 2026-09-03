@@ -6,30 +6,27 @@ import logging
 import sys
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, load_train_config
-from vla_rynn_iql.rewards import annotate_manifest
-from vla_rynn_iql.runtime import run_cuda_stage
+from vla_rynn_iql.rewards import materialize_reward_manifest
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Cache official frozen-RynnValue outputs for prepared trajectories"
+        description="Derive cached sparse/PBRS/final rewards from RynnValue annotations"
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_TRAIN_CONFIG)
     parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Recompute matching trajectory annotations instead of reusing the cache",
+        "--force", action="store_true",
+        help="Rebuild matching deterministic reward artifacts",
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     config = load_train_config(args.config)
-    print(run_cuda_stage(
-        "RynnValue trajectory annotation",
-        lambda: annotate_manifest(config, overwrite=args.overwrite),
-    ))
+    print(materialize_reward_manifest(config, force=args.force))
     return 0
 
 

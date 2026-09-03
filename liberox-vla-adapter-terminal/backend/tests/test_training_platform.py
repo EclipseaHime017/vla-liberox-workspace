@@ -374,7 +374,7 @@ def test_training_revalidates_completed_annotation_hashes(tmp_path: Path):
     jobs.cache_root.mkdir()
     datasets_root = tmp_path / "datasets"
     work = datasets_root / "ds" / "annotations" / "ann" / "work"
-    (work / "rewards").mkdir(parents=True)
+    (work / "annotations").mkdir(parents=True)
     annotation = jobs.cache_root / "value.npz"
     annotation.write_bytes(b"reward")
     digest = hashlib.sha256(b"reward").hexdigest()
@@ -382,7 +382,8 @@ def test_training_revalidates_completed_annotation_hashes(tmp_path: Path):
         "source_dataset_id": "ds", "source_dataset_sha256": "frozen",
         "dataset_sha256": "prepared", "episodes": [{"run_id": "run"}],
     }
-    reward = {
+    annotation_manifest = {
+        "schema_version": 6, "kind": "rynnvalue_annotation",
         "complete": True, "dataset_sha256": "prepared",
         "episodes": [{
             "run_id": "run", "annotation_path": str(annotation),
@@ -390,8 +391,8 @@ def test_training_revalidates_completed_annotation_hashes(tmp_path: Path):
         }],
     }
     (work / "dataset_manifest.json").write_text(json.dumps(prepared), encoding="utf-8")
-    (work / "rewards" / "reward_manifest.json").write_text(
-        json.dumps(reward), encoding="utf-8"
+    (work / "annotations" / "annotation_manifest.json").write_text(
+        json.dumps(annotation_manifest), encoding="utf-8"
     )
     jobs.datasets = SimpleNamespace(root=datasets_root)
     dataset = {"id": "ds", "annotation_id": "ann", "dataset_sha256": "frozen"}
@@ -399,3 +400,36 @@ def test_training_revalidates_completed_annotation_hashes(tmp_path: Path):
     annotation.write_bytes(b"changed")
     with pytest.raises(Exception, match="hash changed"):
         jobs._validated_annotation_work(dataset)
+
+
+def test_training_accepts_legacy_reward_manifest_for_no_forward_migration(tmp_path: Path):
+    jobs = object.__new__(OfflineJobService)
+    jobs.cache_root = tmp_path / "cache"
+    jobs.cache_root.mkdir()
+    datasets_root = tmp_path / "datasets"
+    work = datasets_root / "ds" / "annotations" / "ann" / "work"
+    (work / "rewards").mkdir(parents=True)
+    annotation = jobs.cache_root / "legacy.npz"
+    annotation.write_bytes(b"complete-official-heads")
+    digest = hashlib.sha256(annotation.read_bytes()).hexdigest()
+    prepared = {
+        "source_dataset_id": "ds", "source_dataset_sha256": "frozen",
+        "dataset_sha256": "prepared", "episodes": [{"run_id": "run"}],
+    }
+    legacy = {
+        "schema_version": 5, "complete": True, "dataset_sha256": "prepared",
+        "episodes": [{
+            "run_id": "run", "annotation_path": str(annotation),
+            "annotation_sha256": digest,
+        }],
+    }
+    (work / "dataset_manifest.json").write_text(json.dumps(prepared), encoding="utf-8")
+    (work / "rewards" / "reward_manifest.json").write_text(
+        json.dumps(legacy), encoding="utf-8"
+    )
+    jobs.datasets = SimpleNamespace(root=datasets_root)
+    dataset = {"id": "ds", "annotation_id": "ann", "dataset_sha256": "frozen"}
+
+    validated_work, _, manifest = jobs._validated_annotation_work(dataset)
+    assert validated_work == work
+    assert manifest["schema_version"] == 5

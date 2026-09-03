@@ -24,6 +24,7 @@ from vla_rynn_iql.evaluation_store import bind_reward_manifest
 from vla_rynn_iql.io import atomic_json
 from vla_rynn_iql.server_config import load_server_config, validate_global_batch
 from vla_rynn_iql.terminal_pipeline import (
+    annotation_cache_valid,
     bound_evaluation_count,
     build_selection_manifest,
     dataset_roots,
@@ -223,9 +224,10 @@ def main() -> int:
     prepare_skip = prepare_cache_valid(work_dir, fingerprint)
     annotation_skip = (
         prepare_skip
-        and reward_cache_valid(work_dir, raw["reward"])
+        and annotation_cache_valid(work_dir, raw["reward"])
         and not args.force_annotate
     )
+    reward_skip = annotation_skip and reward_cache_valid(work_dir, raw["reward"])
     evaluated = bound_evaluation_count(selection_manifest)
     print("\n=== VLA-Adapter server DDP + ZeRO-1 pipeline ===")
     print(f"Task               : {canonical_task}")
@@ -241,7 +243,12 @@ def main() -> int:
     )
     print(f"ZeRO/backend       : stage {server.distributed.zero_stage} / {server.distributed.backend}")
     print(f"Replay cache       : {server.replay_cache.root}")
-    print("Stages             : prepare → annotate → bind → mmap cache → DDP train")
+    print("Stages             : prepare → annotate → rewards → bind → mmap cache → DDP train")
+    print(
+        "Cache plan         : "
+        f"annotation={'hit' if annotation_skip else 'run'} / "
+        f"reward={'hit' if reward_skip else 'rebuild'}"
+    )
     if args.dry_run:
         print("Dry run complete; no server pipeline output was created.")
         return 0
@@ -288,11 +295,12 @@ def main() -> int:
         },
         "cache": {
             "prepare_hit": bool(prepare_skip and not args.force_prepare),
-            "reward_manifest_hit": bool(annotation_skip),
+            "annotation_manifest_hit": bool(annotation_skip),
+            "reward_manifest_hit": bool(reward_skip),
         },
         "stages": {
             name: {"status": "PENDING", "started_at": None, "completed_at": None}
-            for name in ("prepare", "annotate", "bind", "cache", "train")
+            for name in ("prepare", "annotate", "rewards", "bind", "cache", "train")
         },
     }
     atomic_json(state_path, state)
@@ -313,13 +321,24 @@ def main() -> int:
             )
             mark_prepare_cache(work_dir, fingerprint, selection_manifest["dataset_sha256"])
 
-        if reward_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
-            runner.skip("annotate", "complete reward manifest and annotation hashes match")
+        if annotation_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
+            runner.skip("annotate", "complete official-output annotation cache matches")
         else:
             runner.python_stage(
                 "annotate", "RynnValue trajectory evaluation",
                 server.terminal.environments["annotate"], "annotate_rewards.py", effective_path,
                 ["--overwrite"] if args.force_annotate else None,
+                environment=single_gpu_environment,
+            )
+
+        if reward_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
+            runner.skip("rewards", "deterministic reward derivation cache matches")
+        else:
+            runner.python_stage(
+                "rewards", "Derive IQL rewards from cached RynnValue outputs",
+                server.terminal.environments["prepare"],
+                "materialize_rewards.py", effective_path,
+                ["--force"] if args.force_annotate else None,
                 environment=single_gpu_environment,
             )
 

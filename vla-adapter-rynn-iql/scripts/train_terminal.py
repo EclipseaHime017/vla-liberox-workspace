@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from vla_rynn_iql.evaluation_store import bind_reward_manifest
 from vla_rynn_iql.io import atomic_json
 from vla_rynn_iql.terminal_pipeline import (
+    annotation_cache_valid,
     bound_evaluation_count,
     build_selection_manifest,
     dataset_roots,
@@ -75,6 +76,7 @@ def _print_preflight(
     raw: dict[str, Any],
     prepare_skip: bool,
     annotation_skip: bool,
+    reward_skip: bool,
     evaluated_count: int,
     force_prepare: bool,
     force_annotate: bool,
@@ -116,10 +118,11 @@ def _print_preflight(
     )
     print(f"Success threshold : {data['success_consecutive_steps']} consecutive steps")
     print("Stages            :")
-    print(f"  [1/4] prepare   : {'RUN' if force_prepare or not prepare_skip else 'SKIP (hash match)'}")
-    print(f"  [2/4] annotate  : {'RUN (forced)' if force_annotate else 'SKIP (complete cache)' if annotation_skip else 'RUN missing/incompatible'}")
-    print("  [3/4] bind      : RUN (atomic sidecars)")
-    print("  [4/4] train     : RUN (new output; resume only when configured)")
+    print(f"  [1/5] prepare   : {'RUN' if force_prepare or not prepare_skip else 'SKIP (hash match)'}")
+    print(f"  [2/5] annotate  : {'RUN (forced)' if force_annotate else 'SKIP (official-output cache)' if annotation_skip else 'RUN missing/incompatible VLM output'}")
+    print(f"  [3/5] rewards   : {'SKIP (derivation cache)' if reward_skip else 'RUN fast deterministic reduction'}")
+    print("  [4/5] bind      : RUN (atomic sidecars)")
+    print("  [5/5] train     : RUN (new output; resume only when configured)")
     print()
 
 
@@ -245,14 +248,18 @@ def main() -> int:
 
     prepare_skip = prepare_cache_valid(work_dir, fingerprint)
     annotation_skip = (
-        prepare_skip and reward_cache_valid(work_dir, raw["reward"])
+        prepare_skip and annotation_cache_valid(work_dir, raw["reward"])
         and not args.force_annotate
+    )
+    reward_skip = (
+        annotation_skip and reward_cache_valid(work_dir, raw["reward"])
     )
     evaluated_count = bound_evaluation_count(selection_manifest)
     _print_preflight(
         task_id=canonical_task, candidates=candidates, selected=selected,
         rejected_count=len(rejected), selection_manifest=selection_manifest, raw=raw,
         prepare_skip=prepare_skip, annotation_skip=annotation_skip,
+        reward_skip=reward_skip,
         evaluated_count=evaluated_count, force_prepare=args.force_prepare,
         force_annotate=args.force_annotate,
     )
@@ -294,13 +301,14 @@ def main() -> int:
         "training_result": None,
         "cache": {
             "prepare_hit": bool(prepare_skip and not args.force_prepare),
-            "reward_manifest_hit": bool(annotation_skip),
+            "annotation_manifest_hit": bool(annotation_skip),
+            "reward_manifest_hit": bool(reward_skip),
             "bound_evaluations_before": evaluated_count,
         },
         "error": None,
         "stages": {
             name: {"status": "PENDING", "started_at": None, "completed_at": None}
-            for name in ("prepare", "annotate", "bind", "train")
+            for name in ("prepare", "annotate", "rewards", "bind", "train")
         },
     }
     atomic_json(state_path, state)
@@ -329,13 +337,22 @@ def main() -> int:
         }
         atomic_json(state_path, state)
 
-        if reward_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
-            runner.skip("annotate", "complete reward manifest and annotation hashes match")
+        if annotation_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
+            runner.skip("annotate", "complete official-output annotation cache matches")
         else:
             runner.stage(
                 "annotate", "RynnValue trajectory evaluation", config.environments["annotate"],
                 "annotate_rewards.py", effective_path,
                 ["--overwrite"] if args.force_annotate else None,
+            )
+
+        if reward_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
+            runner.skip("rewards", "deterministic reward derivation cache matches")
+        else:
+            runner.stage(
+                "rewards", "Derive IQL rewards from cached RynnValue outputs",
+                config.environments["prepare"], "materialize_rewards.py", effective_path,
+                ["--force"] if args.force_annotate else None,
             )
 
         bind_started = time.monotonic()

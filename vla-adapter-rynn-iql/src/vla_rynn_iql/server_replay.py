@@ -22,7 +22,7 @@ from .server_config import ReplayCacheConfig
 from .vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_from_trajectory
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 ARRAY_FILES = {
     "agent_image": "agent_image.npy",
     "wrist_image": "wrist_image.npy",
@@ -36,11 +36,9 @@ def _cache_items(manifest: dict[str, Any]) -> list[tuple[dict[str, Any], int]]:
 
 
 def replay_cache_fingerprint(config: LoadedConfig, manifest: dict[str, Any]) -> str:
-    reward_index = load_reward_index(config)
     return stable_hash({
         "schema_version": CACHE_SCHEMA_VERSION,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": stable_hash(reward_index),
         "critic_image_size": int(config.section("iql")["critic_image_size"]),
         "view_transform": "policy_view_v1",
     })
@@ -85,7 +83,6 @@ def validate_replay_cache(
     manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest = manifest or load_manifest(config)
-    reward_index = load_reward_index(config)
     metadata_path = directory / "cache.json"
     if not metadata_path.is_file():
         raise FileNotFoundError(f"Server replay cache metadata is missing: {metadata_path}")
@@ -95,7 +92,6 @@ def validate_replay_cache(
         "schema_version": CACHE_SCHEMA_VERSION,
         "fingerprint": replay_cache_fingerprint(config, manifest),
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": stable_hash(reward_index),
         "critic_image_size": int(config.section("iql")["critic_image_size"]),
         "item_count": len(expected_items),
         "items_sha256": stable_hash(expected_items),
@@ -132,7 +128,6 @@ def build_replay_cache(
     rebuild: bool = False,
 ) -> tuple[Path, bool]:
     manifest = load_manifest(config)
-    reward_index = load_reward_index(config)
     items = _cache_items(manifest)
     if not items:
         raise RuntimeError("Cannot build a server replay cache for an empty training split")
@@ -216,7 +211,6 @@ def build_replay_cache(
             "schema_version": CACHE_SCHEMA_VERSION,
             "fingerprint": replay_cache_fingerprint(config, manifest),
             "dataset_sha256": manifest["dataset_sha256"],
-            "reward_sha256": stable_hash(reward_index),
             "critic_image_size": image_size,
             "item_count": len(items),
             "items_sha256": stable_hash(expected_items),

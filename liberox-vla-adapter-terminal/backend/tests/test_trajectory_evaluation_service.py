@@ -67,7 +67,8 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
     }), encoding="utf-8")
     rewards = tmp_path / "rewards.json"
     rewards.write_text(json.dumps({
-        "schema_version": EVALUATION_SCHEMA_VERSION,
+        "schema_version": 1,
+        "kind": "derived_iql_reward",
         "complete": True, "dataset_sha256": "dataset",
         "annotator": {"model": "RynnValue-4B", "revision": "fixed"},
         "reward_config": {"gamma": 0.99, "shaping_weight": 0.1},

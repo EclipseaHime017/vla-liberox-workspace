@@ -36,6 +36,7 @@ overrides:
     split_seed: 7
     success_consecutive_steps: 5
   reward:
+    # Cheap reward reduction override. Existing RynnValue evaluations are reused.
     accumulate_primitive_steps: false
   vla: {}
   iql:

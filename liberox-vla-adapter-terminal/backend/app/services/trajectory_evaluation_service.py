@@ -18,7 +18,9 @@ from ..storage.files import atomic_write_json
 
 SIDECAR_NAME = "rynnvalue_evaluation.json"
 VALUES_NAME = "rynnvalue_evaluation.npz"
-EVALUATION_SCHEMA_VERSION = 5
+EVALUATION_SCHEMA_VERSION = 6
+DERIVED_REWARD_SCHEMA_VERSION = 1
+COMPATIBLE_EVALUATION_SCHEMA_VERSIONS = frozenset({5, EVALUATION_SCHEMA_VERSION})
 OFFICIAL_ARRAY_KEYS = frozenset({
     "absolute_temporal_distance_seconds",
     "absolute_value_entropy_nats",
@@ -86,7 +88,7 @@ class TrajectoryEvaluationService:
         except (OSError, json.JSONDecodeError):
             return None
         if (
-            payload.get("schema_version") != EVALUATION_SCHEMA_VERSION
+            payload.get("schema_version") not in COMPATIBLE_EVALUATION_SCHEMA_VERSIONS
             or payload.get("run_id") != run.get("id")
         ):
             return None
@@ -156,7 +158,7 @@ class TrajectoryEvaluationService:
             return {"status": "NOT_EVALUATED"}
 
     def exists(self, run: dict[str, Any]) -> bool:
-        """Only the complete v5 macro-action reward sidecar counts as evaluated."""
+        """Return whether a complete hash-checked RynnValue sidecar is available."""
         try:
             return self._load(run) is not None
         except (FileNotFoundError, OSError, ValueError):
@@ -222,9 +224,12 @@ class TrajectoryEvaluationService:
         rewards = json.loads(reward_path.read_text(encoding="utf-8"))
         if rewards.get("complete") is not True:
             raise ValueError("Reward manifest is incomplete")
-        if rewards.get("schema_version") != EVALUATION_SCHEMA_VERSION:
+        if (
+            rewards.get("schema_version") != DERIVED_REWARD_SCHEMA_VERSION
+            or rewards.get("kind") != "derived_iql_reward"
+        ):
             raise ValueError(
-                "Reward manifest does not contain the complete official RynnValue output set"
+                "Derived reward manifest is invalid or incomplete"
             )
         if rewards.get("dataset_sha256") != prepared.get("dataset_sha256"):
             raise ValueError("Reward manifest does not match the prepared trajectories")
@@ -284,7 +289,8 @@ class TrajectoryEvaluationService:
                 "values_file": VALUES_NAME,
                 "values_sha256": _sha256(destination),
                 "boundary_count": boundary_count,
-                "annotator": rewards.get("annotator") or reward.get("annotator") or {},
+                "annotator": reward.get("annotator") or rewards.get("annotator") or {},
+                "annotation_config": rewards.get("annotation_config") or {},
                 "reward_config": rewards.get("reward_config") or {},
                 "official_outputs": reward.get("official_outputs") or {},
                 "pbrs_reward": reward.get("pbrs_reward") or {},

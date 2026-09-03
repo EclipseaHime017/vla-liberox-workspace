@@ -20,7 +20,12 @@ from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config
 from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
-from .rewards import ANNOTATION_SCHEMA_VERSION
+from .rewards import (
+    ANNOTATION_SCHEMA_VERSION,
+    REWARD_SCHEMA_VERSION,
+    official_inference_config,
+    reward_derivation_config,
+)
 
 
 SOURCE_TYPES = frozenset({"inference", "manual", "policy_requery"})
@@ -463,27 +468,58 @@ def mark_prepare_cache(work_dir: Path, fingerprint: str, selection_sha256: str) 
     })
 
 
-def reward_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
+def annotation_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
     prepared_path = work_dir / MANIFEST_NAME
-    reward_path = work_dir / "rewards" / "reward_manifest.json"
+    annotation_path = work_dir / "annotations" / "annotation_manifest.json"
     try:
         prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
-        rewards = json.loads(reward_path.read_text(encoding="utf-8"))
+        annotations = json.loads(annotation_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     if (
-        rewards.get("schema_version") != ANNOTATION_SCHEMA_VERSION
-        or rewards.get("complete") is not True
-        or rewards.get("dataset_sha256") != prepared.get("dataset_sha256")
-        or rewards.get("reward_config") != reward_config
+        annotations.get("schema_version") != ANNOTATION_SCHEMA_VERSION
+        or annotations.get("kind") != "rynnvalue_annotation"
+        or annotations.get("complete") is not True
+        or annotations.get("dataset_sha256") != prepared.get("dataset_sha256")
+        or annotations.get("annotation_config") != official_inference_config(reward_config)
     ):
         return False
-    for episode in rewards.get("episodes", []):
+    for episode in annotations.get("episodes", []):
         path = Path(str(episode.get("annotation_path") or ""))
         if (
             path.is_symlink()
             or not path.is_file()
             or episode.get("annotation_sha256") != sha256_file(path)
+        ):
+            return False
+    return len(annotations.get("episodes", [])) == len(prepared.get("episodes", []))
+
+
+def reward_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
+    prepared_path = work_dir / MANIFEST_NAME
+    annotation_path = work_dir / "annotations" / "annotation_manifest.json"
+    reward_path = work_dir / "rewards" / "reward_manifest.json"
+    try:
+        prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
+        annotations = json.loads(annotation_path.read_text(encoding="utf-8"))
+        rewards = json.loads(reward_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if (
+        rewards.get("schema_version") != REWARD_SCHEMA_VERSION
+        or rewards.get("kind") != "derived_iql_reward"
+        or rewards.get("complete") is not True
+        or rewards.get("dataset_sha256") != prepared.get("dataset_sha256")
+        or rewards.get("annotation_manifest_sha256") != stable_hash(annotations)
+        or rewards.get("reward_config") != reward_derivation_config(reward_config)
+    ):
+        return False
+    for episode in rewards.get("episodes", []):
+        path = Path(str(episode.get("reward_path") or ""))
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or episode.get("reward_sha256") != sha256_file(path)
         ):
             return False
     return len(rewards.get("episodes", [])) == len(prepared.get("episodes", []))

@@ -154,6 +154,12 @@ class OfflineJobService:
                     "expectile", "beta", "max_advantage_weight", "target_tau",
                 )
             } | {
+                "reward_gamma": raw["reward"]["gamma"],
+                "reward_shaping_weight": raw["reward"]["shaping_weight"],
+                "reward_accumulate_primitive_steps": raw["reward"][
+                    "accumulate_primitive_steps"
+                ],
+            } | {
                 "console_interval_steps": raw["logging"]["console_interval_steps"],
                 "flush_seconds": raw["logging"]["flush_seconds"],
             },
@@ -700,6 +706,11 @@ class OfflineJobService:
                 {"id": "rynn_annotate", "label": "RynnValue-4B 轨迹评价",
                  "environment": self.ui_config.reward_environment, "argv": annotate_argv,
                  "cwd": str(self.ui_config.offline_rl_root)},
+                {"id": "rynn_rewards", "label": "生成默认 IQL 奖励缓存",
+                 "environment": self.ui_config.train_environment,
+                 "argv": ["python", str(scripts / "materialize_rewards.py"),
+                          "--config", str(config_path)],
+                 "cwd": str(self.ui_config.offline_rl_root)},
             ])
         if selected_by_evaluator.get("robometer"):
             base_path = self.ui_config.robometer_root / "configs" / "robometer_evaluation.yaml"
@@ -790,9 +801,16 @@ class OfflineJobService:
                 "cwd": str(self.ui_config.offline_rl_root),
             },
             {
-                "id": "annotate", "label": "RynnValue-4B 奖励标注",
+                "id": "annotate", "label": "RynnValue-4B 轨迹评价",
                 "environment": self.ui_config.reward_environment,
                 "argv": ["python", str(scripts / "annotate_rewards.py"), "--config", str(config_path)],
+                "cwd": str(self.ui_config.offline_rl_root),
+            },
+            {
+                "id": "rewards", "label": "生成默认 IQL 奖励缓存",
+                "environment": self.ui_config.train_environment,
+                "argv": ["python", str(scripts / "materialize_rewards.py"),
+                         "--config", str(config_path)],
                 "cwd": str(self.ui_config.offline_rl_root),
             },
         ]
@@ -824,6 +842,8 @@ class OfflineJobService:
             "flush_seconds", "resume_checkpoint", "tensorboard", "wandb_enabled",
             "wandb_mode", "wandb_project", "wandb_entity", "wandb_run_name",
             "wandb_group", "wandb_tags", "wandb_log_interval_steps",
+            "reward_gamma", "reward_shaping_weight",
+            "reward_accumulate_primitive_steps",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
@@ -844,6 +864,7 @@ class OfflineJobService:
             "critic_lr", "value_lr", "policy_peak_lr", "policy_final_lr", "beta",
             "max_advantage_weight", "target_tau", "flush_seconds",
             "critic_weight_decay", "value_weight_decay",
+            "reward_gamma", "reward_shaping_weight",
         ):
             value = parameters.get(name)
             if value is not None and (
@@ -865,13 +886,18 @@ class OfflineJobService:
         target_tau = parameters.get("target_tau")
         if target_tau is not None and target_tau > 1:
             raise ValueError("target_tau must be in [0, 1]")
+        reward_gamma = parameters.get("reward_gamma")
+        if reward_gamma is not None and reward_gamma > 1:
+            raise ValueError("reward_gamma must be in [0, 1]")
         for name in ("critic_optimizer", "value_optimizer"):
             value = parameters.get(name)
             if value is not None and value not in {"adam", "adamw"}:
                 raise ValueError(f"{name} must be adam or adamw")
         if parameters.get("wandb_mode") not in (None, "online", "offline", "disabled"):
             raise ValueError("wandb_mode must be online, offline, or disabled")
-        for name in ("tensorboard", "wandb_enabled"):
+        for name in (
+            "tensorboard", "wandb_enabled", "reward_accumulate_primitive_steps",
+        ):
             value = parameters.get(name)
             if value is not None and type(value) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -903,14 +929,18 @@ class OfflineJobService:
         annotation_id = dataset["annotation_id"]
         work = self.datasets.root / dataset["id"] / "annotations" / annotation_id / "work"
         prepared_path = work / "dataset_manifest.json"
-        reward_path = work / "rewards" / "reward_manifest.json"
+        annotation_path = work / "annotations" / "annotation_manifest.json"
+        legacy_reward_path = work / "rewards" / "reward_manifest.json"
+        manifest_path = (
+            annotation_path if annotation_path.is_file() else legacy_reward_path
+        )
         if (
-            prepared_path.is_symlink() or reward_path.is_symlink()
-            or not prepared_path.is_file() or not reward_path.is_file()
+            prepared_path.is_symlink() or manifest_path.is_symlink()
+            or not prepared_path.is_file() or not manifest_path.is_file()
         ):
-            raise FileNotFoundError("Prepared dataset or reward manifest is missing")
+            raise FileNotFoundError("Prepared dataset or RynnValue annotation manifest is missing")
         prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
-        reward = json.loads(reward_path.read_text(encoding="utf-8"))
+        annotation_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if (
             prepared.get("source_dataset_id") != dataset["id"]
             or prepared.get("source_dataset_sha256") != dataset["dataset_sha256"]
@@ -919,20 +949,31 @@ class OfflineJobService:
                 "Prepared data does not match the immutable dataset",
                 code="ANNOTATION_DATASET_MISMATCH",
             )
-        if reward.get("complete") is not True or reward.get("dataset_sha256") != prepared.get("dataset_sha256"):
+        separated = manifest_path == annotation_path
+        if separated and annotation_manifest.get("kind") != "rynnvalue_annotation":
             raise ConflictError(
-                "Reward annotation is incomplete or belongs to different prepared data",
+                "RynnValue annotation manifest has an invalid artifact kind",
+                code="ANNOTATION_INCOMPLETE",
+            )
+        if (
+            annotation_manifest.get("complete") is not True
+            or annotation_manifest.get("dataset_sha256") != prepared.get("dataset_sha256")
+        ):
+            raise ConflictError(
+                "RynnValue annotation is incomplete or belongs to different prepared data",
                 code="ANNOTATION_INCOMPLETE",
             )
         expected_runs = {episode["run_id"] for episode in prepared.get("episodes", [])}
-        reward_runs = {episode.get("run_id") for episode in reward.get("episodes", [])}
-        if reward_runs != expected_runs:
+        annotation_runs = {
+            episode.get("run_id") for episode in annotation_manifest.get("episodes", [])
+        }
+        if annotation_runs != expected_runs:
             raise ConflictError(
                 "Reward annotation membership does not match prepared data",
                 code="ANNOTATION_MEMBERSHIP_MISMATCH",
             )
         cache_root = self.cache_root.resolve()
-        for episode in reward.get("episodes", []):
+        for episode in annotation_manifest.get("episodes", []):
             raw_annotation = Path(str(episode.get("annotation_path") or ""))
             if raw_annotation.is_symlink():
                 raise ValueError("Symlink reward annotations are not allowed")
@@ -949,7 +990,7 @@ class OfflineJobService:
                     f"Reward annotation hash changed for {episode.get('run_id')}",
                     code="ANNOTATION_HASH_MISMATCH",
                 )
-        return work, prepared, reward
+        return work, prepared, annotation_manifest
 
     def start_training(self, dataset_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -973,6 +1014,13 @@ class OfflineJobService:
                 raw["iql"][key] = value
             elif key in raw["logging"]:
                 raw["logging"][key] = value
+        for parameter_name, config_name in {
+            "reward_gamma": "gamma",
+            "reward_shaping_weight": "shaping_weight",
+            "reward_accumulate_primitive_steps": "accumulate_primitive_steps",
+        }.items():
+            if parameter_name in parameters:
+                raw["reward"][config_name] = parameters[parameter_name]
         wandb = raw["logging"]["wandb"]
         for parameter_name, config_name in {
             "wandb_enabled": "enabled", "wandb_mode": "mode",
@@ -1002,13 +1050,22 @@ class OfflineJobService:
         raw["paths"]["output_dir"] = str(output_root.resolve())
         config_path = job_dir / "effective_config.yaml"
         atomic_write_yaml(config_path, raw)
-        script = self.ui_config.offline_rl_root / "scripts" / "train_iql.py"
-        stages = [{
-            "id": "train", "label": "VLA-Adapter Pixel-IQL 后训练",
-            "environment": self.ui_config.train_environment,
-            "argv": ["python", str(script), "--config", str(config_path)],
-            "cwd": str(self.ui_config.offline_rl_root),
-        }]
+        scripts = self.ui_config.offline_rl_root / "scripts"
+        stages = [
+            {
+                "id": "rewards", "label": "生成或复用 IQL 奖励缓存",
+                "environment": self.ui_config.train_environment,
+                "argv": ["python", str(scripts / "materialize_rewards.py"),
+                         "--config", str(config_path)],
+                "cwd": str(self.ui_config.offline_rl_root),
+            },
+            {
+                "id": "train", "label": "VLA-Adapter Pixel-IQL 后训练",
+                "environment": self.ui_config.train_environment,
+                "argv": ["python", str(script), "--config", str(config_path)],
+                "cwd": str(self.ui_config.offline_rl_root),
+            },
+        ]
         return self._new_job(
             kind="training", dataset_id=dataset_id, stages=stages,
             config_path=config_path, output_path=output_root,
@@ -1016,6 +1073,13 @@ class OfflineJobService:
                 "task_id": dataset["task_id"], "member_count": dataset["member_count"],
                 "action_count": dataset["action_count"], "chunk_count": dataset["chunk_count"],
                 "annotation_id": annotation_id,
+                "reward": {
+                    "gamma": raw["reward"]["gamma"],
+                    "shaping_weight": raw["reward"]["shaping_weight"],
+                    "accumulate_primitive_steps": raw["reward"][
+                        "accumulate_primitive_steps"
+                    ],
+                },
                 **{name: raw["iql"][name] for name in (
                     "train_steps", "critic_warmup_steps", "micro_batch_size",
                     "gradient_accumulation_steps", "checkpoint_interval", "seed",

@@ -14,7 +14,7 @@ validated Franka/LIBERO-X tasks.
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
 - Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
-- Integrated workflow: the Dataset page evaluates RynnValue once per trajectory, preserves its complete output sidecar, paginates run previews, exposes video/action/EEF, absolute/relative remaining-time, observation-potential and entropy estimates, plus Shape/Final Reward details, and independently packages hash-verified training datasets; the Training page launches resumable IQL jobs, streams metrics/logs, and manages local TensorBoard without merging the two Conda environments.
+- Integrated workflow: the Dataset page evaluates RynnValue once per trajectory, preserves its complete output sidecar, paginates run previews, exposes video/action/EEF, absolute/relative remaining-time, observation-potential and entropy estimates, plus Shape/Final Reward details, and independently packages hash-verified training datasets. The Training page derives rewards from those cached model outputs using its selected `gamma`, shaping coefficient, and macro/primitive reduction, then launches resumable IQL jobs without rerunning RynnValue.
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
 - Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
 
@@ -84,8 +84,10 @@ dataset-root
         ├── validate trajectories; bind reusable RynnValue sidecars per episode
         ▼
 frozen RynnValue-4B ── absolute/relative heads + exact Analysis output
-        │               (PBRS follows the paper formula and is stored separately)
-        │
+        │               (immutable, reward-agnostic annotation cache)
+        ▼
+deterministic reward materialization ── sparse + Shape + Final Reward
+        │                              (gamma/kappa/reduction keyed cache)
         ▼
 Pixel-IQL critics/value + advantage-weighted VLA behavior cloning
         │
@@ -96,10 +98,14 @@ policy-registry/<policy_id>/policy.yaml
 ```
 
 RynnValue follows the pinned official inference implementation and is used only
-as an offline reward annotator. Evaluation schema v2 retains decoded absolute
+as an offline trajectory evaluator. Annotation schema v6 retains decoded absolute
 and relative temporal distances, both distributional-head logits, absolute-head
-entropy, and the exact generated Analysis text/token IDs. No overlapping-window
-average is applied, and PBRS is never labeled as a native model output. The
+entropy, and the exact generated Analysis text/token IDs, but no training
+reward. No overlapping-window average is applied, and PBRS is never labeled as
+a native model output. A separate deterministic cache derives sparse, Shape,
+and Final Reward. Existing compatible schema-v4/v5 sidecars are migrated by
+reusing their model heads, even when their old reward settings differ; no new
+RynnValue forward is performed. The
 PyTorch trainer implements IQL with double-Q
 critics, expectile value regression and advantage-weighted behavior cloning; it
 does not perform online exploration or modify the upstream VLA-Adapter source.
@@ -113,6 +119,8 @@ run from the workspace root:
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
+  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/materialize_rewards.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml

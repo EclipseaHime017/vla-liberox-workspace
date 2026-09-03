@@ -329,7 +329,7 @@ export type EvaluationFilters = {
 
 export type TrainingDefaults = {
   basic: Record<string, number>;
-  advanced: Record<string, number | string>;
+  advanced: Record<string, number | string | boolean>;
   monitoring: Record<string, number | string | boolean | null>;
   fixed: Record<string, string | number | boolean>;
   environments: Record<string, string>;
