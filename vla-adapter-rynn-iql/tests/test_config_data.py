@@ -44,6 +44,15 @@ def test_reward_dtype_must_match_pinned_bfloat16_checkpoint(configured, tmp_path
         load_train_config(path)
 
 
+def test_reward_accumulation_mode_must_be_boolean(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"]["accumulate_primitive_steps"] = "false"
+    path = tmp_path / "invalid-reward-mode.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(TypeError, match="accumulate_primitive_steps"):
+        load_train_config(path)
+
+
 def test_success_confirmation_threshold_is_validated(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
     raw["data"]["success_consecutive_steps"] = 0
@@ -68,6 +77,10 @@ def test_positive_micro_batch_is_not_artificially_limited_to_one(configured, tmp
     path = tmp_path / "batched.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     assert load_train_config(path).section("iql")["micro_batch_size"] == 8
+
+
+def test_default_advantage_weight_cap_is_twenty(configured):
+    assert configured.section("iql")["max_advantage_weight"] == 20.0
 
 
 @pytest.mark.parametrize("field", ["critic_optimizer", "value_optimizer"])

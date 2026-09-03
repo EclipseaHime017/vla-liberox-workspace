@@ -713,7 +713,7 @@ vla:
 iql:
   expectile: 0.8
   beta: 10.0
-  max_advantage_weight: 100.0
+  max_advantage_weight: 20.0
   target_tau: 0.005
   micro_batch_size: 1
   gradient_accumulation_steps: 32
@@ -865,7 +865,7 @@ iql:
   policy_final_lr: 0.000003
   expectile: 0.8
   beta: 10.0
-  max_advantage_weight: 100.0
+  max_advantage_weight: 20.0
   target_tau: 0.005
   critic_warmup_steps: 200
   train_steps: 10000
@@ -1160,6 +1160,9 @@ replay_cache:
   rebuild: false
 
 overrides:
+  reward:
+    # false（默认）为macro-step；true为逐控制步累计并使用gamma^L。
+    accumulate_primitive_steps: false
   iql:
     # server模式下是所有rank合计的全局micro batch。
     micro_batch_size: 8
@@ -1183,7 +1186,7 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
   --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
 ```
 
-流程仍是 `选择 → Prepare → RynnValue评价/绑定 → mmap缓存 → 多卡IQL训练`。前三个阶段沿用现有单进程流程并串行使用 GPU；只有 IQL 训练通过一张卡一个进程的 DDP 分布。Q、V、actor overlay 分别使用独立的 PyTorch `ZeroRedundancyOptimizer`（ZeRO-1）；冻结的 VLA backbone 仍在每张卡各保留一份。target Q 不包 DDP，而是从同步后的 online Q 在每个rank执行完全相同的 Polyak 更新，因此不改变 `main` 当前 V/Q/target/actor 的更新顺序、Advantage、Bellman target、reward reduction、优化器超参数或梯度裁剪。
+流程仍是 `选择 → Prepare → RynnValue评价/绑定 → mmap缓存 → 多卡IQL训练`。前三个阶段沿用现有单进程流程并串行使用 GPU；只有 IQL 训练通过一张卡一个进程的 DDP 分布。Q、V、actor overlay 分别使用独立的 PyTorch `ZeroRedundancyOptimizer`（ZeRO-1）；冻结的 VLA backbone 仍在每张卡各保留一份。target Q 不包 DDP，而是从同步后的 online Q 在每个rank执行完全相同的 Polyak 更新。服务器入口与单卡入口共享 `reward.accumulate_primitive_steps`：`false` 将chunk作为一个宏动作，只应用一次稀疏奖励和折扣；`true` 累计chunk内逐步奖励，并以实际长度 `L` 使用 `γ^L` bootstrap。仅切换该字段会从已有RynnValue输出重算确定性奖励，不会重新运行RynnValue；除此之外服务器分支的更新顺序、Advantage、优化器超参数和梯度裁剪均保持不变。
 
 服务器缓存以 prepared dataset、reward manifest、critic图像尺寸和源哈希为键，把实际参与训练的去重chunk整理为只读 `.npy` mmap。训练时不再逐样本重复解压大型 `trajectory_observations.npz`；图像通过操作系统页缓存共享，动作、proprio、mask和reward由每个rank启动时一次性整理。缓存不会修改源轨迹、RynnValue sidecar或UI数据集。
 
@@ -1201,7 +1204,7 @@ RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个 actio
 
 确认terminal后的采集尾段不进入replay或IQL参数更新，但仍保留在RynnValue评价边界和详情曲线中，使评价时长与源视频/轨迹一致；该尾段按absorbing terminal处理，不重新引入成功前的`-1` step cost。源 `trajectory.npz` 不会被裁剪或改写；manifest 使用 `recorded_success` 保留源判定、`success` 保存去抖后的训练判定，并记录 `raw_done_true_count`、`success_streak_start`、`terminal_step`、`recorded_action_count`、有效 `action_count`、`trailing_action_count` 与 `post_terminal_false_count` 供审计。PBRS sparse reward 和 replay bootstrap 只使用这个确认后的 terminal，不会被确认前的单帧 `done=True` 提前截断。
 
-设 RynnValue 预测的剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。长度为 `L` 的 action chunk 被视作一条宏动作 transition，使用：
+设 RynnValue 预测的剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。默认配置下，长度为 `L` 的 action chunk 被视作一条宏动作 transition，使用：
 
 ```text
 r_sparse(t) = 0，若该 chunk 结束时任务已完成；否则为 -1
@@ -1258,7 +1261,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-liberox python -m pytest -q
 1. 将 `configs/inference.yaml` 的 `evaluation.open_loop_steps` 从 `8` 改为 `1` 或 `2`。抓取接触阶段每 50–100 ms 重规划，通常比一次盲执行 8 步更稳；若成功率明显上升，主要问题是开环执行而不是奖励或动作头完全失效。
 2. 检查失败视频对应的 `trajectory.csv`：raw gripper 应在接触前从接近 `1`（开）切到接近 `0`（闭），环境 gripper action 则应变为 `+1`。若始终不闭合，重点检查示教中“闭爪并保持、随后抬升”的有效 chunk 数，而不是只看总轨迹数。
 3. 现有 50 条接管轨迹的长前缀会让“接近目标”的样本远多于真正抓取转换。优先从夹爪接近碗前开始新增短分支，明确包含对准、闭爪保持和抬升；数据准备仍只导入分支后缀，不重复父前缀。
-4. 查看训练目录的 `metrics.jsonl`。若 `advantage_weight_mean` 长期贴近上限 `100`，说明 `beta: 10` 对当前小数据和有噪声的价值估计过激；下一次对照实验可先尝试 `beta: 3`、`max_advantage_weight: 20`，并把 `critic_warmup_steps` 提高到约 `1000`。每次只改变一组变量。
+4. 查看训练目录的 `metrics.jsonl`。若 `advantage_weight_mean` 长期贴近默认上限 `20`，说明 `beta: 10` 对当前小数据和有噪声的价值估计仍可能过激；下一次对照实验可先尝试 `beta: 3`，并把 `critic_warmup_steps` 提高到约 `1000`。每次只改变一组变量。
 5. 若 gripper 输出方向正确但动作抖动或过冲，再把 `policy_peak_lr` 从 `3e-5` 降至 `1e-5`、`policy_final_lr` 从 `3e-6` 降至 `1e-6`，并保留独立验证轨迹选择 checkpoint，避免 action head 在少量成功数据上过拟合。
 
 摄像头关闭功能适合诊断模型究竟依赖主视角还是腕部视角，不建议把单摄像头消融结果直接当作正式策略提升。训练 overlay 仍是双摄像头模型；若希望永久改成单摄像头结构，需要重新设计并训练模型输入层，而不是只关闭一个槽位。

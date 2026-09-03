@@ -16,7 +16,7 @@ from vla_rynn_iql.io import sha256_file, stable_hash
 from vla_rynn_iql.rewards import (
     ANNOTATION_SCHEMA_VERSION,
     RynnValueAnnotator, annotate_manifest, chunk_reward_components,
-    shaped_chunk_reward,
+    load_reward_index, shaped_chunk_reward,
     validate_rynnvalue_config_contract, validate_rynnvalue_runtime_dtype,
 )
 from vla_rynn_iql.runtime import run_cuda_stage
@@ -77,6 +77,16 @@ def test_chunk_reward_treats_the_action_chunk_as_one_macro_transition():
     )
 
 
+def test_chunk_reward_can_accumulate_primitive_step_costs():
+    sparse, shaping, reward = chunk_reward_components(
+        np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
+        gamma=0.9, shaping_weight=0.1, accumulate_primitive_steps=True,
+    )
+    assert np.isclose(sparse, -(1.0 + 0.9 + 0.9**2))
+    assert np.isclose(shaping, 3.0 - 0.9**3)
+    assert np.isclose(reward, sparse + 0.1 * shaping)
+
+
 def test_fake_annotation_pipeline(configured):
     prepare_dataset(configured)
     result = annotate_manifest(configured, FakeAnnotator())
@@ -130,6 +140,25 @@ def test_reward_cache_resumes_without_reannotation(configured):
     annotate_manifest(configured, annotator)
     assert first_calls > 0
     assert annotator.calls == first_calls
+
+
+def test_reward_mode_change_reuses_heads_and_rebuilds_manifest(
+    configured, monkeypatch,
+):
+    prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    configured.raw["reward"]["accumulate_primitive_steps"] = True
+
+    class UnexpectedModelLoad:
+        def __init__(self, _config):
+            raise AssertionError("reward-only relabel must not load RynnValue")
+
+    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    rebuilt = load_reward_index(configured)
+    assert rebuilt["accumulate_primitive_steps"] is True
+    assert rebuilt["reward_config"]["accumulate_primitive_steps"] is True
+    with np.load(rebuilt["episodes"][0]["annotation_path"], allow_pickle=False) as arrays:
+        assert arrays["pbrs_chunk_reward"][0] < -1.0
 
 
 def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(

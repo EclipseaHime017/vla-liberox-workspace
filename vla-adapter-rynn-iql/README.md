@@ -132,6 +132,13 @@ actions, proprioception, masks, and rewards are assembled once in each rank.
 Changing the dataset/reward manifest, critic image size, or source hashes creates
 a different cache. Source trajectories and RynnValue sidecars remain read-only.
 
+Server and single-GPU training share the same reward-reduction switch. Set
+`reward.accumulate_primitive_steps: false` (the default) to treat each action
+chunk as one macro transition with one sparse reward and one Bellman discount.
+Set it to `true` to accumulate discounted primitive-step rewards and bootstrap
+with `gamma ** chunk_length`. Changing only this option rebuilds deterministic
+reward arrays from the existing RynnValue outputs; it does not rerun the model.
+
 Only rank zero writes JSONL, TensorBoard, W&B, checkpoints, and the standard
 policy overlay. Checkpoint save first consolidates all three ZeRO optimizer
 states on rank zero; unwrapped model keys allow a server checkpoint to resume
@@ -270,7 +277,9 @@ train/validation splits by root trajectory, validates the N+1 state/image
 invariant, and constructs masked 8×7 tensors for variable-duration chunks of
 at most eight actions. Each recorded chunk is one IQL macro-action decision:
 the actual `chunk_length` selects `s[t+L]` and controls the action mask, while
-the sparse reward and Bellman discount are each applied once per chunk.
+the sparse reward and Bellman discount are each applied once per chunk by
+default. `reward.accumulate_primitive_steps: true` selects discounted
+primitive-step accumulation with an actual-duration Bellman discount.
 
 RynnValue receives only upright `agentview` frames and the BDDL task prompt. At
 each action-chunk boundary, the adapter follows the pinned official inference

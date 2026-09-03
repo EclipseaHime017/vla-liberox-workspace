@@ -49,7 +49,7 @@ TRAIN_SCHEMA = {
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
                "gamma": None, "shaping_weight": None, "robot_description": None,
-               "camera_description": None},
+               "camera_description": None, "accumulate_primitive_steps": None},
     "vla": {"base_checkpoint": None, "stats_key": None, "use_pro_version": None,
             "freeze_backbone": None},
     "iql": {"critic_image_size": None, "critic_lr": None, "value_lr": None,
@@ -199,6 +199,8 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     _number(reward, "annotation_batch_size", low=1, integer=True)
     _number(reward, "gamma", low=0, high=1)
     _number(reward, "shaping_weight", low=0)
+    if type(reward["accumulate_primitive_steps"]) is not bool:
+        raise TypeError("reward.accumulate_primitive_steps must be boolean")
     if reward["dtype"] != "bfloat16":
         raise ValueError(
             "Version 1 requires reward.dtype=bfloat16 to match the pinned RynnValue-4B "

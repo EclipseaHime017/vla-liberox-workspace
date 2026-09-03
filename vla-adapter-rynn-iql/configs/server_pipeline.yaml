@@ -32,7 +32,8 @@ overrides:
     validation_fraction: 0.2
     split_seed: 7
     success_consecutive_steps: 5
-  reward: {}
+  reward:
+    accumulate_primitive_steps: false
   vla: {}
   iql:
     train_steps: 20000

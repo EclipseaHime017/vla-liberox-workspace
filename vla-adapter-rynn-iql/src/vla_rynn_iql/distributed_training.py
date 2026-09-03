@@ -465,6 +465,11 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
     try:
         iql_cfg = config.section("iql")
         logging_cfg = config.section("logging")
+        reward_mode = (
+            "cumulative_primitive_steps"
+            if config.section("reward")["accumulate_primitive_steps"]
+            else "macro_action"
+        )
         seed = int(iql_cfg["seed"])
         random.seed(seed)
         np.random.seed(seed)
@@ -606,6 +611,7 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                 "cpu_threads_per_rank": cpu_threads_per_rank,
                 "data_workers_per_rank": distributed.data_workers_per_rank,
                 "replay_cache": str(cache_directory),
+                "reward_mode": reward_mode,
             })
             atomic_json(run_dir / "provenance.json", {
                 "schema_version": 1,
@@ -655,7 +661,8 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                     "SERVER TRAIN ready | "
                     f"run={run_id} | steps={start_step}->{total_steps} | "
                     f"world={world_size} | global/local batch={global_batch}/{local_batch} | "
-                    f"actor_batch={global_batch * accumulation}",
+                    f"actor_batch={global_batch * accumulation} | "
+                    f"reward_mode={reward_mode}",
                     flush=True,
                 )
             iterator = iter(loader)
@@ -700,8 +707,10 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                     bellman_target = chunk_bellman_target(
                         critic_batch["reward"],
                         next_value,
+                        critic_batch["chunk_length"],
                         critic_batch["bootstrap_mask"],
                         float(config.section("reward")["gamma"]),
+                        bool(config.section("reward")["accumulate_primitive_steps"]),
                     )
                 q1, q2 = q_ddp(
                     critic_batch["pixels"], critic_batch["proprio"],
@@ -908,6 +917,7 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                             "world_size": world_size,
                             "global_micro_batch_size": global_batch,
                             "cpu_threads_per_rank": cpu_threads_per_rank,
+                            "reward_mode": reward_mode,
                             "cancel_checkpoint": str(latest_checkpoint),
                         })
                     raise DistributedTrainingCancelled(
@@ -942,6 +952,7 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                 "actor_global_batch_size": global_batch * accumulation,
                 "cpu_threads_per_rank": cpu_threads_per_rank,
                 "data_workers_per_rank": distributed.data_workers_per_rank,
+                "reward_mode": reward_mode,
                 "dataset_sha256": manifest["dataset_sha256"],
                 "reward_sha256": stable_hash(reward_index),
                 "policy_overlay": str(policy),
