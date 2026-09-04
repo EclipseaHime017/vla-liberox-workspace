@@ -243,9 +243,12 @@ immutable official outputs and writes a second-level cache containing
 `pbrs_shaping_reward` (the raw Shape Reward `γΦ(s')-Φ(s)`) and
 `pbrs_chunk_reward` (the Final Reward `r_sparse+κ·r_shape`). Here
 `r_sparse` is `-1` for an incomplete macro action and `0` when that chunk
-completes the task, and `Φ=-absolute temporal distance`. Its cache key includes
-`gamma`, `shaping_weight`, and `accumulate_primitive_steps`; changing any of
-them recomputes only these inexpensive arrays. Hash-valid schema-v4/v5
+completes the task, and `Φ=-absolute temporal distance`. Set
+`reward.rynnvalue: false` for a sparse-only training ablation: the diagnostic
+Shape Reward remains stored, but `dense_reward=0` and Final Reward equals the
+sparse reward. Its cache key includes `rynnvalue`, `gamma`, `shaping_weight`,
+and `accumulate_primitive_steps`; changing any of them recomputes only these
+inexpensive arrays. Hash-valid schema-v4/v5
 sidecars reuse their complete official model heads during migration, regardless
 of the reward reduction stored beside them, so RynnValue is not run again. Chunks recorded
 after the confirmed terminal are inspection-only and never enter ReplayDataset.
@@ -307,9 +310,9 @@ dataset/reward hashes and workspace Git commit.
 - `outputs/work/annotations/annotation_manifest.json`: the current prepared
   dataset's complete reference index into the immutable RynnValue outputs.
 - `outputs/work/rewards/<reward_hash>.npz` and `reward_manifest.json`: the
-  deterministic second-level reward cache for the active `gamma`, `kappa`, and
-  macro/primitive-step reduction. Exact repeats are reused; a mismatch is
-  rebuilt from annotations without loading RynnValue.
+  deterministic second-level reward cache for the active RynnValue inclusion
+  switch, `gamma`, `kappa`, and macro/primitive-step reduction. Exact repeats
+  are reused; a mismatch is rebuilt from annotations without loading RynnValue.
 - `outputs/training/<run>/`: metrics, full checkpoints, provenance and effective
   config.
 - `policy-registry/<policy_id>/`: immutable action-head and proprio-projector

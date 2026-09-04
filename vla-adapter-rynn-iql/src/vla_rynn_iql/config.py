@@ -48,7 +48,8 @@ TRAIN_SCHEMA = {
              "split_seed": None, "allow_no_success": None},
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
-               "gamma": None, "shaping_weight": None, "robot_description": None,
+               "rynnvalue": None, "gamma": None, "shaping_weight": None,
+               "robot_description": None,
                "camera_description": None, "accumulate_primitive_steps": None},
     "vla": {"base_checkpoint": None, "stats_key": None, "use_pro_version": None,
             "freeze_backbone": None},
@@ -157,6 +158,14 @@ def _cuda_device(value: Any, name: str) -> None:
 def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     path = path.expanduser().resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+    # Schema-v1 configurations created before the sparse-only ablation switch
+    # preserve their original behavior.
+    if (
+        isinstance(raw, dict)
+        and isinstance(raw.get("reward"), dict)
+        and "rynnvalue" not in raw["reward"]
+    ):
+        raw["reward"]["rynnvalue"] = True
     _validate_schema(raw, TRAIN_SCHEMA)
     if raw["schema_version"] != 1:
         raise ValueError("Only schema_version=1 is supported")
@@ -197,6 +206,8 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
             raise TypeError(f"reward.{key} must be a non-empty string")
     _number(reward, "max_frames", low=2, integer=True)
     _number(reward, "annotation_batch_size", low=1, integer=True)
+    if type(reward["rynnvalue"]) is not bool:
+        raise TypeError("reward.rynnvalue must be boolean")
     _number(reward, "gamma", low=0, high=1)
     _number(reward, "shaping_weight", low=0)
     if type(reward["accumulate_primitive_steps"]) is not bool:

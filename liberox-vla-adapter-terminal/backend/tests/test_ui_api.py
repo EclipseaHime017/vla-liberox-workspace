@@ -299,6 +299,8 @@ def test_request_validation(tmp_path: Path):
     })
     with pytest.raises(ValueError, match="train_steps"):
         OfflineJobService._validate_training_parameters(request.parameters)
+    with pytest.raises(ValueError, match="reward_rynnvalue"):
+        OfflineJobService._validate_training_parameters({"reward_rynnvalue": "false"})
 
 
 def test_explicit_trajectory_evaluation_cannot_overwrite():

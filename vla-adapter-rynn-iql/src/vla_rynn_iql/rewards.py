@@ -35,7 +35,7 @@ OFFICIAL_INFERENCE_CONFIG_KEYS = frozenset({
     "robot_description", "camera_description",
 })
 REWARD_DERIVATION_CONFIG_KEYS = frozenset({
-    "gamma", "shaping_weight", "accumulate_primitive_steps",
+    "rynnvalue", "gamma", "shaping_weight", "accumulate_primitive_steps",
 })
 OFFICIAL_OUTPUT_KEYS = (
     "absolute_temporal_distance_seconds",
@@ -593,6 +593,7 @@ def chunk_reward_components(
     gamma: float,
     shaping_weight: float,
     accumulate_primitive_steps: bool = False,
+    rynnvalue: bool = True,
 ) -> tuple[float, float, float]:
     """Return sparse, raw PBRS shape, and final rewards for one chunk."""
     sparse = (
@@ -603,7 +604,8 @@ def chunk_reward_components(
     phi_start, phi_end = -float(value_start), -float(value_end)
     duration = length if accumulate_primitive_steps else 1
     pbrs_shaping = (gamma ** duration) * phi_end - phi_start
-    return sparse, pbrs_shaping, sparse + shaping_weight * pbrs_shaping
+    dense = shaping_weight * pbrs_shaping if rynnvalue else 0.0
+    return sparse, pbrs_shaping, sparse + dense
 
 
 def _official_inference_config_matches(
@@ -1004,6 +1006,7 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
                 float(derivation_cfg["gamma"]),
                 float(derivation_cfg["shaping_weight"]),
                 bool(derivation_cfg["accumulate_primitive_steps"]),
+                bool(derivation_cfg["rynnvalue"]),
             )
             for chunk in evaluation_chunks
         ]
@@ -1032,7 +1035,11 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
                 **official_outputs,
                 sparse_reward=sparse,
                 pbrs_shaping_reward=shaping,
-                dense_reward=float(derivation_cfg["shaping_weight"]) * shaping,
+                dense_reward=(
+                    float(derivation_cfg["shaping_weight"]) * shaping
+                    if bool(derivation_cfg["rynnvalue"])
+                    else np.zeros_like(shaping)
+                ),
                 pbrs_chunk_reward=final,
             )
             os.replace(temporary, output)

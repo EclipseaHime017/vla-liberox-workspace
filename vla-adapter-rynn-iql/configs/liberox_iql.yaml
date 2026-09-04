@@ -34,6 +34,8 @@ reward:
   # The fields above define expensive RynnValue inference and its reusable cache.
   # The fields below only derive training rewards from cached model outputs.
   # Changing them never requires another RynnValue forward pass.
+  # false: train from the environment sparse reward only; cached evaluations stay intact.
+  rynnvalue: true
   # One discount per action chunk (macro action), not one discount per 20 Hz action.
   gamma: 0.99
   shaping_weight: 0.1

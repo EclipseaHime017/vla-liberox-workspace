@@ -100,9 +100,11 @@ default:
 `r_sparse` is `-1` for an incomplete chunk and `0` for a completing chunk, and
 the IQL Bellman target uses one `gamma`. Variable chunks keep their actual `L`
 only for the action mask and selection of `s[t+L]`. This second cache is keyed
-by the prepared dataset and annotation hashes plus `gamma`, `kappa`, and the
-macro/primitive-step switch. Exact repeated training reuses it; a mismatch is
-recomputed with NumPy and never invokes RynnValue.
+by the prepared dataset and annotation hashes plus the `rynnvalue` inclusion
+switch, `gamma`, `kappa`, and the macro/primitive-step switch. Exact repeated
+training reuses it; a mismatch is recomputed with NumPy and never invokes
+RynnValue. With `rynnvalue=false`, the diagnostic Shape Reward remains present,
+but `dense_reward` is zero and Final Reward equals the sparse reward.
 
 After a successful UI evaluation job, a combined evaluation snapshot may be
 atomically copied beside the source episode as `rynnvalue_evaluation.npz`; its

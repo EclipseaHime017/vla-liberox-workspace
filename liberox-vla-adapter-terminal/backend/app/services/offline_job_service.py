@@ -154,6 +154,7 @@ class OfflineJobService:
                     "expectile", "beta", "max_advantage_weight", "target_tau",
                 )
             } | {
+                "reward_rynnvalue": raw["reward"]["rynnvalue"],
                 "reward_gamma": raw["reward"]["gamma"],
                 "reward_shaping_weight": raw["reward"]["shaping_weight"],
                 "reward_accumulate_primitive_steps": raw["reward"][
@@ -896,7 +897,7 @@ class OfflineJobService:
             "flush_seconds", "resume_checkpoint", "tensorboard", "wandb_enabled",
             "wandb_mode", "wandb_project", "wandb_entity", "wandb_run_name",
             "wandb_group", "wandb_tags", "wandb_log_interval_steps",
-            "reward_gamma", "reward_shaping_weight",
+            "reward_rynnvalue", "reward_gamma", "reward_shaping_weight",
             "reward_accumulate_primitive_steps",
         }
         unknown = sorted(set(parameters) - allowed)
@@ -950,7 +951,8 @@ class OfflineJobService:
         if parameters.get("wandb_mode") not in (None, "online", "offline", "disabled"):
             raise ValueError("wandb_mode must be online, offline, or disabled")
         for name in (
-            "tensorboard", "wandb_enabled", "reward_accumulate_primitive_steps",
+            "tensorboard", "wandb_enabled", "reward_rynnvalue",
+            "reward_accumulate_primitive_steps",
         ):
             value = parameters.get(name)
             if value is not None and type(value) is not bool:
@@ -1086,6 +1088,7 @@ class OfflineJobService:
             elif key in raw["logging"]:
                 raw["logging"][key] = value
         for parameter_name, config_name in {
+            "reward_rynnvalue": "rynnvalue",
             "reward_gamma": "gamma",
             "reward_shaping_weight": "shaping_weight",
             "reward_accumulate_primitive_steps": "accumulate_primitive_steps",
@@ -1146,6 +1149,7 @@ class OfflineJobService:
                 "action_count": dataset["action_count"], "chunk_count": dataset["chunk_count"],
                 "annotation_id": annotation_id,
                 "reward": {
+                    "rynnvalue": raw["reward"]["rynnvalue"],
                     "gamma": raw["reward"]["gamma"],
                     "shaping_weight": raw["reward"]["shaping_weight"],
                     "accumulate_primitive_steps": raw["reward"][
