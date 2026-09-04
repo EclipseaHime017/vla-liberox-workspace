@@ -22,6 +22,7 @@ from vla_rynn_iql.server_replay import (
     build_replay_cache,
     validate_replay_cache,
 )
+from vla_rynn_iql.terminal_pipeline import merged_training_config
 
 
 class FakeAnnotator:
@@ -125,6 +126,15 @@ def test_server_config_rejects_gpu_and_global_batch_errors(configured, tmp_path)
     path.write_text(yaml.safe_dump(invalid), encoding="utf-8")
     with pytest.raises(ValueError, match="data_workers_per_rank"):
         load_server_config(path)
+
+
+def test_server_reward_ablation_override_is_merged(configured, tmp_path):
+    path = _server_yaml(tmp_path, configured.path)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["overrides"]["reward"]["rynnvalue"] = False
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    effective = merged_training_config(load_server_config(path).terminal)
+    assert effective["reward"]["rynnvalue"] is False
 
 
 def test_server_yaml_rejects_duplicate_and_unknown_keys(configured, tmp_path):

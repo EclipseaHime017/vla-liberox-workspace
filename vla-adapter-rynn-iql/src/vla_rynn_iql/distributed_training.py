@@ -470,6 +470,7 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
             if config.section("reward")["accumulate_primitive_steps"]
             else "macro_action"
         )
+        rynnvalue_enabled = bool(config.section("reward")["rynnvalue"])
         seed = int(iql_cfg["seed"])
         random.seed(seed)
         np.random.seed(seed)
@@ -612,6 +613,7 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                 "data_workers_per_rank": distributed.data_workers_per_rank,
                 "replay_cache": str(cache_directory),
                 "reward_mode": reward_mode,
+                "rynnvalue_reward_enabled": rynnvalue_enabled,
             })
             atomic_json(run_dir / "provenance.json", {
                 "schema_version": 1,
@@ -662,7 +664,8 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                     f"run={run_id} | steps={start_step}->{total_steps} | "
                     f"world={world_size} | global/local batch={global_batch}/{local_batch} | "
                     f"actor_batch={global_batch * accumulation} | "
-                    f"reward_mode={reward_mode}",
+                    f"reward_mode={reward_mode} | "
+                    f"reward_source={'rynnvalue_pbrs' if rynnvalue_enabled else 'sparse_only'}",
                     flush=True,
                 )
             iterator = iter(loader)
@@ -918,6 +921,7 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                             "global_micro_batch_size": global_batch,
                             "cpu_threads_per_rank": cpu_threads_per_rank,
                             "reward_mode": reward_mode,
+                            "rynnvalue_reward_enabled": rynnvalue_enabled,
                             "cancel_checkpoint": str(latest_checkpoint),
                         })
                     raise DistributedTrainingCancelled(
@@ -953,6 +957,7 @@ def train_distributed(config: LoadedConfig, server: ServerPipelineConfig) -> Pat
                 "cpu_threads_per_rank": cpu_threads_per_rank,
                 "data_workers_per_rank": distributed.data_workers_per_rank,
                 "reward_mode": reward_mode,
+                "rynnvalue_reward_enabled": rynnvalue_enabled,
                 "dataset_sha256": manifest["dataset_sha256"],
                 "reward_sha256": stable_hash(reward_index),
                 "policy_overlay": str(policy),

@@ -53,6 +53,25 @@ def test_reward_accumulation_mode_must_be_boolean(configured, tmp_path: Path):
         load_train_config(path)
 
 
+def test_rynnvalue_reward_switch_must_be_boolean(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"]["rynnvalue"] = "false"
+    path = tmp_path / "invalid-rynnvalue-switch.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(TypeError, match="reward.rynnvalue"):
+        load_train_config(path)
+
+
+def test_legacy_config_without_rynnvalue_switch_keeps_shaping_enabled(
+    configured, tmp_path: Path,
+):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    del raw["reward"]["rynnvalue"]
+    path = tmp_path / "legacy-without-rynnvalue-switch.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert load_train_config(path).section("reward")["rynnvalue"] is True
+
+
 def test_success_confirmation_threshold_is_validated(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
     raw["data"]["success_consecutive_steps"] = 0

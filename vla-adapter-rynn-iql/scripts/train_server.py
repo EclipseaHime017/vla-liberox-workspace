@@ -242,6 +242,10 @@ def main() -> int:
         f"{global_batch * int(raw['iql']['gradient_accumulation_steps'])}"
     )
     print(f"ZeRO/backend       : stage {server.distributed.zero_stage} / {server.distributed.backend}")
+    print(
+        "Training reward     : "
+        f"{'RynnValue PBRS + sparse' if raw['reward']['rynnvalue'] else 'sparse only'}"
+    )
     print(f"Replay cache       : {server.replay_cache.root}")
     print("Stages             : prepare → annotate → rewards → bind → mmap cache → DDP train")
     print(

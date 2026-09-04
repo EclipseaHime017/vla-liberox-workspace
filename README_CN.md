@@ -642,7 +642,7 @@ Pixel-IQL                         冻结的 VLA backbone
 
 1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始rollout与接管/重新推理分支都从第0步开始保留完整物理轨迹，因此RynnValue能评价接管前自然rollout、接管后新后缀及固定时长采集中的成功后尾段；训练transition仍在确认terminal结束。transition 不跨越 `policy`、`policy_requery`、`human` 来源边界；若接管发生在 8 步 chunk 中间，接管前最后一个 policy transition 以实际长度结束。固定 8 步只作为最大 horizon，实际长度写入 `chunk_length`。组成训练 replay 时，再按 `(root_run_id,start,end,action_source)` 去重父轨迹与 sibling 分支物理复制的相同前缀，既不丢失整轨迹评价，也不把相同自然 rollout 重复放大。训练集与验证集仍按 root trajectory 划分。该阶段不运行模型、不计算奖励，也不修改源动作，输出schema-v4 `outputs/work/dataset_manifest.json`。
 2. **Annotate（RynnValue 轨迹评价）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 生成 absolute/relative remaining time、entropy、logits 和 Analysis。该阶段不训练 RynnValue、不更新 VLA，也不计算 sparse/Shape/Final Reward。输出位于 `outputs/work/annotations/` 和全局 `annotation-cache/`；已有 schema-v4/v5 评价会复用其完整模型输出并迁移，不会再跑 RynnValue forward。
-3. **Materialize Rewards（奖励派生）**：在 `vla-liberox` 环境中读取上述评价和环境 terminal，根据 `gamma`、`shaping_weight`、`accumulate_primitive_steps` 快速计算 sparse reward、Shape Reward 和 Final Reward。结果是带配置 hash 的二级缓存；完全一致时直接复用，不一致时只用 NumPy 重算奖励，不加载 4B 模型。
+3. **Materialize Rewards（奖励派生）**：在 `vla-liberox` 环境中读取上述评价和环境 terminal，根据 `rynnvalue`、`gamma`、`shaping_weight`、`accumulate_primitive_steps` 快速计算 sparse reward、Shape Reward 和 Final Reward。`rynnvalue: false` 时保留 Shape Reward 供诊断，但训练使用的 Dense Reward 归零、Final Reward 等于 sparse reward。结果是带配置 hash 的二级缓存；完全一致时直接复用，不一致时只用 NumPy 重算奖励，不加载 4B 模型。
 4. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已派生 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；VLA 视觉/语言 backbone 只做冻结的特征提取，反向传播仅更新 continuous action head 与 proprio projector。训练 checkpoint 会保留 Q/V、optimizer 和随机状态以便恢复，最终部署 overlay 只发布 action head、proprio projector 和兼容性清单。
 
 RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本训练系统不使用 Robometer、在线 RL、奖励模型微调或真机控制；Robometer 仅作为后述独立诊断评价器，不进入 IQL reward。
@@ -711,6 +711,8 @@ reward:
   annotation_batch_size: 1
   # 以上字段决定昂贵的 RynnValue 评价缓存。
   # 以下字段只决定快速的奖励派生缓存。
+  # false时保留评价输出，但训练Final Reward只使用环境稀疏奖励。
+  rynnvalue: true
   gamma: 0.99
   shaping_weight: 0.1
   accumulate_primitive_steps: false
@@ -847,11 +849,13 @@ conda run -n rynnvalue-reward python \
 
 ```yaml
 reward:
+  rynnvalue: true
   gamma: 0.99
   shaping_weight: 0.1
   accumulate_primitive_steps: false
 ```
 
+- `rynnvalue`：是否把 RynnValue Shape Reward 纳入训练的 Final Reward。设为 `false` 时 `dense_reward=0`、`final_reward=sparse_reward`；原始评价与 Shape Reward 诊断仍保留。
 - `gamma`：以 action chunk 为时间单位的折扣；Shape Reward 和 IQL Bellman target 对每个宏动作各使用一次。
 - `shaping_weight`：RynnValue 势函数奖励的强度；`0` 表示只使用 sparse step cost。
 - `accumulate_primitive_steps`：`false` 将 chunk 当作一个宏动作；`true` 累计 chunk 内的折扣 primitive-step cost，并使用实际 `L` 的势函数折扣。
@@ -864,9 +868,9 @@ conda run -n vla-liberox python \
   --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
 ```
 
-评价缓存键按单条轨迹内容寻址，包含轨迹/图像 hash、提示词、chunk 边界、RynnValue 模型与 `max_frames`，但不包含 `gamma`、`shaping_weight`、`accumulate_primitive_steps` 或整个数据集 hash。因此同一条轨迹进入不同的冻结数据集版本时可直接复用；已有 schema-v4/v5 sidecar 也会先迁移原始 head 输出，不重新执行 RynnValue。修改源数据、所需边界、提示词、`max_frames` 或 RynnValue 版本才会使模型评价失效。
+评价缓存键按单条轨迹内容寻址，包含轨迹/图像 hash、提示词、chunk 边界、RynnValue 模型与 `max_frames`，但不包含 `rynnvalue`、`gamma`、`shaping_weight`、`accumulate_primitive_steps` 或整个数据集 hash。因此同一条轨迹进入不同的冻结数据集版本时可直接复用；已有 schema-v4/v5 sidecar 也会先迁移原始 head 输出，不重新执行 RynnValue。修改源数据、所需边界、提示词、`max_frames` 或 RynnValue 版本才会使模型评价失效。
 
-奖励缓存是第二层，键中另外包含 prepared dataset hash、评价 hash、`gamma`、`shaping_weight` 和 `accumulate_primitive_steps`。完全一致的二次训练直接复用；配置不一致时仅快速重算奖励并原子替换当前 `reward_manifest.json`，不触碰原轨迹，也不加载 RynnValue。
+奖励缓存是第二层，键中另外包含 prepared dataset hash、评价 hash、`rynnvalue`、`gamma`、`shaping_weight` 和 `accumulate_primitive_steps`。完全一致的二次训练直接复用；配置不一致时仅快速重算奖励并原子替换当前 `reward_manifest.json`，不触碰原轨迹，也不加载 RynnValue。
 
 #### 4.4.3 配置并运行 IQL 后训练
 
@@ -973,7 +977,7 @@ conda run -n vla-liberox python \
 | `success_consecutive_steps`或 action/chunk 边界 | 必须 | 仅缺失所需边界时 | 必须 | 必须 | 按需 |
 | 仅 `split_seed`、`validation_fraction` | 必须 | 复用已有逐轨迹评价 | 必须 | 必须 | 按需 |
 | RynnValue 模型/版本、`max_frames`、提示词 | 按输入是否变化 | 必须 | 必须 | 必须 | 按需 |
-| `gamma`、`shaping_weight`、`accumulate_primitive_steps` | 不需要 | **不需要** | 快速重算 | 必须 | 按需 |
+| `rynnvalue`、`gamma`、`shaping_weight`、`accumulate_primitive_steps` | 不需要 | **不需要** | 快速重算 | 必须 | 按需 |
 | VLA checkpoint/stats 或任一 `iql.*` 参数 | 不需要 | 不需要 | 相同奖励配置直接复用 | 必须 | 必须 |
 | 仅 `logging.*` | 不需要 | 不需要 | 不需要 | 仅影响新训练 | 不需要 |
 | 仅 `inference.yaml` | 不需要 | 不需要 | 不需要 | 不需要 | 必须 |
@@ -1067,7 +1071,7 @@ python vla-adapter-rynn-iql/scripts/train_terminal.py \
 1. 数据成员、源文件哈希、成功阈值、split或chunk结构未变化时，跳过Prepare；仅修改 `iql.*` 不会使Prepare失效。
 2. 当前 prepared dataset 已有完整、官方推理配置相同且文件哈希有效的 annotation manifest 时，跳过 RynnValue 评价阶段。这个命中不要求奖励参数相同。
 3. 即使新工作目录还没有 annotation manifest，脚本也会按轨迹检查 `rynnvalue_evaluation.json/.npz`、schema-v4/v5 旧缓存和全局 content cache。只要轨迹/图像/提示词/边界/模型契约匹配，就迁移原始 head 输出，不再运行 RynnValue forward。
-4. 当前 prepared dataset 已有完整、奖励参数相同的 reward manifest 时直接复用；`gamma` / `shaping_weight` / `accumulate_primitive_steps` 不一致时只执行快速 reward materialize。
+4. 当前 prepared dataset 已有完整、奖励参数相同的 reward manifest 时直接复用；`rynnvalue` / `gamma` / `shaping_weight` / `accumulate_primitive_steps` 不一致时只执行快速 reward materialize。
 5. 评价结束后结果会原子绑定回各轨迹目录，因此删除终端流水线缓存后仍可复用，也能在现有数据详情页查看。
 6. IQL训练默认每次创建新的输出和overlay；只有 `overrides.iql.resume_checkpoint` 明确指定checkpoint时才恢复。
 
@@ -1192,6 +1196,8 @@ replay_cache:
 
 overrides:
   reward:
+    # false为不启用RynnValue稠密奖励的消融；已有评价不会删除或重跑。
+    rynnvalue: true
     # false（默认）为macro-step；true为逐控制步累计并使用gamma^L。
     accumulate_primitive_steps: false
   iql:
@@ -1217,7 +1223,7 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
   --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
 ```
 
-流程仍是 `选择 → Prepare → RynnValue评价 → 奖励派生 → 绑定 → mmap缓存 → 多卡IQL训练`。评价阶段单卡串行使用 GPU，奖励派生是轻量 NumPy 过程；只有 IQL 训练通过一张卡一个进程的 DDP 分布。Q、V、actor overlay 分别使用独立的 PyTorch `ZeroRedundancyOptimizer`（ZeRO-1）；冻结的 VLA backbone 仍在每张卡各保留一份。target Q 不包 DDP，而是从同步后的 online Q 在每个rank执行完全相同的 Polyak 更新。服务器入口与单卡入口共享 `reward.accumulate_primitive_steps`：`false` 将chunk作为一个宏动作，只应用一次稀疏奖励和折扣；`true` 累计chunk内逐步奖励，并以实际长度 `L` 使用 `γ^L` bootstrap。仅切换该字段会从已有RynnValue输出重算确定性奖励，不会重新运行RynnValue；除此之外服务器分支的更新顺序、Advantage、优化器超参数和梯度裁剪均保持不变。
+流程仍是 `选择 → Prepare → RynnValue评价 → 奖励派生 → 绑定 → mmap缓存 → 多卡IQL训练`。评价阶段单卡串行使用 GPU，奖励派生是轻量 NumPy 过程；只有 IQL 训练通过一张卡一个进程的 DDP 分布。Q、V、actor overlay 分别使用独立的 PyTorch `ZeroRedundancyOptimizer`（ZeRO-1）；冻结的 VLA backbone 仍在每张卡各保留一份。target Q 不包 DDP，而是从同步后的 online Q 在每个rank执行完全相同的 Polyak 更新。服务器入口与单卡入口共享奖励消融：`reward.rynnvalue: false` 保留RynnValue评价输出，但令dense reward为0、Final Reward等于环境稀疏奖励；默认`true`。`reward.accumulate_primitive_steps: false` 将chunk作为一个宏动作，只应用一次稀疏奖励和折扣；`true` 累计chunk内逐步奖励，并以实际长度 `L` 使用 `γ^L` bootstrap。切换这些奖励派生字段只会从已有RynnValue输出重算确定性奖励，不会重新运行RynnValue；除此之外服务器分支的更新顺序、Advantage、优化器超参数和梯度裁剪均保持不变。
 
 服务器缓存以 prepared dataset、reward manifest、critic图像尺寸和源哈希为键，把实际参与训练的去重chunk整理为只读 `.npy` mmap。训练时不再逐样本重复解压大型 `trajectory_observations.npz`；图像通过操作系统页缓存共享，动作、proprio、mask和reward由每个rank启动时一次性整理。缓存不会修改源轨迹、RynnValue sidecar或UI数据集。
 

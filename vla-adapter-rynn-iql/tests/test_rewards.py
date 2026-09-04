@@ -88,6 +88,16 @@ def test_chunk_reward_can_accumulate_primitive_step_costs():
     assert np.isclose(reward, sparse + 0.1 * shaping)
 
 
+def test_rynnvalue_switch_keeps_shape_for_diagnostics_but_trains_on_sparse_reward():
+    sparse, shaping, reward = chunk_reward_components(
+        np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
+        gamma=0.9, shaping_weight=0.1, rynnvalue=False,
+    )
+    assert np.isclose(sparse, -1.0)
+    assert np.isclose(shaping, 2.1)
+    assert np.isclose(reward, sparse)
+
+
 def test_fake_annotation_pipeline(configured):
     prepare_dataset(configured)
     result = annotate_manifest(configured, FakeAnnotator())
@@ -169,6 +179,30 @@ def test_reward_mode_change_reuses_heads_and_rebuilds_manifest(
     assert annotation_after == annotation_before
     with np.load(rebuilt["episodes"][0]["reward_path"], allow_pickle=False) as arrays:
         assert arrays["pbrs_chunk_reward"][0] < -1.0
+
+
+def test_disabling_rynnvalue_reuses_evaluation_and_materializes_sparse_only(
+    configured, monkeypatch,
+):
+    prepare_dataset(configured)
+    annotation_path = annotate_manifest(configured, FakeAnnotator())
+    annotation_before = json.loads(annotation_path.read_text(encoding="utf-8"))
+    configured.raw["reward"]["rynnvalue"] = False
+
+    class UnexpectedModelLoad:
+        def __init__(self, _config):
+            raise AssertionError("reward ablation must not load RynnValue")
+
+    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    rebuilt = load_reward_index(configured)
+    assert rebuilt["reward_config"]["rynnvalue"] is False
+    assert json.loads(annotation_path.read_text(encoding="utf-8")) == annotation_before
+    with np.load(rebuilt["episodes"][0]["reward_path"], allow_pickle=False) as arrays:
+        assert np.any(arrays["pbrs_shaping_reward"] != 0.0)
+        assert np.all(arrays["dense_reward"] == 0.0)
+        assert np.array_equal(arrays["pbrs_chunk_reward"], arrays["sparse_reward"])
+
+
 
 
 def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(

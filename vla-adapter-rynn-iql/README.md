@@ -138,10 +138,14 @@ different mmap cache. Reward-only changes reuse the image cache. Source
 trajectories and RynnValue sidecars remain read-only.
 
 Server and single-GPU training share the same reward-reduction switch. Set
+`reward.rynnvalue: false` for a sparse-reward-only ablation; this keeps the
+stored RynnValue evaluation outputs for diagnostics but sets the dense reward
+to zero and makes the final training reward equal the sparse reward. The
+default is `true`. Set
 `reward.accumulate_primitive_steps: false` (the default) to treat each action
 chunk as one macro transition with one sparse reward and one Bellman discount.
 Set it to `true` to accumulate discounted primitive-step rewards and bootstrap
-with `gamma ** chunk_length`. Changing this option, `reward.gamma`, or
+with `gamma ** chunk_length`. Changing either switch, `reward.gamma`, or
 `reward.shaping_weight` rebuilds only the deterministic second-level reward
 cache from existing RynnValue outputs; it does not rerun the model.
 
