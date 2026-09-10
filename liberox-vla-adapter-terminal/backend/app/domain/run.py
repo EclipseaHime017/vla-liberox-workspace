@@ -85,6 +85,13 @@ class SimulationSession:
     spacemouse_calibration: dict[str, Any] | None = field(default=None, repr=False)
     spacemouse_diagnostics: dict[str, Any] | None = field(default=None, repr=False)
     spacemouse_samples: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    controller_status: str | None = None
+    controller_connected: bool | None = None
+    controller_stale: bool | None = None
+    controller_latency_ms: float | None = None
+    controller_deadman_ms: int | None = None
+    controller_calibration: dict[str, Any] | None = field(default=None, repr=False)
+    controller_diagnostics: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def episode_dir(self) -> Path:
@@ -109,6 +116,12 @@ class SimulationSession:
             "policy_overlay": self.policy_overlay,
             "policy_compatibility_sha256": self.policy_compatibility_sha256,
             "manual_source": self.manual_source,
+            "controller_id": self.manual_source,
+            "controller_status": self.controller_status,
+            "controller_connected": self.controller_connected,
+            "controller_stale": self.controller_stale,
+            "controller_latency_ms": self.controller_latency_ms,
+            "controller_deadman_ms": self.controller_deadman_ms,
             "manual_translation_gain": self.manual_translation_gain,
             "manual_rotation_gain": self.manual_rotation_gain,
             "spacemouse_status": self.spacemouse_status,

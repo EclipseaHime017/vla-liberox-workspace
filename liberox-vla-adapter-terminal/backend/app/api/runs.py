@@ -40,6 +40,7 @@ async def branch(run_id: str, body: CreateBranchRequest, request: Request):
         return service(request).create_branch(
             run_id, body.resume_step, body.control_mode, body.open_loop_steps,
             translation_gain=body.translation_gain, rotation_gain=body.rotation_gain,
+            **({"controller_id": body.controller_id} if body.controller_id is not None else {}),
         )
     except Exception as exc: raise http_error(exc) from exc
 

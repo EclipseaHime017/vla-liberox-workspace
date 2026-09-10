@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/JasonJZLiu/FACTR_Teleop.git",
+  "commit": "7a07ab3629af03a91c0198df7c44a0082dca77ab",
+  "files": {
+    "src/factr_teleop/factr_teleop/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/factr_teleop/factr_teleop/factr_teleop.py": "0c86585c03b51a76a3c965b32f0f55cc8244d96454758e326acc7766df496945",
+    "src/factr_teleop/factr_teleop/dynamixel/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/factr_teleop/factr_teleop/dynamixel/driver.py": "4e78607c873b211bc0a4941a32c264e269860e19f43ca1c2e044463242be8a4d",
+    "src/factr_teleop/factr_teleop/configs/grav_comp_demo.yaml": "61330cd2e0df160293b793d4b76e600dedab584e29dc692cf973e5e752169328",
+    "src/factr_teleop/factr_teleop/urdf/factr_teleop_franka.urdf": "47c938a9457cbc5dea90dc58e3a3f7d7ade474912fbafa9762ff6fd740a45209",
+    "src/python_utils/python_utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/python_utils/python_utils/utils.py": "83b1690f47c75573db8933e8c1fb2521705353ae3b3782adc7af3f16c8ff1e48"
+  }
+}

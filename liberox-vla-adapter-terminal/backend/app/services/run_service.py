@@ -37,8 +37,17 @@ class RunService:
     def discard_draft(self): return self.worker.discard_draft()
     def draft_preview(self): return self.worker.draft_preview()
     def start_draft(self): return self.worker.start_draft()
-    def controller_status(self): return self.worker.controller_status()
-    def calibrate_controller(self): return self.worker.calibrate_controller()
+    def controller_status(self, controller_id="spacemouse"):
+        if controller_id == "spacemouse":
+            return {"controller_id": controller_id, **self.worker.controller_status()}
+        return self.worker.controller_status(controller_id)
+    def controller_catalog(self): return self.worker.controller_catalog()
+    def set_controller_gravity(self, controller_id, enabled):
+        return self.worker.set_controller_gravity(controller_id, enabled)
+    def calibrate_controller(self, controller_id="spacemouse", phase="reference"):
+        if controller_id == "spacemouse" and phase == "reference":
+            return self.worker.calibrate_controller()
+        return self.worker.calibrate_controller(controller_id, phase)
     def manual_connect(self, run_id): return self.worker.manual_connect(run_id)
     def manual_disconnect(self, run_id): return self.worker.manual_disconnect(run_id)
     def manual_settings(self, run_id, translation, rotation): return self.worker.manual_settings(run_id, translation, rotation)

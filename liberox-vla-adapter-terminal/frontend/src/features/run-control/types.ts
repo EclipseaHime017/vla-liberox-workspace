@@ -77,13 +77,16 @@ export type Session = {
   id: string; kind: "original" | "branch"; task_id: string | null; level: string | null;
   task_name: string | null; task: string | null; parent_session_id: string | null;
   resume_step?: number | null;
-  control_mode: string; manual_source: "browser" | "spacemouse" | null;
+  control_mode: string; manual_source: "browser" | "spacemouse" | "factr" | null;
   policy_id: string; policy_label: string | null; policy_base_checkpoint: string | null;
   policy_overlay: string | null; policy_compatibility_sha256: string | null;
   manual_translation_gain: number | null; manual_rotation_gain: number | null;
   spacemouse_status: string | null; spacemouse_connected: boolean | null;
   spacemouse_stale: boolean | null; spacemouse_latency_ms: number | null;
   spacemouse_deadman_ms: number | null; status: string; created_at: string | null;
+  controller_status?: string | null; controller_connected?: boolean | null;
+  controller_stale?: boolean | null; controller_latency_ms?: number | null;
+  controller_deadman_ms?: number | null;
   max_steps: number; open_loop_steps: number; current_step: number; state_count: number;
   seed: number; init_state_index: number; disabled_policy_cameras: PolicyCameraId[];
   action_count: number; policy_queries: number; success: boolean; error: string | null;
@@ -352,11 +355,20 @@ export type TensorBoardStatus = {
   logdir: string; starting?: boolean;
 };
 
+export type ControllerId = "spacemouse" | "factr";
+
 export type ControllerStatus = {
-  state: "DISCONNECTED" | "UNCALIBRATED" | "CALIBRATING" | "READY" | "ARMED" | "ERROR";
+  controller_id?: ControllerId;
+  state: "DISCONNECTED" | "UNCALIBRATED" | "CALIBRATING" | "ALIGNING" | "READY" | "ARMED" | "ERROR";
   connected: boolean; calibrated: boolean; calibration_progress: number; movement_resets: number;
   message: string; error: string | null; armed_session_id: string | null;
   latency_ms: number | null; latency_level: "green" | "yellow" | "red" | null; stale: boolean;
+  gravity_supported?: boolean;
+  gravity_enabled?: boolean;
+  gravity_state?: "on" | "off" | "unknown";
+  cycle_ms?: number | null;
+  reference_joint_positions?: number[];
+  translation_gain?: number; rotation_gain?: number;
 };
 
 export type FrameState = {

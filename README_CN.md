@@ -2,7 +2,7 @@
 
 当前版本：**v0.4.1**
 
-这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse 接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。
+这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse / FACTR 人工接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。FACTR 独立测试使用官方整臂参考姿态校准，同一校准用于末端跟随和手动重力补偿；UI 中的 FACTR 接管仍为被动读取。实体设备验收须在连接对应硬件后进行。
 
 默认任务：
 
@@ -409,6 +409,90 @@ mode: simulation
 
 独立测试和 Web UI 复用同一个 `SpaceMouseInput`、轴映射、静止校准、按钮锁存和 250 ms stale deadman 实现，因此通过本节实机验收后无需维护第二套设备控制代码。
 
+#### 3.6.1 FACTR Franka 校准、手动重力补偿与无 VLA 测试
+
+GUI 与独立测试共用固定版本的官方 FACTR 类、驱动及参数，不再保留自写重力公式、重复 URDF 或另一套被动 GUI 采样器。未修改的源码在 `third_party/FACTR_Teleop/`，commit 为 `7a07ab3629af03a91c0198df7c44a0082dca77ab`，版本与执行文件哈希由 `configs/factr_official.lock.json` 校验。下载目录与隔离环境不提交 Git。
+
+从 workspace 根目录安装、检查（这两条命令不打开设备）：
+
+```bash
+conda activate vla-liberox
+python liberox-vla-adapter-terminal/scripts/setup_factr.py
+python liberox-vla-adapter-terminal/scripts/setup_factr.py --check
+```
+
+系统 Python 需先具备 ROS 2、Pinocchio、NumPy、PyYAML、pyzmq，本机为 ROS 2 Jazzy。其他机器参考[官方安装说明](https://github.com/JasonJZLiu/FACTR_Teleop#installation)并 source ROS 环境。脚本只在隔离环境安装固定 SDK/pyserial，不把系统 Python 3.12 的 ROS 库装入 Python 3.10 的 VLA 环境；通过本地父子进程通信。检查失败不会回退自写后端。
+
+固定配置为 `configs/factr_test_config.yaml`，GUI/CLI 共用设备参数，串口必须填写实际 `/dev/serial/by-id/...`。以下路径相对 YAML：
+
+```yaml
+runtime:
+  upstream_root: ../third_party/FACTR_Teleop
+  runtime_python: ../third_party/factr-runtime/bin/python
+  calibration_file: ../runs/factr_calibration/FTB9B3GO.json
+```
+
+旧 `standalone` 段改名为 `runtime`；删除旧被动采样 `poll_hz`、多阶段校准和测试录制参数。部署时同步配置，保留实际串口。SpaceMouse 是环境安装的 `pyspacemouse==2.0.0`，无需复制到 `third_party`。
+
+**GUI 流程：**选择 FACTR → 整臂置于[官方有支撑的近似参考构型](https://github.com/JasonJZLiu/FACTR_Teleop/blob/7a07ab3629af03a91c0198df7c44a0082dca77ab/src/factr_teleop/README.md#initialization-settings)并松开触发器 → 点击一次“校准控制器” → 点击“开启重力补偿” → 回溯接管。
+
+校准直接调用官方 `_get_dynamixel_offsets`（预热十包，按 π/2 候选选偏置），同时捕获松开触发器零点，使用官方 0.8 rad 行程；不再分别采集开/闭端点。这仍需要近似参考构型，**不是将任意姿态当成 Panda 物理零位**，也不逐电机标定。只保存主机文件，不写舵机 Homing Offset；旧后端校准需重新采集。GUI 启动需显式校准，不自动上力。
+
+开启补偿后，运动、倒计时、正常完成/停止仿真和回溯之间持续保持，可在接管中手动关闭。补偿开启时锁定控制器选择与重新校准，避免隐藏仍上力的设备。**仿真异常、设备故障、后端关闭时先停止实体输出，再做数据后处理或等待仿真线程。**重连不自动恢复。关闭浏览器不等于关闭后端；离开前请手动关闭补偿或退出后端。通信损坏导致无法确认 OFF 时显示“撤力未确认”，操作者需支撑主臂并检查实体电源，不能假定已经撤力。
+
+控制参数来自上游 `grav_comp_demo.yaml`：目标 500 Hz、增益 0.85，以及官方摩擦补偿、零空间调节、关节限位屏障。无额外 2 rad/s 速度阈值、渐入/软电流限制或 120 秒时限；保留设备电流上限、编码器不连续检测、七轴 RAM watchdog 与故障撤力。触发器电机始终 torque OFF。这些不是第二套动力学公式，也不能保证断电后悬停。关闭补偿前请支撑主臂。
+
+**硬件准备：**核对结构、型号、ID 1–8、方向、4 Mbps 与官方一致，current mode、Return Delay Time=0，官方 USB latency=1 ms。脚本不自动修改权限、模式、EEPROM、USB 参数或杀占用进程。关闭所有控制程序、确认真实设备名后由操作者检查/设置：
+
+```bash
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+# ttyUSB0 必须换成本设备真实名称
+echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+```
+
+1 ms 为 USB 参数，不代表实测达到 500 Hz，状态中的 `cycle_ms` 用于检查。GUI、CLI、上游 demo、厂商工具不能同时占用串口。
+
+独立测试固定读取同一 YAML：`mode: device` 不加载 MuJoCo/VLA，`simulation` 为无 VLA 仿真。
+
+```bash
+conda run --no-capture-output -n vla-liberox python liberox-vla-adapter-terminal/scripts/test_factr.py
+```
+
+| 输入 | 操作 |
+| --- | --- |
+| `c` | 松开触发器，一次官方整臂校准 |
+| `s` | 开始设备测试或无 VLA 仿真 |
+| `g` | 启用补偿，不再输入 ENABLE |
+| `d` | 直接关闭补偿，无二次确认；操作前支撑主臂 |
+| `i` | 查看版本、补偿、样本年龄和循环耗时 |
+| `q` / Ctrl+C | 先关闭电机输出，再退出整个测试程序，无二次确认 |
+
+`FACTR>` 表示等待输入，后台持续补偿。正常完成测试/关闭 Viewer 返回菜单不撤力；Ctrl+C、错误或退出停止输出。独立测试不保存轨迹、CSV、视频或运行目录，仅持久化校准。
+
+仿真控制：校准后的主臂七关节角 → Panda 绝对关节位置目标 → MuJoCo 关节位置控制器（仍计算物理动力学，不直接覆盖 qpos）。七关节按 1:1 目标跟随，不再使用相对末端偏移，也不使用位移/旋转增益。夹爪保持源指令，触发器先对齐再切换。
+
+接管流程：先开启补偿 → 回溯后点击 FACTR 接管 → **仿真保持静止，实体主臂缓慢靠近仿真姿态** → 对齐后保持姿态并倒计时 3 秒 → 释放对齐保持，开始关节跟随。请给实体主臂留出运动空间。关闭补偿或停止仿真可取消准备。对齐目标必须在官方关节范围内，不做任意置零或角度夹断。
+
+对齐使用官方关节位置 PD 增益，但改为非阻塞逐周期执行，并保留官方重力、摩擦及关节限位项；不是直接调用官方阻塞式 `set_leader_joint_pos`。只在准备阶段将参考目标以最多 0.15 rad/s 移动，限制跟踪误差积累为 0.12 rad；误差 ≤0.08 rad、速度 ≤0.15 rad/s 持续 0.5 秒才进入倒计时，60 秒未完成则报错。官方文档对该 PD 要求至少 200 Hz；项目在启动和运行对齐时按最近 50 个周期的平均频率检查，不能把它解释成每个周期绝不超过 5 ms。单次超过 5 ms 时只暂停该周期的对齐 PD 和参考推进，保持普通补偿，不退出；持续窗口低于 200 Hz 或硬件看门狗超时仍停止。这些不是人工遥操作的速度或补偿时长限制。实体对齐效果仍需实机确认。
+
+退出诊断将“运行故障”和“电机 OFF 校验”分开：非零退出码不代表撤力失败。子进程显式传回关闭寄存器读回结果，只有关闭校验失败或没有收到确认才显示关闭未确认；重复的 RuntimeError 前缀不再层层叠加。
+
+如果校准时立即出现连接重置，先查看具体的子进程启动错误。父进程会优先读取退出消息，并从内存中的有界 stderr 尾部提取启动异常，不额外保存测试日志。USB 拔插后 `latency_timer` 可能恢复为 16 ms；当前启动检查要求 1 ms。关闭 FACTR 程序后重新执行前述 USB 配置并读回确认，再重新校准。只看到 USB 枚举成功不代表子进程启动检查已经通过。
+
+运行中 `communication failed: -3001` 表示 DYNAMIXEL 状态包接收超时（`-3002` 为坏包），不等同于整条 USB 设备被拔出。接入层允许一次完整同步重读，丢弃残留接收数据；成功后才发布新关节包，不复用旧反馈。与官方默认最多十次重试不同，这里总读取预算为 75 ms，首读已用掉半数预算时不再重试；连续失败、完整包缺失或超时仍停机。硬件 100 ms watchdog 不变，发送电流前也检查循环是否已超时。`GET /api/controller?controller_id=factr` 的 `serial_read` 提供失败/恢复累计次数和最近读取耗时。偶发恢复会提示 `sync read recovered`；若频繁发生，需要排查线缆、接口、供电和系统负载，不能仅靠不断增加重试掩盖。
+
+**FACTR 与 SpaceMouse 使用相同的人工接管记录、结果展示和训练入口。** GUI 正常创建结果目录、复制父轨迹并保存完整前缀和新接管后缀、双视角视频、同步 observation 及末端轨迹；不再提供“仅控制、不记录”的临时会话。FACTR 保持七关节跟随，每个 20 Hz 控制步结束后，用实际仿真末端的世界坐标位移及相对旋转反算归一化七维 OSC 动作标签，夹爪仍为 `-1` 打开、`+1` 闭合，`action_source=human`。不新增关节示教日志，现有 `sim_state` 仍用于准确恢复物理状态。末端增量标签是实际运动的重标注，不声称与关节控制的驱动力学严格等价，也不另设训练数据类别。
+
+`raw_action` 保留未裁剪的转换结果，`env_action` 限于现有 `[-1, 1]` 范围供训练读取；超限次数、比例和轴计数保存在 controller 诊断中，终端会提示，不静默丢弃超限信息。视频与 observation 从真实记录的仿真状态重建，不使用反算 action 重放。正常结束只 disarm 仿真，保留补偿和校准；设备/仿真错误或后端退出仍 disable。成功后继续记录至停止或步数上限，故障则保存已完成部分。独立 `test_factr.py` 仍为不保存数据的设备测试。训练/reward/server 不变。
+
+前端改动后需重新构建并重启后端：
+
+```bash
+cd liberox-vla-adapter-terminal/frontend
+npm ci
+npm run build
+```
+
 ### 3.7 仿真与干预 Web UI
 
 Web UI 将原始仿真、实时查看、结束后的逐帧回溯、VLA 重新推理、人工接管和结果下载整合到同一个本机页面。后端固定监听 `127.0.0.1:8000`，不开放局域网，也不包含认证功能。
@@ -512,9 +596,9 @@ LOADING → READY（人工接管倒计时）→ RUNNING → STOPPING → POSTPRO
 
 原始会话结束且后处理完成后，时间轴范围为 `0..state_count-1`。拖动时间轴会把所选 `sim_state` 直接恢复到只读环境，不会从第 0 帧重新执行。页面同时显示仿真时间、EEF XYZ `[m]`、axis-angle `[rad]`、双指夹爪 qpos、VLA raw action、实际环境 action 和成功状态。
 
-点击“从此帧重新推理”不会立即启动分支，而会先在左侧打开二次推理配置。源任务、`episode_000`、回溯帧和原轨迹结束步均锁定为灰色，只允许调整 `open_loop_steps`（每次预测后实际连续执行的步数，范围 `1..8`）；点击“开始二次推理”后才真正创建分支。后端随后验证 MuJoCo state 最大恢复误差不超过 `1e-9`，创建空 action queue，从所选帧重新查询 VLA，并执行到源轨迹的实际结束帧。人工接管只支持 SpaceMouse，使用相同的精确恢复与源轨迹总长度规则。每个原始轨迹可产生多个并列分支；分支本身只读，不能再创建子分支。
+点击“从此帧重新推理”不会立即启动分支，而会先在左侧打开二次推理配置。源任务、`episode_000`、回溯帧和原轨迹结束步均锁定为灰色，只允许调整 `open_loop_steps`（每次预测后实际连续执行的步数，范围 `1..8`）；点击“开始二次推理”后才真正创建分支。后端随后验证 MuJoCo state 最大恢复误差不超过 `1e-9`，创建空 action queue，从所选帧重新查询 VLA，并执行到源轨迹的实际结束帧。人工接管可选择 SpaceMouse 或 FACTR，使用相同的精确恢复、源轨迹总长度及数据保存规则；FACTR 按 3.6.1 节一次校准后开启补偿。每个原始轨迹可产生多个并列分支；分支本身只读，不能再创建子分支。
 
-UI 启动后只探测控制器，不占用动作输出。连接设备后顶部状态显示 `UNCALIBRATED`（已连接·待校准），点击“校准”并松开帽盖连续静止 2 秒即可。校准期间若任一轴超过 `neutral_max_abs`，静止进度会重置并提示松开帽盖，不再使分支进入 `ERROR`；30 秒内始终无法稳定才报告可重试的校准失败。一次成功校准会由全局控制器服务持续复用，设备拔插或 UI 服务重启后必须重新校准。
+UI 启动后只探测控制器，不占用动作输出。选择 SpaceMouse 并连接后，控制器设置区显示已连接·待校准（`UNCALIBRATED`）；顶部只显示是否有控制器连接，点击“校准”并松开帽盖连续静止 2 秒即可。校准期间若任一轴超过 `neutral_max_abs`，静止进度会重置并提示松开帽盖，不再使分支进入 `ERROR`；30 秒内始终无法稳定才报告可重试的校准失败。一次成功校准会由全局控制器服务持续复用，设备拔插或 UI 服务重启后必须重新校准。FACTR 按官方整臂近似参考构型一次校准，不做帽盖静止或三步端点校准。
 
 点击 SpaceMouse 接管后，后端依次显示“读取轨迹、加载环境、恢复状态、准备预览”，取得有效首帧后进入 `READY`，显示清晰的 `3、2、1` 倒计时；倒计时结束前控制器保持 disarmed，机械臂不会运动。开始接管后左键张开夹爪，右键闭合；位移和旋转增益可在创建分支前调整，也可在运行时通过 `0.05..1.0` 的滑杆实时更新。顶部控制器 pill 显示输入样本年龄：绿色 `<50 ms`，黄色 `50–249 ms`，红色 `≥250 ms`、断连或读取错误；红色状态下六维运动自动归零。接管会话的 WebSocket 断开会安全停止分支并保存已有轨迹。
 
@@ -545,7 +629,9 @@ UI 启动后只探测控制器，不占用动作输出。连接设备后顶部�
 ```text
 GET  /api/bootstrap
 GET  /api/controller
+GET  /api/controllers
 POST /api/controller/calibrate
+POST /api/controller/gravity?controller_id=factr  # JSON: {"enabled": true|false}
 GET  /api/draft
 POST /api/draft
 PATCH /api/draft
@@ -1238,6 +1324,8 @@ UI 只接受与当前基础 checkpoint、8×7 action、8 维 proprio 兼容且�
 独立推理是否对比基础策略由 `configs/inference.yaml` 控制。每个策略仍使用 LIBERO-X 环境原本的 `done` 判断与成功率，不会使用 RynnValue 文本判断替代任务成功条件。
 
 ### 4.7 测试、限制与参考资料
+
+Stage-based 奖励的前期调研见 [docs/STAGE_REWARD_RESEARCH.md](docs/STAGE_REWARD_RESEARCH.md)：讨论 SARM、STDR、Reward Machines、Relay Policy Learning，以及 stage-potential PBRS 与按阶段调整时间代价的数学区别、失败回退、未知标签和消融设计。本轮只新增调研文档，不新增 stage 训练开关，也不更改 RynnValue/Robometer 评价、IQL 或现有 reward。
 
 当前已有数据即使全部失败也允许完成流程烟测，但会明确警告，不能据此预期策略提升。4B RynnValue 评价和 VLA/IQL 严格串行使用 GPU；任一阶段显存不足会报告具体阶段且不会自动回退 CPU。
 

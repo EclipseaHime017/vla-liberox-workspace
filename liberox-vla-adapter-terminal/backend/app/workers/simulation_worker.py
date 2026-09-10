@@ -27,6 +27,8 @@ from trajectory_utils import (
 
 from ..core.config import UIConfig
 from ..devices.spacemouse import SpaceMouseInput, SpaceMouseSnapshot, load_spacemouse_config
+from ..devices.factr import load_factr_config
+from ..services.factr_controller_service import FactrControllerService
 from ..domain.run import (
     ACTIVE_STATES,
     TERMINAL_STATES,
@@ -222,6 +224,13 @@ class SimulationManager:
             if self.spacemouse_config is None
             else SpaceMouseControllerService(self.spacemouse_config)
         )
+        self.factr_controller = None
+        self.factr_config_error = None
+        try:
+            self.factr_controller = FactrControllerService(load_factr_config())
+        except Exception as exc:
+            self.factr_config_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning("FACTR configuration unavailable: %s", self.factr_config_error)
         self.sessions: dict[str, SimulationSession] = {}
         self.legacy_sessions: dict[str, dict[str, Any]] = {}
         self.draft: SimulationDraft | None = None
@@ -371,33 +380,67 @@ class SimulationManager:
                 "step": False,
                 "branch_depth": 1,
                 "manual_control": True,
-                "manual_sources": ["spacemouse"],
+                "manual_sources": ["spacemouse", "factr"],
             },
         }
 
-    def controller_status(self) -> dict[str, Any]:
-        if self.controller is None:
+    def _controller_service(self, controller_id: str = "spacemouse"):
+        if controller_id == "spacemouse":
+            return getattr(self, "controller", None)
+        if controller_id == "factr":
+            return getattr(self, "factr_controller", None)
+        raise ValueError(f"Unknown controller: {controller_id}")
+
+    def controller_catalog(self) -> dict[str, Any]:
+        return {"controllers": [self.controller_status(name) for name in ("spacemouse", "factr")]}
+
+    def controller_status(self, controller_id: str = "spacemouse") -> dict[str, Any]:
+        controller = self._controller_service(controller_id)
+        if controller is None:
             return {
+                "controller_id": controller_id,
                 "state": "ERROR",
                 "connected": False,
                 "calibrated": False,
                 "calibration_progress": 0.0,
-                "message": "SpaceMouse 配置不可用",
-                "error": self.spacemouse_config_error,
+                "message": f"{controller_id} 配置不可用",
+                "error": getattr(self, f"{controller_id}_config_error", None),
                 "armed_session_id": None,
                 "latency_ms": None,
                 "latency_level": None,
                 "stale": True,
             }
-        return self.controller.status()
+        return {"controller_id": controller_id, **controller.status()}
 
-    def calibrate_controller(self) -> dict[str, Any]:
+    def calibrate_controller(self, controller_id: str = "spacemouse", phase: str = "reference") -> dict[str, Any]:
         with self.lock:
             if self.active_session_id is not None:
                 raise RuntimeError("Cannot calibrate while a simulation is active")
-        if self.controller is None:
-            raise RuntimeError(f"SpaceMouse unavailable: {self.spacemouse_config_error}")
-        return self.controller.start_calibration()
+            controller = self._controller_service(controller_id)
+            if controller is None:
+                raise RuntimeError(f"{controller_id} unavailable: {self.controller_status(controller_id)['error']}")
+            for other in ("spacemouse", "factr"):
+                if other != controller_id and self.controller_status(other)["state"] in {"CALIBRATING", "ARMED"}:
+                    raise RuntimeError("Another controller is calibrating or armed")
+            if phase != "reference":
+                raise ValueError("Only single-capture reference calibration is supported")
+            return controller.start_calibration()
+
+    def set_controller_gravity(self, controller_id: str, enabled: bool):
+        if controller_id != "factr":
+            raise ValueError("Only FACTR supports gravity compensation")
+        with self.lock:
+            controller = self._controller_service("factr")
+            if controller is None:
+                raise RuntimeError("FACTR is unavailable")
+            if enabled and self.controller_status("spacemouse")["state"] == "CALIBRATING":
+                raise RuntimeError("Another controller is calibrating")
+        return controller.set_gravity(enabled)
+
+    def _disable_factr_on_error(self, reason: str):
+        controller = getattr(self, "factr_controller", None)
+        if controller is not None:
+            controller.emergency_stop(reason)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -443,6 +486,7 @@ class SimulationManager:
         control_mode: str = "policy",
         manual_translation_gain: float | None = None,
         manual_rotation_gain: float | None = None,
+        controller_id: str | None = None,
     ) -> SimulationSession:
         eval_config = getattr(self, "eval_config", None)
         default_seed = int(getattr(eval_config, "seed", 0))
@@ -507,14 +551,18 @@ class SimulationManager:
             source_trajectory=None if parent is None else parent["trajectory"],
             resume_step=resume_step,
             control_mode=control_mode,
-            manual_source="spacemouse" if control_mode == "manual" else None,
+            managed=True,
+            manual_source=(controller_id or "spacemouse") if control_mode == "manual" else None,
             manual_translation_gain=manual_translation_gain,
             manual_rotation_gain=manual_rotation_gain,
             spacemouse_deadman_ms=(
                 self.spacemouse_config.stale_timeout_ms
-                if control_mode == "manual" and self.spacemouse_config is not None
+                if control_mode == "manual" and controller_id != "factr" and self.spacemouse_config is not None
                 else None
             ),
+            controller_deadman_ms=(getattr(
+                getattr(self._controller_service(controller_id or "spacemouse"), "config", None),
+                "stale_timeout_ms", 250) if control_mode == "manual" else None),
             status="LOADING",
             branchable=parent is None,
             current_step=0 if resume_step is None else resume_step,
@@ -529,6 +577,8 @@ class SimulationManager:
         if gpu_guard is not None:
             gpu_guard()
         with self.lock:
+            if any(self.controller_status(name)["state"] == "CALIBRATING" for name in ("spacemouse", "factr")):
+                raise RuntimeError("Cannot start a simulation during controller calibration")
             if self.draft is not None:
                 raise RuntimeError("Cancel or start the current draft before creating a session")
             if self.active_session_id is not None:
@@ -770,6 +820,8 @@ class SimulationManager:
         with self.lock:
             if self.active_session_id is not None:
                 raise RuntimeError("Cannot start a draft while a simulation is active")
+            if any(self.controller_status(name)["state"] == "CALIBRATING" for name in ("spacemouse", "factr")):
+                raise RuntimeError("Cannot start a draft during controller calibration")
             if self.draft is None:
                 raise KeyError("draft")
             draft = self.draft
@@ -801,6 +853,7 @@ class SimulationManager:
         open_loop_steps: int,
         translation_gain: float | None = None,
         rotation_gain: float | None = None,
+        controller_id: str | None = None,
     ) -> dict[str, Any]:
         parent = self.get_public(parent_id)
         if parent["kind"] != "original" or not parent.get("branchable"):
@@ -823,16 +876,21 @@ class SimulationManager:
         if control_mode not in {"policy", "manual"}:
             raise ValueError("control_mode must be 'policy' or 'manual'")
         if control_mode == "policy":
+            if controller_id is not None:
+                raise ValueError("controller_id must be omitted for policy branches")
             if translation_gain is not None or rotation_gain is not None:
                 raise ValueError("manual gains must be omitted for policy branches")
         else:
+            controller_id = controller_id or "spacemouse"
+            controller = self._controller_service(controller_id)
+            defaults = getattr(controller, "config", None) if controller_id == "factr" else None
             translation_gain = (
-                self.ui_config.manual_translation_gain
+                getattr(defaults, "translation_gain", self.ui_config.manual_translation_gain)
                 if translation_gain is None
                 else float(translation_gain)
             )
             rotation_gain = (
-                self.ui_config.manual_rotation_gain
+                getattr(defaults, "rotation_gain", self.ui_config.manual_rotation_gain)
                 if rotation_gain is None
                 else float(rotation_gain)
             )
@@ -840,14 +898,16 @@ class SimulationManager:
                 raise ValueError("translation_gain must be in [0.05, 1.0]")
             if not 0.05 <= rotation_gain <= 1.0:
                 raise ValueError("rotation_gain must be in [0.05, 1.0]")
-            if self.controller is None:
-                raise RuntimeError(f"SpaceMouse unavailable: {self.spacemouse_config_error}")
-            controller_state = self.controller.status()["state"]
+            if controller is None:
+                raise RuntimeError(f"{controller_id} is unavailable")
+            controller_state = controller.status()["state"]
             if controller_state != "READY":
                 raise RuntimeError(
-                    "SpaceMouse must be connected and calibrated before takeover "
+                    f"{controller_id} must be connected and calibrated before takeover "
                     f"(current state: {controller_state})"
                 )
+            if controller_id == "factr" and not controller.status().get("gravity_enabled"):
+                raise RuntimeError("FACTR: enable gravity compensation before alignment/takeover")
         if not 1 <= open_loop_steps <= 8:
             raise ValueError("open_loop_steps must be in [1, 8]")
         action_count = int(parent["action_count"])
@@ -868,6 +928,7 @@ class SimulationManager:
             control_mode=control_mode,
             manual_translation_gain=translation_gain,
             manual_rotation_gain=rotation_gain,
+            controller_id=controller_id,
         )
         try:
             self._copy_branch_source(record, parent)
@@ -917,8 +978,9 @@ class SimulationManager:
         with self.lock:
             record.manual_translation_gain = translation_gain
             record.manual_rotation_gain = rotation_gain
-        if self.controller is not None:
-            self.controller.set_gains(record.id, translation_gain, rotation_gain)
+        controller = self._controller_service(record.manual_source or "spacemouse")
+        if controller is not None:
+            controller.set_gains(record.id, translation_gain, rotation_gain)
 
     def manual_disconnect(self, session_id: str) -> None:
         record = self._manual_record(session_id)
@@ -1010,6 +1072,11 @@ class SimulationManager:
                     "control_mode": record.control_mode,
                     "resume_step": record.resume_step,
                 },
+                "controller": {
+                    "id": record.manual_source,
+                    "translation_gain": record.manual_translation_gain,
+                    "rotation_gain": record.manual_rotation_gain,
+                },
             },
         )
 
@@ -1039,6 +1106,7 @@ class SimulationManager:
                 "root_session_id": record.root_session_id,
                 "resume_step": record.resume_step,
                 "control_mode": record.control_mode,
+                "manual_source": record.manual_source,
                 "policy_id": record.policy_id,
                 "policy_label": record.policy_label,
                 "policy_base_checkpoint": record.policy_base_checkpoint,
@@ -1129,7 +1197,8 @@ class SimulationManager:
                 "policy_compatibility_sha256"
             ),
             "manual_source": (
-                "spacemouse" if controller else manifest.get("manual_source")
+                controller.get("type", manifest.get("manual_source") or "spacemouse")
+                if controller else manifest.get("manual_source")
             ),
             "manual_translation_gain": controller.get(
                 "translation_gain", manifest.get("manual_translation_gain")
@@ -1195,6 +1264,8 @@ class SimulationManager:
         }
 
     def _set_status(self, record: SimulationSession, status: str) -> None:
+        if status == "ERROR":
+            self._disable_factr_on_error(record.error or "Simulation failed")
         with self.lock:
             record.status = status
             self._persist_manifest(record)
@@ -1236,6 +1307,10 @@ class SimulationManager:
             record.spacemouse_connected = snapshot.connected
             record.spacemouse_stale = snapshot.stale
             record.spacemouse_latency_ms = latency_ms
+            record.controller_status = status
+            record.controller_connected = snapshot.connected
+            record.controller_stale = snapshot.stale
+            record.controller_latency_ms = latency_ms
             row: dict[str, Any] = {
                 "step": step,
                 "sequence": snapshot.sequence,
@@ -1262,6 +1337,7 @@ class SimulationManager:
         if snapshot.error is not None:
             raise RuntimeError(f"SpaceMouse reader failed: {snapshot.error}")
         return np.asarray(snapshot.action, dtype=np.float32)
+
 
     @staticmethod
     def _serializable_spacemouse_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
@@ -1327,11 +1403,13 @@ class SimulationManager:
 
     def _run_session(self, record: SimulationSession) -> None:
         recorder: TrajectoryRecorder | None = None
+        follower = None
         env = None
         source_trajectory: dict[str, np.ndarray] | None = None
         restore_error: float | None = None
         timing: dict[str, float | None] = {}
         controller_summary: dict[str, Any] | None = None
+        controller = self._controller_service(record.manual_source or "spacemouse") if record.control_mode == "manual" else None
         prep_started = time.monotonic()
         task = self.catalog.entry(record.task_id)
         bddl, _ = self.catalog.paths(record.task_id)
@@ -1425,6 +1503,9 @@ class SimulationManager:
             record.current_step = recorder.action_count
             record.state_count = recorder.state_count
             record.action_count = recorder.action_count
+            if record.manual_source == "factr":
+                from ..devices.factr_joint_control import JointFollower
+                follower = JointFollower(env)
             phase("preparing_preview", "准备实时四视角")
             record.preview_event.clear()
             record.preview_error = None
@@ -1436,30 +1517,48 @@ class SimulationManager:
             record.preparation_timing["ready_seconds"] = time.monotonic() - prep_started
 
             if record.control_mode == "manual":
-                if self.controller is None:
-                    raise RuntimeError("SpaceMouse controller service is unavailable")
+                if controller is None:
+                    raise RuntimeError("Selected controller service is unavailable")
                 assert record.manual_translation_gain is not None
                 assert record.manual_rotation_gain is not None
-                record.spacemouse_calibration = self.controller.calibration_snapshot()
+                record.controller_calibration = controller.calibration_snapshot()
+                if follower is not None:
+                    from .factr_control_worker import prepare_factr
+                    if not prepare_factr(self, record, follower, controller):
+                        record.stopped_reason = "alignment_cancelled"
+                        return
+                else:
+                    record.spacemouse_calibration = record.controller_calibration
                 self._set_status(record, "READY")
                 for remaining in (3, 2, 1):
                     with self.lock:
                         record.countdown_remaining = remaining
                         record.preparation_phase = "countdown"
-                        record.preparation_message = f"{remaining} 秒后开始 SpaceMouse 接管"
+                        record.preparation_message = f"{remaining} 秒后开始 {record.manual_source} 接管"
                         self._persist_manifest(record)
                     if record.stop_event.wait(1.0):
                         break
+                    if record.preview_error:
+                        raise RuntimeError(record.preview_error)
+                    if follower is not None and not controller.status().get("gravity_enabled"):
+                        record.stopped_reason = "alignment_cancelled"
+                        return
                 record.countdown_remaining = None
                 if not record.stop_event.is_set():
-                    self.controller.arm(
-                        record.id,
-                        record.manual_translation_gain,
-                        record.manual_rotation_gain,
-                    )
-                    record.spacemouse_status = "armed"
-                    record.spacemouse_connected = True
-                    record.spacemouse_stale = False
+                    arm_args = (record.id, record.manual_translation_gain, record.manual_rotation_gain)
+                    if follower is not None:
+                        controller.finish_alignment(record.id)
+                        gripper = recorder.env_actions[-1][6] if recorder.env_actions else -1.
+                        sample = controller.arm(*arm_args, gripper=1. if gripper > 0 else -1.)
+                        follower.check_aligned(sample.joint_positions)
+                    else:
+                        controller.arm(*arm_args)
+                        record.spacemouse_status = "armed"
+                        record.spacemouse_connected = True
+                        record.spacemouse_stale = False
+                    record.controller_status = "armed"
+                    record.controller_connected = True
+                    record.controller_stale = False
             with self.lock:
                 record.preparation_phase = "complete"
                 record.preparation_message = None
@@ -1500,7 +1599,12 @@ class SimulationManager:
                 stop_on_success=False,
                 horizon_reason="max_steps",
             )
-            if record.control_mode == "manual":
+            if follower is not None:
+                from .factr_control_worker import run_factr_loop
+                result = run_factr_loop(record=record, controller=controller, follower=follower,
+                    recorder=recorder, initial_observation=observation, rate_limiter=limiter,
+                    on_transition=on_transition)
+            elif record.control_mode == "manual":
                 result = run_control_loop(
                     **common,
                     action_source="human",
@@ -1536,13 +1640,35 @@ class SimulationManager:
             record.preparation_message = "准备或运行失败"
             LOGGER.exception("Session %s failed", record.id)
         finally:
-            if record.control_mode == "manual" and self.controller is not None:
-                record.spacemouse_diagnostics = self._serializable_spacemouse_diagnostics(
-                    self.controller.diagnostics()
-                )
-                self.controller.disarm(record.id)
-                if record.spacemouse_status != "error":
-                    record.spacemouse_status = "stopped"
+            import sys
+            if record.error or sys.exc_info()[0] is not None:
+                self._disable_factr_on_error(record.error or "Simulation interrupted")
+            if controller is not None:
+                try:
+                    if record.manual_source == "factr":
+                        controller.finish_alignment(record.id)
+                    else:
+                        record.spacemouse_diagnostics = self._serializable_spacemouse_diagnostics(controller.diagnostics())
+                        if record.spacemouse_status != "error":
+                            record.spacemouse_status = "stopped"
+                    controller.disarm(record.id)
+                except Exception as exc:
+                    record.error = record.error or f"Controller cleanup: {exc}"
+                    self._disable_factr_on_error(record.error)
+                if record.controller_status != "error":
+                    record.controller_status = "stopped"
+            if follower is not None:
+                record.controller_diagnostics = follower.encoder.diagnostics()
+                controller_summary = {"type": "factr", "action_conversion": record.controller_diagnostics}
+                if record.controller_diagnostics["clipped_steps"]:
+                    LOGGER.warning("Session %s: %d/%d measured end-effector actions exceeded OSC bounds; "
+                                   "unclipped values retained in raw_action", record.id,
+                                   record.controller_diagnostics["clipped_steps"],
+                                   record.controller_diagnostics["sample_count"])
+            if recorder is not None:
+                record.action_count = record.current_step = recorder.action_count
+                record.state_count = recorder.state_count
+                record.policy_queries = len(recorder.inference_query_steps)
 
             suffix_start = record.resume_step or 0
             has_new_actions = bool(
@@ -1577,8 +1703,14 @@ class SimulationManager:
                     )
                     record.stopped_reason = "error"
                     LOGGER.exception("Session %s video post-processing failed", record.id)
+                    self._disable_factr_on_error(record.error)
             if env is not None:
-                self.simulator.close(env)
+                try:
+                    self.simulator.close(env)
+                except Exception as exc:
+                    record.error = record.error or f"Environment cleanup: {exc}"
+                    record.stopped_reason = "error"
+                    self._disable_factr_on_error(record.error)
 
             if recorder is not None and recorder.state_count:
                 try:
@@ -1633,6 +1765,9 @@ class SimulationManager:
                     )
                     record.stopped_reason = "error"
 
+
+            if record.error:
+                self._disable_factr_on_error(record.error)
             record.completed_at = utc_now()
             record.status = "ERROR" if record.error else "COMPLETED"
             record.preparation_phase = "failed" if record.error else "completed"
@@ -1680,6 +1815,10 @@ class SimulationManager:
             "target_total_steps": record.max_steps,
             "control_mode": record.control_mode,
             "manual_source": record.manual_source,
+            "controller_id": record.manual_source,
+            "controller_calibration": record.controller_calibration,
+            "controller_diagnostics": record.controller_diagnostics,
+            "controller_deadman_ms": record.controller_deadman_ms,
             "manual_translation_gain": record.manual_translation_gain,
             "manual_rotation_gain": record.manual_rotation_gain,
             "spacemouse_deadman_ms": record.spacemouse_deadman_ms,
@@ -1886,8 +2025,7 @@ class SimulationManager:
         with self.lock:
             if self.active_session_id is not None:
                 raise RuntimeError("Cannot delete while a simulation is active")
-            controller_state = self.controller_status()["state"]
-            if controller_state in {"CALIBRATING", "ARMED"}:
+            if any(self.controller_status(name)["state"] in {"CALIBRATING", "ARMED"} for name in ("spacemouse", "factr")):
                 raise RuntimeError("Cannot delete while the controller is calibrating or armed")
             public = self.get_public(session_id)
             if not public.get("managed"):
@@ -1922,6 +2060,9 @@ class SimulationManager:
                 self._trajectory_cache.pop(cache_key, None)
 
     def close(self) -> None:
+        # Remove physical output before waiting on a possibly blocked CUDA call.
+        if getattr(self, "factr_controller", None) is not None:
+            self.factr_controller.close()
         with self.lock:
             active_id = self.active_session_id
             if active_id and active_id in self.sessions:

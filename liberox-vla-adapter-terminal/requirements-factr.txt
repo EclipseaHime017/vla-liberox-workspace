@@ -1,0 +1,4 @@
+# Optional direct SDK preflight development/tests. GUI/CLI runtime is provisioned
+# by scripts/setup_factr.py; do not install ROS/Pinocchio into the VLA environment.
+dynamixel-sdk==3.7.31
+pyserial==3.5

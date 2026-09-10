@@ -2,7 +2,7 @@
 
 Current release: **v0.4.1**
 
-Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse takeover,
+Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse / FACTR takeover,
 offline post-training, and reproducible batch policy testing for the three
 validated Franka/LIBERO-X tasks.
 
@@ -12,6 +12,7 @@ validated Franka/LIBERO-X tasks.
 - Compatibility: the existing evaluation, intervention, and SpaceMouse CLI scripts remain available.
 - Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
+- FACTR Franka: GUI and CLI share official calibration and gravity compensation, with one reference capture and explicit ON/OFF. Joint following includes slow leader alignment; GUI records measured end-effector action labels, trajectories and dual-camera video through the standard manual-data pipeline. Physical acceptance is still required.
 - Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
 - Integrated workflow: the Dataset page evaluates RynnValue once per trajectory, preserves its complete output sidecar, paginates run previews, exposes video/action/EEF, absolute/relative remaining-time, observation-potential and entropy estimates, plus Shape/Final Reward details, and independently packages hash-verified training datasets. The Training page derives rewards from those cached model outputs using its selected `gamma`, shaping coefficient, and macro/primitive reduction, then launches resumable IQL jobs without rerunning RynnValue.
@@ -54,6 +55,75 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 On a new checkout, run `npm ci` once in `liberox-vla-adapter-terminal/frontend/`. The launcher fingerprints the frontend sources, prints the exact build command before running it, and automatically rebuilds the Git-ignored `frontend/dist` after later pulls. Run `npm run build` there for a manual source-only rebuild, or `npm ci && npm run build` after `package-lock.json` changes. Neither `npm run build` nor `npm test` installs or upgrades dependencies.
 
 Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup and operation, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries, and [docs/DATA_LAYOUT.md](docs/DATA_LAYOUT.md) for persistence rules.
+
+## FACTR calibration and manual gravity compensation
+
+GUI and CLI share the pinned official FACTR classes, driver and control parameters.
+The unmodified checkout/runtime live under `third_party/`; commit/file hashes are
+verified against `configs/factr_official.lock.json`. No custom gravity model remains.
+
+```bash
+conda activate vla-liberox
+python liberox-vla-adapter-terminal/scripts/setup_factr.py
+python liberox-vla-adapter-terminal/scripts/setup_factr.py --check
+python liberox-vla-adapter-terminal/scripts/test_factr.py
+```
+
+Setup/check do not open hardware. System ROS 2/Pinocchio dependencies must be
+installed first; SDK packages go into an isolated system-Python runtime, not the
+VLA Python environment. Configure the explicit serial path in
+[configs/factr_test_config.yaml](configs/factr_test_config.yaml).
+The former `standalone` section is now `runtime`.
+
+In GUI, select FACTR, support the complete arm in the official approximate resting
+configuration and release the trigger, click Calibrate once, then Enable gravity
+compensation. Calibration calls the official offset method and captures trigger
+zero using the official 0.8 rad travel. No individual-motor or separate endpoint
+calibration, and no arbitrary-pose physical-zero assumption.
+
+Compensation is explicitly enabled, never enabled by calibration or takeover.
+It persists through movement, normal simulation completion, countdown and rewind.
+Manual OFF, simulation faults or backend shutdown disable output before expensive
+postprocessing. Closing the browser alone does not stop the backend. Support the
+arm before OFF; an unverified shutdown is shown as unknown, not falsely confirmed.
+
+CLI: `c` calibrates, `s` tests, `g` enables without an ENABLE prompt,
+`d` disables immediately, `i` shows status; `q`/Ctrl+C disable output then exit
+the entire test program. No second confirmation is requested.
+Normal test completion returns to the menu with support retained; Ctrl+C/faults
+stop output immediately. Tests create no trajectories/videos/run directories;
+only successful calibration persists.
+
+Official gravity/friction/null-space/limit-barrier control uses a 500 Hz target
+and gain 0.85. USB latency 1 ms, 4 Mbps and correct current-mode configuration
+are required. No custom speed cutoff or support time limit; encoder integrity,
+hardware current limits, watchdog and shutdown handling remain. Trigger torque
+stays OFF. No automatic permissions, USB or EEPROM changes.
+
+FACTR mirrors calibrated seven-joint targets through a Panda joint-position
+controller (physics still runs; no qpos teleport). Before takeover, the simulation
+stays fixed while the physical leader slowly aligns to it, holds through the
+countdown, then follows 1:1. Keep the physical workspace clear. Alignment uses
+the official PD gains in a nonblocking adapter with gravity support; it is not
+the unmodified blocking upstream alignment routine. Its documented >=200 Hz
+requirement is checked over a rolling 50-cycle window only for alignment, not
+as a human motion-speed cutoff or an every-cycle 5 ms deadline. A single late
+tick skips alignment PD/reference advance and retains normal compensation;
+sustained low rate still stops the run. This is an application timing check,
+not an assertion implemented by upstream FACTR. Hardware watchdogs remain.
+FACTR and SpaceMouse use the same recorded manual-session and training workflow.
+FACTR still follows joint targets; each 20 Hz step's measured end-effector world
+translation and relative rotation are inverse-scaled into seven-dimensional OSC
+labels, with the gripper command appended. These describe achieved motion, not
+an exactly equivalent executed OSC command. No separate joint demonstration log
+is written. Unclipped labels remain in raw_action; bounded labels in env_action,
+with clipping statistics in controller diagnostics. Parent prefixes, state-based
+dual-camera reconstruction and dataset export use the shared recording pipeline.
+Normal completion retains compensation; errors disable it and save partial data.
+SpaceMouse remains an installed `pyspacemouse` dependency, not a vendored checkout.
+Do not run GUI, CLI or upstream demos against the same serial port concurrently.
+See [the Chinese guide](README_CN.md#361-factr-franka-校准手动重力补偿与无-vla-测试)
+and [official source](https://github.com/JasonJZLiu/FACTR_Teleop).
 
 ## Batch policy testing
 
@@ -164,3 +234,12 @@ prefix protocol and batch-size tuning are documented in the
 - [LIBERO-X official implementation](https://github.com/meituan/LIBERO-X)
 - [Robometer paper](https://arxiv.org/abs/2603.02115)
 - [Robometer official implementation](https://github.com/robometer/robometer)
+
+## Stage-based reward research
+
+[Stage reward research and ablations](docs/STAGE_REWARD_RESEARCH.md) compares
+SARM, STDR, Reward Machines and Relay Policy Learning, then separates two proposed
+experiments: stage-potential PBRS and stage-dependent time cost. It covers
+failure rollback, uncertain labels, macro/Semi-MDP discount consistency and
+controlled evaluation. This is research documentation only: no stage model,
+training reward, IQL update or existing evaluation sidecar is changed.

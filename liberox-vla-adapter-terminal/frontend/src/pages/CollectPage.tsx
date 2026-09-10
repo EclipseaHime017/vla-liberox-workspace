@@ -6,8 +6,10 @@ import {
 } from "../features/simulation-view/controls";
 import { api, ApiError } from "../api/client";
 import { sessionWebSocket } from "../api/websocket";
-import { ACTIVE, TERMINAL, type Bootstrap, type ControllerStatus, type Draft, type FrameState, type PolicyBranchDraft, type PolicyCameraId, type Session, type TaskInfo } from "../features/run-control/types";
-import { Gain, Info, Metric } from "../features/metrics/MetricsPanel";
+import { ACTIVE, TERMINAL, type Bootstrap, type ControllerId, type ControllerStatus, type Draft, type FrameState, type PolicyBranchDraft, type PolicyCameraId, type Session, type TaskInfo } from "../features/run-control/types";
+import { Info, Metric } from "../features/metrics/MetricsPanel";
+import { ControllerSettings } from "../features/run-control/ControllerSettings";
+import { calibrateController, setControllerGravity, CONTROLLER_LABELS, controllerConnection, getControllers } from "../features/run-control/controller";
 import { RunConfigForm } from "../features/run-config/RunConfigForm";
 import { RunStatus } from "../features/run-control/RunStatus";
 import { SessionMonitor } from "../features/run-control/SessionMonitor";
@@ -38,6 +40,9 @@ function CollectPage() {
   const [translationGain, setTranslationGain] = useState(0.25);
   const [rotationGain, setRotationGain] = useState(0.08);
   const [controller, setController] = useState<ControllerStatus | null>(null);
+  const [controllers, setControllers] = useState<ControllerStatus[]>([]);
+  const [controllerId, setControllerId] = useState<ControllerId>("spacemouse");
+  const [controllerBusy, setControllerBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [deleteReferences, setDeleteReferences] = useState<Array<{ id: string; name: string }>>([]);
   const [error, setError] = useState("");
@@ -45,6 +50,10 @@ function CollectPage() {
   const websocket = useRef<WebSocket | null>(null);
   const trajectoryVideo = useRef<HTMLVideoElement | null>(null);
   const gainRef = useRef({ translationGain, rotationGain });
+  const controllerGains = useRef<Record<ControllerId, { translationGain: number; rotationGain: number }>>({
+    spacemouse: { translationGain: 0.25, rotationGain: 0.08 },
+    factr: { translationGain: 0.25, rotationGain: 0.25 },
+  });
 
   const selected = useMemo(
     () => sessions.find((session) => session.id === selectedId) ?? null,
@@ -84,9 +93,9 @@ function CollectPage() {
       .then(() => Promise.all([
         api<Bootstrap>("/api/bootstrap"),
         api<Session[]>("/api/sessions"),
-        api<ControllerStatus>("/api/controller"),
+        getControllers(),
       ]))
-      .then(([boot, history, controllerStatus]) => {
+      .then(([boot, history, catalog]) => {
         setBootstrap(boot);
         setSessions(history);
         setMaxSteps(boot.config.max_steps);
@@ -98,7 +107,26 @@ function CollectPage() {
         setPolicyId("base");
         setTranslationGain(boot.config.manual.translation_gain);
         setRotationGain(boot.config.manual.rotation_gain);
-        setController(controllerStatus);
+        controllerGains.current.spacemouse = {
+          translationGain: boot.config.manual.translation_gain,
+          rotationGain: boot.config.manual.rotation_gain,
+        };
+        // Seed each device once from its configured defaults. Later polling
+        // must not overwrite the user's slider values or per-device choices.
+        const factrStatus = catalog.controllers.find((item) => item.controller_id === "factr");
+        controllerGains.current.factr = {
+          translationGain: factrStatus?.translation_gain ?? 0.25,
+          rotationGain: factrStatus?.rotation_gain ?? 0.25,
+        };
+        setControllers(catalog.controllers);
+        const initial = catalog.controllers.find((item) => item.connected && item.state !== "ERROR")
+          ?? catalog.controllers.find((item) => item.controller_id === "spacemouse");
+        if (initial?.controller_id) {
+          setControllerId(initial.controller_id);
+          setController(initial);
+          setTranslationGain(controllerGains.current[initial.controller_id].translationGain);
+          setRotationGain(controllerGains.current[initial.controller_id].rotationGain);
+        }
         if (history[0]) setSelectedId(history[0].id);
       })
       .catch((reason) => setError(String(reason)));
@@ -136,6 +164,13 @@ function CollectPage() {
   }, [selected?.id]);
 
   useEffect(() => {
+    // Reloading or browsing history must not change a running branch's device.
+    const id = active?.manual_source;
+    if (id !== "factr" && id !== "spacemouse") return;
+    setControllerId(id);
+  }, [active?.id, active?.manual_source]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       api<Session[]>("/api/sessions")
         .then((history) => {
@@ -148,16 +183,22 @@ function CollectPage() {
   }, [selectedId]);
 
   useEffect(() => {
+    let cancelled = false;
     const interval = controller?.state === "ARMED"
-      ? 100
+      ? 500
       : controller?.state === "CALIBRATING" ? 250 : 1000;
-    const timer = window.setInterval(() => {
-      api<ControllerStatus>("/api/controller")
-        .then(setController)
-        .catch((reason) => setError(String(reason)));
-    }, interval);
-    return () => window.clearInterval(timer);
-  }, [controller?.state]);
+    const refresh = () => getControllers()
+      .then(({controllers: values}) => {
+        if (!cancelled) {
+          setControllers(values);
+          setController(values.find((item) => item.controller_id === controllerId) ?? null);
+        }
+      })
+      .catch((reason) => { if (!cancelled) setError(String(reason)); });
+    void refresh();
+    const timer = window.setInterval(refresh, interval);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [controllerId, controller?.state]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -357,6 +398,7 @@ function CollectPage() {
             ? policyBranchDraft.open_loop_steps
             : openLoop,
           ...(controlMode === "manual" ? {
+            controller_id: controllerId,
             translation_gain: translationGain,
             rotation_gain: rotationGain,
           } : {}),
@@ -373,11 +415,28 @@ function CollectPage() {
 
   const calibrate = async () => {
     setError("");
+    setControllerBusy(true);
     try {
-      setController(await api<ControllerStatus>("/api/controller/calibrate", {
-        method: "POST",
-      }));
+      setController(await calibrateController(controllerId));
     } catch (reason) { setError(String(reason)); }
+    finally { setControllerBusy(false); }
+  };
+
+  const toggleGravity = async (enabled: boolean) => {
+    setError("");
+    setControllerBusy(true);
+    try { setController(await setControllerGravity(enabled)); }
+    catch (reason) { setError(String(reason)); }
+    finally { setControllerBusy(false); }
+  };
+
+  const selectController = (id: ControllerId) => {
+    if (active || controllerBusy || controller?.state === "CALIBRATING" || controller?.gravity_enabled) return;
+    controllerGains.current[controllerId] = { translationGain, rotationGain };
+    setControllerId(id);
+    setController(null);
+    setTranslationGain(controllerGains.current[id].translationGain);
+    setRotationGain(controllerGains.current[id].rotationGain);
   };
 
   const removeSession = async (force = false) => {
@@ -447,10 +506,10 @@ function CollectPage() {
   const viewerAspectRatio = livePreview
     ? bootstrap.config.preview.stream_width + " / " + bootstrap.config.preview.stream_height
     : bootstrap.config.preview.width + " / " + bootstrap.config.preview.height;
-  const controllerReady = controller?.state === "READY";
-  const controllerPillText = controller?.state === "ARMED"
-    ? (controller.latency_ms === null ? "控制器 · 等待样本" : `控制器 · ${controller.latency_ms.toFixed(1)} ms`)
-    : (controller ? `${controller.state} · ${controller.message}` : "正在检测控制器");
+  const controllerReady = controller?.state === "READY" && !controller.stale && (controllerId !== "factr" || controller.gravity_enabled);
+  const controllerLabel = CONTROLLER_LABELS[controllerId];
+  const connection = controllerConnection(controllers.map((item) =>
+    controller && item.controller_id === controller.controller_id ? controller : item));
 
   return (
     <section className="collect-page">
@@ -461,8 +520,8 @@ function CollectPage() {
           <p className="subtitle">单会话 · 20 Hz 实时控制 · 精确状态回溯</p>
         </div>
         <div className="state-pills">
-          <div className={"system-state controller-state " + (controller?.state === "ARMED" ? (controller.latency_level ?? "red") : "")} title={controller?.error ?? controller?.message}>
-            <span className="pulse" />{controllerPillText}
+          <div className={"system-state controller-state " + connection.level} aria-label="控制器连接状态">
+            <span className="pulse" />{connection.text}
           </div>
           <div className={"system-state " + (active ? "running" : "")}>
             <span className="pulse" />
@@ -470,8 +529,8 @@ function CollectPage() {
           </div>
           {(controller?.state === "UNCALIBRATED" || controller?.state === "ERROR") && <button
             className="calibrate-shortcut"
-            disabled={Boolean(active) || !controller.connected}
-            onClick={calibrate}
+            disabled={Boolean(active) || (!controller.connected && controller.state !== "ERROR") || controllerBusy}
+            onClick={() => void calibrate()}
           >校准</button>}
         </div>
       </header>
@@ -592,30 +651,23 @@ function CollectPage() {
             <div className="button-row branch-buttons">
               <button className="primary" disabled={!selected.branchable || Boolean(active) || busy || Boolean(policyBranchDraft) || selectedStep >= selected.action_count} onClick={configurePolicyBranch}>{policyBranchDraft ? "正在配置二次推理" : "从此帧重新推理"}</button>
               <button
-                disabled={!selected.branchable || Boolean(active) || busy || Boolean(policyBranchDraft) || selectedStep >= selected.action_count || !controllerReady}
-                title={controllerReady ? "从所选帧开始 SpaceMouse 接管" : "请先连接并校准 SpaceMouse"}
+                disabled={!selected.branchable || Boolean(active) || busy || controllerBusy || Boolean(policyBranchDraft) || selectedStep >= selected.action_count || !controllerReady}
+                title={controllerReady ? `从所选帧开始 ${controllerLabel} 接管` : `请先连接并校准 ${controllerLabel}${controllerId === "factr" ? "，并开启重力补偿" : ""}`}
                 onClick={() => branch("manual")}
-              >SpaceMouse 接管</button>
+              >{controllerLabel} 接管</button>
             </div>
             {!selected.branchable && <p className="hint">分支结果只读，不能继续创建子分支。</p>}
           </div>}
 
-          {!draft && (manualSessionActive || Boolean(selected?.branchable && timelineReady)) && <div className="panel manual-panel">
-            <div className="panel-title">
-              <h2>{manualSessionActive ? "人工接管 · SpaceMouse" : "SpaceMouse 控制设置"}</h2>
-              <span>{controller?.state ?? "DISCONNECTED"}</span>
-            </div>
-            <div className="gain-grid">
-              <Gain label="位移增益" value={translationGain} setValue={setTranslationGain} />
-              <Gain label="旋转增益" value={rotationGain} setValue={setRotationGain} />
-            </div>
-            {!controller?.calibrated && <div className="calibration-row">
-              <button className="primary" disabled={Boolean(active) || controller?.state === "CALIBRATING" || !controller?.connected} onClick={calibrate}>校准控制器</button>
-              <span>{controller?.message ?? "正在检测控制器"}</span>
-              {controller?.state === "CALIBRATING" && <progress max={1} value={controller.calibration_progress} />}
-            </div>}
-            <p className="hint">控制器只需在连接后手动校准一次。接管前会显示 3 秒倒计时；左键张开夹爪，右键闭合。灵敏度可在运行中实时调整。</p>
-          </div>}
+
+          <ControllerSettings
+            controllerId={controllerId} controller={controller}
+            active={Boolean(active)} manualActive={manualSessionActive}
+            busy={controllerBusy || busy} translationGain={translationGain} rotationGain={rotationGain}
+            onSelect={selectController} onCalibrate={() => void calibrate()}
+            onGravity={(enabled) => void toggleGravity(enabled)}
+            onTranslationGain={setTranslationGain} onRotationGain={setRotationGain}
+          />
 
           {!draft && selected && Object.keys(selected.artifacts).length > 0 && <div className="panel artifacts-panel">
             <div className="panel-title"><h2>结果文件</h2><span>{Object.keys(selected.artifacts).length}</span></div>

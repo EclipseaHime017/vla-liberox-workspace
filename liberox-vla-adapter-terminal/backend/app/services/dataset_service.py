@@ -13,7 +13,7 @@ from typing import Any
 
 
 EXPORT_ARTIFACT_NAMES = frozenset({"run.json", "config.yaml", "summary.json"})
-EXPORT_TRAJECTORY_NAMES = frozenset({"trajectory.csv", "trajectory_inference.csv"})
+EXPORT_TRAJECTORY_NAMES = frozenset({"trajectory.csv", "trajectory_inference.csv", "factr_samples.csv"})
 EXPORT_VIDEO_NAMES = frozenset({"agentview.mp4", "vla_views.mp4"})
 EXPORT_EVALUATION_NAMES = frozenset({
     "rynnvalue_evaluation.json", "rynnvalue_evaluation.npz",
@@ -31,14 +31,22 @@ outcome. Episode data remains under `episodes/episode_000/`.
 `i < N`, state row `i` and its action columns describe
 `state[i] -- action[i] --> state[i+1]`. The final row has empty action fields.
 `vla_action_*` is the raw command before environment conversion; despite the
-legacy column name it contains SpaceMouse input on `action_source=human` rows.
-`action_*` is the normalized OSC_POSE command sent to LIBERO-X.
+legacy column name it contains the mapped human OSC command on `action_source=human` rows.
+`action_*` is the normalized OSC_POSE training label. For SpaceMouse it is the
+command sent to LIBERO-X; for FACTR joint following it is inverse-scaled from
+the measured end-effector motion over that control step.
 
 ## Segments and outcomes
 
 - `policy`: action executed by the original VLA rollout.
 - `policy_requery`: VLA action generated after restoring a branch point.
-- `human`: SpaceMouse action after manual takeover.
+- `human`: mapped SpaceMouse or FACTR action after manual takeover.
+
+`manual_source` identifies the controller for diagnostics; both use the same
+manual training category. New FACTR records retain unclipped labels in raw
+action columns and bounded labels in action columns, with clipping statistics
+in controller diagnostics. No new joint sample CSV is written. Existing
+`factr_samples.csv` files are included as legacy diagnostics when available.
 
 A branch trajectory is already merged: rows before `resume_step` are a physical
 copy of the parent prefix and rows from `resume_step` onward are the new suffix.

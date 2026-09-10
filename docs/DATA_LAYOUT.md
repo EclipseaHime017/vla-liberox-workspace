@@ -36,7 +36,8 @@ dataset-root/
                                 ├── rynnvalue_evaluation.json
                                 ├── rynnvalue_evaluation.npz
                                 ├── *.png
-                                └── spacemouse_samples.csv
+                                ├── spacemouse_samples.csv  # SpaceMouse runs only
+                                └── factr_samples.csv       # FACTR runs only
 ```
 
 - `run.json` is the small mutable lifecycle manifest and deletion safety marker.
@@ -47,6 +48,27 @@ dataset-root/
 - `legacy_scan_roots` are indexed read-only. Existing `runs/` directories are never migrated, renamed, or deleted by the new catalog.
 
 All JSON/YAML/CSV publications use temporary files followed by atomic replacement. New run directories are unique and never overwrite earlier experiments.
+
+## Manual controller recordings
+
+SpaceMouse and FACTR share the same run layout, `action_source=human` category,
+dataset export and training input. `manual_source` retains the device name for
+diagnostics only. FACTR follows seven joint targets in physics but stores a 7-D
+end-effector label per 20 Hz step: world translation `p_next-p_current`, world
+relative rotation `Log(R_next R_current^T)`, inverse-scaled using the environment's
+original OSC input/output ranges, plus gripper `-1` (open) or `+1` (close).
+This is achieved-motion relabeling, not a claim of exact OSC inverse dynamics.
+
+`raw_action` retains the unbounded normalized label; `env_action` clips six axes
+to `[-1,1]`. `controller_diagnostics` in trajectory metadata and controller summary
+report the mapping, clipping counts/fraction, per-axis counts and maxima. There
+is no separate FACTR training category or joint demonstration CSV. The existing
+`sim_state` remains for physical-state restoration, video/observation rendering,
+and parent-prefix preservation. Each N actions still has N+1 states/images;
+success does not truncate the suffix. Faults retain completed transitions.
+
+Existing `factr_samples.csv` files remain readable/exportable legacy diagnostics.
+Independent device tests still do not record trajectories or videos.
 
 ## Immutable training datasets and background jobs
 
@@ -226,13 +248,16 @@ liberox_<task_id>.zip
             └── episode_000/
                 ├── trajectory.csv
                 ├── trajectory_inference.csv  # policy runs only, when available
+                ├── factr_samples.csv         # FACTR runs only, when available
                 ├── agentview.mp4
                 └── vla_views.mp4
 ```
 
 Large replay/checkpoint artifacts are intentionally excluded: `trajectory.npz`,
 `*_observations.npz`, plots, `source_trajectory.npz`, and raw SpaceMouse
-diagnostic samples. MP4 files are copied without ZIP recompression.
+diagnostic samples. FACTR's small `factr_samples.csv` is included when present
+for input-to-OSC auditing, but is not used as a replacement training action.
+MP4 files are copied without ZIP recompression.
 
 ### Transition schema
 
@@ -259,9 +284,10 @@ The last row is the terminal state and therefore has empty action, reward, and
 | `action_source` | transition provenance | enum below |
 
 The `vla_action_*` name is retained for schema compatibility. On
-`action_source=human` rows it contains the raw SpaceMouse command, not a VLA
-prediction. Use `action_source`, never the column prefix, to identify the
-controller.
+`action_source=human` rows it contains the normalized Cartesian command from
+SpaceMouse or the FACTR FK/OSC adapter, not a VLA prediction or raw leader joint
+angles. Use `action_source` to distinguish policy/human transitions and the run's
+`manual_source` to identify the controller, never the column prefix.
 
 `trajectory_inference.csv` records complete VLA action chunks, including
 predicted actions that were not executed because the policy was queried again.
@@ -275,7 +301,7 @@ The exported `runs.csv` includes `kind`, `control_mode`, `success`,
 
 - `policy`: transitions copied from or executed by the original VLA rollout;
 - `policy_requery`: VLA transitions generated after restoring `resume_step`;
-- `human`: SpaceMouse transitions generated after restoring `resume_step`.
+- `human`: SpaceMouse or FACTR transitions generated after restoring `resume_step`.
 
 For direct filtering, `runs.csv` also supplies `episode_category` with one of
 `unassisted_success`, `unassisted_failure`, `manual_intervention`,

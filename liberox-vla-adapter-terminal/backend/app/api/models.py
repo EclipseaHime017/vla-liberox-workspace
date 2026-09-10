@@ -74,6 +74,21 @@ class CreateBranchRequest(StrictModel):
     open_loop_steps: int = Field(ge=1, le=8)
     translation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
     rotation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
+    controller_id: Literal["spacemouse", "factr"] | None = None
+
+    @model_validator(mode="after")
+    def validate_controller(self):
+        if self.control_mode == "policy" and self.controller_id is not None:
+            raise ValueError("controller_id is only valid for manual branches")
+        return self
+
+
+class ControllerCalibrationRequest(StrictModel):
+    phase: Literal["reference"] = "reference"
+
+
+class ControllerGravityRequest(StrictModel):
+    enabled: bool = Field(strict=True)
 
 
 class DeleteSessionRequest(StrictModel):
