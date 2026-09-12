@@ -219,7 +219,7 @@ td code { font-size: 11px; }
 .annotation-version-field { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
 .annotation-version-field input { width: 58px; padding: 7px 8px; }
 .annotation-reward-toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
-.annotation-reward-toggle input { width: 14px; height: 14px; margin: 0; accent-color: var(--blue); }
+.annotation-reward-toggle select { padding: 7px 8px; border: 1px solid var(--line-strong); border-radius: 9px; background: #fff; color: var(--text); }
 .dataset-integrity-error { grid-column: 1 / -1; color: var(--danger) !important; }
 .job-monitor-card { min-height: 310px; display: flex; flex-direction: column; }
 .job-status-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 18px; padding: 11px 15px; border-bottom: 1px solid var(--line); font-size: 10px; color: var(--muted); }
@@ -450,6 +450,22 @@ td code { font-size: 11px; }
 .trajectory-video { padding: 18px; }
 .trajectory-video h2 { margin: 0 0 14px; font-size: 18px; }
 .trajectory-video video { display: block; width: 100%; max-height: 560px; border-radius: 14px; background: #111; }
+.stage-annotation { margin-top: 16px; }
+.stage-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.stage-toolbar > span { color: var(--muted); font-size: 13px; }
+.stage-toolbar label { display: grid; gap: 6px; font-size: 13px; }
+.stage-toolbar input[type="number"] { width: 125px; }
+.stage-controls { min-width: 0; border: 0; padding: 0; margin: 0; }
+.stage-controls > label { display: grid; gap: 8px; font-size: 13px; }
+.stage-controls input[type="range"] { width: 100%; margin: 0; }
+.stage-markers { height: 22px; position: relative; margin: 0 8px; }
+.stage-marker { position: absolute; transform: translateX(-50%); width: 10px; min-height: 16px; border: 0; padding: 0; border-radius: 3px; background: #3c9a70; }
+.stage-marker.negative { background: #e06c4f; }
+.stage-marker.success { background: #3775e8; }
+.stage-keyframes { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; max-height: 180px; overflow: auto; list-style: none; }
+.stage-keyframes li { display: flex; gap: 4px; }
+.stage-keyframe.positive { border-color: #3c9a70; color: #28734e; }
+.stage-keyframe.negative { border-color: #e06c4f; color: #b4432a; }
 .model-properties { display: grid; grid-template-columns: 120px 1fr; margin: 0; }
 .model-properties dt, .model-properties dd { margin: 0; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .model-properties dt { color: var(--muted); }

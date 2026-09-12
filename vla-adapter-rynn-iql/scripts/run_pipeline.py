@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from vla_rynn_iql.config import load_train_config, reward_source
 
 
 def run(environment: str, script: str, config: Path) -> None:
@@ -25,7 +28,8 @@ def main() -> int:
     parser.add_argument("--skip-evaluation", action="store_true")
     args = parser.parse_args()
     run(args.train_env, "prepare_dataset.py", args.config.resolve())
-    run(args.reward_env, "annotate_rewards.py", args.config.resolve())
+    if reward_source(load_train_config(args.config).section("reward")) == "rynnvalue":
+        run(args.reward_env, "annotate_rewards.py", args.config.resolve())
     run(args.train_env, "materialize_rewards.py", args.config.resolve())
     run(args.train_env, "train_iql.py", args.config.resolve())
     if not args.skip_evaluation:

@@ -1,6 +1,9 @@
 # LIBERO-X Local Data Studio
 
-Current release: **v0.4.1**
+Current release: **v0.5.0**
+
+Release highlights: FACTR teleoperation alongside SpaceMouse, and independent
+human Stage-based rewards with keyframe annotation and training source selection.
 
 Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse / FACTR takeover,
 offline post-training, and reproducible batch policy testing for the three
@@ -17,6 +20,7 @@ validated Franka/LIBERO-X tasks.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
 - Integrated workflow: the Dataset page evaluates RynnValue once per trajectory, preserves its complete output sidecar, paginates run previews, exposes video/action/EEF, absolute/relative remaining-time, observation-potential and entropy estimates, plus Shape/Final Reward details, and independently packages hash-verified training datasets. The Training page derives rewards from those cached model outputs using its selected `gamma`, shaping coefficient, and macro/primitive reduction, then launches resumable IQL jobs without rerunning RynnValue.
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
+- Human stage rewards: mark positive/negative keyframes in trajectory details without cutting the recording. Training selects Sparse, RynnValue, or Stage-based rewards; Stage validates every member and freezes annotations per run. See [the implemented formulas and workflow](docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励) and [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
 - Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
 
 ## Repository layout

@@ -14,6 +14,8 @@ data:
   task_ids: []
   # Optional immutable UI dataset manifest. null preserves recursive CLI discovery.
   selection_manifest: null
+  # Optional immutable Stage annotation snapshot; null reads each episode sidecar.
+  stage_annotations_manifest: null
   action_horizon: 8
   action_dim: 7
   proprio_dim: 8
@@ -34,8 +36,12 @@ reward:
   # The fields above define expensive RynnValue inference and its reusable cache.
   # The fields below only derive training rewards from cached model outputs.
   # Changing them never requires another RynnValue forward pass.
-  # false: train from the environment sparse reward only; cached evaluations stay intact.
-  rynnvalue: true
+  # Independent reward sources: sparse | rynnvalue | stage.
+  # Sparse/Stage do not load or require RynnValue. Stage requires every selected
+  # trajectory to have a saved, valid stage_annotation.json (including failures).
+  source: rynnvalue
+  # Stage interpolation: x^p, p >= 1. Reward is the score, not its difference.
+  stage_exponent: 2.0
   # One discount per action chunk (macro action), not one discount per 20 Hz action.
   gamma: 0.99
   shaping_weight: 0.1

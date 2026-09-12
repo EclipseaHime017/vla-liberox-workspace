@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vla-adapter-robometer"
-version = "0.4.1"
+version = "0.5.0"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "PyYAML>=6.0"]
 

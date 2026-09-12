@@ -56,12 +56,14 @@ class OfflineJobService:
         self, ui_config: Any, manager: Any, datasets: Any,
         trajectory_evaluations: Any | None = None,
         robometer_evaluations: Any | None = None,
+        stage_annotations: Any | None = None,
     ):
         self.ui_config = ui_config
         self.manager = manager
         self.datasets = datasets
         self.trajectory_evaluations = trajectory_evaluations
         self.robometer_evaluations = robometer_evaluations
+        self.stage_annotations = stage_annotations
         self.project_root = ui_config.project_root
         self.jobs_root = self.project_root / "jobs"
         self.training_root = self.project_root / "training"
@@ -137,6 +139,7 @@ class OfflineJobService:
 
     def defaults(self, dataset_id: str | None = None) -> dict[str, Any]:
         raw = self._load_base_config()
+        reward_source = self._reward_source(raw, {})
         return {
             "basic": {
                 name: raw["iql"][name] for name in (
@@ -154,7 +157,9 @@ class OfflineJobService:
                     "expectile", "beta", "max_advantage_weight", "target_tau",
                 )
             } | {
-                "reward_rynnvalue": raw["reward"]["rynnvalue"],
+                "reward_source": reward_source,
+                "reward_stage_exponent": raw["reward"].get("stage_exponent", 2.0),
+                "reward_rynnvalue": reward_source == "rynnvalue",
                 "reward_gamma": raw["reward"]["gamma"],
                 "reward_shaping_weight": raw["reward"]["shaping_weight"],
                 "reward_accumulate_primitive_steps": raw["reward"][
@@ -699,6 +704,8 @@ class OfflineJobService:
         selections: dict[str, Any] = {}
         if selected_by_evaluator.get("rynnvalue"):
             raw = copy.deepcopy(self._load_base_config())
+            raw["reward"].update(source="rynnvalue", rynnvalue=True)
+            raw["data"].pop("stage_annotations_manifest", None)
             rynn_work = work_dir / "rynnvalue"
             rynn_work.mkdir(parents=True)
             raw["data"]["task_ids"] = [task_id]
@@ -812,6 +819,8 @@ class OfflineJobService:
         work_dir = annotation_root / "work"
         work_dir.mkdir(parents=True, exist_ok=False)
         raw = self._effective_config(dataset)
+        raw["reward"].update(source="rynnvalue", rynnvalue=True)
+        raw["data"].pop("stage_annotations_manifest", None)
         if max_frames is not None:
             raw["reward"]["max_frames"] = max_frames
         if accumulate_primitive_steps is not None:
@@ -898,7 +907,7 @@ class OfflineJobService:
             "wandb_mode", "wandb_project", "wandb_entity", "wandb_run_name",
             "wandb_group", "wandb_tags", "wandb_log_interval_steps",
             "reward_rynnvalue", "reward_gamma", "reward_shaping_weight",
-            "reward_accumulate_primitive_steps",
+            "reward_accumulate_primitive_steps", "reward_source", "reward_stage_exponent",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
@@ -944,6 +953,17 @@ class OfflineJobService:
         reward_gamma = parameters.get("reward_gamma")
         if reward_gamma is not None and reward_gamma > 1:
             raise ValueError("reward_gamma must be in [0, 1]")
+        if "reward_source" in parameters and parameters["reward_source"] not in (
+            "sparse", "rynnvalue", "stage",
+        ):
+            raise ValueError("reward_source must be sparse, rynnvalue, or stage")
+        if "reward_stage_exponent" in parameters:
+            exponent = parameters["reward_stage_exponent"]
+            if (
+                isinstance(exponent, bool) or not isinstance(exponent, (int, float))
+                or not math.isfinite(exponent) or exponent < 1
+            ):
+                raise ValueError("reward_stage_exponent must be a finite number >= 1")
         for name in ("critic_optimizer", "value_optimizer"):
             value = parameters.get(name)
             if value is not None and value not in {"adam", "adamw"}:
@@ -1063,23 +1083,68 @@ class OfflineJobService:
                 )
         return work, prepared, annotation_manifest
 
+    @staticmethod
+    def _reward_source(raw: dict[str, Any], parameters: dict[str, Any]) -> str:
+        if "reward_source" in parameters:
+            source = parameters["reward_source"]
+        elif "reward_rynnvalue" in parameters:
+            # Old clients used a boolean checkbox; false meant sparse-only.
+            source = "rynnvalue" if parameters["reward_rynnvalue"] else "sparse"
+        else:
+            source = raw["reward"].get("source") or (
+                "rynnvalue" if raw["reward"].get("rynnvalue", True) else "sparse"
+            )
+        if source not in ("sparse", "rynnvalue", "stage"):
+            raise ValueError("reward_source must be sparse, rynnvalue, or stage")
+        return source
+
     def start_training(self, dataset_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
-            dataset = self.datasets.require_ready_for_training(dataset_id)
             self._validate_training_parameters(parameters)
+            source = self._reward_source(self._load_base_config(), parameters)
+            normalized = {**parameters, "reward_source": source}
+            dataset = (
+                self.datasets.require_ready_for_training(dataset_id)
+                if source == "rynnvalue"
+                else self.datasets.require_ready_for_annotation(dataset_id)
+            )
+            snapshot = None
+            if source == "stage":
+                service = getattr(self, "stage_annotations", None)
+                if service is None:
+                    raise ConflictError(
+                        "Stage annotations are unavailable; training was not started",
+                        code="STAGE_ANNOTATION_MISSING",
+                    )
+                manifest = self.datasets.root / dataset_id / "dataset.json"
+                frozen = json.loads(manifest.read_text(encoding="utf-8"))
+                # Validate every frozen member, including validation episodes,
+                # before reserving a GPU or creating a detached training job.
+                snapshot = service.validate_members(
+                    frozen["members"], dataset["success_consecutive_steps"]
+                )
             self._prepare_launch()
             try:
-                return self._launch_training(dataset_id, dataset, parameters)
+                return self._launch_training(
+                    dataset_id, dataset, normalized, stage_annotations_snapshot=snapshot
+                )
             finally:
                 self.launch_reserved = False
 
     def _launch_training(
-        self, dataset_id: str, dataset: dict[str, Any], parameters: dict[str, Any]
+        self, dataset_id: str, dataset: dict[str, Any], parameters: dict[str, Any],
+        *, stage_annotations_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         raw = self._effective_config(dataset)
-        annotation_id = dataset["annotation_id"]
-        work_dir, _, _ = self._validated_annotation_work(dataset)
-        raw["paths"]["work_dir"] = str(work_dir.resolve())
+        source = self._reward_source(raw, parameters)
+        raw["reward"].update(source=source, rynnvalue=source == "rynnvalue")
+        raw["data"].pop("stage_annotations_manifest", None)
+        annotation_id = dataset.get("annotation_id") if source == "rynnvalue" else None
+        work_dir = None
+        if source == "rynnvalue":
+            work_dir, _, _ = self._validated_annotation_work(dataset)
+        elif source == "stage" and stage_annotations_snapshot is None:
+            raise ValueError("Stage annotations must be validated before training")
         # RynnValue evaluation is immutable and reward-agnostic. Training keeps
         # the active YAML reward settings and materializes a matching cheap cache.
         for key, value in parameters.items():
@@ -1088,10 +1153,10 @@ class OfflineJobService:
             elif key in raw["logging"]:
                 raw["logging"][key] = value
         for parameter_name, config_name in {
-            "reward_rynnvalue": "rynnvalue",
             "reward_gamma": "gamma",
             "reward_shaping_weight": "shaping_weight",
             "reward_accumulate_primitive_steps": "accumulate_primitive_steps",
+            "reward_stage_exponent": "stage_exponent",
         }.items():
             if parameter_name in parameters:
                 raw["reward"][config_name] = parameters[parameter_name]
@@ -1119,6 +1184,15 @@ class OfflineJobService:
         job_id = f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         job_dir = self.jobs_root / job_id
         job_dir.mkdir(parents=True, exist_ok=False)
+        if work_dir is None:
+            work_dir = job_dir / "work"
+        raw["paths"]["work_dir"] = str(work_dir.resolve())
+        if stage_annotations_snapshot is not None:
+            snapshot_path = job_dir / "stage_annotations.json"
+            atomic_write_json(snapshot_path, {
+                "schema_version": 1, "annotations": stage_annotations_snapshot,
+            })
+            raw["data"]["stage_annotations_manifest"] = str(snapshot_path.resolve())
         output_root = self.training_root / job_id
         output_root.mkdir(parents=True, exist_ok=False)
         raw["paths"]["output_dir"] = str(output_root.resolve())
@@ -1141,6 +1215,14 @@ class OfflineJobService:
                 "cwd": str(self.ui_config.offline_rl_root),
             },
         ]
+        if source != "rynnvalue":
+            stages.insert(0, {
+                "id": "prepare", "label": "准备训练数据集",
+                "environment": self.ui_config.train_environment,
+                "argv": ["python", str(scripts / "prepare_dataset.py"),
+                         "--config", str(config_path)],
+                "cwd": str(self.ui_config.offline_rl_root),
+            })
         return self._new_job(
             kind="training", dataset_id=dataset_id, stages=stages,
             config_path=config_path, output_path=output_root,
@@ -1148,7 +1230,10 @@ class OfflineJobService:
                 "task_id": dataset["task_id"], "member_count": dataset["member_count"],
                 "action_count": dataset["action_count"], "chunk_count": dataset["chunk_count"],
                 "annotation_id": annotation_id,
+                "source_dataset_sha256": dataset.get("dataset_sha256"),
                 "reward": {
+                    "source": source,
+                    "stage_exponent": raw["reward"].get("stage_exponent", 2.0),
                     "rynnvalue": raw["reward"]["rynnvalue"],
                     "gamma": raw["reward"]["gamma"],
                     "shaping_weight": raw["reward"]["shaping_weight"],
@@ -1864,22 +1949,20 @@ class OfflineJobService:
             return None
 
     def available_checkpoints(self, dataset_id: str | None = None) -> list[dict[str, Any]]:
-        expected: tuple[str, str] | None = None
+        expected_dataset_hash = None
+        dataset = None
         if dataset_id:
             dataset = self.datasets.get(dataset_id)
             annotation_id = dataset.get("annotation_id")
             if dataset.get("annotation_status") == "READY" and annotation_id:
                 work = self.datasets.root / dataset_id / "annotations" / annotation_id / "work"
                 prepared = work / "dataset_manifest.json"
-                rewards = work / "rewards" / "reward_manifest.json"
-                if prepared.is_file() and rewards.is_file():
+                if prepared.is_file():
                     prepared_payload = json.loads(prepared.read_text(encoding="utf-8"))
-                    reward_payload = json.loads(rewards.read_text(encoding="utf-8"))
-                    expected = (
-                        str(prepared_payload.get("dataset_sha256")),
-                        _stable_hash(reward_payload),
-                    )
+                    expected_dataset_hash = prepared_payload.get("dataset_sha256")
         result = []
+        jobs: dict[str, dict[str, Any] | None] = {}
+        jobs_root = getattr(self, "jobs_root", self.training_root.parent / "jobs")
         for path in sorted(
             self.training_root.glob("*/*/checkpoints/step_*"), reverse=True
         ):
@@ -1890,13 +1973,37 @@ class OfflineJobService:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            if expected is not None and (
-                metadata.get("dataset_sha256"), metadata.get("reward_sha256")
-            ) != expected:
-                continue
+            job_id = path.parents[2].name
+            if job_id not in jobs:
+                job_path = jobs_root / job_id / "job.json"
+                try:
+                    job = json.loads(job_path.read_text(encoding="utf-8"))
+                    jobs[job_id] = job if (
+                        not job_path.is_symlink() and job.get("id") == job_id
+                        and job.get("kind") == "training"
+                    ) else None
+                except (OSError, ValueError):
+                    jobs[job_id] = None
+            job = jobs[job_id]
+            if dataset_id:
+                if job is not None:
+                    if job.get("dataset_id") != dataset_id:
+                        continue
+                    frozen_hash = job.get("parameters", {}).get("source_dataset_sha256")
+                    if frozen_hash and frozen_hash != dataset.get("dataset_sha256"):
+                        continue
+                elif (
+                    expected_dataset_hash is None
+                    or metadata.get("dataset_sha256") != expected_dataset_hash
+                ):
+                    continue
+            # List this dataset's checkpoints across reward sources. Exact
+            # reward/config compatibility remains enforced by checkpoint restore.
+            source = (job or {}).get("parameters", {}).get("reward", {}).get("source")
+            label = f"{job_id}/{path.parent.parent.name}/{path.name}"
             result.append({
                 "path": str(path.resolve()),
-                "label": f"{path.parents[2].name}/{path.parent.parent.name}/{path.name}",
+                "label": f"{label} · {source}" if source else label,
             })
         return result
 

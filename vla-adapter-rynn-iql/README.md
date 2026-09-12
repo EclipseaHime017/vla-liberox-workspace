@@ -117,6 +117,51 @@ model evaluations are reused; preparation itself is still required because a
 dataset version has its own members, interrupted chunks, terminal threshold,
 and root-grouped split.
 
+## Independent reward sources and human keyframes
+
+The base YAML and UI advanced IQL form select the same reward source:
+
+```yaml
+reward:
+  source: stage  # sparse | rynnvalue | stage (default: rynnvalue)
+  stage_exponent: 2.0
+  gamma: 0.99
+  accumulate_primitive_steps: false
+```
+
+For Sparse/Stage use `prepare_dataset.py → materialize_rewards.py → train_iql.py`
+in `vla-liberox`; no RynnValue annotation/environment is required. Both terminal
+pipeline entry points select these stages automatically. RynnValue retains its
+existing frozen-model annotation and PBRS path; Robometer is never a training
+reward source. Old YAML with only `reward.rynnvalue: true/false` maps to
+RynnValue/Sparse; conflicting legacy and explicit source settings are rejected.
+
+Mark Positive/Negative observation steps in the Dataset trajectory detail's
+keyframe editor, then save. This writes only `stage_annotation.json`, never cuts
+source actions, observations or video. Initial score is −1. With P positive and
+N negative manual marks, the increment is `1/(P-N+1)` for confirmed success,
+`1/(P+1)` for failure. Success adds one automatic positive anchor and fixes its
+score to 0; the failed tail holds its last score. Values are **not clipped**.
+Between anchors, interpolate using `z=z_start+(z_end-z_start)*x^p`, default p=2.
+Training uses the YAML/form exponent; detail preview uses the saved exponent.
+
+Stage is a direct reward, not PBRS and not added to sparse cost:
+macro `R=z(t+L)`, cumulative `R=Σ gamma^h z(t+h+1)`. Bootstrap retains the
+existing paired discount, respectively `gamma` / `gamma^L`. No changes to IQL
+updates, action masks, replay deduplication, or success confirmation were made.
+All selected members must have valid saved labels, including failures and
+validation members. Missing/stale labels abort before VLA loading; an explicitly
+saved empty failed annotation is valid and gives −1 throughout.
+
+UI/terminal jobs freeze annotations; training outputs retain `stage_annotations.json`
+and `reward_manifest.json` for audit. Re-editing source labels cannot alter an
+already-started run. Annotation hashes bind the original `trajectory.npz` bytes
+and success threshold. A ZIP retaining original NPZ files and sidecars is
+supported; the UI's existing lightweight CSV/video export archives labels but
+cannot reuse that binding after reconstructing a different NPZ. Retain the
+original trajectory files for portable Stage training; hashes are never silently
+rewritten. Detailed formulas: [Stage research §6](../docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励).
+
 ## Training monitoring
 
 New training runs write both the auditable `metrics.jsonl` stream and
@@ -244,9 +289,10 @@ immutable official outputs and writes a second-level cache containing
 `pbrs_chunk_reward` (the Final Reward `r_sparse+κ·r_shape`). Here
 `r_sparse` is `-1` for an incomplete macro action and `0` when that chunk
 completes the task, and `Φ=-absolute temporal distance`. Set
-`reward.rynnvalue: false` for a sparse-only training ablation: the diagnostic
-Shape Reward remains stored, but `dense_reward=0` and Final Reward equals the
-sparse reward. Its cache key includes `rynnvalue`, `gamma`, `shaping_weight`,
+`reward.source: sparse` for a sparse-only training ablation: it derives Final
+Reward directly from environment terminal flags without reading model outputs.
+Existing RynnValue diagnostics remain untouched. The RynnValue cache key includes
+`rynnvalue`, `gamma`, `shaping_weight`,
 and `accumulate_primitive_steps`; changing any of them recomputes only these
 inexpensive arrays. Hash-valid schema-v4/v5
 sidecars reuse their complete official model heads during migration, regardless

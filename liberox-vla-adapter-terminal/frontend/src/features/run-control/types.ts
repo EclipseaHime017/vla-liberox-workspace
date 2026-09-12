@@ -138,6 +138,15 @@ export type TrajectoryDetail = {
   };
 };
 
+export type StageKeyframe = { step: number; kind: "positive" | "negative" };
+
+export type StageAnnotation = {
+  run_id: string; status: "missing" | "ready" | "stale"; error?: string | null;
+  action_count: number; time_seconds: number[]; success_step: number | null;
+  success_consecutive_steps: number; exponent: number; keyframes: StageKeyframe[];
+  scores: number[]; revision: string | null;
+};
+
 export type RynnValueEvaluation = {
     status: "READY"; evaluated_at: string; model: string | null;
     boundary_steps: number[];

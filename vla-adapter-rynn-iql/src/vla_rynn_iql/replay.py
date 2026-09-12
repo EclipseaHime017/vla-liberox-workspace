@@ -17,10 +17,11 @@ from .vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_f
 
 class ReplayDataset(Dataset):
     def __init__(self, config: LoadedConfig, action_stats: dict[str, Any],
-                 proprio_stats: dict[str, Any], split: str = "train"):
+                 proprio_stats: dict[str, Any], split: str = "train",
+                 reward_index: dict[str, Any] | None = None):
         self.config = config
         self.manifest = load_manifest(config)
-        reward_index = load_reward_index(config)
+        reward_index = load_reward_index(config) if reward_index is None else reward_index
         if reward_index.get("complete") is False:
             raise ValueError("Reward annotation manifest is incomplete")
         if reward_index["dataset_sha256"] != self.manifest["dataset_sha256"]:
@@ -63,7 +64,8 @@ class ReplayDataset(Dataset):
         actions[:length] = env_to_dataset_actions(trajectory["env_action"][start:end], self.action_stats)
         action_mask[:length] = True
         with np.load(annotation_path, allow_pickle=False) as rewards:
-            reward = float(rewards["pbrs_chunk_reward"][chunk_index])
+            key = "final_reward" if "final_reward" in rewards else "pbrs_chunk_reward"
+            reward = float(rewards[key][chunk_index])
         # Raw done may flicker before the configured confirmation streak. Only the
         # effective endpoint selected during preparation terminates a replay chunk.
         terminal = end == episode["action_count"]

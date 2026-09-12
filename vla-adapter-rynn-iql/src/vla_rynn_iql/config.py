@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,13 +43,15 @@ TRAIN_SCHEMA = {
               "vla_adapter_root": None, "libero_x_root": None,
               "rynnvalue_root": None, "policy_registry": None},
     "data": {"project_id": None, "task_ids": None, "selection_manifest": None,
+             "stage_annotations_manifest": None,
              "action_horizon": None,
              "action_dim": None, "proprio_dim": None, "control_hz": None,
              "success_consecutive_steps": None, "validation_fraction": None,
              "split_seed": None, "allow_no_success": None},
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
-               "rynnvalue": None, "gamma": None, "shaping_weight": None,
+               "rynnvalue": None, "source": None, "stage_exponent": None,
+               "gamma": None, "shaping_weight": None,
                "robot_description": None,
                "camera_description": None, "accumulate_primitive_steps": None},
     "vla": {"base_checkpoint": None, "stats_key": None, "use_pro_version": None,
@@ -155,17 +158,30 @@ def _cuda_device(value: Any, name: str) -> None:
         raise ValueError(f"{name} must identify one CUDA device, for example cuda:0")
 
 
+def reward_source(reward: dict[str, Any]) -> str:
+    """Resolve legacy sparse ablations without depending on any reward model."""
+    source = reward.get("source", "rynnvalue" if reward.get("rynnvalue", True) else "sparse")
+    if source not in ("sparse", "rynnvalue", "stage"):
+        raise ValueError("reward.source must be sparse, rynnvalue or stage")
+    return source
+
+
 def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     path = path.expanduser().resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
-    # Schema-v1 configurations created before the sparse-only ablation switch
-    # preserve their original behavior.
-    if (
-        isinstance(raw, dict)
-        and isinstance(raw.get("reward"), dict)
-        and "rynnvalue" not in raw["reward"]
-    ):
-        raw["reward"]["rynnvalue"] = True
+    # Canonicalize old boolean configs. Explicit contradictory choices fail fast.
+    if isinstance(raw, dict) and isinstance(raw.get("reward"), dict):
+        reward = raw["reward"]
+        source = reward_source(reward)
+        if "rynnvalue" in reward:
+            if type(reward["rynnvalue"]) is not bool:
+                raise TypeError("reward.rynnvalue must be boolean")
+            if "source" in reward and reward["rynnvalue"] != (source == "rynnvalue"):
+                raise ValueError("reward.source conflicts with legacy reward.rynnvalue")
+        reward.update(source=source, rynnvalue=source == "rynnvalue")
+        reward.setdefault("stage_exponent", 2.0)
+    if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
+        raw["data"].setdefault("stage_annotations_manifest", None)
     _validate_schema(raw, TRAIN_SCHEMA)
     if raw["schema_version"] != 1:
         raise ValueError("Only schema_version=1 is supported")
@@ -189,6 +205,14 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
         data["selection_manifest"] = str(
             (selection_path if selection_path.is_absolute() else path.parent / selection_path).resolve()
         )
+    stage_manifest = data["stage_annotations_manifest"]
+    if stage_manifest is not None:
+        if not isinstance(stage_manifest, str) or not stage_manifest.strip():
+            raise TypeError("data.stage_annotations_manifest must be null or a non-empty path")
+        stage_path = Path(stage_manifest).expanduser()
+        data["stage_annotations_manifest"] = str(
+            (stage_path if stage_path.is_absolute() else path.parent / stage_path).resolve()
+        )
     for name, expected in (("action_horizon", 8), ("action_dim", 7), ("proprio_dim", 8)):
         _number(data, name, low=1, integer=True)
         if data[name] != expected:
@@ -209,6 +233,9 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     if type(reward["rynnvalue"]) is not bool:
         raise TypeError("reward.rynnvalue must be boolean")
     _number(reward, "gamma", low=0, high=1)
+    _number(reward, "stage_exponent", low=1)
+    if not math.isfinite(reward["stage_exponent"]):
+        raise ValueError("reward.stage_exponent must be finite")
     _number(reward, "shaping_weight", low=0)
     if type(reward["accumulate_primitive_steps"]) is not bool:
         raise TypeError("reward.accumulate_primitive_steps must be boolean")

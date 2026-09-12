@@ -28,6 +28,17 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class StageKeyframe(StrictModel):
+    step: StrictInt = Field(gt=0)
+    kind: Literal["positive", "negative"]
+
+
+class StageAnnotationRequest(StrictModel):
+    keyframes: list[StageKeyframe] = Field(max_length=10000)
+    exponent: StrictFloat | StrictInt = Field(default=2.0, ge=1, allow_inf_nan=False)
+    revision: StrictStr | None = None
+
+
 class DraftRequest(StrictModel):
     task_id: str = Field(min_length=1)
     policy_id: str = Field(default="base", min_length=1)

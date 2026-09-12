@@ -35,6 +35,7 @@ dataset-root/
                                 ├── vla_views.mp4
                                 ├── rynnvalue_evaluation.json
                                 ├── rynnvalue_evaluation.npz
+                                ├── stage_annotation.json  # optional human keyframes
                                 ├── *.png
                                 ├── spacemouse_samples.csv  # SpaceMouse runs only
                                 └── factr_samples.csv       # FACTR runs only
@@ -71,6 +72,51 @@ Existing `factr_samples.csv` files remain readable/exportable legacy diagnostics
 Independent device tests still do not record trajectories or videos.
 
 ## Immutable training datasets and background jobs
+
+### Human Stage annotations
+
+`episodes/episode_000/stage_annotation.json` is independent of RynnValue and
+Robometer. Schema v1 stores `run_id`, original `trajectory_sha256`,
+`action_count`, `success_consecutive_steps`, automatic `success_step`, manual
+`keyframes [{step, kind}]`, preview `exponent`, and `annotation_sha256`.
+Steps address the original N+1 observation timeline, including the takeover
+prefix. Saving does not truncate, rewrite or re-encode source artifacts.
+
+The initial score is −1; manual positive/negative marks add/subtract
+`1/(P-N+1)` on successful records or `1/(P+1)` on failed records. The automatic
+success anchor adds one positive increment and gives 0. Between anchors use
+`z_start+(z_end-z_start)*x^p`; the last score is held through the recorded tail.
+No clipping is applied. Missing files are not interpreted as empty annotations.
+The lightweight GET/PUT annotation API validates only the control NPZ and small
+sidecar, caching source reads by file signature; dragging video sends no API
+requests. Revision checks prevent silently overwriting another edit.
+
+Stage training requires valid annotations for **every** frozen member, with the
+same trajectory hash and success threshold. Before launch, UI/terminal jobs save
+`stage_annotations.json` (`schema_version: 1`, `annotations: {run_id: payload}`)
+and reference it in `data.stage_annotations_manifest`. The deterministic reward
+cache includes the annotation hash and current training `reward.stage_exponent`.
+It stores full `stage_score` and chunk `stage_chunk_reward` / `final_reward`;
+the legacy `pbrs_chunk_reward` alias is only for reader compatibility, not PBRS.
+Training outputs retain the snapshot and reward manifest. Re-editing labels
+affects only a later run; checkpoint identity ignores job-local paths but still
+checks actual label and reward contents.
+
+`reward.source: sparse|rynnvalue|stage` selects one independent source.
+Sparse/Stage do not require a RynnValue-ready dataset or model inference;
+existing automatic RynnValue evaluation on dataset creation is unchanged.
+Macro Stage reward is `z(t+L)`, cumulative Stage reward is
+`Σ gamma^h z(t+h+1)`; the respective Bellman discounts remain `gamma` and
+`gamma^L`. Source observations, replay deduplication and terminal rules are
+unchanged. Formulas and caveats: [Stage research §6](STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励).
+
+The existing UI CSV/video ZIP includes the optional annotation for archival use,
+but reconstructing NPZ from that bundle changes its byte hash. Portable Stage
+training therefore requires the original `trajectory.npz` alongside its annotation
+(and the usual aligned observations). A raw-NPZ ZIP works without rebinding;
+the importer never silently trusts labels against a newly reconstructed file.
+
+### Membership and RynnValue evaluation versions
 
 `datasets/<dataset_id>/dataset.json` is an immutable, single-task membership
 manifest. It stores the explicit run IDs, provenance (`inference`, `manual`, or
@@ -125,8 +171,9 @@ only for the action mask and selection of `s[t+L]`. This second cache is keyed
 by the prepared dataset and annotation hashes plus the `rynnvalue` inclusion
 switch, `gamma`, `kappa`, and the macro/primitive-step switch. Exact repeated
 training reuses it; a mismatch is recomputed with NumPy and never invokes
-RynnValue. With `rynnvalue=false`, the diagnostic Shape Reward remains present,
-but `dense_reward` is zero and Final Reward equals the sparse reward.
+RynnValue. The legacy `rynnvalue=false` configuration now selects independent
+Sparse materialization; it does not require model outputs. Existing diagnostic
+sidecars are retained, and Final Reward equals the sparse reward.
 
 After a successful UI evaluation job, a combined evaluation snapshot may be
 atomically copied beside the source episode as `rynnvalue_evaluation.npz`; its

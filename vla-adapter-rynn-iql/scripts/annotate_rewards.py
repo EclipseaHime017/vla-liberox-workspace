@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, load_train_config
+from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, load_train_config, reward_source
 from vla_rynn_iql.rewards import annotate_manifest
 from vla_rynn_iql.runtime import run_cuda_stage
 
@@ -26,6 +26,11 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     config = load_train_config(args.config)
+    source = reward_source(config.section("reward"))
+    if source != "rynnvalue":
+        print(f"Skipped RynnValue annotation: reward.source={source}; "
+              "use materialize_rewards.py to derive the selected rewards.")
+        return 0
     print(run_cuda_stage(
         "RynnValue trajectory annotation",
         lambda: annotate_manifest(config, overwrite=args.overwrite),

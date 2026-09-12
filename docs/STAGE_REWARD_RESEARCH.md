@@ -1,6 +1,6 @@
 # Stage-based 奖励：调研与实验设计
 
-本文件只记录前期调研与候选实验，不表示已经接入阶段标注器、VLM 或新的训练奖励。当前 RynnValue / Robometer 评价、IQL 更新、成功判断和历史数据均保持原行为；FACTR 控制器接入是另一项独立工作。
+第 1–5 节保留前期调研与候选实验；第 6 节记录目前已接入的人工关键帧直接奖励。它独立于 RynnValue / Robometer，不新增 VLM 阶段分类器，也不修改 IQL 更新、成功判断或采集数据。FACTR 控制器接入是另一项独立工作。
 
 ## 1. 要解决的问题与已有工作
 
@@ -115,6 +115,66 @@ r_t=-c(u_t),\qquad c(u)\in\{1,0.75,0.5,0.25\},
 
 ## 5. 本轮交付与后续边界
 
-本轮不新增 stage YAML 训练开关、不重写已评价 sidecar、不修改 reward cache、ReplayDataset、IQL 或环境成功率。它只建立上述文献入口和可检验的设计方案。后续如进入实现，阶段标注应作为新的独立 sidecar，reward 仍由现有确定性派生层读取原始评价/标注后生成；不能让一次 VLM 标注绑定死某种 reward 公式。
+以上是前期调研的边界。下面的实施版本选择人工关键帧直接奖励，而非方案 A 的 PBRS；原有 RynnValue / Robometer sidecar 和 IQL 算法保持不变。
 
 FACTR 整臂参考姿态校准、末端跟随与手动重力补偿的测试命令见 [README_CN §3.6.1](../README_CN.md#361-factr-franka-校准手动重力补偿与无-vla-测试)。该控制器只影响采集动作来源，与本文件的奖励研究彼此独立。
+
+## 6. 已实现：人工关键帧直接奖励
+
+### 6.1 标注与归一化
+
+数据详情页点击“切片 / 标记关键帧”，拖动主视角录像或逐帧定位，选择 `positive` / `negative` 后保存。切片仅保存标记，不删除视频帧、动作或 observation；完整接管前缀和成功后的记录仍然可见。标记绑定原始 observation step：N 个动作对应 0…N 共 N+1 个状态。原录像若只有 N 帧，最后一个状态会明确提示没有额外编码帧。
+
+令 P、N 分别为手动 positive、negative 的数量（这里 N 是负关键帧数，不是动作数）。成功沿用连续 `data.success_consecutive_steps` 次环境 done 的首次确认，默认 5；确认动作后的 observation 自动成为 success 锚点，不需要也不能重复手动标记。令每个事件的绝对增量为：
+
+\[
+w=\begin{cases}
+1/(P-N+1),&\text{确认成功}\\
+1/(P+1),&\text{未确认成功}
+\end{cases}
+\]
+
+从 `z_0=-1` 开始，每个 positive 加 w、negative 减 w，自动 success 再加 w，成功处精确取 0。失败末尾保持最后一个锚点的分数，**不强制回到 −1**。例如成功 P=3、N=1 时 w=1/3；失败 P=1、N=1 时 w=1/2。
+
+严格保留公式结果，不裁剪到 `[-1,0]`：negative 在前可能低于 −1，某些顺序可能在成功前达到非负值。这是用户选择的实验语义，不代表成功判定；持续正分数可能鼓励停留，需在消融中检查。成功公式的分母必须大于 0。重复帧、超界帧、success 时刻及其后的手动标记拒绝保存；失败轨迹允许显式保存空标注，整条为 −1，但“没有标注文件”不等于空标注。
+
+### 6.2 阶段间插值与 IQL reward
+
+相邻锚点位于 s、e，采用：
+
+\[
+z(t)=z_s+(z_e-z_s)\left(\frac{t-s}{e-s}\right)^p,
+\qquad p\ge1.
+\]
+
+默认 p=2；positive 前上升更快、negative 前下降更快，p=1 则为线性插值。当前数据严格 20 Hz，按 observation step 插值等价于按其真实时间插值。最后一个锚点后的分数保持不变；成功后记录为 0。这是基于未来人工边界的离线奖励重标注，不能宣称阶段间每一帧都有独立视觉进展证据。
+
+**该分数直接作为奖励，不做 potential 差分，也不再叠加 sparse step cost。** 对起点 t、实际长度 L 的 chunk：
+
+\[
+\begin{array}{ll}
+\text{macro:}&R_t=z(t+L),\quad y_t=R_t+\gamma m_tV(s_{t+L});\\
+\text{cumulative:}&R_t=\sum_{h=0}^{L-1}\gamma^h z(t+h+1),\quad
+y_t=R_t+\gamma^L m_tV(s_{t+L}).
+\end{array}
+\]
+
+`m_t` 仍使用现有 terminal 规则。成功后记录用于详情显示，不重新进入现有 replay 的成功后采样；前缀去重、动作 mask、Q/V 更新顺序和 actor advantage 均不改变。
+
+### 6.3 配置、版本与训练
+
+```yaml
+reward:
+  source: stage  # sparse | rynnvalue | stage
+  stage_exponent: 2.0
+  gamma: 0.99
+  accumulate_primitive_steps: false
+```
+
+训练页面“高级 IQL 参数”提供相同选项。详情中 p 控制保存后的预览；训练使用当前 YAML/表单的统一 `stage_exponent`，改变 p 只重算奖励，不需要重标关键帧。Sparse 不依赖评价，RynnValue 沿用既有 PBRS，Stage 不加载两种奖励模型。
+
+每条轨迹旁保存 `stage_annotation.json`：schema、轨迹 hash、关键帧、确认成功 step、成功阈值、p 和标注内容 hash。保存只读取小型控制 NPZ，结果原子发布；拖动进度条不请求后端，不解压双视角 observation，也不调用 MuJoCo。并发编辑通过 revision 拒绝覆盖旧版本。
+
+Stage 训练开始前检查全部数据成员，包含 validation 和被前缀去重覆盖的记录。缺失、失效、轨迹 hash 或成功阈值不一致时列出记录并停止，不跳过也不退回其他奖励。更改成功阈值后须检查标记并重新保存。GUI/终端任务冻结完整标注快照；训练目录保留该快照和 reward manifest，后续编辑不影响已启动训练。原始 NPZ 与标注一起迁移/打包可保留绑定；现有 UI 的轻量 CSV/视频 ZIP 会归档标注，但重建 NPZ 后 hash 改变，不能直接复用该标注。用于异机 Stage 训练应保留原始 trajectory.npz，不自动篡改绑定 hash。
+
+第一轮建议固定数据、split、训练步数及评测初始状态，仅比较 Sparse、RynnValue、Stage 三种来源；分别报告成功率、耗时、分数范围与实际 actor 权重，不以曲线更平滑作为有效性的结论。

@@ -16,7 +16,7 @@ from vla_rynn_iql.rewards import materialize_reward_manifest
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Derive cached sparse/PBRS/final rewards from RynnValue annotations"
+        description="Derive independent Sparse, RynnValue or Stage-based IQL rewards"
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_TRAIN_CONFIG)
     parser.add_argument(

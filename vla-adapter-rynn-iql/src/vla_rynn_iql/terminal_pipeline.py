@@ -16,7 +16,7 @@ from typing import Any, Iterable
 import numpy as np
 import yaml
 
-from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config
+from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config, reward_source
 from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
@@ -188,7 +188,14 @@ def merged_training_config(config: TerminalPipelineConfig) -> dict[str, Any]:
                     value = str(_resolve(value, config.path.parent, f"overrides.paths.{key}"))
             elif section == "iql" and key == "resume_checkpoint" and value is not None:
                 value = str(_resolve(value, config.path.parent, "overrides.iql.resume_checkpoint"))
+            elif section == "data" and key == "stage_annotations_manifest" and value is not None:
+                value = str(_resolve(value, config.path.parent, "overrides.data.stage_annotations_manifest"))
             raw[section][key] = value
+    reward_overrides = config.overrides.get("reward", {})
+    if "source" in reward_overrides and "rynnvalue" not in reward_overrides:
+        raw["reward"]["rynnvalue"] = raw["reward"]["source"] == "rynnvalue"
+    elif "rynnvalue" in reward_overrides and "source" not in reward_overrides:
+        raw["reward"]["source"] = "rynnvalue" if raw["reward"]["rynnvalue"] else "sparse"
     raw["data"]["task_ids"] = [config.selection["task_id"]]
     raw["data"]["selection_manifest"] = None
     return raw
@@ -496,6 +503,10 @@ def annotation_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> boo
 
 
 def reward_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
+    # Direct sources must validate current Stage sidecars/frozen annotations in
+    # materialize_reward_manifest, which cheaply reuses matching reward arrays.
+    if reward_source(reward_config) != "rynnvalue":
+        return False
     prepared_path = work_dir / MANIFEST_NAME
     annotation_path = work_dir / "annotations" / "annotation_manifest.json"
     reward_path = work_dir / "rewards" / "reward_manifest.json"

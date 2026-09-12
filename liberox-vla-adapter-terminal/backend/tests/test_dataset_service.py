@@ -21,12 +21,14 @@ def test_dataset_service_filters_by_task_and_exports_offline_rl_bundle(tmp_path:
     vla_views_video = tmp_path / "vla_views.mp4"
     rynn_metadata = tmp_path / "rynnvalue_evaluation.json"
     rynn_values = tmp_path / "rynnvalue_evaluation.npz"
+    stage_marks = tmp_path / "stage_annotation.json"
     summary.write_text("{}\n", encoding="utf-8")
     trajectory.write_text("step,success\n0,false\n", encoding="utf-8")
     agentview_video.write_bytes(b"external-video")
     vla_views_video.write_bytes(b"policy-views-video")
     rynn_metadata.write_text("{}\n", encoding="utf-8")
     rynn_values.write_bytes(b"reward-values")
+    stage_marks.write_text('{"schema_version": 1}\n', encoding="utf-8")
     service = DatasetService(FakeRunService([
         {
             "id": "run-a", "task_id": "task-a", "task_name": "A",
@@ -39,6 +41,7 @@ def test_dataset_service_filters_by_task_and_exports_offline_rl_bundle(tmp_path:
                 "episodes/episode_000/vla_views.mp4": str(vla_views_video),
                 "episodes/episode_000/rynnvalue_evaluation.json": str(rynn_metadata),
                 "episodes/episode_000/rynnvalue_evaluation.npz": str(rynn_values),
+                "episodes/episode_000/stage_annotation.json": str(stage_marks),
             },
         },
         {
@@ -64,6 +67,7 @@ def test_dataset_service_filters_by_task_and_exports_offline_rl_bundle(tmp_path:
             assert "runs/run-a/episodes/episode_000/vla_views.mp4" in names
             assert "runs/run-a/episodes/episode_000/rynnvalue_evaluation.json" in names
             assert "runs/run-a/episodes/episode_000/rynnvalue_evaluation.npz" in names
+            assert archive.read("runs/run-a/episodes/episode_000/stage_annotation.json") == stage_marks.read_bytes()
             assert archive.read("runs/run-a/episodes/episode_000/agentview.mp4") == b"external-video"
             assert archive.getinfo("runs/run-a/episodes/episode_000/agentview.mp4").compress_type == zipfile.ZIP_STORED
             assert "action_source" in archive.read("DATA_FORMAT.md").decode("utf-8")

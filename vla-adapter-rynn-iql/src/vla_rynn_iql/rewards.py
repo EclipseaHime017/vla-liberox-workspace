@@ -16,7 +16,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from .config import LoadedConfig
+from .config import LoadedConfig, reward_source
 from .data import load_manifest
 from .io import atomic_json, sha256_file, stable_hash
 
@@ -56,10 +56,32 @@ def official_inference_config(reward_config: dict[str, Any]) -> dict[str, Any]:
 
 def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
     """Return cheap reward-reduction settings, independent of VLM inference."""
-    return {
+    result = {
         key: reward_config[key]
         for key in sorted(REWARD_DERIVATION_CONFIG_KEYS)
     }
+    source = reward_source(reward_config)
+    result["rynnvalue"] = source == "rynnvalue"
+    # Preserve RynnValue's existing manifest/checkpoint identity exactly.
+    if source != "rynnvalue":
+        result["source"] = source
+    if source == "stage":
+        result["stage_exponent"] = float(reward_config.get("stage_exponent", 2.0))
+    return result
+
+
+def reward_manifest_digest(index: dict[str, Any]) -> str:
+    """Content identity for direct rewards; legacy RynnValue hashes stay unchanged."""
+    if index.get("reward_config", {}).get("source", "rynnvalue") == "rynnvalue":
+        return stable_hash(index)
+    return stable_hash({
+        "schema_version": index["schema_version"], "kind": index["kind"],
+        "dataset_sha256": index["dataset_sha256"], "reward_config": index["reward_config"],
+        "stage_annotations_sha256": index.get("stage_annotations_sha256"),
+        "episodes": [{"run_id": item["run_id"], "reward_sha256": item["reward_sha256"],
+                      "stage_annotation_sha256": item.get("stage_annotation_sha256")}
+                     for item in index["episodes"]],
+    })
 
 
 def validate_rynnvalue_config_contract(config: Any, processor: Any) -> dict[str, Any]:
@@ -927,6 +949,8 @@ def load_annotation_index(config: LoadedConfig) -> dict[str, Any]:
 
 def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) -> Path:
     """Build the cheap reward cache from immutable official RynnValue outputs."""
+    if reward_source(config.section("reward")) != "rynnvalue":
+        return _materialize_direct_rewards(config, force=force)
     manifest = load_manifest(config)
     annotation_index = load_annotation_index(config)
     reward_cfg = config.section("reward")
@@ -1106,3 +1130,126 @@ def load_reward_index(config: LoadedConfig) -> dict[str, Any]:
     if payload.get("complete") is not True:
         raise ValueError("Derived reward manifest is incomplete")
     return payload
+
+
+def load_stage_annotations(config: LoadedConfig, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Validate every selected member, including validation and deduplicated prefixes."""
+    from .stage_rewards import STAGE_FILENAME, validate_stage_annotation
+
+    frozen_path = config.section("data").get("stage_annotations_manifest")
+    frozen = None
+    if frozen_path is not None:
+        frozen = json.loads(Path(frozen_path).read_text(encoding="utf-8"))
+        if (not isinstance(frozen, dict) or set(frozen) != {"schema_version", "annotations"}
+                or frozen["schema_version"] != 1 or not isinstance(frozen["annotations"], dict)):
+            raise ValueError("Invalid frozen stage annotations manifest")
+    selected: dict[str, Any] = {}
+    invalid: list[str] = []
+    for episode in manifest["episodes"]:
+        run_id = str(episode["run_id"])
+        trajectory = Path(episode["trajectory_path"])
+        try:
+            if frozen is None and episode.get("observation_orientation") == "vla_policy":
+                raise ValueError(
+                    "Stage cannot reuse labels for a CSV/video-reconstructed trajectory; "
+                    "provide the original trajectory.npz, observations and bound stage_annotation.json. "
+                    "Annotation hashes are never silently rebound."
+                )
+            payload = (frozen["annotations"][run_id] if frozen is not None else
+                       json.loads((trajectory.parent / STAGE_FILENAME).read_text(encoding="utf-8")))
+            actual_sha = sha256_file(trajectory)
+            if actual_sha != episode["trajectory_sha256"]:
+                raise ValueError("Trajectory changed after Prepare; run Prepare again")
+            with np.load(trajectory, allow_pickle=False) as arrays:
+                done = np.asarray(arrays["done"])
+            selected[run_id] = validate_stage_annotation(
+                payload, run_id=run_id, trajectory_sha256=actual_sha, done=done,
+                success_consecutive_steps=int(config.section("data")["success_consecutive_steps"]),
+            )
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            invalid.append(f"{run_id}: {exc}")
+    if invalid:
+        raise ValueError("Stage annotations missing or invalid; training stopped:\n" + "\n".join(invalid))
+    return {"schema_version": 1, "annotations": selected}
+
+
+def _materialize_direct_rewards(config: LoadedConfig, *, force: bool) -> Path:
+    """Sparse/Stage are independent reward sources and never need VLM evaluation."""
+    from .stage_rewards import stage_chunk_reward, stage_scores
+
+    manifest = load_manifest(config)
+    derivation = reward_derivation_config(config.section("reward"))
+    source = derivation["source"]
+    snapshot = load_stage_annotations(config, manifest) if source == "stage" else None
+    snapshot_hash = stable_hash(snapshot) if snapshot is not None else None
+    directory = Path(config.section("paths")["work_dir"]) / "rewards"
+    directory.mkdir(parents=True, exist_ok=True)
+    index_path = directory / "reward_manifest.json"
+    identity = {
+        "schema_version": REWARD_SCHEMA_VERSION, "kind": "derived_iql_reward",
+        "dataset_sha256": manifest["dataset_sha256"], "reward_config": derivation,
+        "stage_annotations_sha256": snapshot_hash,
+    }
+    if index_path.exists() and not force:
+        try:
+            previous = json.loads(index_path.read_text(encoding="utf-8"))
+            if (all(previous.get(key) == value for key, value in identity.items())
+                    and previous.get("complete") is True
+                    and len(previous["episodes"]) == len(manifest["episodes"])
+                    and all(not Path(item["reward_path"]).is_symlink()
+                            and Path(item["reward_path"]).is_file()
+                            and sha256_file(Path(item["reward_path"])) == item["reward_sha256"]
+                            for item in previous["episodes"])):
+                if snapshot is None or (
+                    Path(previous["stage_annotations_path"]).is_file()
+                    and json.loads(Path(previous["stage_annotations_path"]).read_text()) == snapshot
+                ):
+                    return index_path
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    snapshot_path = directory / f"stage_annotations_{snapshot_hash}.json" if snapshot else None
+    if snapshot_path is not None:
+        atomic_json(snapshot_path, snapshot)
+    index = []
+    gamma = float(derivation["gamma"])
+    cumulative = bool(derivation["accumulate_primitive_steps"])
+    for episode in manifest["episodes"]:
+        chunks = episode.get("evaluation_chunks", episode["chunks"])
+        done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
+        if episode["terminal_step"] is not None:
+            done[int(episode["terminal_step"]):] = True
+        if source == "stage":
+            annotation = snapshot["annotations"][str(episode["run_id"])]
+            scores = stage_scores(annotation, exponent=derivation["stage_exponent"])
+            final = np.asarray([stage_chunk_reward(scores, int(chunk["start"]),
+                int(chunk["length"]), gamma, cumulative) for chunk in chunks], dtype=np.float32)
+            arrays = {"stage_score": scores, "stage_chunk_reward": final}
+            annotation_hash = annotation["annotation_sha256"]
+        else:
+            final = np.asarray([
+                (sparse_primitive_return(done, int(chunk["start"]), int(chunk["length"]), gamma)
+                 if cumulative else sparse_macro_reward(done, int(chunk["start"]), int(chunk["length"])))
+                for chunk in chunks
+            ], dtype=np.float32)
+            arrays = {"sparse_reward": final}
+            annotation_hash = None
+        key = stable_hash({**identity, "run_id": episode["run_id"], "chunks": chunks,
+                           "trajectory_sha256": episode["trajectory_sha256"],
+                           "annotation_sha256": annotation_hash})
+        output = directory / f"{key}.npz"
+        temporary = directory / f".{key}.{os.getpid()}.npz"
+        try:
+            np.savez_compressed(temporary, boundary_steps=np.asarray(episode["reward_boundaries"]),
+                                final_reward=final, pbrs_chunk_reward=final, **arrays)
+            os.replace(temporary, output)
+        finally:
+            temporary.unlink(missing_ok=True)
+        digest = sha256_file(output)
+        index.append({"run_id": episode["run_id"], "reward_path": str(output.resolve()),
+                      "reward_sha256": digest, "annotation_path": str(output.resolve()),
+                      "annotation_sha256": digest, "stage_annotation_sha256": annotation_hash,
+                      "source": source, "environment_success": episode["success"]})
+    atomic_json(index_path, {**identity, "complete": True, "episodes": index,
+                            "stage_annotations_path": str(snapshot_path.resolve()) if snapshot_path else None})
+    LOG.info("Materialized %d %s reward arrays without reward-model evaluation", len(index), source)
+    return index_path

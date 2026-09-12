@@ -9,8 +9,9 @@ from .dependencies import (
     dataset_service, http_error, offline_job_service, service,
     training_dataset_service, trajectory_evaluation_service,
     robometer_evaluation_service,
+    stage_annotation_service,
 )
-from .models import RunTestLabelRequest, TrajectoryEvaluationRequest
+from .models import RunTestLabelRequest, TrajectoryEvaluationRequest, StageAnnotationRequest
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -58,6 +59,25 @@ async def update_run_labels(
     try:
         return await run_in_threadpool(
             training_dataset_service(request).set_test, run_id, body.is_test,
+        )
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.get("/runs/{run_id}/stage-annotation")
+async def get_stage_annotation(run_id: str, request: Request):
+    try:
+        return await run_in_threadpool(stage_annotation_service(request).detail, run_id)
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.put("/runs/{run_id}/stage-annotation")
+async def save_stage_annotation(run_id: str, body: StageAnnotationRequest, request: Request):
+    try:
+        return await run_in_threadpool(
+            stage_annotation_service(request).save, run_id,
+            [frame.model_dump() for frame in body.keyframes], body.exponent, body.revision,
         )
     except Exception as exc:
         raise http_error(exc) from exc

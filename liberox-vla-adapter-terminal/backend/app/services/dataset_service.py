@@ -17,6 +17,7 @@ EXPORT_TRAJECTORY_NAMES = frozenset({"trajectory.csv", "trajectory_inference.csv
 EXPORT_VIDEO_NAMES = frozenset({"agentview.mp4", "vla_views.mp4"})
 EXPORT_EVALUATION_NAMES = frozenset({
     "rynnvalue_evaluation.json", "rynnvalue_evaluation.npz",
+    "stage_annotation.json",
 })
 
 DATA_FORMAT_MARKDOWN = """# LIBERO-X offline RL export
@@ -78,6 +79,18 @@ token IDs, and display-only parsing of Description / Match / Success.
 is one IQL decision and receives one discount; its actual duration only selects
 the next observation and action mask. These files are optional and can be reused by a later dataset
 package; their absence means the trajectory has not been evaluated yet.
+
+## Human Stage annotation
+
+Optional `stage_annotation.json` stores positive/negative observation-step
+keyframes, the automatic confirmed-success anchor, exponent and source/content
+hashes. It is independent of both reward models and does not alter the recorded
+trajectory. Direct Stage scores can be below -1 or positive: they follow the
+signed-count formula without clipping. Training freezes a separate annotation
+snapshot and derives rewards for the selected exponent/discount mode.
+This lightweight CSV/video export archives the marks but omits the original
+trajectory NPZ. Reconstructed NPZ bytes cannot reuse its original hash binding;
+retain the original trajectory.npz and aligned observations for Stage training.
 """
 
 

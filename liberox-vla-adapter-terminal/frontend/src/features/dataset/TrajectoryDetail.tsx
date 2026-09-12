@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
-import type { TrajectoryDetail as Detail } from "../run-control/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { StageAnnotation, TrajectoryDetail as Detail } from "../run-control/types";
 import { Badge } from "../../components/ui/Badge";
 import { Dialog } from "../../components/ui/Dialog";
+import { StageAnnotationPanel } from "./StageAnnotationPanel";
+import { selectMainVideoArtifact } from "../simulation-view/controls";
 
 const colors = ["#3775e8", "#e06c4f", "#3c9a70", "#9b63d4", "#c38b27", "#3c94a6", "#d14f86"];
 
@@ -177,10 +179,20 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
   const [isTest, setIsTest] = useState(Boolean(detail.run.is_test));
   const [labelBusy, setLabelBusy] = useState(false);
   const [labelError, setLabelError] = useState("");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [stageAnnotation, setStageAnnotation] = useState<StageAnnotation | null>(null);
+  const [stageDirty, setStageDirty] = useState(false);
   const plots = useMemo<Plot[]>(() => {
     const values: Plot[] = [
       { title: "VLA 环境 action", unit: "normalized command [-]", times: detail.series.action_time_seconds, labels: ["dx", "dy", "dz", "dRx", "dRy", "dRz", "gripper"], values: detail.series.env_action },
     ];
+    if (stageAnnotation?.status === "ready" && stageAnnotation.scores.length) {
+      values.push({
+        title: "Stage-based Reward", unit: "reward [-]", times: stageAnnotation.time_seconds,
+        labels: ["direct stage reward"], values: stageAnnotation.scores.map((score) => [score]),
+        sampleLabels: stageAnnotation.time_seconds.map((_, step) => `observation step ${step}`),
+      });
+    }
     const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
     if (evaluation) {
       const official = evaluation.official_outputs;
@@ -282,9 +294,9 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
       }
     }
     return values;
-  }, [detail]);
-  const video = Object.entries(detail.artifacts).find(([name]) => name.endsWith("/agentview.mp4"))?.[1]
-    ?? Object.entries(detail.artifacts).find(([name]) => name.endsWith(".mp4"))?.[1];
+  }, [detail, stageAnnotation]);
+  const videoName = selectMainVideoArtifact(detail.artifacts);
+  const video = videoName ? detail.artifacts[videoName] : null;
   const comparison = useMemo(() => {
     const rynn = detail.rynnvalue_evaluation ?? detail.evaluation;
     const robo = detail.robometer_evaluation;
@@ -306,10 +318,14 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
     };
   }, [detail]);
   return <section className="content-page trajectory-detail-page">
-    <div className="page-heading detail-heading"><div><p className="eyebrow">TRAJECTORY DETAIL</p><h1>轨迹 {detail.run.id}</h1><p>{detail.run.task} · {detail.run.action_count} steps</p></div><button onClick={onBack}>返回数据集</button></div>
+    <div className="page-heading detail-heading"><div><p className="eyebrow">TRAJECTORY DETAIL</p><h1>轨迹 {detail.run.id}</h1><p>{detail.run.task} · {detail.run.action_count} steps</p></div><button onClick={() => {
+      if (!stageDirty || window.confirm("切片标记尚未保存，是否丢弃并返回数据集？")) onBack();
+    }}>返回数据集</button></div>
     <div className="detail-summary surface"><Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge><span>{detail.run.source_type ?? detail.run.control_mode}</span><span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span><label className="test-label-switch"><input type="checkbox" checked={isTest} disabled={labelBusy || !onSetTest} onChange={async (event) => { const next = event.target.checked; setLabelBusy(true); setLabelError(""); try { await onSetTest?.(next); setIsTest(next); } catch (reason) { setLabelError(String(reason)); } finally { setLabelBusy(false); } }} /><span><b>测试标签</b><small>启用后不进入新训练数据集，任务级批量评价默认跳过</small></span></label></div>
     {labelError && <div className="error-banner"><span>{labelError}</span><button onClick={() => setLabelError("")}>关闭</button></div>}
-    <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}</article>
+    <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video ref={videoRef} controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}
+      <StageAnnotationPanel key={detail.run.id} runId={detail.run.id} videoRef={videoRef} onSaved={setStageAnnotation} onDirtyChange={setStageDirty} />
+    </article>
     {comparison && <article className="surface detail-summary"><strong>RynnValue / Robometer 对比</strong>{comparison.available ? <><span>Pearson r = {comparison.correlation?.toFixed(4)}</span><span>终点进度：Rynn {comparison.rynnEnd?.toFixed(3)} / Robometer {comparison.roboEnd?.toFixed(3)}</span><span>Robometer 成功概率 {comparison.successEnd?.toFixed(3)}</span><span>环境成功：{comparison.environmentSuccess ? "是" : "否"}</span></> : <span>{comparison.reason}</span>}</article>}
     <div className="trajectory-plots">{plots.map((plot) => <PlotCard key={plot.title} plot={plot} onOpen={() => setOpened(plot)} />)}</div>
     {opened && <PlotInspector plot={opened} onClose={() => setOpened(null)} />}

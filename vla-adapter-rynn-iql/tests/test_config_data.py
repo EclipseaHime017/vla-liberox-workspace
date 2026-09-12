@@ -66,7 +66,8 @@ def test_legacy_config_without_rynnvalue_switch_keeps_shaping_enabled(
     configured, tmp_path: Path,
 ):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
-    del raw["reward"]["rynnvalue"]
+    raw["reward"].pop("rynnvalue", None)
+    raw["reward"].pop("source", None)
     path = tmp_path / "legacy-without-rynnvalue-switch.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     assert load_train_config(path).section("reward")["rynnvalue"] is True

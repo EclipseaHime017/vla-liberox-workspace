@@ -21,7 +21,7 @@ import torch
 import yaml
 from torch.utils.data import default_collate
 
-from .config import LoadedConfig
+from .config import LoadedConfig, reward_source
 from .data import load_manifest
 from .io import atomic_json, sha256_file, stable_hash
 from .iql import PixelIQL, advantage_weights, weighted_masked_l1
@@ -32,7 +32,7 @@ from .monitoring import (
     log_wandb_metric,
 )
 from .replay import ReplayDataset
-from .rewards import load_reward_index
+from .rewards import load_reward_index, reward_manifest_digest
 from .vla_adapter import (
     ACTION_DIM, ACTION_HORIZON, PROPRIO_DIM, extract_action_hidden_states,
     load_components, predict_normalized, processor_inputs,
@@ -248,7 +248,7 @@ def _save_checkpoint(
     checkpoint_metadata = {
         "schema_version": 1, "step": step, "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": stable_hash(reward_index),
+        "reward_sha256": reward_manifest_digest(reward_index),
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
         "code_version": _code_version(),
@@ -281,10 +281,13 @@ def _publish_overlay(
         "action_dim": ACTION_DIM,
         "proprio_dim": PROPRIO_DIM,
     }
+    reward_label = {"rynnvalue": "RynnValue", "sparse": "Sparse", "stage": "Stage-based"}[
+        reward_source(config.section("reward"))
+    ]
     payload = {
         "schema_version": 1,
         "policy_id": policy_id,
-        "label": f"RynnValue IQL · step {step}",
+        "label": f"{reward_label} IQL · step {step}",
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
         "action_head": "action_head.pt",
@@ -293,7 +296,7 @@ def _publish_overlay(
         "action_dim": ACTION_DIM,
         "proprio_dim": PROPRIO_DIM,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": stable_hash(reward_index),
+        "reward_sha256": reward_manifest_digest(reward_index),
         "training_step": step,
         "component_sha256": {
             "action_head": sha256_file(target / "action_head.pt"),
@@ -326,7 +329,7 @@ def _restore_checkpoint(
     metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
     expected = {
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": stable_hash(reward_index),
+        "reward_sha256": reward_manifest_digest(reward_index),
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
     }
@@ -373,7 +376,7 @@ def train(config: LoadedConfig) -> Path:
     device = _device(iql_cfg["device"])
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    LOG.info("Loading prepared replay manifest and RynnValue reward cache")
+    LOG.info("Loading prepared replay manifest and selected IQL reward cache")
     manifest = load_manifest(config)
     reward_index = load_reward_index(config)
     micro_batch_size = int(iql_cfg["micro_batch_size"])
@@ -382,7 +385,8 @@ def train(config: LoadedConfig) -> Path:
     component_load_started = time.monotonic()
     components = load_components(config)
     LOG.info("VLA components loaded in %.2f s", time.monotonic() - component_load_started)
-    dataset = ReplayDataset(config, components.action_stats, components.proprio_stats, "train")
+    dataset = ReplayDataset(config, components.action_stats, components.proprio_stats, "train",
+                            reward_index=reward_index)
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
     agent = PixelIQL(
@@ -429,6 +433,11 @@ def train(config: LoadedConfig) -> Path:
     run_dir = Path(config.section("paths")["output_dir"]) / run_id
     checkpoint_root = run_dir / "checkpoints"
     checkpoint_root.mkdir(parents=True, exist_ok=False)
+    atomic_json(run_dir / "reward_manifest.json", reward_index)
+    if reward_index.get("stage_annotations_path"):
+        atomic_json(run_dir / "stage_annotations.json", json.loads(
+            Path(reward_index["stage_annotations_path"]).read_text(encoding="utf-8")
+        ))
     (run_dir / "effective_config.yaml").write_text(
         yaml.safe_dump(config.raw, sort_keys=False), encoding="utf-8"
     )
@@ -437,7 +446,7 @@ def train(config: LoadedConfig) -> Path:
         "code_version": _code_version(),
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": stable_hash(reward_index),
+        "reward_sha256": reward_manifest_digest(reward_index),
         "base_checkpoint": config.section("vla")["base_checkpoint"],
     })
     actor_optimizer.zero_grad(set_to_none=True)
@@ -628,7 +637,7 @@ def train(config: LoadedConfig) -> Path:
                     "schema_version": 1, "status": "canceled", "steps": step + 1,
                     "elapsed_seconds": time.monotonic() - start_time,
                     "dataset_sha256": manifest["dataset_sha256"],
-                    "reward_sha256": stable_hash(reward_index),
+                    "reward_sha256": reward_manifest_digest(reward_index),
                     "cancel_checkpoint": str(latest_checkpoint),
                     "resumed_from_step": start_step,
                     "micro_batch_size": micro_batch_size,
@@ -655,7 +664,7 @@ def train(config: LoadedConfig) -> Path:
         "schema_version": 1, "status": "completed", "steps": total_steps,
         "elapsed_seconds": time.monotonic() - start_time,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": stable_hash(reward_index), "policy_overlay": str(policy),
+        "reward_sha256": reward_manifest_digest(reward_index), "policy_overlay": str(policy),
         "resumed_from_step": start_step,
         "micro_batch_size": micro_batch_size,
         "transitions_processed": (total_steps - start_step) * micro_batch_size,

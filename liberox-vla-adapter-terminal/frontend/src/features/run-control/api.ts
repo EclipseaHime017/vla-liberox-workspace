@@ -3,7 +3,7 @@ import type {
   Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, EvaluationConfig,
   EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
   PaginatedRuns, PolicyDetail, PolicyInfo, TensorBoardStatus, TrajectoryDetail,
-  TrainingDataset, TrainingDefaults,
+  TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe,
 } from "./types";
 
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
@@ -16,6 +16,14 @@ export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5) => api<P
 export const getTrajectoryDetail = (runId: string) => api<TrajectoryDetail>(
   `/api/datasets/runs/${encodeURIComponent(runId)}`,
 );
+export const getStageAnnotation = (runId: string) => api<StageAnnotation>(
+  `/api/datasets/runs/${encodeURIComponent(runId)}/stage-annotation`,
+);
+export const saveStageAnnotation = (runId: string, body: {
+  keyframes: StageKeyframe[]; exponent: number; revision: string | null;
+}) => api<StageAnnotation>(`/api/datasets/runs/${encodeURIComponent(runId)}/stage-annotation`, {
+  method: "PUT", body: JSON.stringify(body),
+});
 export const setTrajectoryTestLabel = (runId: string, isTest: boolean) => api<{
   run_id: string; task_id: string | null; is_test: boolean;
   excluded_from_training_packages: boolean;

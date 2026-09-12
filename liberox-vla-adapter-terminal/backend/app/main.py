@@ -30,6 +30,7 @@ from .services.offline_job_service import OfflineJobService
 from .services.training_dataset_service import TrainingDatasetService
 from .services.trajectory_evaluation_service import TrajectoryEvaluationService
 from .services.robometer_evaluation_service import RobometerEvaluationService
+from .services.stage_annotation_service import StageAnnotationService
 from .workers.simulation_worker import SimulationManager
 
 
@@ -59,6 +60,9 @@ def create_app(
             app.state.trajectory_evaluation_service = TrajectoryEvaluationService(
                 app.state.run_service, ui_config.project_root
             )
+            app.state.stage_annotation_service = StageAnnotationService(
+                app.state.run_service, ui_config.offline_rl_root,
+            )
             app.state.training_dataset_service = TrainingDatasetService(
                 app.state.run_service, ui_config,
                 app.state.trajectory_evaluation_service,
@@ -72,6 +76,7 @@ def create_app(
                 ui_config, worker, app.state.training_dataset_service,
                 app.state.trajectory_evaluation_service,
                 app.state.robometer_evaluation_service,
+                stage_annotations=app.state.stage_annotation_service,
             )
             worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
         else:
@@ -80,6 +85,7 @@ def create_app(
             app.state.trajectory_evaluation_service = None
             app.state.robometer_evaluation_service = None
             app.state.offline_job_service = None
+            app.state.stage_annotation_service = None
         try:
             yield
         finally:
@@ -91,7 +97,7 @@ def create_app(
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="0.4.1",
+        version="0.5.0",
         lifespan=lifespan,
     )
     app.include_router(runs.router)

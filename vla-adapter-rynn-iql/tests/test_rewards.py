@@ -187,7 +187,7 @@ def test_disabling_rynnvalue_reuses_evaluation_and_materializes_sparse_only(
     prepare_dataset(configured)
     annotation_path = annotate_manifest(configured, FakeAnnotator())
     annotation_before = json.loads(annotation_path.read_text(encoding="utf-8"))
-    configured.raw["reward"]["rynnvalue"] = False
+    configured.raw["reward"].update(source="sparse", rynnvalue=False)
 
     class UnexpectedModelLoad:
         def __init__(self, _config):
@@ -198,8 +198,8 @@ def test_disabling_rynnvalue_reuses_evaluation_and_materializes_sparse_only(
     assert rebuilt["reward_config"]["rynnvalue"] is False
     assert json.loads(annotation_path.read_text(encoding="utf-8")) == annotation_before
     with np.load(rebuilt["episodes"][0]["reward_path"], allow_pickle=False) as arrays:
-        assert np.any(arrays["pbrs_shaping_reward"] != 0.0)
-        assert np.all(arrays["dense_reward"] == 0.0)
+        assert "pbrs_shaping_reward" not in arrays
+        assert "dense_reward" not in arrays
         assert np.array_equal(arrays["pbrs_chunk_reward"], arrays["sparse_reward"])
 
 

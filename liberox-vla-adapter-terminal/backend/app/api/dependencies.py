@@ -8,6 +8,7 @@ from ..services.offline_job_service import OfflineJobService
 from ..services.training_dataset_service import TrainingDatasetService
 from ..services.trajectory_evaluation_service import TrajectoryEvaluationService
 from ..services.robometer_evaluation_service import RobometerEvaluationService
+from ..services.stage_annotation_service import StageAnnotationService
 
 
 def service(request: Request) -> RunService:
@@ -51,6 +52,13 @@ def robometer_evaluation_service(request: Request) -> RobometerEvaluationService
     current = getattr(request.app.state, "robometer_evaluation_service", None)
     if current is None:
         raise HTTPException(status_code=503, detail="Robometer evaluation service is unavailable")
+    return current
+
+
+def stage_annotation_service(request: Request) -> StageAnnotationService:
+    current = getattr(request.app.state, "stage_annotation_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Stage annotation service is unavailable")
     return current
 
 

@@ -1,6 +1,11 @@
 # LIBERO-X × VLA-Adapter Terminal
 
-当前版本：**v0.4.1**
+当前版本：**v0.5.0**
+
+本版主要内容：
+
+1. 新增 FACTR 遥操作支持，保留 SpaceMouse，统一接管与数据记录。
+2. 新增 Stage-based reward，支持人工关键帧标注和独立训练奖励选择。
 
 这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse / FACTR 人工接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。FACTR 独立测试使用官方整臂参考姿态校准，同一校准用于末端跟随和手动重力补偿；UI 中的 FACTR 接管仍为被动读取。实体设备验收须在连接对应硬件后进行。
 
@@ -728,7 +733,7 @@ Pixel-IQL                         冻结的 VLA backbone
 
 1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始rollout与接管/重新推理分支都从第0步开始保留完整物理轨迹，因此RynnValue能评价接管前自然rollout、接管后新后缀及固定时长采集中的成功后尾段；训练transition仍在确认terminal结束。transition 不跨越 `policy`、`policy_requery`、`human` 来源边界；若接管发生在 8 步 chunk 中间，接管前最后一个 policy transition 以实际长度结束。固定 8 步只作为最大 horizon，实际长度写入 `chunk_length`。组成训练 replay 时，再按 `(root_run_id,start,end,action_source)` 去重父轨迹与 sibling 分支物理复制的相同前缀，既不丢失整轨迹评价，也不把相同自然 rollout 重复放大。训练集与验证集仍按 root trajectory 划分。该阶段不运行模型、不计算奖励，也不修改源动作，输出schema-v4 `outputs/work/dataset_manifest.json`。
 2. **Annotate（RynnValue 轨迹评价）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 生成 absolute/relative remaining time、entropy、logits 和 Analysis。该阶段不训练 RynnValue、不更新 VLA，也不计算 sparse/Shape/Final Reward。输出位于 `outputs/work/annotations/` 和全局 `annotation-cache/`；已有 schema-v4/v5 评价会复用其完整模型输出并迁移，不会再跑 RynnValue forward。
-3. **Materialize Rewards（奖励派生）**：在 `vla-liberox` 环境中读取上述评价和环境 terminal，根据 `rynnvalue`、`gamma`、`shaping_weight`、`accumulate_primitive_steps` 快速计算 sparse reward、Shape Reward 和 Final Reward。`rynnvalue: false` 时保留 Shape Reward 供诊断，但训练使用的 Dense Reward 归零、Final Reward 等于 sparse reward。结果是带配置 hash 的二级缓存；完全一致时直接复用，不一致时只用 NumPy 重算奖励，不加载 4B 模型。
+3. **Materialize Rewards（奖励派生）**：在 `vla-liberox` 环境中按 `reward.source` 选择来源：RynnValue 读取缓存评价并计算 sparse＋PBRS；Sparse 直接使用环境 terminal；Stage 使用已保存的人工关键帧直接分数。结合 `gamma` 和 macro/cumulative 模式生成带配置 hash 的二级缓存，完全一致时复用，不一致时只用 NumPy 重算，不加载奖励模型。三种来源的操作见 §4.4.2。
 4. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已派生 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；VLA 视觉/语言 backbone 只做冻结的特征提取，反向传播仅更新 continuous action head 与 proprio projector。训练 checkpoint 会保留 Q/V、optimizer 和随机状态以便恢复，最终部署 overlay 只发布 action head、proprio projector 和兼容性清单。
 
 RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本训练系统不使用 Robometer、在线 RL、奖励模型微调或真机控制；Robometer 仅作为后述独立诊断评价器，不进入 IQL reward。
@@ -797,7 +802,8 @@ reward:
   annotation_batch_size: 1
   # 以上字段决定昂贵的 RynnValue 评价缓存。
   # 以下字段只决定快速的奖励派生缓存。
-  rynnvalue: true
+  source: rynnvalue  # sparse | rynnvalue | stage
+  stage_exponent: 2.0
   gamma: 0.99
   shaping_weight: 0.1
   # false=chunk宏动作奖励；true=chunk内20Hz逐步累计奖励
@@ -901,6 +907,22 @@ conda run -n vla-liberox python \
 
 #### 4.4.2 annotate 与 reward materialize 的边界
 
+先选择 `reward.source`：`rynnvalue` 沿用下文的模型评价＋PBRS；`sparse` 只使用环境稀疏奖励；`stage` 使用人工关键帧直接奖励。后两者不需要运行 annotate，执行 `prepare_dataset.py → materialize_rewards.py → train_iql.py` 即可，且不需要 RynnValue 环境。终端流水线会根据来源自动选择这些阶段。
+
+**Stage 标注：**进入数据集的单条数据详情，点击“切片 / 标记关键帧”，拖动主视角录像或逐帧定位，选择 Positive/Negative，最后“保存切片并计算奖励”。不裁剪源数据，保存后显示完整 Stage-based Reward 曲线；success 按连续 done 阈值自动添加。失败轨迹无关键事件时也需要显式保存空标注。公式、边界和不裁剪分数的语义见 [Stage 直接奖励说明](docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励)。
+
+```yaml
+reward:
+  source: stage
+  stage_exponent: 2.0  # p>=1；统一控制本次训练的阶段内插值
+  gamma: 0.99
+  accumulate_primitive_steps: false
+```
+
+默认 macro 直接取 `R=z(t+L)`；累计模式取 `R=Σ γ^h z(t+h+1)`，Bellman 分别使用 `γ`、`γ^L`。Stage 不做 PBRS 差分，不叠加 sparse 或 RynnValue reward。成功 P 个 positive、N 个 negative 时每次增量为 `1/(P-N+1)`（成功本身额外算一次 positive）；失败为 `1/(P+1)`。分数从 −1 起，positive 加、negative 减，严格保留公式结果，允许超出 `[-1,0]`。
+
+Stage 训练会在加载 VLA 前检查**全部数据成员**，缺失、损坏或成功阈值不匹配的标注都会列出并终止。UI/终端启动会冻结标注快照；调整 p 只重算奖励，后续修改轨迹标注不改变已经启动的训练。详情预览使用标注保存的 p，训练以 YAML/训练表单的 `stage_exponent` 为准。
+
 annotate 的作用不是重新判断任务是否成功，也不是训练 RynnValue。它冻结加载 RynnValue-4B，对 prepare 后每条轨迹的 action-chunk 边界执行以下处理：
 
 1. 只读取第三人称 `agentview` 和该轨迹的 BDDL 提示词；不读取 wrist、动作来源或人工/策略标签。
@@ -935,16 +957,18 @@ conda run -n rynnvalue-reward python \
 
 ```yaml
 reward:
-  rynnvalue: true
+  source: rynnvalue
+  stage_exponent: 2.0
   gamma: 0.99
   shaping_weight: 0.1
   accumulate_primitive_steps: false
 ```
 
-- `rynnvalue`：是否把 RynnValue Shape Reward 纳入训练的 Final Reward。设为 `false` 时 `dense_reward=0`、`final_reward=sparse_reward`；原始评价与 Shape Reward 诊断仍保留。
+- `source`：独立选择 Sparse、RynnValue 或 Stage-based。原 `reward.rynnvalue: true/false` 仍兼容旧 YAML，但新配置使用 `source`，不要同时填写互相矛盾的两个值。
+- `stage_exponent`：仅对 Stage 生效；p=2 使临近 positive/negative 边界的升降更快，p=1 为线性。
 - `gamma`：以 action chunk 为时间单位的折扣；Shape Reward 和 IQL Bellman target 对每个宏动作各使用一次。
 - `shaping_weight`：RynnValue 势函数奖励的强度；`0` 表示只使用 sparse step cost。
-- `accumulate_primitive_steps`：`false` 将 chunk 当作一个宏动作；`true` 累计 chunk 内的折扣 primitive-step cost，并使用实际 `L` 的势函数折扣。
+- `accumulate_primitive_steps`：UI 显示为 **cumulative reward**，采用 On/Off 选择。Off（`false`）将 chunk 当作一个宏动作；On（`true`）累计 chunk 内的折扣 primitive-step reward，并使用实际 `L` 的 Bellman 折扣；RynnValue 模式的势函数折扣也同步使用 `γ^L`。
 
 运行奖励派生：
 
@@ -1305,7 +1329,7 @@ y_t         = R_final(t) + γ^L m_t V(s_{t+L})
 
 轨迹评价 schema v6 只保存原始 absolute/relative distance、entropy、logits 和 Analysis，不固化任何训练奖励语义。奖励派生 schema v1 另行保存 `sparse_reward`、未乘 `κ` 的 `pbrs_shaping_reward`、已乘 `κ` 的 `dense_reward` 和 Final Reward `pbrs_chunk_reward`。已有 hash 与模型推理契约匹配的 schema-v4/v5 轨迹评价会复用全部模型输出；即使旧文件带有由不同 `gamma`、`κ` 或累计模式产生的 Final Reward，也只丢弃旧派生数组并在 CPU 上重算，不再运行 RynnValue。
 
-当 `reward.rynnvalue: false` 时，奖励派生仍保留 `pbrs_shaping_reward` 供审计，但把 `dense_reward` 固定为 `0`，因此 `pbrs_chunk_reward=sparse_reward`。该开关只影响训练奖励，不删除评价，也不改变 IQL 的网络结构、更新顺序或 Bellman discount。
+选择 `reward.source: sparse` 时，直接从环境 terminal 派生 sparse reward，不读取或要求 RynnValue 输出；原有评价文件仍保留。选择 `stage` 则直接读取人工关键帧分数，不再叠加 sparse 或 Shape Reward。旧 YAML 的 `reward.rynnvalue: false` 映射为 Sparse。这些来源只改变训练奖励，不改变 IQL 的网络结构、更新顺序或所选 macro/cumulative 对应的 Bellman discount。
 
 主要中间结果：
 
@@ -1325,7 +1349,7 @@ UI 只接受与当前基础 checkpoint、8×7 action、8 维 proprio 兼容且�
 
 ### 4.7 测试、限制与参考资料
 
-Stage-based 奖励的前期调研见 [docs/STAGE_REWARD_RESEARCH.md](docs/STAGE_REWARD_RESEARCH.md)：讨论 SARM、STDR、Reward Machines、Relay Policy Learning，以及 stage-potential PBRS 与按阶段调整时间代价的数学区别、失败回退、未知标签和消融设计。本轮只新增调研文档，不新增 stage 训练开关，也不更改 RynnValue/Robometer 评价、IQL 或现有 reward。
+Stage-based 的调研及人工关键帧直接奖励定义见 [docs/STAGE_REWARD_RESEARCH.md](docs/STAGE_REWARD_RESEARCH.md)。第 1–5 节保留文献及候选实验，第 6 节说明实际实现、归一化、插值、快照和消融边界；该直接奖励独立于 RynnValue/Robometer，不改变 IQL 更新设计。
 
 当前已有数据即使全部失败也允许完成流程烟测，但会明确警告，不能据此预期策略提升。4B RynnValue 评价和 VLA/IQL 严格串行使用 GPU；任一阶段显存不足会报告具体阶段且不会自动回退 CPU。
 
@@ -1369,7 +1393,7 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 轨迹评价、奖励派生和 
 2. 点击“创建训练数据集”，选择随机、按时间顺序、分类配额或手动勾选。预览会先排除测试数据，再给出 M、预计 action/chunk 数和分类构成；确认后生成不可变、单任务数据集。修改成员必须使用“派生版本”，不会覆盖旧版本。未标注版本可“取消冻结”，已结束标注的版本可“删除数据集”；存在活动任务或派生子版本时会拒绝删除。若已有训练历史，页面会要求第二次确认；强制删除仍保留训练输出、checkpoint 和 policy overlay，只在训练记录中标记源数据集已删除。删除不会移除源轨迹或全局共享奖励缓存。
 3. 点击“验证完整性”会重新计算 `run.json`、trajectory 和双视角 observation 的大小及 SHA-256。普通删除被引用轨迹时返回冲突并列出数据集；确认强制删除后关联数据集立即变为 `BROKEN`，不能继续标注或训练。
 4. 创建/派生数据集后，平台会自动建立第一套数据集评价。也可以在数据集卡片中修改 `max_frames` 后生成新评价并切换：第一阶段在 `vla-liberox` 中运行 `prepare_dataset.py`，为该评价版本生成 `annotations/<annotation_id>/work/dataset_manifest.json`；第二阶段在 `rynnvalue-reward` 中运行 `annotate_rewards.py`，仅保存 RynnValue 原始输出；第三阶段回到 `vla-liberox` 运行 `materialize_rewards.py`，生成默认 reward cache。已有 schema-v4/v5/v6 评价会迁移或回填到全局 content cache，所以只有缺失或输入、模型推理契约变化的轨迹才执行 RynnValue forward。改变 reward reduction 只重算快速缓存。评价结果不会覆盖轨迹源数据；作业完整成功后 `dataset.json` 的 `annotation_id` 才切换，失败时继续使用上一套 READY 评价。任务窗口关闭或刷新浏览器不会停止后台进程；重新打开页面会恢复状态和完整日志。
-5. 打开侧栏“训练”，选择任务和 `READY + HEALTHY` 的数据集。训练固定使用该版本全部 M 条；若要改变规模，应回到数据集页面派生并重新评价新增成员。“高级 IQL 参数”统一包含 RynnValue 奖励复选框、`gamma`、Shape Reward 系数 `κ`、chunk reward reduction 以及 Q/V/actor 参数。点击开始后先命中或快速重建派生 reward cache，不会重跑 RynnValue。Franka、BF16、micro batch 1、8×7 action、8D proprio、双视角 critic 和冻结 backbone 等兼容项只读。
+5. 打开侧栏“训练”，在“高级 IQL 参数”选择 **Sparse / RynnValue / Stage-based**，并调整 `gamma`、宏动作/逐步累计模式及相应的 `κ` 或 Stage 插值指数 p。RynnValue 需要 `READY + HEALTHY` 数据集；Sparse/Stage 不要求 RynnValue 评价就绪，但必须健康且没有正在运行的评价。Stage 还要求该版本全部 M 条均有有效人工标注，缺少则报错停止。训练固定使用该版本全部成员；改变规模应派生数据集。启动后只命中或快速重建对应来源的奖励缓存，Stage 不加载 RynnValue/Robometer，也不修改 Q/V/actor 更新、Franka 动作/状态或双视角契约。
 6. 任务监视器实时显示阶段、step、速度、已用时间、滚动 ETA/预计完成时间、Q/value/actor loss、Q/V/advantage、advantage weight、学习率、梯度范数和峰值显存，历史日志可滚动查看。安全停止会在优化边界保存取消 checkpoint。页面刷新或后端重启只自动恢复仍在运行的训练；已结束记录可用“关闭记录”收起，不会再次自动占据训练页面，但其落盘日志、checkpoint 和 overlay 不会删除。完成后可回到仿真平台选择发布的 policy overlay。
 
 TensorBoard 按需由平台用 `vla-liberox` 启动并覆盖所有受管训练目录，固定访问 `http://127.0.0.1:6006/`。它不占用 GPU 任务锁，可与仿真并存；若端口被其他服务占用，页面会明确报错而不会结束那个进程。
