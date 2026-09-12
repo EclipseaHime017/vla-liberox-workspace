@@ -260,6 +260,9 @@ class OfflineJobRepository:
                 )
 
             elif job["kind"] == "training":
+                # Sparse/Stage have no model annotation. Preserve JSON null, but
+                # use the existing NOT NULL catalog's empty-string sentinel.
+                annotation_id = (job.get("parameters") or {}).get("annotation_id") or ""
                 overlay = None
                 output = Path(str(job.get("output_path") or ""))
                 if output.is_dir():
@@ -284,7 +287,7 @@ class OfflineJobRepository:
                     """,
                     (
                         job["id"], self.project_id, job["dataset_id"],
-                        (job.get("parameters") or {}).get("annotation_id", ""),
+                        annotation_id,
                         job["id"], job["status"], job.get("output_path"), overlay,
                         job["created_at"], job.get("completed_at"),
                     ),

@@ -10,6 +10,8 @@ import pytest
 import yaml
 
 from backend.app.services.offline_job_service import OfflineJobService
+from backend.app.storage.database import connect
+from backend.app.storage.repositories import OfflineJobRepository
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
@@ -96,6 +98,57 @@ def test_direct_sources_train_without_any_rynn_annotation(tmp_path, source):
     assert result["parameters"]["annotation_id"] is None
     assert result["parameters"]["reward"]["source"] == source
     assert jobs.launch_reserved is False
+
+
+@pytest.mark.parametrize("source", ["sparse", "stage", "rynnvalue"])
+def test_training_launch_and_recovery_use_real_catalog(tmp_path, monkeypatch, source):
+    jobs, _, dataset, _, _ = make_jobs(tmp_path)
+    database_path = tmp_path / "catalog.sqlite3"
+    jobs.repository = OfflineJobRepository(database_path, "test")
+    jobs.gpu_lock_path = tmp_path / ".gpu-task.lock"
+    jobs._new_job = lambda **kwargs: OfflineJobService._new_job(jobs, **kwargs)
+    jobs._prepare_launch = lambda: setattr(jobs, "launch_reserved", True)
+    dataset["annotation_id"] = "ann"  # Direct rewards must not inherit an older model evaluation.
+    if source == "rynnvalue":
+        dataset.update(annotation_status="READY", annotation_id="ann")
+    spawned = []
+
+    def launch(*args, **kwargs):
+        spawned.append(args)
+        return SimpleNamespace(pid=123456)
+
+    monkeypatch.setattr("backend.app.services.offline_job_service.subprocess.Popen", launch)
+    result = jobs.start_training("ds", {"reward_source": source})
+    assert len(spawned) == 1
+    assert result["status"] == "STARTING"
+    assert jobs.launch_reserved is False
+    annotation_id = "ann" if source == "rynnvalue" else None
+    path = jobs.jobs_root / result["id"] / "job.json"
+    assert json.loads(path.read_text())["parameters"]["annotation_id"] == annotation_id
+
+    with connect(database_path) as database:
+        column = next(row for row in database.execute("PRAGMA table_info(training_runs)")
+                      if row["name"] == "annotation_id")
+        assert column["notnull"] == 1  # Existing catalogs require no schema migration.
+        row = database.execute("SELECT * FROM training_runs WHERE id = ?", (result["id"],)).fetchone()
+        assert row["annotation_id"] == (annotation_id or "")
+        assert row["status"] == "STARTING"
+        assert len(jobs.repository.references_for_dataset("ds")) == 1
+
+    # The pre-fix failure left a STARTING manifest before any runner was spawned.
+    # A restarted service must index it as failed instead of hiding it on every poll.
+    orphan = json.loads(path.read_text())
+    orphan.update(created_at="2000-01-01T00:00:00+00:00", launcher_pid=None)
+    path.write_text(json.dumps(orphan))
+    jobs.repository = OfflineJobRepository(database_path, "test")
+    recovered = jobs.get(result["id"])
+    assert recovered["status"] == "FAILED"
+    assert len(spawned) == 1  # Recovery never restarts training automatically.
+    assert recovered["parameters"]["annotation_id"] == annotation_id
+    with connect(database_path) as database:
+        for table in ("offline_jobs", "training_runs"):
+            row = database.execute(f"SELECT status FROM {table} WHERE id = ?", (result["id"],)).fetchone()
+            assert row["status"] == "FAILED"
 
 
 def test_stage_freezes_all_members_before_gpu_and_retains_original_snapshot(tmp_path):

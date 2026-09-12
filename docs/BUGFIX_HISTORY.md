@@ -2,6 +2,14 @@
 
 本文记录 LIBERO-X × VLA-Adapter 最小测试框架在安装和运行过程中的问题、原因及修复结果。
 
+## 2026-09-12：Sparse / Stage 训练记录入库失败
+
+- 问题：启动训练出现 `sqlite3.IntegrityError: NOT NULL constraint failed: training_runs.annotation_id`。
+- 原因：独立奖励不依赖 RynnValue 评价，任务记录中的 `annotation_id` 为 `null`；旧索引列仍要求非空，`dict.get(key, "")` 不能替换显式 `None`。原测试模拟了任务启动方法，未覆盖真实 SQLite 写入。
+- 修复：仅在数据库索引层把缺失 ID 转为空字符串，沿用原有占位约定；JSON 仍保留 `null`，RynnValue 的实际评价 ID 不变，无需迁移或删除数据库。
+- 验证：新增经过真实任务创建、SQLite 入库与恢复索引的三种奖励来源回归测试。该报错发生于子进程启动前；加载修复后，遗留的无进程任务会被标记为失败，可重新启动训练，不需要重新评价或切片标注。
+- 清理：移除未被当前流程引用的早期 10 Hz LeRobot / Parquet 检查脚本 `scripts/inspect_lerobot_schema.py`，保留正式回归测试和仍在使用的硬件、环境检查入口。
+
 > 说明：2026-08-14 之前条目中的长命令用于记录当时的旧版 CLI；当前版本请编辑 `configs/config.yaml`，并使用文末的简化命令运行。其余路径保留历史发生时的名称。
 
 ## 2026-08-13：3.1 环境验证无法运行
