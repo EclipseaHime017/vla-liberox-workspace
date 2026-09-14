@@ -42,6 +42,7 @@ export function TrainingPage() {
   const [busy, setBusy] = useState(false);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
+  const [defaultsDatasetId, setDefaultsDatasetId] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -70,12 +71,10 @@ export function TrainingPage() {
     return () => { current = false; };
   }, [taskId]);
   const rewardSource = String(parameters.reward_source ?? "rynnvalue");
-  const availableDatasets = useMemo(() => datasets.filter((item) => (
-    rewardSource !== "rynnvalue" || item.annotation_status === "READY"
-  )), [datasets, rewardSource]);
+  const availableDatasets = datasets;
   useEffect(() => {
     setDatasetId((current) => availableDatasets.some((item) => item.id === current)
-      ? current : availableDatasets[0]?.id ?? "");
+      ? current : availableDatasets.find((item) => item.reward_version_id || item.annotation_status === "READY")?.id ?? availableDatasets[0]?.id ?? "");
   }, [availableDatasets]);
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -91,19 +90,28 @@ export function TrainingPage() {
     void getTrainingDefaults(datasetId).then((next) => {
       if (!current) return;
       setDefaults(next);
-      setParameters((current) => ({
-        ...current,
-        resume_checkpoint: next.checkpoints.some(
-          (checkpoint) => checkpoint.path === current.resume_checkpoint
-        ) ? current.resume_checkpoint : null,
-      }));
+      setDefaultsDatasetId(datasetId);
+      setParameters((current) => {
+        const { reward_rynnvalue: legacyRynn, ...advanced } = next.advanced;
+        const pinned = Object.fromEntries(Object.entries(advanced).filter(([key]) => key.startsWith("reward_")));
+        return { ...current, ...pinned,
+          reward_source: advanced.reward_source ?? (legacyRynn === false ? "sparse" : "rynnvalue"),
+          reward_version_id: next.reward_version?.id ?? null,
+          resume_checkpoint: next.checkpoints.some(
+            (checkpoint) => checkpoint.path === current.resume_checkpoint
+          ) ? current.resume_checkpoint : null,
+        };
+      });
     }).catch((reason) => { if (current) setError(String(reason)); })
       .finally(() => { if (current) setDefaultsLoading(false); });
     return () => { current = false; };
   }, [datasetId]);
+  const rewardReady = Boolean(datasetId && defaultsDatasetId === datasetId && defaults?.reward_version
+    && !defaults.reward_version.legacy
+    && ["READY", "COMPLETED"].includes(defaults.reward_version.status));
   const patchParameter = (name: string, value: number | string | boolean | null) => setParameters((current) => ({ ...current, [name]: value }));
   const begin = async () => {
-    if (busy || datasetsLoading || defaultsLoading || !availableDatasets.some((item) => item.id === datasetId)) return;
+    if (busy || datasetsLoading || defaultsLoading || !rewardReady || !availableDatasets.some((item) => item.id === datasetId)) return;
     setBusy(true); setError("");
     try {
       const next = await startTraining(datasetId, parameters);
@@ -120,7 +128,7 @@ export function TrainingPage() {
   };
 
   return <section className="content-page training-page">
-    <div className="page-heading"><p className="eyebrow">OFFLINE RL TRAINING</p><h1>VLA-Adapter + Pixel-IQL</h1><p>选择已冻结的单任务数据集与奖励来源，后训练 action head 与 proprio projector。Stage-based 需要每条成员轨迹均已保存关键帧标注，缺少标注时训练停止。</p></div>
+    <div className="page-heading"><p className="eyebrow">OFFLINE RL TRAINING</p><h1>VLA-Adapter + Pixel-IQL</h1><p>选择已评价的数据集，后训练 action head 与 proprio projector。Discount ratio 与 cumulative reward 可为本次训练单独调整。</p></div>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     <div className="training-layout">
       <section className="surface training-config">
@@ -128,17 +136,19 @@ export function TrainingPage() {
         <div className="training-form">
           <label>任务<select value={taskId} onChange={(event) => setTaskId(event.target.value)}>{bootstrap?.task_catalog.map((task) => <option key={task.task_id} value={task.task_id}>{task.prompt}</option>)}</select></label>
           <label>冻结数据集<select value={datasetId} disabled={datasetsLoading} onChange={(event) => setDatasetId(event.target.value)}><option value="">{datasetsLoading ? "加载数据集…" : "请选择"}</option>{availableDatasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
-          {dataset && <div className="training-dataset-summary"><strong>{dataset.member_count} 条轨迹</strong><span>{dataset.action_count} actions</span><span>{dataset.chunk_count} chunks</span><Badge tone="green">完整性正常</Badge><p>训练固定使用该版本全部成员。若需改变成员，请在数据集页面派生新的数据集。</p></div>}
+          {dataset && <div className="training-dataset-summary"><strong>{dataset.member_count} 条轨迹</strong><span>{dataset.action_count} actions</span><span>{dataset.chunk_count} chunks</span><Badge tone="green">完整性正常</Badge>
+            <p>{defaultsLoading ? "正在读取评价结果…" : rewardReady ? `当前训练奖励：${rewardSource}` : "请先在数据集配置中完成评价，再开始训练。"}</p>
+            <p>修改 Discount ratio γ 或 cumulative reward 只影响本次训练，不重新运行评价模型，也不改变数据集当前结果。</p></div>}
           <div className="parameter-grid">{basicFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name === "critic_warmup_steps" || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
           {defaults?.checkpoints.length ? <label>断点恢复<select value={String(parameters.resume_checkpoint ?? "")} onChange={(event) => patchParameter("resume_checkpoint", event.target.value || null)}><option value="">不恢复</option>{defaults.checkpoints.map((checkpoint) => <option value={checkpoint.path} key={checkpoint.path}>{checkpoint.label}</option>)}</select></label> : null}
           <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">
-            <label>Reward 来源<select value={rewardSource} onChange={(event) => patchParameter("reward_source", event.target.value)}>
+            <label>Reward 来源<select value={rewardSource} disabled>
               <option value="sparse">Sparse</option><option value="rynnvalue">RynnValue</option><option value="stage">Stage-based</option>
             </select></label>
-            <label>Discount γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
-            <label>Shape reward 系数 κ<input type="number" min={0} step="any" disabled={rewardSource !== "rynnvalue"} value={String(parameters.reward_shaping_weight ?? "")} onChange={(event) => patchParameter("reward_shaping_weight", Number(event.target.value))} /></label>
-            <label>Stage 插值指数 p<input type="number" min={1} step="any" disabled={rewardSource !== "stage"} value={String(parameters.reward_stage_exponent ?? 2)} onChange={(event) => patchParameter("reward_stage_exponent", Number(event.target.value))} /></label>
-            <label>cumulative reward<select value={String(Boolean(parameters.reward_accumulate_primitive_steps))} onChange={(event) => patchParameter("reward_accumulate_primitive_steps", event.target.value === "true")}><option value="false">Off</option><option value="true">On</option></select></label>
+            <label>Discount ratio γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} disabled={defaultsLoading || !rewardReady}
+              onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
+            <label>cumulative reward<select disabled={defaultsLoading || !rewardReady} value={String(Boolean(parameters.reward_accumulate_primitive_steps))}
+              onChange={(event) => patchParameter("reward_accumulate_primitive_steps", event.target.value === "true")}><option value="false">Off</option><option value="true">On</option></select></label>
             <label>Critic optimizer<select value={String(parameters.critic_optimizer ?? "adamw")} onChange={(event) => patchParameter("critic_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
             <label>Value optimizer<select value={String(parameters.value_optimizer ?? "adamw")} onChange={(event) => patchParameter("value_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
             {advancedFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}
@@ -155,7 +165,7 @@ export function TrainingPage() {
             <label>W&amp;B 日志间隔<input type="number" min={1} step={1} value={String(parameters.wandb_log_interval_steps ?? "")} onChange={(event) => patchParameter("wandb_log_interval_steps", Number(event.target.value))} /></label>
           </div></details>
           {defaults && <div className="fixed-parameters"><h2>固定兼容项</h2>{Object.entries(defaults.fixed).map(([name, value]) => <span key={name}><b>{name}</b>{String(value)}</span>)}</div>}
-          <button className="primary start-training" disabled={busy || datasetsLoading || defaultsLoading || !availableDatasets.some((item) => item.id === datasetId) || Boolean(job && activeJobStates.has(job.status))} onClick={() => void begin()}>开始训练</button>
+          <button className="primary start-training" disabled={busy || datasetsLoading || defaultsLoading || !rewardReady || !availableDatasets.some((item) => item.id === datasetId) || Boolean(job && activeJobStates.has(job.status))} onClick={() => void begin()}>开始训练</button>
         </div>
       </section>
       <section className="surface tensorboard-card">

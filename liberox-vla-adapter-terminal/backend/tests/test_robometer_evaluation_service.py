@@ -40,8 +40,8 @@ def test_bind_and_source_hash_invalidation(tmp_path: Path):
     manifest = tmp_path / "robometer_manifest.json"
     manifest.write_text(json.dumps({
         "schema_version": 1, "complete": True,
-        "annotator": {"model": "Robometer", "revision": "rev"},
-        "evaluation_config": {"fps": 3},
+        "annotator": {"model": "Robometer", "revision": "rev", "robometer_commit": "commit"},
+        "evaluation_config": {"fps": 3, "control_hz": 20, "prefix_frames": 4},
         "episodes": [{
             "run_id": "run", "annotation_path": str(source),
             "values_sha256": sha(source), "trajectory_sha256": sha(trajectory),
@@ -53,6 +53,15 @@ def test_bind_and_source_hash_invalidation(tmp_path: Path):
     assert service.bind(manifest, overwrite=False)["bound"] == ["run"]
     assert (episode / SIDECAR_NAME).is_file() and (episode / VALUES_NAME).is_file()
     assert service.status(run)["status"] == "READY"
+    global_bytes = (episode / VALUES_NAME).read_bytes()
+    inference = {"model": {"checkpoint": "Robometer", "revision": "rev", "robometer_commit": "commit", "dtype": "bfloat16"},
+                 "evaluation": {"fps": 3, "control_hz": 20, "prefix_frames": 4}}
+    destination = tmp_path / "version" / "values"
+    assert service.seed_version_cache(["run"], destination, inference)["restored"] == 1
+    assert (destination / "run.npz").read_bytes() == global_bytes
+    assert json.loads((destination / "run.json").read_text())["inference_config"] == inference
+    assert service.seed_version_cache(["run"], destination, inference)["restored"] == 0
+    assert (episode / VALUES_NAME).read_bytes() == global_bytes
     np.savez_compressed(observations, agentview_image=np.ones((5, 2, 2, 3), np.uint8))
     # Catalog status is deliberately sidecar-only; strict consumers still
     # detect source changes without making every list request decompress data.

@@ -615,7 +615,7 @@ UI 启动后只探测控制器，不占用动作输出。选择 SpaceMouse 并�
 
 新会话按 `dataset-root/projects/libero_x_vla/runs/<task_name>/<YYYY-MM-DD>/<时间>__<session_id>/` 分组，不覆盖历史结果。`catalog.sqlite3` 只保存可重建的检索和成功率索引；run 目录仍是事实来源。`run.json` 是生命周期和安全删除所需的极简清单，`config.yaml` 固化任务、模型和控制参数，`summary.json` 只记录用户关心的结果与关键时序；轨迹、视频、图表和 SpaceMouse 采样统一放在 `episodes/episode_000/`。不再重复生成 `results.jsonl`、`trajectory.json`、`source_trajectory.json` 或 `spacemouse_device_summary.json`。完整回放 metadata 已内嵌在 `trajectory.npz`，逐步可读数据保留在 `trajectory.csv`。
 
-采集主界面的会话侧栏提供“全部任务数据”和三个具体任务的检索选项，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。数据集页进一步拆成“轨迹评价”和“打包训练数据集”：批量评价默认跳过已有 RynnValue sidecar，也可显式覆盖；选择一条或多条轨迹时只补充所选评价器的缺失结果，不能重复覆盖同一模型评价。评价成功后 `rynnvalue_evaluation.json/npz` 与 `trajectory.npz` 位于同一 episode，后续冻结不同数据集时直接复用。轨迹表默认每页 5 条，可选 10/20/50，详情页显示结果视频、7维action、RynnValue的absolute/relative remaining time、由 `Φ(s)=-v(s)` 得到的observation potential与entropy估计，并在同一图中显示稀疏奖励、Shape Reward和Final Reward；点击后可拖动滑块或自动播放并查看chunk范围和实际长度`L`。完整head logits和Analysis仍保存在sidecar供审计，但不在详情UI展示。冻结数据集会自动补齐缺失评价而不覆盖已有结果。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV、可用的 RynnValue 评价 sidecar，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。核心 `trajectory.npz`、observation NPZ、普通图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。详细 transition 对齐、视频拆分、轨迹评价和接管分段规则见 `docs/DATA_LAYOUT.md`。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
+采集主界面的会话侧栏提供“全部任务数据”和三个具体任务的检索选项，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。数据集页进一步拆成“轨迹评价”和“打包训练数据集”：批量评价默认跳过已有 RynnValue sidecar，也可显式覆盖；选择一条或多条轨迹时可显式开启覆盖，未开启时只补充缺失结果。评价成功后 `rynnvalue_evaluation.json/npz` 与 `trajectory.npz` 位于同一 episode，后续冻结不同数据集时直接复用。轨迹表默认每页 5 条，可选 10/20/50，详情页显示结果视频、7维action、RynnValue的absolute/relative remaining time、由 `Φ(s)=-v(s)` 得到的observation potential与entropy估计，并在同一图中显示稀疏奖励、Shape Reward和Final Reward；点击后可拖动滑块或自动播放并查看chunk范围和实际长度`L`。完整head logits和Analysis仍保存在sidecar供审计，但不在详情UI展示。冻结数据集只固定成员；通过每行右侧“配置”更新当前评价结果，训练固定使用启动时的快照，具体操作见 §4.9。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV、可用的 RynnValue 评价 sidecar，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。核心 `trajectory.npz`、observation NPZ、普通图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。详细 transition 对齐、视频拆分、轨迹评价和接管分段规则见 `docs/DATA_LAYOUT.md`。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
 
 创建分支时会立即把父轨迹控制数据物理复制为子目录中的 `source_trajectory.npz`，但不复制父 observations、视频或图表；因此父会话被删除后，子分支仍能独立恢复状态和绘制对比。原始会话生成轨迹图和 7 张 action 图；回溯分支不生成只包含二次推理的单独图表，只生成 7 张“完整原始轨迹 + 从回溯帧开始的二次推理/人工接管”action 对比图。若准备阶段尚未执行新动作就失败，仅保存精简轨迹、清单和 summary，不再重建整段视频、observations 或对比图。已有历史目录不会自动删除或迁移。
 
@@ -909,7 +909,7 @@ conda run -n vla-liberox python \
 
 先选择 `reward.source`：`rynnvalue` 沿用下文的模型评价＋PBRS；`sparse` 只使用环境稀疏奖励；`stage` 使用人工关键帧直接奖励。后两者不需要运行 annotate，执行 `prepare_dataset.py → materialize_rewards.py → train_iql.py` 即可，且不需要 RynnValue 环境。终端流水线会根据来源自动选择这些阶段。
 
-**Stage 标注：**进入数据集的单条数据详情，点击“切片 / 标记关键帧”，拖动主视角录像或逐帧定位，选择 Positive/Negative，最后“保存切片并计算奖励”。不裁剪源数据，保存后显示完整 Stage-based Reward 曲线；success 按连续 done 阈值自动添加。失败轨迹无关键事件时也需要显式保存空标注。公式、边界和不裁剪分数的语义见 [Stage 直接奖励说明](docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励)。
+**Stage 标注：**进入数据集的单条数据详情，点击“切片 / 标记关键帧”，拖动主视角录像或逐帧定位，选择 Positive/Negative 后保存。关键帧是持久标注，p 和奖励数组不写入标注身份；已有旧格式标注无需重新保存。不裁剪源数据；success 按数据集连续 done 阈值自动添加。失败轨迹无关键事件时也需要显式保存空标注。公式、边界和不裁剪分数的语义见 [Stage 直接奖励说明](docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励)。
 
 ```yaml
 reward:
@@ -921,7 +921,7 @@ reward:
 
 默认 macro 直接取 `R=z(t+L)`；累计模式取 `R=Σ γ^h z(t+h+1)`，Bellman 分别使用 `γ`、`γ^L`。Stage 不做 PBRS 差分，不叠加 sparse 或 RynnValue reward。成功 P 个 positive、N 个 negative 时每次增量为 `1/(P-N+1)`（成功本身额外算一次 positive）；失败为 `1/(P+1)`。分数从 −1 起，positive 加、negative 减，严格保留公式结果，允许超出 `[-1,0]`。
 
-Stage 训练会在加载 VLA 前检查**全部数据成员**，缺失、损坏或成功阈值不匹配的标注都会列出并终止。UI/终端启动会冻结标注快照；调整 p 只重算奖励，后续修改轨迹标注不改变已经启动的训练。详情预览使用标注保存的 p，训练以 YAML/训练表单的 `stage_exponent` 为准。
+Stage 评价会检查**全部数据成员**，缺失、损坏或源轨迹哈希不匹配的标注都会列出并终止；公式无效单独报告，不删除关键帧。UI 在数据集配置中调整 p 并重新评价，使用最新保存的关键帧，成功后替换该数据集的当前结果。已启动训练仍使用启动时的快照。编辑器的即时预览使用基础配置，实验曲线以所选数据来源的已保存评价为准。独立 CLI 仍可通过 YAML 的 `stage_exponent` 重算；两条路径都不需要重新标记。
 
 annotate 的作用不是重新判断任务是否成功，也不是训练 RynnValue。它冻结加载 RynnValue-4B，对 prepare 后每条轨迹的 action-chunk 边界执行以下处理：
 
@@ -1392,13 +1392,14 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 轨迹评价、奖励派生和 
 1. 打开侧栏“数据集”，先选择一个任务。轨迹表将来源明确分为“原始推理”“人工接管”“二次推理”和不可训练的“错误/未完成”；人工/二次推理分支会显示策略前缀、`resume_step` 以及实际进入训练的后缀长度。详情页可把轨迹标记为“测试数据”。测试数据仍可浏览和显式单条评价，但会被新的训练数据集打包、任务批量评价和 offline-RL 导出自动跳过。
 2. 点击“创建训练数据集”，选择随机、按时间顺序、分类配额或手动勾选。预览会先排除测试数据，再给出 M、预计 action/chunk 数和分类构成；确认后生成不可变、单任务数据集。修改成员必须使用“派生版本”，不会覆盖旧版本。未标注版本可“取消冻结”，已结束标注的版本可“删除数据集”；存在活动任务或派生子版本时会拒绝删除。若已有训练历史，页面会要求第二次确认；强制删除仍保留训练输出、checkpoint 和 policy overlay，只在训练记录中标记源数据集已删除。删除不会移除源轨迹或全局共享奖励缓存。
 3. 点击“验证完整性”会重新计算 `run.json`、trajectory 和双视角 observation 的大小及 SHA-256。普通删除被引用轨迹时返回冲突并列出数据集；确认强制删除后关联数据集立即变为 `BROKEN`，不能继续标注或训练。
-4. 创建/派生数据集后，平台会自动建立第一套数据集评价。也可以在数据集卡片中修改 `max_frames` 后生成新评价并切换：第一阶段在 `vla-liberox` 中运行 `prepare_dataset.py`，为该评价版本生成 `annotations/<annotation_id>/work/dataset_manifest.json`；第二阶段在 `rynnvalue-reward` 中运行 `annotate_rewards.py`，仅保存 RynnValue 原始输出；第三阶段回到 `vla-liberox` 运行 `materialize_rewards.py`，生成默认 reward cache。已有 schema-v4/v5/v6 评价会迁移或回填到全局 content cache，所以只有缺失或输入、模型推理契约变化的轨迹才执行 RynnValue forward。改变 reward reduction 只重算快速缓存。评价结果不会覆盖轨迹源数据；作业完整成功后 `dataset.json` 的 `annotation_id` 才切换，失败时继续使用上一套 READY 评价。任务窗口关闭或刷新浏览器不会停止后台进程；重新打开页面会恢复状态和完整日志。
-5. 打开侧栏“训练”，在“高级 IQL 参数”选择 **Sparse / RynnValue / Stage-based**，并调整 `gamma`、宏动作/逐步累计模式及相应的 `κ` 或 Stage 插值指数 p。RynnValue 需要 `READY + HEALTHY` 数据集；Sparse/Stage 不要求 RynnValue 评价就绪，但必须健康且没有正在运行的评价。Stage 还要求该版本全部 M 条均有有效人工标注，缺少则报错停止。训练固定使用该版本全部成员；改变规模应派生数据集。启动后只命中或快速重建对应来源的奖励缓存，Stage 不加载 RynnValue/Robometer，也不修改 Q/V/actor 更新、Franka 动作/状态或双视角契约。
-6. 任务监视器实时显示阶段、step、速度、已用时间、滚动 ETA/预计完成时间、Q/value/actor loss、Q/V/advantage、advantage weight、学习率、梯度范数和峰值显存，历史日志可滚动查看。安全停止会在优化边界保存取消 checkpoint。页面刷新或后端重启只自动恢复仍在运行的训练；已结束记录可用“关闭记录”收起，不会再次自动占据训练页面，但其落盘日志、checkpoint 和 overlay 不会删除。完成后可回到仿真平台选择发布的 policy overlay。
+4. 创建/派生数据集只冻结成员，**不自动评价**。点击每行右侧“配置”，原地展开圆角表单：Sparse 配置预览 γ 和 cumulative reward On/Off；Stage-based 增加 p；RynnValue 增加 max_frames、评价 batch size 和 κ；Robometer 配置 fps、batch size，前缀固定 4 帧。模型与 revision 只读。开始评价或重新评价时在后台 Prepare 并计算结果；Sparse/Stage 只做 CPU 计算，RynnValue/Robometer 默认复用兼容输出。“强制重新运行模型”默认 Off。任务窗口关闭或页面刷新不停止后台任务。
+5. 每个数据集只展示**当前评价结果**；重新评价完整成功后自动替换，失败保留上次结果，不需要选择或启用评价版本。Robometer 的诊断结果独立更新，不进入 IQL。更改 p、γ、κ、cumulative 或奖励公式只重算奖励，不需重标关键帧或重跑模型；部署新公式后重启 UI 再重新评价即可。展开成员列表（默认 5 条，可选至 50 条）进入详情，可切换“全局轨迹”或具体数据集。全局默认保存该轨迹的首次成功评价，普通数据集重算不会替换它；显式评价覆盖，或在数据集配置打开“同步覆盖全局评价”，才更新全局结果。同一轨迹在不同数据集的配置仍相互独立。内部保留训练快照以保护已启动和历史训练，但页面不再展示评价版本管理。
+6. 打开侧栏“训练”，选择健康且有完整评价的数据集。**Discount ratio γ 和 cumulative reward 仍可逐次调整**，初始值来自该数据集；奖励来源及 p、κ、模型评价参数由当前评价确定。高级 IQL 不再显示 p、κ，它们仅在数据集配置调整。学习率、batch、训练步数等继续可编辑。γ／累计方式不变时读取保存的奖励；改变时仅从启动时固定的 Stage 曲线／模型输出及 terminal 信息重算本次 chunk reward，不重新标记、不运行模型，也不修改数据集评价。有效参数与重算结果保存在训练输出中。Off 时 Bellman 与 RynnValue 势差项使用 γ；On 时累计 chunk 内逐步折扣奖励，Bellman 与势差项使用实际长度折扣 γ^L；Sparse/Stage 的宏动作奖励本身不含 γ。没有完整评价不能开始 UI 训练。独立 CLI 的 YAML 流程不变，仍可通过 `reward.manifest_path`、`reward.manifest_sha256`、`reward.version_id` 固定内部快照，再通过 `reward.gamma` 和 `reward.accumulate_primitive_steps` 配置本次训练。
+7. 任务监视器实时显示阶段、step、速度、已用时间、滚动 ETA/预计完成时间、Q/value/actor loss、Q/V/advantage、advantage weight、学习率、梯度范数和峰值显存，历史日志可滚动查看。安全停止会在优化边界保存取消 checkpoint。页面刷新或后端重启只自动恢复仍在运行的训练；已结束记录可用“关闭记录”收起，不会再次自动占据训练页面，但其落盘日志、checkpoint 和 overlay 不会删除。完成后可回到仿真平台选择发布的 policy overlay。
 
 TensorBoard 按需由平台用 `vla-liberox` 启动并覆盖所有受管训练目录，固定访问 `http://127.0.0.1:6006/`。它不占用 GPU 任务锁，可与仿真并存；若端口被其他服务占用，页面会明确报错而不会结束那个进程。
 
-仿真、标注、训练和批量测试共享一个跨进程 GPU 文件锁，同一时间只允许一个任务，不排队；冲突请求返回 `409`。开始标注、训练或批量测试前平台会卸载驻留 VLA，完成后不自动重载，下一次仿真按需加载。后台任务使用独立进程组，PID、心跳、日志与状态均落盘，所以 UI 后端重启不会主动终止它。TensorBoard 是只读进程，不占用这把 GPU 锁。
+需要 GPU 的仿真、模型评价、训练和批量测试共享跨进程 GPU 文件锁；冲突请求返回 `409`。开始这些离线 GPU 任务前平台会卸载驻留 VLA，完成后不自动重载，下一次仿真按需加载。Sparse/Stage 奖励生成不加载模型、不占用 GPU 锁，仍受后台任务调度保护。后台任务使用独立进程组，PID、心跳、日志与状态均落盘，所以 UI 后端重启不会主动终止它。TensorBoard 是只读进程，不占用 GPU 锁。
 
 平台持久化目录为：
 
@@ -1418,7 +1419,7 @@ dataset-root/projects/libero_x_vla/
 Robometer 使用独立的 `robometer-reward` 环境和
 `aliangdw/Robometer-4B-LIBERO`，安装步骤见
 [`vla-adapter-robometer/README.md`](vla-adapter-robometer/README.md)。数据集页面的评价区可分别勾选
-`RynnValue` 与 `Robometer`；同时勾选时后台按勾选顺序串行加载两个 4B 模型，不会让它们同时占用 GPU。批量评价默认分别跳过已有有效 sidecar，只有显式启用批量覆盖才会重算；“评价所选”只补充缺失结果，同一评价器不能对单条轨迹重复评价。
+`RynnValue` 与 `Robometer`；同时勾选时后台按勾选顺序串行加载两个 4B 模型，不会让它们同时占用 GPU。批量评价和“评价所选”默认分别跳过已有有效 sidecar；显式开启覆盖后可以更新所选评价器的全局结果，不影响另一评价器。
 
 Robometer 完整读取 `agentview` observation，在 20 Hz 原时间轴上以 3 Hz 选取评价点，始终包含首帧和末帧；每个评价点按官方 `use_frame_steps` 语义使用从起点到当前点的前缀，并均匀选择 4 帧。首次 `done=true` 不会截断评价。每条 episode 独立保存：
 
@@ -1428,7 +1429,7 @@ robometer_evaluation.npz    # step、真实秒数、progress_pred、success_prob
 ```
 
 详情页的 Robometer Progress 与 Success Probability 均为模型原始单轨迹输出。对比卡中的 RynnValue 进度
-`clip(1-d(t)/d(0), 0, 1)` 和真实秒数插值只用于 UI 显示，不写回 sidecar，也不进入训练。冻结数据集的自动流程为 `prepare → RynnValue annotate → materialize rewards`；Robometer 不参与 IQL reward、样本筛选或训练 manifest。
+`clip(1-d(t)/d(0), 0, 1)` 和真实秒数插值只用于 UI 显示，不写回 sidecar，也不进入训练。冻结数据集配置可单独生成 Robometer 诊断版本，与训练奖励版本相互独立；不参与 IQL reward、样本筛选或训练 manifest。有效模型输出可跨版本复用，更换输出目录或执行 batch size 不会单独导致模型重载。
 
 首次配置环境：
 

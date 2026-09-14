@@ -4,6 +4,7 @@ import { Badge } from "../../components/ui/Badge";
 import { Dialog } from "../../components/ui/Dialog";
 import { StageAnnotationPanel } from "./StageAnnotationPanel";
 import { selectMainVideoArtifact } from "../simulation-view/controls";
+import { rewardParameterLabels, rewardSourceLabels } from "./rewardVersions";
 
 const colors = ["#3775e8", "#e06c4f", "#3c9a70", "#9b63d4", "#c38b27", "#3c94a6", "#d14f86"];
 
@@ -171,11 +172,13 @@ function PlotInspector({ plot, onClose }: { plot: Plot; onClose: () => void }) {
   </Dialog>;
 }
 
-export function TrajectoryDetail({ detail, onBack, onSetTest }: {
+export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, contextLoading = false }: {
   detail: Detail; onBack: () => void;
   onSetTest?: (isTest: boolean) => Promise<void>;
+  onContextChange?: (datasetId?: string) => void;
+  contextLoading?: boolean;
 }) {
-  const [opened, setOpened] = useState<Plot | null>(null);
+  const [openedTitle, setOpenedTitle] = useState<string | null>(null);
   const [isTest, setIsTest] = useState(Boolean(detail.run.is_test));
   const [labelBusy, setLabelBusy] = useState(false);
   const [labelError, setLabelError] = useState("");
@@ -186,12 +189,25 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
     const values: Plot[] = [
       { title: "VLA 环境 action", unit: "normalized command [-]", times: detail.series.action_time_seconds, labels: ["dx", "dy", "dz", "dRx", "dRy", "dRz", "gripper"], values: detail.series.env_action },
     ];
-    if (stageAnnotation?.status === "ready" && stageAnnotation.scores.length) {
+    const reward = detail.reward_evaluation;
+    if (reward?.source === "stage" && reward.stage_scores?.length) {
+      const times = reward.time_seconds ?? detail.series.time_seconds;
+      values.push({ title: "Stage-based Reward", unit: "reward [-]", times,
+        labels: ["direct stage reward"], values: reward.stage_scores.map((score) => [score]),
+        sampleLabels: times.map((_, index) => `observation step ${reward.observation_steps?.[index] ?? index}`) });
+    } else if (!detail.dataset_context && !detail.global_evaluation && !detail.global_evaluation_pending
+      && !detail.global_evaluation_error && !reward && !detail.rynnvalue_evaluation
+      && !detail.evaluation && stageAnnotation?.status === "ready" && stageAnnotation.scores.length) {
       values.push({
-        title: "Stage-based Reward", unit: "reward [-]", times: stageAnnotation.time_seconds,
+        title: "关键帧奖励预览（未评价）", unit: "reward [-]", times: stageAnnotation.time_seconds,
         labels: ["direct stage reward"], values: stageAnnotation.scores.map((score) => [score]),
         sampleLabels: stageAnnotation.time_seconds.map((_, step) => `observation step ${step}`),
       });
+    }
+    if (reward && reward.source !== "rynnvalue") {
+      const series = chunkRewardSeries(reward.chunk_start_steps, reward.chunk_end_steps, reward.final_reward, detail.series.time_seconds);
+      values.push({ title: `${rewardSourceLabels[reward.source]} · Final Reward · ${reward.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
+        unit: "reward [-]", ...series, labels: ["final reward"], interpolation: "step" });
     }
     const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
     if (evaluation) {
@@ -210,21 +226,6 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
           ? "observation potential Φ(s)"
           : `observation potential Φ${index}(s)`,
       );
-      const rewardSeries = (reward: number[]) => chunkRewardSeries(
-        evaluation.pbrs_reward.chunk_start_steps,
-        evaluation.pbrs_reward.chunk_end_steps,
-        reward,
-        detail.series.time_seconds,
-      );
-      const shapeSeries = rewardSeries(evaluation.pbrs_reward.shape_reward);
-      const sparseReward = evaluation.pbrs_reward.sparse_reward;
-      if (
-        sparseReward.length !== evaluation.pbrs_reward.shape_reward.length
-        || sparseReward.length !== evaluation.pbrs_reward.dense_reward.length
-        || sparseReward.length !== evaluation.pbrs_reward.final_reward.length
-      ) {
-        throw new Error("reward component length mismatch");
-      }
       values.push(
         {
           title: "RynnValue Absolute Remaining Time", unit: "s",
@@ -247,7 +248,19 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
           labels: absoluteHeadLabels.map((label) => `${label} entropy`),
           values: official.absolute_value_entropy_nats,
         },
-        {
+      );
+      // Raw model diagnostics may coexist with another selected reward source.
+      // Only the current source supplies the displayed training reward.
+      if (!reward || reward.source === "rynnvalue") {
+        const sparseReward = evaluation.pbrs_reward.sparse_reward;
+        if (sparseReward.length !== evaluation.pbrs_reward.shape_reward.length
+          || sparseReward.length !== evaluation.pbrs_reward.dense_reward.length
+          || sparseReward.length !== evaluation.pbrs_reward.final_reward.length) {
+          throw new Error("reward component length mismatch");
+        }
+        const shapeSeries = chunkRewardSeries(evaluation.pbrs_reward.chunk_start_steps,
+          evaluation.pbrs_reward.chunk_end_steps, evaluation.pbrs_reward.shape_reward, detail.series.time_seconds);
+        values.push({
           title: `Reward Components · ${evaluation.pbrs_reward.accumulate_primitive_steps
             ? "逐步累计" : "宏动作"}`,
           unit: "reward [-]",
@@ -259,8 +272,8 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
           ]),
           sampleLabels: shapeSeries.sampleLabels,
           interpolation: "step",
-        },
-      );
+        });
+      }
     }
     const robometer = detail.robometer_evaluation;
     if (robometer) {
@@ -295,6 +308,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
     }
     return values;
   }, [detail, stageAnnotation]);
+  const opened = plots.find((plot) => plot.title === openedTitle);
   const videoName = selectMainVideoArtifact(detail.artifacts);
   const video = videoName ? detail.artifacts[videoName] : null;
   const comparison = useMemo(() => {
@@ -317,17 +331,29 @@ export function TrajectoryDetail({ detail, onBack, onSetTest }: {
       successEnd: robo.success_probs.at(-1), environmentSuccess: detail.run.success,
     };
   }, [detail]);
+  const evaluationSource = detail.dataset_context?.source ?? detail.global_evaluation?.source;
   return <section className="content-page trajectory-detail-page">
     <div className="page-heading detail-heading"><div><p className="eyebrow">TRAJECTORY DETAIL</p><h1>轨迹 {detail.run.id}</h1><p>{detail.run.task} · {detail.run.action_count} steps</p></div><button onClick={() => {
       if (!stageDirty || window.confirm("切片标记尚未保存，是否丢弃并返回数据集？")) onBack();
     }}>返回数据集</button></div>
     <div className="detail-summary surface"><Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge><span>{detail.run.source_type ?? detail.run.control_mode}</span><span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span><label className="test-label-switch"><input type="checkbox" checked={isTest} disabled={labelBusy || !onSetTest} onChange={async (event) => { const next = event.target.checked; setLabelBusy(true); setLabelError(""); try { await onSetTest?.(next); setIsTest(next); } catch (reason) { setLabelError(String(reason)); } finally { setLabelBusy(false); } }} /><span><b>测试标签</b><small>启用后不进入新训练数据集，任务级批量评价默认跳过</small></span></label></div>
+    {onContextChange && <div className="surface detail-evaluation-context">
+      <label>数据来源<select disabled={contextLoading} value={detail.dataset_context?.dataset_id ?? ""} onChange={(event) => onContextChange(event.target.value || undefined)}>
+        <option value="">全局轨迹评价</option>{detail.available_dataset_contexts?.map((context) => <option key={context.dataset_id} value={context.dataset_id}>{context.dataset_name}</option>)}
+      </select></label>
+      <div><strong>{contextLoading || detail.global_evaluation_pending ? "正在更新评价图表…" : detail.dataset_context
+        ? `${detail.dataset_context.dataset_name} · 当前评价` : "全局轨迹评价"}</strong>
+        <div className="reward-parameter-chips">{evaluationSource && <span>{rewardSourceLabels[evaluationSource]}</span>}
+          {rewardParameterLabels(detail.dataset_context?.config ?? detail.global_evaluation?.config).map((label) => <span key={label}>{label}</span>)}</div>
+        <small>关键帧保存在原轨迹中；在数据集配置中重新评价即可更新奖励。</small></div>
+    </div>}
+    {!detail.dataset_context && detail.global_evaluation_error && <p className="error-banner">{detail.global_evaluation_error}</p>}
     {labelError && <div className="error-banner"><span>{labelError}</span><button onClick={() => setLabelError("")}>关闭</button></div>}
     <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video ref={videoRef} controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}
       <StageAnnotationPanel key={detail.run.id} runId={detail.run.id} videoRef={videoRef} onSaved={setStageAnnotation} onDirtyChange={setStageDirty} />
     </article>
     {comparison && <article className="surface detail-summary"><strong>RynnValue / Robometer 对比</strong>{comparison.available ? <><span>Pearson r = {comparison.correlation?.toFixed(4)}</span><span>终点进度：Rynn {comparison.rynnEnd?.toFixed(3)} / Robometer {comparison.roboEnd?.toFixed(3)}</span><span>Robometer 成功概率 {comparison.successEnd?.toFixed(3)}</span><span>环境成功：{comparison.environmentSuccess ? "是" : "否"}</span></> : <span>{comparison.reason}</span>}</article>}
-    <div className="trajectory-plots">{plots.map((plot) => <PlotCard key={plot.title} plot={plot} onOpen={() => setOpened(plot)} />)}</div>
-    {opened && <PlotInspector plot={opened} onClose={() => setOpened(null)} />}
+    <div className="trajectory-plots">{plots.map((plot) => <PlotCard key={plot.title} plot={plot} onOpen={() => setOpenedTitle(plot.title)} />)}</div>
+    {opened && <PlotInspector key={opened.title} plot={opened} onClose={() => setOpenedTitle(null)} />}
   </section>;
 }

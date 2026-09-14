@@ -124,8 +124,19 @@ class StageAnnotationService:
                 payload, run_id=run["id"], trajectory_sha256=source["trajectory_sha256"],
                 done=source["done"], success_consecutive_steps=threshold,
             )
-            response.update(status="ready", exponent=valid["exponent"], keyframes=valid["keyframes"],
-                            scores=math.stage_scores(valid).tolist(), anchors=math.stage_anchors(valid))
+            response.update(status="ready", keyframes=valid["keyframes"],
+                            annotation_sha256=valid["annotation_sha256"])
+            # Labels remain valid when a reward recipe cannot be evaluated.
+            # The preview is disposable; only manual marks are persisted.
+            try:
+                context = math.stage_annotation_context(
+                    valid, done=source["done"], success_consecutive_steps=threshold,
+                    exponent=exponent,
+                )
+                response.update(scores=math.stage_scores(context).tolist(),
+                                anchors=math.stage_anchors(context), derivation_error=None)
+            except (ValueError, TypeError, KeyError) as exc:
+                response.update(derivation_error=str(exc))
         except (ValueError, TypeError, KeyError) as exc:
             response.update(status="stale", error=str(exc))
             # Preserve valid-looking user marks for explicit review/resave, never train from them.

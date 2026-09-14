@@ -171,10 +171,10 @@ reward:
   accumulate_primitive_steps: false
 ```
 
-训练页面“高级 IQL 参数”提供相同选项。详情中 p 控制保存后的预览；训练使用当前 YAML/表单的统一 `stage_exponent`，改变 p 只重算奖励，不需要重标关键帧。Sparse 不依赖评价，RynnValue 沿用既有 PBRS，Stage 不加载两种奖励模型。
+独立 CLI 使用 YAML 的 `stage_exponent`。GUI 在冻结数据集右侧“配置”中调整 p 并重新评价，成功后替换当前结果，无须重标关键帧或管理评价版本。训练固定使用启动时的评价快照；γ 与 cumulative reward 仍可单独调整，从已保存 Stage 分数重算本次 chunk reward。高级 IQL 页面不再显示 p、κ。Sparse 不依赖模型评价，RynnValue 沿用既有 PBRS，Stage 不加载两种奖励模型。
 
-每条轨迹旁保存 `stage_annotation.json`：schema、轨迹 hash、关键帧、确认成功 step、成功阈值、p 和标注内容 hash。保存只读取小型控制 NPZ，结果原子发布；拖动进度条不请求后端，不解压双视角 observation，也不调用 MuJoCo。并发编辑通过 revision 拒绝覆盖旧版本。
+每条轨迹旁保存 `stage_annotation.json`：schema v2、轨迹身份与 hash、动作数、人工关键帧及标注内容 hash。成功阈值来自冻结数据集，p 和自动成功 step 属于评价上下文，不再写入关键帧身份；schema v1 可直接复用，无需重新保存。保存只读取小型控制 NPZ，结果原子发布；拖动进度条不请求后端，不解压双视角 observation，也不调用 MuJoCo。并发编辑通过 revision 拒绝覆盖旧版本。
 
-Stage 训练开始前检查全部数据成员，包含 validation 和被前缀去重覆盖的记录。缺失、失效、轨迹 hash 或成功阈值不一致时列出记录并停止，不跳过也不退回其他奖励。更改成功阈值后须检查标记并重新保存。GUI/终端任务冻结完整标注快照；训练目录保留该快照和 reward manifest，后续编辑不影响已启动训练。原始 NPZ 与标注一起迁移/打包可保留绑定；现有 UI 的轻量 CSV/视频 ZIP 会归档标注，但重建 NPZ 后 hash 改变，不能直接复用该标注。用于异机 Stage 训练应保留原始 trajectory.npz，不自动篡改绑定 hash。
+Stage 生成前检查全部数据成员，包含 validation 和被前缀去重覆盖的记录。缺失、失效或轨迹 hash 不一致时列出记录并停止，不跳过也不退回其他奖励。新评价读取最新已保存的标记，使用当前数据集成功阈值生成上下文；归一化分母或成功边界冲突属于公式评价错误，不销毁标注。每个数据集版本保存本次标注快照、参数、公式代码指纹和 reward manifest；修改公式或 p 后生成新版本即可，旧结果和已启动训练不变。原始 NPZ 与标注一起迁移/打包可保留绑定；现有 UI 的轻量 CSV/视频 ZIP 会归档标注，但重建 NPZ 后 hash 改变，不能直接复用该标注。用于异机 Stage 训练应保留原始 trajectory.npz，不自动篡改绑定 hash。
 
 第一轮建议固定数据、split、训练步数及评测初始状态，仅比较 Sparse、RynnValue、Stage 三种来源；分别报告成功率、耗时、分数范围与实际 actor 权重，不以曲线更平滑作为有效性的结论。

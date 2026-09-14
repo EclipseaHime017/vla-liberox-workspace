@@ -72,17 +72,18 @@ class Runner:
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self.signal)
         signal.signal(signal.SIGINT, self.signal)
-        gpu_lock_path = Path(self.payload["gpu_lock_path"])
-        gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_stream = gpu_lock_path.open("a+")
-        try:
-            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            self.persist(
-                status="FAILED", completed_at=utc_now(),
-                error="Another GPU task already holds the platform lock",
-            )
-            return 2
+        lock_stream = None
+        if self.payload.get("requires_gpu", True):
+            gpu_lock_path = Path(self.payload["gpu_lock_path"])
+            gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_stream = gpu_lock_path.open("a+")
+            try:
+                fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_stream.close()
+                self.persist(status="FAILED", completed_at=utc_now(),
+                             error="Another GPU task already holds the platform lock")
+                return 2
         self.persist(
             status="RUNNING", pid=os.getpid(), process_group_id=os.getpgrp(),
             started_at=utc_now(), heartbeat_at=utc_now(), error=None,
@@ -142,8 +143,9 @@ class Runner:
         finally:
             self.stop.set()
             self.persist(heartbeat_at=utc_now())
-            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
-            lock_stream.close()
+            if lock_stream is not None:
+                fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+                lock_stream.close()
 
 
 def main() -> int:

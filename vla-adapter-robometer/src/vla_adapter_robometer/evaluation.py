@@ -21,6 +21,30 @@ SCHEMA_VERSION = 1
 ARRAY_KEYS = frozenset({"observation_steps", "time_seconds", "progress_pred", "success_probs"})
 
 
+def inference_config(raw: dict[str, Any]) -> dict[str, Any]:
+    """Output identity excludes storage locations and execution batch sizing."""
+    return {
+        "model": {key: raw["model"][key] for key in
+                  ("checkpoint", "revision", "robometer_commit", "dtype")},
+        "evaluation": {key: raw["evaluation"][key] for key in
+                       ("control_hz", "fps", "prefix_frames")},
+    }
+
+
+def _cached_values_valid(path: Path) -> bool:
+    try:
+        with np.load(path, allow_pickle=False) as values:
+            if not ARRAY_KEYS.issubset(values.files):
+                return False
+            arrays = [values[key] for key in sorted(ARRAY_KEYS)]
+            return (all(array.ndim == 1 for array in arrays)
+                    and len({len(array) for array in arrays}) == 1
+                    and len(arrays[0]) > 0
+                    and all(np.isfinite(array).all() for array in arrays))
+    except (OSError, ValueError, KeyError):
+        return False
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -177,8 +201,10 @@ def evaluate_selection(
     members = selection.get("members") or []
     if not members:
         raise ValueError("Selection contains no trajectories")
-    annotator = annotator_factory(config)
+    annotator = None
+    inference = inference_config(raw)
     episodes = []
+    cached_count = 0
     started = time.monotonic()
     for index, member in enumerate(members, 1):
         run_id = str(member["run_id"])
@@ -188,14 +214,30 @@ def evaluate_selection(
         manifest = Path(artifacts["manifest"]["path"]).resolve()
         target = values_dir / f"{run_id}.npz"
         metadata_path = values_dir / f"{run_id}.json"
+        trajectory_sha = sha256_file(trajectory)
+        observations_sha = sha256_file(observations)
+        manifest_sha = sha256_file(manifest)
         source_key = hashlib.sha256(json.dumps({
-            "trajectory": sha256_file(trajectory), "observations": sha256_file(observations),
-            "manifest": sha256_file(manifest), "config": config.digest,
+            "trajectory": trajectory_sha, "observations": observations_sha,
+            "manifest": manifest_sha, "inference": inference,
         }, sort_keys=True).encode()).hexdigest()
         if not overwrite and target.is_file() and metadata_path.is_file():
-            prior = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if prior.get("source_key") == source_key and prior.get("values_sha256") == sha256_file(target):
-                episodes.append(prior)
+            try:
+                prior = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                prior = {}
+            compatible = prior.get("source_key") == source_key or (
+                prior.get("inference_config") == inference
+                and prior.get("trajectory_sha256") == trajectory_sha
+                and prior.get("observations_sha256") == observations_sha
+                and prior.get("manifest_sha256") == manifest_sha
+            )
+            if (compatible and not target.is_symlink()
+                    and prior.get("values_sha256") == sha256_file(target)
+                    and _cached_values_valid(target)):
+                episodes.append({**prior, "source_key": source_key,
+                                 "inference_config": inference, "annotation_path": str(target.resolve())})
+                cached_count += 1
                 print(f"ROBOMETER [{index}/{len(members)}] cached {run_id}", flush=True)
                 continue
         with np.load(observations, allow_pickle=False) as archive:
@@ -207,6 +249,9 @@ def evaluate_selection(
         if len(frames) != len(times):
             raise ValueError(f"Observation/time length mismatch for {run_id}")
         steps = evaluation_steps(len(frames), raw["evaluation"]["control_hz"], raw["evaluation"]["fps"])
+        if annotator is None:
+            print("ROBOMETER loading model for missing evaluations", flush=True)
+            annotator = annotator_factory(config)
         progress, success = annotator(frames, steps, _manifest_prompt(manifest))
         if len(progress) != len(steps) or len(success) != len(steps):
             raise ValueError(f"Robometer output length mismatch for {run_id}")
@@ -221,8 +266,9 @@ def evaluate_selection(
         item = {
             "schema_version": SCHEMA_VERSION, "run_id": run_id,
             "source_key": source_key, "annotation_path": str(target),
-            "values_sha256": sha256_file(target), "trajectory_sha256": sha256_file(trajectory),
-            "observations_sha256": sha256_file(observations), "manifest_sha256": sha256_file(manifest),
+            "values_sha256": sha256_file(target), "trajectory_sha256": trajectory_sha,
+            "observations_sha256": observations_sha, "manifest_sha256": manifest_sha,
+            "inference_config": inference,
             "sample_count": len(steps),
         }
         descriptor, metadata_temporary_name = tempfile.mkstemp(
@@ -251,10 +297,12 @@ def evaluate_selection(
         "selection_sha256": selection.get("dataset_sha256"), "config_sha256": config.digest,
         "annotator": {
             "model": raw["model"]["checkpoint"], "revision": raw["model"]["revision"],
-            "robometer_commit": getattr(annotator, "commit", "test"),
+            "robometer_commit": getattr(annotator, "commit", raw["model"]["robometer_commit"]),
             "load_seconds": getattr(annotator, "load_seconds", None),
         },
-        "evaluation_config": raw["evaluation"], "episodes": episodes,
+        "evaluation_config": raw["evaluation"], "inference_config": inference,
+        "cache_stats": {"selected": len(members), "skipped": cached_count,
+                        "completed": len(members) - cached_count}, "episodes": episodes,
     }
     result_path = output / "robometer_manifest.json"
     descriptor, temporary_name = tempfile.mkstemp(prefix=".robometer_manifest.", suffix=".tmp", dir=output)

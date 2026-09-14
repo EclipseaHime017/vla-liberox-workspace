@@ -17,14 +17,16 @@ from vla_rynn_iql.io import atomic_json
 from vla_rynn_iql.rewards import load_reward_index, load_stage_annotations, reward_manifest_digest
 from vla_rynn_iql.stage_rewards import (
     build_stage_annotation, stage_anchors, stage_chunk_reward, stage_scores,
-    validate_stage_annotation,
+    stage_annotation_context, validate_stage_annotation,
 )
 
 
 def annotation(frames, *, done=None, exponent=2):
-    return build_stage_annotation(run_id="run", trajectory_sha256="a" * 64,
-                                  done=[False] * 20 if done is None else done,
-                                  keyframes=frames, exponent=exponent)
+    done = [False] * 20 if done is None else done
+    labels = build_stage_annotation(run_id="run", trajectory_sha256="a" * 64,
+                                    done=done, keyframes=frames, exponent=exponent)
+    return stage_annotation_context(labels, done=done, success_consecutive_steps=5,
+                                    exponent=exponent)
 
 
 def test_success_positive_negative_normalization_and_post_success_tail():
@@ -72,19 +74,21 @@ def test_keyframe_errors(frames):
 
 def test_invalid_denominator_and_duplicate_success_rejected():
     with pytest.raises(ValueError, match="denominator"):
-        annotation([{"step": 2, "kind": "negative"}], done=[False] * 10 + [True] * 10)
+        stage_scores(annotation([{"step": 2, "kind": "negative"}], done=[False] * 10 + [True] * 10))
     with pytest.raises(ValueError, match="precede"):
-        annotation([{"step": 15, "kind": "positive"}], done=[False] * 10 + [True] * 10)
+        stage_scores(annotation([{"step": 15, "kind": "positive"}], done=[False] * 10 + [True] * 10))
     with pytest.raises(ValueError, match="finite"):
         annotation([], exponent=float("nan"))
 
 
-def test_hash_threshold_and_foreign_trajectory_rejected():
-    payload = annotation([])
+def test_hash_and_foreign_trajectory_rejected_but_threshold_is_recipe_local():
+    payload = build_stage_annotation(run_id="run", trajectory_sha256="a" * 64,
+                                     done=[False] * 20, keyframes=[])
     validate_stage_annotation(payload, run_id="run", trajectory_sha256="a" * 64,
                               done=[False] * 20, success_consecutive_steps=5)
-    for overrides in [{"run_id": "other"}, {"trajectory_sha256": "b" * 64},
-                      {"success_consecutive_steps": 6}]:
+    assert validate_stage_annotation(payload, run_id="run", trajectory_sha256="a" * 64,
+                                     done=[False] * 20, success_consecutive_steps=6) == payload
+    for overrides in [{"run_id": "other"}, {"trajectory_sha256": "b" * 64}]:
         args = dict(run_id="run", trajectory_sha256="a" * 64,
                     done=[False] * 20, success_consecutive_steps=5)
         args.update(overrides)
@@ -154,13 +158,12 @@ def test_stage_all_members_required_and_frozen_snapshot_reusable(configured, mon
         assert "pbrs_shaping_reward" not in arrays
 
 
-def test_stage_stale_annotation_stops_instead_of_sparse_fallback(configured):
+def test_stage_annotation_success_threshold_is_dataset_local(configured):
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
     _select(configured, "stage")
     configured.raw["data"]["success_consecutive_steps"] = 6
-    with pytest.raises(ValueError, match="threshold"):
-        load_stage_annotations(configured, manifest)
+    assert len(load_stage_annotations(configured, manifest)["annotations"]) == 2
 
 
 def test_reward_config_source_compatibility_and_validation(configured, tmp_path):
@@ -260,7 +263,10 @@ def test_stage_replay_uses_actual_chunk_endpoint_without_reward_model(configured
     for index, (episode, chunk_index, _) in enumerate(replay.items):
         item = replay[index]
         chunk = episode["chunks"][chunk_index]
-        score = stage_scores(snapshot["annotations"][episode["run_id"]])
+        with np.load(episode["trajectory_path"], allow_pickle=False) as source:
+            context = stage_annotation_context(snapshot["annotations"][episode["run_id"]],
+                done=source["done"], success_consecutive_steps=5)
+        score = stage_scores(context)
         assert item["reward"].item() == pytest.approx(score[chunk["end"]])
         assert item["action_mask"].sum().item() == chunk["length"]
 

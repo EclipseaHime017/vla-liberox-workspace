@@ -173,11 +173,6 @@ class TrajectoryEvaluationRequest(StrictModel):
                 raise ValueError("run_ids must not be empty when provided")
             if len(self.run_ids) != len(set(self.run_ids)):
                 raise ValueError("run_ids must not contain duplicates")
-            if self.overwrite is True:
-                raise ValueError(
-                    "explicit trajectory evaluation cannot overwrite an existing "
-                    "evaluation from the same evaluator"
-                )
         if not self.evaluators:
             raise ValueError("evaluators must not be empty")
         if len(self.evaluators) != len(set(self.evaluators)):
@@ -190,8 +185,16 @@ class RunTestLabelRequest(StrictModel):
 
 
 class DatasetAnnotationRequest(StrictModel):
+    source: Literal["sparse", "stage", "rynnvalue", "robometer"] = "rynnvalue"
     max_frames: StrictInt | None = Field(default=None, ge=2, le=64)
     accumulate_primitive_steps: StrictBool | None = None
+    stage_exponent: StrictFloat | StrictInt | None = Field(default=None, ge=1)
+    gamma: StrictFloat | StrictInt | None = Field(default=None, ge=0, le=1)
+    shaping_weight: StrictFloat | StrictInt | None = Field(default=None, ge=0)
+    batch_size: StrictInt | None = Field(default=None, ge=1)
+    sampling_hz: StrictFloat | StrictInt | None = Field(default=None, gt=0, le=20)
+    force_model: StrictBool = False
+    overwrite_global: StrictBool = False
 
 
 class RenamePolicyRequest(StrictModel):

@@ -27,6 +27,7 @@ import yaml
 from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
 from ..storage.repositories import EvaluationRepository, OfflineJobRepository
+from .dataset_reward_versions import DatasetRewardVersions
 
 
 ACTIVE_JOB_STATES = frozenset({"STARTING", "RUNNING", "STOPPING"})
@@ -51,7 +52,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-class OfflineJobService:
+class OfflineJobService(DatasetRewardVersions):
     def __init__(
         self, ui_config: Any, manager: Any, datasets: Any,
         trajectory_evaluations: Any | None = None,
@@ -139,8 +140,21 @@ class OfflineJobService:
 
     def defaults(self, dataset_id: str | None = None) -> dict[str, Any]:
         raw = self._load_base_config()
+        version = None
+        if dataset_id:
+            dataset = self.datasets.get(dataset_id, quick_verify=False)
+            if dataset.get("reward_version_id"):
+                version = self.datasets.get_version(dataset_id, dataset["reward_version_id"])
+                sealed = yaml.safe_load(Path(version["config_path"]).read_text(encoding="utf-8"))
+                raw["reward"] = sealed["reward"]
         reward_source = self._reward_source(raw, {})
         return {
+            "reward_version": version,
+            "reward_parameters_locked": False,
+            "reward_locked_parameters": [
+                "reward_source", "reward_stage_exponent", "reward_shaping_weight", "reward_rynnvalue",
+            ] if dataset_id else [],
+            "reward_editable_parameters": ["reward_gamma", "reward_accumulate_primitive_steps"],
             "basic": {
                 name: raw["iql"][name] for name in (
                     "train_steps", "critic_warmup_steps",
@@ -239,7 +253,20 @@ class OfflineJobService:
             job["error"] = "Detached job process exited without a terminal status"
             atomic_write_json(path, job)
         self.repository.upsert(job, path)
-        if job["kind"] == "annotation":
+        if job["kind"] == "annotation" and (job.get("parameters") or {}).get("reward_version_id"):
+            version = self.datasets.get_version(job["dataset_id"], job["id"])
+            if job["status"] == "COMPLETED" and not version.get("complete"):
+                job.update(status="FAILED", error="Evaluation version was not sealed")
+                atomic_write_json(path, job)
+                self.repository.upsert(job, path)
+            status = {"COMPLETED": "READY", "FAILED": "ERROR", "CANCELED": "CANCELED"}.get(job["status"], "RUNNING")
+            if version.get("status") != "READY":
+                version.update(status=status, error=job.get("error"), completed_at=job.get("completed_at"))
+                if status in {"ERROR", "CANCELED"} and not version.get("complete"):
+                    version_path = self.datasets.root / job["dataset_id"] / "annotations" / job["id"] / "version.json"
+                    atomic_write_json(version_path, version)
+            self.datasets.update_version(job["dataset_id"], version)
+        elif job["kind"] == "annotation":
             desired = {
                 "COMPLETED": "READY",
                 "FAILED": "ERROR",
@@ -266,43 +293,11 @@ class OfflineJobService:
                     )
             except Exception:
                 pass
-        if (
+        if job["kind"] in {"annotation", "trajectory_evaluation"} and (
             job["kind"] == "trajectory_evaluation"
-            and job["status"] == "COMPLETED"
-            and self.trajectory_evaluations is not None
-            and not job.get("trajectory_binding")
-            and not job.get("trajectory_binding_error")
+            or (job.get("parameters") or {}).get("reward_version_id")
         ):
-            work = Path(str(job["output_path"])) / "work"
-            try:
-                parameters = job.get("parameters", {})
-                evaluators = parameters.get("evaluators")
-                selected_by_evaluator = parameters.get("selected_by_evaluator") or {}
-                if evaluators:
-                    bindings: dict[str, Any] = {}
-                    if selected_by_evaluator.get("rynnvalue"):
-                        bindings["rynnvalue"] = self.trajectory_evaluations.bind(
-                            work / "rynnvalue" / "dataset_manifest.json",
-                            work / "rynnvalue" / "rewards" / "reward_manifest.json",
-                            overwrite=bool(parameters.get("overwrite", False)),
-                        )
-                    if selected_by_evaluator.get("robometer"):
-                        if self.robometer_evaluations is None:
-                            raise RuntimeError("Robometer evaluation service is unavailable")
-                        bindings["robometer"] = self.robometer_evaluations.bind(
-                            work / "robometer" / "robometer_manifest.json",
-                            overwrite=bool(parameters.get("overwrite", False)),
-                        )
-                    job["trajectory_binding"] = bindings
-                atomic_write_json(path, job)
-                self.repository.upsert(job, path)
-            except Exception as exc:
-                message = f"Cannot bind trajectory evaluations: {type(exc).__name__}: {exc}"
-                job["status"] = "FAILED"
-                job["error"] = message
-                job["completed_at"] = _utc_now()
-                atomic_write_json(path, job)
-                self.repository.upsert(job, path)
+            self._schedule_result_binding(job)
         elif job["kind"] == "evaluation":
             manifest = Path(str(job.get("output_path") or "")) / "evaluation.json"
             try:
@@ -385,6 +380,13 @@ class OfflineJobService:
             key: value for key, value in job.items()
             if key not in {"stages", "gpu_lock_path"}
         }
+        if job.get("trajectory_binding_status") == "RUNNING":
+            result.update(status="RUNNING", stage="bind", stage_label="保存轨迹评价")
+        elif job.get("trajectory_binding_status") == "ERROR":
+            # Dataset outputs are already sealed and valid. Global publication
+            # is a separate convenience copy, not a failed reward computation.
+            result.update(stage="bind", stage_label="评价成功，全局结果同步失败",
+                          warning=job.get("trajectory_binding_error"))
         job_dir = self.jobs_root / job["id"]
         result["log_size"] = (job_dir / "job.log").stat().st_size if (job_dir / "job.log").is_file() else 0
         if job["kind"] == "training":
@@ -455,6 +457,11 @@ class OfflineJobService:
     def has_active_job(self) -> bool:
         return any(job["status"] in ACTIVE_JOB_STATES for job in self.list())
 
+    def has_active_gpu_job(self) -> bool:
+        return any(job["status"] in ACTIVE_JOB_STATES
+                   and job.get("parameters", {}).get("requires_gpu", True)
+                   for job in self.list())
+
     def _external_gpu_lock(self) -> bool:
         self.gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
         with self.gpu_lock_path.open("a+") as stream:
@@ -466,14 +473,14 @@ class OfflineJobService:
         return False
 
     def assert_simulation_allowed(self) -> None:
-        if self.launch_reserved or self.has_active_job() or self._external_gpu_lock():
+        if self.launch_reserved or self.has_active_gpu_job() or self._external_gpu_lock():
             raise ConflictError(
                 "An annotation, training, or evaluation job is using the GPU",
                 code="GPU_TASK_ACTIVE",
             )
 
     def _prepare_launch(self) -> None:
-        if self.has_active_job() or self._external_gpu_lock():
+        if self.has_active_gpu_job() or self._external_gpu_lock():
             raise ConflictError("Another GPU task is active", code="GPU_TASK_ACTIVE")
         active = getattr(self.manager, "active_session_id", None)
         if active is not None:
@@ -525,6 +532,7 @@ class OfflineJobService:
             "config_path": str(config_path.resolve()),
             "output_path": str(output_path.resolve()),
             "parameters": parameters,
+            "requires_gpu": parameters.get("requires_gpu", True),
             "gpu_lock_path": str(self.gpu_lock_path.resolve()),
             "stages": stages,
         }
@@ -568,27 +576,10 @@ class OfflineJobService:
 
     def start_annotation(
         self, dataset_id: str, *, max_frames: int | None = None,
-        accumulate_primitive_steps: bool | None = None,
+        accumulate_primitive_steps: bool | None = None, source: str = "rynnvalue", **options: Any,
     ) -> dict[str, Any]:
-        with self.lock:
-            dataset = self.datasets.require_ready_for_annotation(dataset_id)
-            if max_frames is not None and (
-                type(max_frames) is not int or not 2 <= max_frames <= 64
-            ):
-                raise ValueError("max_frames must be an integer in [2, 64]")
-            if (
-                accumulate_primitive_steps is not None
-                and type(accumulate_primitive_steps) is not bool
-            ):
-                raise TypeError("accumulate_primitive_steps must be boolean")
-            self._prepare_launch()
-            try:
-                return self._launch_annotation(
-                    dataset_id, dataset, max_frames=max_frames,
-                    accumulate_primitive_steps=accumulate_primitive_steps,
-                )
-            finally:
-                self.launch_reserved = False
+        return self.start_reward_version(dataset_id, source=source, max_frames=max_frames,
+            accumulate_primitive_steps=accumulate_primitive_steps, **options)
 
     def start_trajectory_evaluation(
         self,
@@ -600,12 +591,6 @@ class OfflineJobService:
     ) -> dict[str, Any]:
         """Evaluate selected trajectories independently from frozen datasets."""
         with self.lock:
-            if run_ids is not None and overwrite:
-                raise ValueError(
-                    "Explicit trajectory evaluation cannot overwrite an existing "
-                    "evaluation from the same evaluator; use task-wide batch "
-                    "evaluation for an intentional replacement"
-                )
             runs = self.datasets.list_runs(task_id=task_id, eligible=True)
             available = {item["id"]: item for item in runs}
             # A task-wide batch is a data-maintenance operation and excludes
@@ -803,95 +788,6 @@ class OfflineJobService:
             shutil.rmtree(output_root, ignore_errors=True)
             raise
 
-    def _launch_annotation(
-        self, dataset_id: str, dataset: dict[str, Any], *, max_frames: int | None = None,
-        accumulate_primitive_steps: bool | None = None,
-    ) -> dict[str, Any]:
-        if self.trajectory_evaluations is not None:
-            self.trajectory_evaluations.seed_cache(
-                [member["run_id"] for member in dataset.get("members", [])],
-                self.cache_root,
-            )
-        job_id = f"ann_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-        job_dir = self.jobs_root / job_id
-        job_dir.mkdir(parents=True, exist_ok=False)
-        annotation_root = self.datasets.root / dataset_id / "annotations" / job_id
-        work_dir = annotation_root / "work"
-        work_dir.mkdir(parents=True, exist_ok=False)
-        raw = self._effective_config(dataset)
-        raw["reward"].update(source="rynnvalue", rynnvalue=True)
-        raw["data"].pop("stage_annotations_manifest", None)
-        if max_frames is not None:
-            raw["reward"]["max_frames"] = max_frames
-        if accumulate_primitive_steps is not None:
-            raw["reward"]["accumulate_primitive_steps"] = accumulate_primitive_steps
-        raw["paths"]["work_dir"] = str(work_dir.resolve())
-        # Seed the new version with the previous dataset-local reward manifest.
-        # annotate_rewards validates all hashes and only reuses official heads;
-        # deterministic reward arrays are always regenerated for changed modes.
-        previous_annotation_id = dataset.get("annotation_id")
-        if previous_annotation_id:
-            previous_reward = (
-                self.datasets.root / dataset_id / "annotations"
-                / str(previous_annotation_id) / "work" / "rewards"
-                / "reward_manifest.json"
-            )
-            if previous_reward.is_file() and not previous_reward.is_symlink():
-                seeded_reward = work_dir / "rewards" / "reward_manifest.json"
-                seeded_reward.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(previous_reward, seeded_reward)
-        config_path = job_dir / "effective_config.yaml"
-        atomic_write_yaml(config_path, raw)
-        scripts = self.ui_config.offline_rl_root / "scripts"
-        stages = [
-            {
-                "id": "prepare", "label": "准备训练数据集",
-                "environment": self.ui_config.train_environment,
-                "argv": ["python", str(scripts / "prepare_dataset.py"), "--config", str(config_path)],
-                "cwd": str(self.ui_config.offline_rl_root),
-            },
-            {
-                "id": "annotate", "label": "RynnValue-4B 轨迹评价",
-                "environment": self.ui_config.reward_environment,
-                "argv": ["python", str(scripts / "annotate_rewards.py"), "--config", str(config_path)],
-                "cwd": str(self.ui_config.offline_rl_root),
-            },
-            {
-                "id": "rewards", "label": "生成默认 IQL 奖励缓存",
-                "environment": self.ui_config.train_environment,
-                "argv": ["python", str(scripts / "materialize_rewards.py"),
-                         "--config", str(config_path)],
-                "cwd": str(self.ui_config.offline_rl_root),
-            },
-        ]
-        annotation_config = {
-            "max_frames": int(raw["reward"]["max_frames"]),
-            "accumulate_primitive_steps": bool(
-                raw["reward"]["accumulate_primitive_steps"]
-            ),
-        }
-        self.datasets.update_annotation(
-            dataset_id, "RUNNING", annotation_id=job_id,
-            annotation_config=annotation_config,
-        )
-        try:
-            return self._new_job(
-                kind="annotation", dataset_id=dataset_id, stages=stages,
-                config_path=config_path, output_path=annotation_root,
-                parameters={
-                    "task_id": dataset["task_id"], "member_count": dataset["member_count"],
-                    "action_count": dataset["action_count"], "chunk_count": dataset["chunk_count"],
-                    "model": raw["reward"]["model"], "revision": raw["reward"]["revision"],
-                    "overwrite": False,
-                    **annotation_config,
-                },
-            )
-        except Exception:
-            self.datasets.update_annotation(
-                dataset_id, "ERROR", annotation_id=job_id,
-                annotation_config=annotation_config,
-            )
-            raise
 
     @staticmethod
     def _validate_training_parameters(parameters: dict[str, Any]) -> None:
@@ -908,6 +804,7 @@ class OfflineJobService:
             "wandb_group", "wandb_tags", "wandb_log_interval_steps",
             "reward_rynnvalue", "reward_gamma", "reward_shaping_weight",
             "reward_accumulate_primitive_steps", "reward_source", "reward_stage_exponent",
+            "reward_version_id",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
@@ -951,8 +848,13 @@ class OfflineJobService:
         if target_tau is not None and target_tau > 1:
             raise ValueError("target_tau must be in [0, 1]")
         reward_gamma = parameters.get("reward_gamma")
-        if reward_gamma is not None and reward_gamma > 1:
+        if "reward_gamma" in parameters and (
+            type(reward_gamma) not in (int, float) or not math.isfinite(reward_gamma)
+            or not 0 <= reward_gamma <= 1
+        ):
             raise ValueError("reward_gamma must be in [0, 1]")
+        if "reward_accumulate_primitive_steps" in parameters and type(parameters["reward_accumulate_primitive_steps"]) is not bool:
+            raise ValueError("reward_accumulate_primitive_steps must be boolean")
         if "reward_source" in parameters and parameters["reward_source"] not in (
             "sparse", "rynnvalue", "stage",
         ):
@@ -1101,52 +1003,32 @@ class OfflineJobService:
     def start_training(self, dataset_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             self._validate_training_parameters(parameters)
-            source = self._reward_source(self._load_base_config(), parameters)
-            normalized = {**parameters, "reward_source": source}
-            dataset = (
-                self.datasets.require_ready_for_training(dataset_id)
-                if source == "rynnvalue"
-                else self.datasets.require_ready_for_annotation(dataset_id)
-            )
-            snapshot = None
-            if source == "stage":
-                service = getattr(self, "stage_annotations", None)
-                if service is None:
-                    raise ConflictError(
-                        "Stage annotations are unavailable; training was not started",
-                        code="STAGE_ANNOTATION_MISSING",
-                    )
-                manifest = self.datasets.root / dataset_id / "dataset.json"
-                frozen = json.loads(manifest.read_text(encoding="utf-8"))
-                # Validate every frozen member, including validation episodes,
-                # before reserving a GPU or creating a detached training job.
-                snapshot = service.validate_members(
-                    frozen["members"], dataset["success_consecutive_steps"]
-                )
+            dataset = self.datasets.require_ready_for_training(dataset_id)
+            version, normalized = self.pinned_reward(dataset, parameters)
             self._prepare_launch()
             try:
                 return self._launch_training(
-                    dataset_id, dataset, normalized, stage_annotations_snapshot=snapshot
+                    dataset_id, dataset, normalized, reward_version=version,
                 )
             finally:
                 self.launch_reserved = False
 
     def _launch_training(
         self, dataset_id: str, dataset: dict[str, Any], parameters: dict[str, Any],
-        *, stage_annotations_snapshot: dict[str, Any] | None = None,
+        *, reward_version: dict[str, Any],
     ) -> dict[str, Any]:
+        # Start from the sealed evaluation configuration: input sampling, reward
+        # parameters and prepared-data identity must not drift with base YAML.
+        sealed = yaml.safe_load(Path(reward_version["config_path"]).read_text(encoding="utf-8"))
         raw = self._effective_config(dataset)
+        for section in ("data", "reward", "paths", "vla"):
+            raw[section] = copy.deepcopy(sealed[section])
         source = self._reward_source(raw, parameters)
         raw["reward"].update(source=source, rynnvalue=source == "rynnvalue")
-        raw["data"].pop("stage_annotations_manifest", None)
-        annotation_id = dataset.get("annotation_id") if source == "rynnvalue" else None
-        work_dir = None
-        if source == "rynnvalue":
-            work_dir, _, _ = self._validated_annotation_work(dataset)
-        elif source == "stage" and stage_annotations_snapshot is None:
-            raise ValueError("Stage annotations must be validated before training")
-        # RynnValue evaluation is immutable and reward-agnostic. Training keeps
-        # the active YAML reward settings and materializes a matching cheap cache.
+        annotation_id = reward_version["id"]
+        work_dir = Path(reward_version["work_dir"])
+        raw["reward"].update(manifest_path=reward_version["reward_manifest_path"],
+            manifest_sha256=reward_version["reward_manifest_sha256"], version_id=annotation_id)
         for key, value in parameters.items():
             if key in raw["iql"]:
                 raw["iql"][key] = value
@@ -1184,15 +1066,7 @@ class OfflineJobService:
         job_id = f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         job_dir = self.jobs_root / job_id
         job_dir.mkdir(parents=True, exist_ok=False)
-        if work_dir is None:
-            work_dir = job_dir / "work"
         raw["paths"]["work_dir"] = str(work_dir.resolve())
-        if stage_annotations_snapshot is not None:
-            snapshot_path = job_dir / "stage_annotations.json"
-            atomic_write_json(snapshot_path, {
-                "schema_version": 1, "annotations": stage_annotations_snapshot,
-            })
-            raw["data"]["stage_annotations_manifest"] = str(snapshot_path.resolve())
         output_root = self.training_root / job_id
         output_root.mkdir(parents=True, exist_ok=False)
         raw["paths"]["output_dir"] = str(output_root.resolve())
@@ -1201,13 +1075,6 @@ class OfflineJobService:
         scripts = self.ui_config.offline_rl_root / "scripts"
         stages = [
             {
-                "id": "rewards", "label": "生成或复用 IQL 奖励缓存",
-                "environment": self.ui_config.train_environment,
-                "argv": ["python", str(scripts / "materialize_rewards.py"),
-                         "--config", str(config_path)],
-                "cwd": str(self.ui_config.offline_rl_root),
-            },
-            {
                 "id": "train", "label": "VLA-Adapter Pixel-IQL 后训练",
                 "environment": self.ui_config.train_environment,
                 "argv": ["python", str(scripts / "train_iql.py"),
@@ -1215,14 +1082,6 @@ class OfflineJobService:
                 "cwd": str(self.ui_config.offline_rl_root),
             },
         ]
-        if source != "rynnvalue":
-            stages.insert(0, {
-                "id": "prepare", "label": "准备训练数据集",
-                "environment": self.ui_config.train_environment,
-                "argv": ["python", str(scripts / "prepare_dataset.py"),
-                         "--config", str(config_path)],
-                "cwd": str(self.ui_config.offline_rl_root),
-            })
         return self._new_job(
             kind="training", dataset_id=dataset_id, stages=stages,
             config_path=config_path, output_path=output_root,
@@ -1230,6 +1089,8 @@ class OfflineJobService:
                 "task_id": dataset["task_id"], "member_count": dataset["member_count"],
                 "action_count": dataset["action_count"], "chunk_count": dataset["chunk_count"],
                 "annotation_id": annotation_id,
+                "reward_version_id": annotation_id,
+                "reward_manifest_sha256": reward_version["reward_manifest_sha256"],
                 "source_dataset_sha256": dataset.get("dataset_sha256"),
                 "reward": {
                     "source": source,
@@ -2061,4 +1922,8 @@ class OfflineJobService:
 
     def close(self) -> None:
         # Offline jobs and TensorBoard intentionally survive a UI backend restart.
-        pass
+        executor = getattr(self, "_binding_executor", None)
+        if executor is not None:
+            # Cancel queued publishers; unfinished jobs will be rediscovered on
+            # restart. Let an in-flight atomic publication finish before exit.
+            executor.shutdown(wait=True, cancel_futures=True)

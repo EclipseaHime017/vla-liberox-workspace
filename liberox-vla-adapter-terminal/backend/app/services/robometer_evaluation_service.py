@@ -165,7 +165,44 @@ class RobometerEvaluationService:
         except (OSError, ValueError, FileNotFoundError):
             return False
 
-    def bind(self, manifest_path: Path, *, overwrite: bool) -> dict[str, Any]:
+    def seed_version_cache(self, run_ids: list[str], values_dir: Path,
+                           inference_config: dict[str, Any]) -> dict[str, int]:
+        """Copy compatible global outputs into a new version, never alter sidecars."""
+        values_dir.mkdir(parents=True, exist_ok=True)
+        restored = 0
+        for run_id in run_ids:
+            run = self.run_service.get_run(run_id)
+            payload = self._load(run)
+            if payload is None:
+                continue
+            previous = payload.get("inference_config")
+            if previous is None:
+                # Legacy v1 always ran BF16 with the configured official commit.
+                model, evaluation = payload.get("annotator", {}), payload.get("evaluation_config", {})
+                previous = {
+                    "model": {"checkpoint": model.get("model"), "revision": model.get("revision"),
+                              "robometer_commit": model.get("robometer_commit"), "dtype": "bfloat16"},
+                    "evaluation": {key: evaluation.get(key) for key in ("control_hz", "fps", "prefix_frames")},
+                }
+            if previous != inference_config:
+                continue
+            target = values_dir / f"{run_id}.npz"
+            metadata = values_dir / f"{run_id}.json"
+            # A copied dataset-local version is preferable to a global sidecar.
+            if target.exists() or metadata.exists():
+                continue
+            shutil.copyfile(self._episode_dir(run) / VALUES_NAME, target)
+            atomic_write_json(metadata, {
+                **{key: payload.get(key) for key in (
+                    "schema_version", "run_id", "source_key", "values_sha256", "trajectory_sha256",
+                    "observations_sha256", "manifest_sha256", "sample_count")},
+                "annotation_path": str(target.resolve()), "inference_config": previous,
+            })
+            restored += 1
+        return {"restored": restored, "skipped": len(run_ids) - restored}
+
+    def bind(self, manifest_path: Path, *, overwrite: bool,
+             run_ids: list[str] | None = None) -> dict[str, Any]:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("schema_version") != SCHEMA_VERSION or manifest.get("complete") is not True:
             raise ValueError("Robometer manifest is incomplete or incompatible")
@@ -173,6 +210,8 @@ class RobometerEvaluationService:
         skipped: list[str] = []
         for item in manifest.get("episodes") or []:
             run_id = str(item["run_id"])
+            if run_ids is not None and run_id not in run_ids:
+                continue
             run = self.run_service.get_run(run_id)
             episode = self._episode_dir(run)
             trajectory = episode / "trajectory.npz"
@@ -225,6 +264,7 @@ class RobometerEvaluationService:
                 "sample_count": int(item["sample_count"]),
                 "annotator": manifest.get("annotator") or {},
                 "evaluation_config": manifest.get("evaluation_config") or {},
+                "inference_config": manifest.get("inference_config"),
             }
             atomic_write_json(episode / SIDECAR_NAME, payload)
             self._validation_cache.pop(run_id, None)

@@ -1,5 +1,5 @@
-import { act, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OfflineJob } from "../run-control/types";
 
 let socket: { onmessage: ((event: { data: string }) => void) | null; onerror: (() => void) | null; close: ReturnType<typeof vi.fn> } = {
@@ -19,6 +19,7 @@ const job: OfflineJob = {
   stage_label: "Pixel-IQL", error: null, output_path: "/tmp/output",
   parameters: { critic_warmup_steps: 5 }, log_size: 0,
 };
+afterEach(cleanup);
 
 describe("offline job monitor", () => {
   it("restores streamed logs and exposes training metrics", () => {
@@ -47,5 +48,31 @@ describe("offline job monitor", () => {
     render(<JobMonitor initial={{ ...job, status: "COMPLETED" }} onDismiss={onDismiss} />);
     screen.getByRole("button", { name: "关闭记录" }).click();
     expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("uses the latest completion callback without reconnecting the job socket", () => {
+    const oldCallback = vi.fn(); const nextCallback = vi.fn();
+    const view = render(<JobMonitor initial={job} onUpdate={oldCallback} />);
+    const originalSocket = socket;
+    view.rerender(<JobMonitor initial={job} onUpdate={nextCallback} />);
+    const completed = { ...job, status: "COMPLETED" };
+    act(() => socket.onmessage?.({ data: JSON.stringify({ job: completed }) }));
+    expect(socket).toBe(originalSocket);
+    expect(originalSocket.close).not.toHaveBeenCalled();
+    expect(oldCallback).not.toHaveBeenCalled();
+    expect(nextCallback).toHaveBeenCalledWith(completed);
+  });
+
+  it("shows a global synchronization warning while keeping dataset evaluation completed", () => {
+    const onUpdate = vi.fn();
+    render(<JobMonitor initial={{ ...job, kind: "annotation" }} onUpdate={onUpdate} onDismiss={() => {}} />);
+    const completed: OfflineJob = { ...job, kind: "annotation", status: "COMPLETED",
+      stage_label: "评价成功，全局结果同步失败", warning: "数据集结果已保存，但全局评价同步失败：目标目录不可写" };
+    act(() => socket.onmessage?.({ data: JSON.stringify({ job: completed }) }));
+    expect(screen.getByRole("alert").textContent).toBe(completed.warning);
+    expect(screen.getByText("COMPLETED")).toBeTruthy();
+    expect(screen.queryByText("FAILED")).toBeNull();
+    expect(screen.getByRole("button", { name: "关闭记录" })).toBeTruthy();
+    expect(onUpdate).toHaveBeenCalledWith(completed);
   });
 });

@@ -3,7 +3,8 @@ import type {
   Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, EvaluationConfig,
   EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
   PaginatedRuns, PolicyDetail, PolicyInfo, TensorBoardStatus, TrajectoryDetail,
-  TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe,
+  TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe, RewardParameters,
+  RewardSource,
 } from "./types";
 
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
@@ -13,14 +14,16 @@ export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5) => api<P
   "/api/datasets/runs?task_id=" + encodeURIComponent(taskId)
   + `&page=${page}&page_size=${pageSize}`,
 );
-export const getTrajectoryDetail = (runId: string) => api<TrajectoryDetail>(
-  `/api/datasets/runs/${encodeURIComponent(runId)}`,
-);
+export const getTrajectoryDetail = (runId: string, datasetId?: string) => {
+  const query = new URLSearchParams();
+  if (datasetId) query.set("dataset_id", datasetId);
+  return api<TrajectoryDetail>(`/api/datasets/runs/${encodeURIComponent(runId)}${query.size ? `?${query}` : ""}`);
+};
 export const getStageAnnotation = (runId: string) => api<StageAnnotation>(
   `/api/datasets/runs/${encodeURIComponent(runId)}/stage-annotation`,
 );
 export const saveStageAnnotation = (runId: string, body: {
-  keyframes: StageKeyframe[]; exponent: number; revision: string | null;
+  keyframes: StageKeyframe[]; exponent?: number; revision: string | null;
 }) => api<StageAnnotation>(`/api/datasets/runs/${encodeURIComponent(runId)}/stage-annotation`, {
   method: "PUT", body: JSON.stringify(body),
 });
@@ -76,17 +79,18 @@ export const verifyTrainingDataset = (id: string) => api<TrainingDataset>(
   `/api/training-datasets/${encodeURIComponent(id)}/verify`, { method: "POST" },
 );
 export const annotateTrainingDataset = (
-  id: string, maxFrames?: number, accumulatePrimitiveSteps?: boolean,
+  id: string, parameters: RewardParameters & { source: RewardSource },
 ) => api<OfflineJob>(
   `/api/training-datasets/${encodeURIComponent(id)}/annotations`, {
     method: "POST",
-    body: JSON.stringify({
-      ...(maxFrames == null ? {} : { max_frames: maxFrames }),
-      ...(accumulatePrimitiveSteps == null ? {} : {
-        accumulate_primitive_steps: accumulatePrimitiveSteps,
-      }),
-    }),
+    body: JSON.stringify(parameters),
   },
+);
+export const getDatasetRewardConfig = (id: string) => api<Record<RewardSource, RewardParameters>>(
+  `/api/training-datasets/${encodeURIComponent(id)}/reward-config`,
+);
+export const listTrainingDatasetMembers = (id: string, page = 1, pageSize = 5) => api<PaginatedRuns>(
+  `/api/training-datasets/${encodeURIComponent(id)}/members?page=${page}&page_size=${pageSize}`,
 );
 export const listOfflineJobs = () => api<OfflineJob[]>("/api/jobs");
 export const getOfflineJob = (id: string) => api<OfflineJob>(`/api/jobs/${encodeURIComponent(id)}`);

@@ -380,11 +380,11 @@ def test_batch_trajectory_evaluation_skips_test_labels_by_default():
     )
     assert captured["requested_run_ids"] == ["held-out"]
 
-    with pytest.raises(ValueError, match="cannot overwrite"):
-        jobs.start_trajectory_evaluation(
-            task_id="LEVEL1::pick", run_ids=["train"], overwrite=True,
-            evaluators=["rynnvalue"],
-        )
+    jobs.start_trajectory_evaluation(
+        task_id="LEVEL1::pick", run_ids=["train"], overwrite=True,
+        evaluators=["rynnvalue"],
+    )
+    assert captured["overwrite"] is True
 
     jobs.trajectory_evaluations = SimpleNamespace(exists=lambda _: True)
     reused = jobs.start_trajectory_evaluation(

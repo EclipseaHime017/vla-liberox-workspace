@@ -219,6 +219,7 @@ class TrajectoryEvaluationService:
         reward_path: Path,
         *,
         overwrite: bool,
+        run_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         prepared = json.loads(prepared_path.read_text(encoding="utf-8"))
         rewards = json.loads(reward_path.read_text(encoding="utf-8"))
@@ -238,6 +239,8 @@ class TrajectoryEvaluationService:
         skipped: list[str] = []
         for reward in rewards.get("episodes", []):
             run_id = str(reward["run_id"])
+            if run_ids is not None and run_id not in run_ids:
+                continue
             episode = prepared_by_id.get(run_id)
             if episode is None:
                 raise ValueError(f"Reward run is missing from prepared manifest: {run_id}")
@@ -301,7 +304,8 @@ class TrajectoryEvaluationService:
             bound.append(run_id)
         return {"bound": bound, "skipped": skipped, "count": len(bound)}
 
-    def detail(self, run_id: str, robometer: Any | None = None) -> dict[str, Any]:
+    def detail(self, run_id: str, robometer: Any | None = None,
+               *, include_global_evaluations: bool = True) -> dict[str, Any]:
         run = self.run_service.get_run(run_id)
         episode = self._episode_dir(run)
         trajectory_path = episode / "trajectory.npz"
@@ -323,7 +327,7 @@ class TrajectoryEvaluationService:
             for name in artifacts
             if name.endswith((".mp4", ".png"))
         }
-        payload = self._load(run)
+        payload = self._load(run) if include_global_evaluations else None
         evaluation: dict[str, Any] | None = None
         if payload is not None:
             with np.load(episode / VALUES_NAME, allow_pickle=False) as values:
@@ -421,5 +425,6 @@ class TrajectoryEvaluationService:
             },
             "evaluation": evaluation,
             "rynnvalue_evaluation": evaluation,
-            "robometer_evaluation": None if robometer is None else robometer.detail(run),
+            "robometer_evaluation": (robometer.detail(run)
+                                     if robometer is not None and include_global_evaluations else None),
         }

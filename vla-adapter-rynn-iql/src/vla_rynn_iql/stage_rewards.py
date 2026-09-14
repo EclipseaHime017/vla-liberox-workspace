@@ -8,7 +8,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-STAGE_SCHEMA_VERSION = 1
+STAGE_SCHEMA_VERSION = 2
 STAGE_FILENAME = "stage_annotation.json"
 
 
@@ -43,7 +43,11 @@ def stage_anchors(annotation: dict[str, Any]) -> list[dict[str, Any]]:
     frames = annotation["keyframes"]
     positives = sum(frame["kind"] == "positive" for frame in frames)
     negatives = len(frames) - positives
+    if "success_step" not in annotation:
+        raise ValueError("Stage scores require an evaluation context, not bare keyframe labels")
     success = annotation["success_step"]
+    if success is not None and any(frame["step"] >= success for frame in frames):
+        raise ValueError("Manual keyframes must precede the automatic success anchor for this dataset")
     denominator = positives - negatives + 1 if success is not None else positives + 1
     if denominator <= 0:
         raise ValueError("Stage normalization requires a positive denominator")
@@ -71,7 +75,10 @@ def build_stage_annotation(*, run_id: str, trajectory_sha256: str,
         raise ValueError("Stage trajectory_sha256 must be a SHA256 digest")
     if len(done) < 1:
         raise ValueError("Stage annotation requires at least one executed action")
-    success_step = confirmed_success_step(done, success_consecutive_steps)
+    # Retain these arguments for old callers, but never persist recipe settings
+    # in the primary human-label identity.
+    confirmed_success_step(done, success_consecutive_steps)
+    _exponent(exponent)
     if not isinstance(keyframes, list):
         raise TypeError("Stage keyframes must be a list")
     ordered = []
@@ -82,8 +89,6 @@ def build_stage_annotation(*, run_id: str, trajectory_sha256: str,
         step, kind = frame["step"], frame["kind"]
         if type(step) is not int or not 0 < step <= len(done):
             raise ValueError("Keyframes must reference observation steps in (0, action_count]")
-        if success_step is not None and step >= success_step:
-            raise ValueError("Manual keyframes must precede the automatic success anchor")
         if step in seen:
             raise ValueError(f"Duplicate keyframe at observation {step}")
         if kind not in ("positive", "negative"):
@@ -93,12 +98,8 @@ def build_stage_annotation(*, run_id: str, trajectory_sha256: str,
     payload = {
         "schema_version": STAGE_SCHEMA_VERSION, "run_id": run_id,
         "trajectory_sha256": trajectory_sha256, "action_count": len(done),
-        "success_consecutive_steps": success_consecutive_steps,
-        "success_step": success_step,
         "keyframes": sorted(ordered, key=lambda item: item["step"]),
-        "exponent": _exponent(exponent),
     }
-    stage_anchors(payload)
     payload["annotation_sha256"] = _digest(payload)
     return payload
 
@@ -112,15 +113,40 @@ def validate_stage_annotation(payload: dict[str, Any], *, run_id: str,
         run_id=run_id, trajectory_sha256=trajectory_sha256, done=done,
         keyframes=payload.get("keyframes"),
         success_consecutive_steps=success_consecutive_steps,
-        exponent=payload.get("exponent"),
     )
+    if payload.get("schema_version") == 1:
+        # Check the original v1 byte-independent canonical identity, not the
+        # current reward formula. Legacy labels remain usable with a new p or
+        # dataset success threshold and do not need to be rewritten.
+        expected.pop("annotation_sha256")
+        expected.update(
+            schema_version=1,
+            success_consecutive_steps=payload.get("success_consecutive_steps"),
+            success_step=confirmed_success_step(done, payload.get("success_consecutive_steps")),
+            exponent=_exponent(payload.get("exponent")),
+        )
+        expected["annotation_sha256"] = _digest(expected)
     if _digest(payload) != _digest(expected):
-        raise ValueError("Stage annotation is stale, corrupted or uses a different success threshold")
+        raise ValueError("Stage annotation is stale or corrupted")
     return expected
 
 
+def stage_annotation_context(annotation: dict[str, Any], *, done: Sequence[bool],
+                             success_consecutive_steps: int,
+                             exponent: float = 2.0) -> dict[str, Any]:
+    """Attach dataset-local evaluation settings without changing human labels."""
+    if len(done) != annotation["action_count"]:
+        raise ValueError("Stage evaluation action count does not match the keyframe labels")
+    return {
+        **annotation,
+        "success_consecutive_steps": success_consecutive_steps,
+        "success_step": confirmed_success_step(done, success_consecutive_steps),
+        "exponent": _exponent(exponent),
+    }
+
+
 def stage_scores(annotation: dict[str, Any], exponent: float | None = None) -> np.ndarray:
-    power = _exponent(annotation["exponent"] if exponent is None else exponent)
+    power = _exponent(annotation.get("exponent", 2.0) if exponent is None else exponent)
     anchors = stage_anchors(annotation)
     scores = np.full(int(annotation["action_count"]) + 1, anchors[-1]["score"], dtype=np.float64)
     scores[0] = -1.0

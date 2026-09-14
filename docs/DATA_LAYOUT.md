@@ -10,7 +10,9 @@ dataset-root/
         ├── datasets/
         │   └── <dataset_id>/
         │       ├── dataset.json
-        │       └── annotations/<annotation_id>/work/
+        │       └── annotations/<version_id>/
+        │           ├── version.json
+        │           └── work/  # frozen labels, official outputs and derived rewards
         ├── annotation-cache/
         ├── training/<training_id>/
         ├── evaluations/
@@ -76,9 +78,11 @@ Independent device tests still do not record trajectories or videos.
 ### Human Stage annotations
 
 `episodes/episode_000/stage_annotation.json` is independent of RynnValue and
-Robometer. Schema v1 stores `run_id`, original `trajectory_sha256`,
-`action_count`, `success_consecutive_steps`, automatic `success_step`, manual
-`keyframes [{step, kind}]`, preview `exponent`, and `annotation_sha256`.
+Robometer. Schema v2 stores `run_id`, original `trajectory_sha256`,
+`action_count`, manual `keyframes [{step, kind}]`, and `annotation_sha256`.
+The exponent and automatic success boundary are evaluation context, not label
+identity. Existing schema-v1 labels are validated with their original hash
+rules and can be reused without being edited or saved again.
 Steps address the original N+1 observation timeline, including the takeover
 prefix. Saving does not truncate, rewrite or re-encode source artifacts.
 
@@ -91,20 +95,26 @@ The lightweight GET/PUT annotation API validates only the control NPZ and small
 sidecar, caching source reads by file signature; dragging video sends no API
 requests. Revision checks prevent silently overwriting another edit.
 
-Stage training requires valid annotations for **every** frozen member, with the
-same trajectory hash and success threshold. Before launch, UI/terminal jobs save
+Stage evaluation requires valid annotations for **every** frozen member, with the
+same trajectory hash. The frozen dataset provides its success threshold; changing
+that structural setting requires deriving another dataset, not relabeling frames.
+Each dataset evaluation reads the latest saved labels and saves
 `stage_annotations.json` (`schema_version: 1`, `annotations: {run_id: payload}`)
 and reference it in `data.stage_annotations_manifest`. The deterministic reward
-cache includes the annotation hash and current training `reward.stage_exponent`.
+cache includes the label snapshot, `reward.stage_exponent`, and a fingerprint of
+the reward implementation. Labels stay usable even when a recipe fails validation;
+the error belongs to evaluation rather than the source labels.
 It stores full `stage_score` and chunk `stage_chunk_reward` / `final_reward`;
 the legacy `pbrs_chunk_reward` alias is only for reader compatibility, not PBRS.
-Training outputs retain the snapshot and reward manifest. Re-editing labels
-affects only a later run; checkpoint identity ignores job-local paths but still
-checks actual label and reward contents.
+Training outputs retain the version reference, snapshot and reward manifest.
+Re-editing labels affects only a subsequent evaluation, never existing versions.
 
 `reward.source: sparse|rynnvalue|stage` selects one independent source.
-Sparse/Stage do not require a RynnValue-ready dataset or model inference;
-existing automatic RynnValue evaluation on dataset creation is unchanged.
+Sparse/Stage do not require RynnValue model inference. Freezing or deriving a
+dataset no longer starts an evaluation: select its recipe and evaluate it
+explicitly before starting UI training. The UI exposes one current result per
+dataset; successful reevaluation replaces it. Historical result IDs are internal
+training-snapshot references, not a user-facing version-management workflow.
 Macro Stage reward is `z(t+L)`, cumulative Stage reward is
 `Σ gamma^h z(t+h+1)`; the respective Bellman discounts remain `gamma` and
 `gamma^L`. Source observations, replay deduplication and terminal rules are
@@ -116,7 +126,7 @@ training therefore requires the original `trajectory.npz` alongside its annotati
 (and the usual aligned observations). A raw-NPZ ZIP works without rebinding;
 the importer never silently trusts labels against a newly reconstructed file.
 
-### Membership and RynnValue evaluation versions
+### Membership and independent evaluation versions
 
 `datasets/<dataset_id>/dataset.json` is an immutable, single-task membership
 manifest. It stores the explicit run IDs, provenance (`inference`, `manual`, or
@@ -126,14 +136,18 @@ train/validation grouping, and the path, size, and SHA-256 of each source
 those high-volume artifacts. Branch members represent one selected record but
 prepare only imports `[resume_step, end_step)` as new replay data.
 
-The mutable fields in the same JSON are limited to integrity and annotation
-lifecycle. `annotation_id` selects the evaluation version used by training,
-while `annotation_history` preserves earlier versions and their effective
-configuration (including `max_frames` and the boolean
-`accumulate_primitive_steps`). Creating a new evaluation version
-regenerates that version's prepared manifest and reward manifest, then switches
-`annotation_id` only after the whole job succeeds. A failed replacement leaves
-the previous ready version active. Full verification recomputes every hash. Deleting a referenced run
+The mutable fields include integrity and evaluation lifecycle.
+`reward_version_id` selects a Sparse, Stage or RynnValue training reward;
+`robometer_version_id` independently selects diagnostics. `evaluation_versions`
+contains lightweight version summaries and their `parameters`; `annotation_id`
+remains a compatibility alias for the active training reward. Each
+`annotations/<version_id>/version.json` seals the effective parameters, dataset
+identity, prepared/reward/official-output paths and checksums. Formula code
+fingerprints are recorded in the derived manifest. New versions use independent
+files, including snapshots of shared official outputs; force evaluation never
+rewrites an old version. Only complete successful versions become active.
+Historical versions can be viewed or explicitly reactivated; viewing alone does
+not change training defaults. Full verification recomputes every hash. Deleting a referenced run
 requires explicit force confirmation and marks every referencing dataset
 `BROKEN`; existing training summaries and overlays remain auditable but the
 dataset can no longer be annotated or trained.
@@ -159,7 +173,9 @@ RynnValue model/revision, dtype, and `max_frames`; it deliberately excludes
 Each prepared dataset has
 `annotations/<annotation_id>/work/annotations/annotation_manifest.json`, which
 binds its members to those immutable model outputs. A separate deterministic
-stage writes `work/rewards/<reward_hash>.npz` and `reward_manifest.json`.
+stage writes `work/rewards/versions/<generation>/<reward_hash>.npz` and an immutable
+manifest beside it. `work/rewards/reward_manifest.json` is the CLI's current
+cache pointer; dataset version references are pinned, not rewritten by training.
 `pbrs_shaping_reward` stores the raw, unweighted RynnValue Shape Reward
 `gamma * Phi(s_next) - Phi(s)`, `dense_reward` stores
 `kappa * pbrs_shaping_reward`, and `pbrs_chunk_reward` stores the Final Reward
@@ -169,11 +185,49 @@ default:
 the IQL Bellman target uses one `gamma`. Variable chunks keep their actual `L`
 only for the action mask and selection of `s[t+L]`. This second cache is keyed
 by the prepared dataset and annotation hashes plus the `rynnvalue` inclusion
-switch, `gamma`, `kappa`, and the macro/primitive-step switch. Exact repeated
-training reuses it; a mismatch is recomputed with NumPy and never invokes
+switch, `gamma`, `kappa`, the macro/primitive-step switch, and the implementation
+fingerprint. Exact repeated CLI training reuses it; a mismatch is recomputed with NumPy and never invokes
 RynnValue. The legacy `rynnvalue=false` configuration now selects independent
 Sparse materialization; it does not require model outputs. Existing diagnostic
 sidecars are retained, and Final Reward equals the sparse reward.
+
+UI training pins all three optional YAML fields `reward.manifest_path`,
+`reward.manifest_sha256` (file SHA-256), and `reward.version_id`. They must be
+provided together. The loader checks the fixed recipe, member/chunk identity and
+artifact hashes. Reward source, Stage exponent, shaping weight and model-evaluation
+parameters stay bound to the selected version. `reward.gamma` and
+`reward.accumulate_primitive_steps` remain editable training parameters, initially
+populated from that version. If unchanged, training consumes the saved arrays
+without writes. If changed, it reduces the saved Stage scores or RynnValue outputs
+and prepared terminal information into separate, immutable training-local arrays
+under `paths.output_dir/reward_adaptations/`. It never reads newer live keyframes,
+reruns a model, or changes the dataset version. The training reward manifest records
+the source version/hash and effective reduction settings; dataset detail continues
+to display the selected dataset version, not a training run's overrides. Bellman
+discount and reward reduction use the same effective gamma/cumulative settings.
+Other IQL hyperparameters remain editable. Standalone CLI use without pinned fields
+retains its current preparation/materialization workflow.
+
+`GET /api/datasets/runs/<run_id>?dataset_id=...&version_id=...` displays the
+selected version's stored arrays, with `dataset_context` and `reward_evaluation`.
+The global detail retains global trajectory sidecars. Dataset-scoped results do
+not overwrite them unless explicitly requested; two datasets can show different exponents for the same
+source recording. Lists read lightweight metadata rather than hashing or
+decompressing observation arrays; artifact verification runs in background jobs
+or cached detail reads.
+
+Global reward plots use `trajectory_reward.json` beside the source trajectory,
+pointing to a copied, content-addressed `trajectory_reward.<sha256>.npz`. The
+metadata retains the input hashes, evaluator, recipe and evaluation time. The
+first successful evaluation initializes this snapshot; reevaluating a dataset
+does not automatically replace it. An explicit manual overwrite, including
+`overwrite_global: true` on a dataset evaluation, atomically replaces the global
+pointer. This also allows Stage curves to be updated without relabeling. Existing
+valid global RynnValue sidecars retain precedence during initialization. Stored
+global reward arrays are independent of dataset directories, so deleting a
+dataset does not remove its previously copied global result. Robometer globals
+remain independent diagnostic sidecars. The UI has only a global/dataset source
+selector; it no longer exposes evaluation-history selection or activation.
 
 After a successful UI evaluation job, a combined evaluation snapshot may be
 atomically copied beside the source episode as `rynnvalue_evaluation.npz`; its

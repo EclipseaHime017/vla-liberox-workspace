@@ -303,12 +303,12 @@ def test_request_validation(tmp_path: Path):
         OfflineJobService._validate_training_parameters({"reward_rynnvalue": "false"})
 
 
-def test_explicit_trajectory_evaluation_cannot_overwrite():
-    with pytest.raises(ValidationError, match="cannot overwrite"):
-        TrajectoryEvaluationRequest.model_validate({
-            "task_id": "LEVEL1::pick", "run_ids": ["run-1"],
-            "overwrite": True, "evaluators": ["rynnvalue"],
-        })
+def test_explicit_trajectory_evaluation_can_overwrite():
+    selected = TrajectoryEvaluationRequest.model_validate({
+        "task_id": "LEVEL1::pick", "run_ids": ["run-1"],
+        "overwrite": True, "evaluators": ["rynnvalue"],
+    })
+    assert selected.overwrite is True
     batch = TrajectoryEvaluationRequest.model_validate({
         "task_id": "LEVEL1::pick",
         "run_ids": None,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -49,10 +50,11 @@ def test_complete_trajectory_is_evaluated(tmp_path: Path):
     raw["paths"].update({"selection_manifest": str(selection), "output_dir": str(tmp_path / "out"), "robometer_root": str(tmp_path)})
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(raw))
+    loads = []
     class Fake:
         commit = "fake"
         load_seconds = 0
-        def __init__(self, _): pass
+        def __init__(self, _): loads.append(1)
         def __call__(self, frames, steps, prompt):
             assert len(frames) == 11 and steps[-1] == 10 and prompt == "do task"
             return np.linspace(0, 1, len(steps)), np.linspace(0, 1, len(steps))
@@ -60,3 +62,19 @@ def test_complete_trajectory_is_evaluated(tmp_path: Path):
     payload = json.loads(result.read_text())
     with np.load(payload["episodes"][0]["annotation_path"]) as values:
         assert values["observation_steps"][-1] == 10
+    assert len(loads) == 1
+    # A new dataset version or execution batch size must not load the model.
+    shutil.copytree(tmp_path / "out" / "values", tmp_path / "new" / "values")
+    raw["paths"]["output_dir"] = str(tmp_path / "new")
+    raw["evaluation"]["batch_size"] = 1
+    config_path.write_text(yaml.safe_dump(raw))
+    cached = json.loads(evaluate_selection(load_config(config_path), Fake).read_text())
+    assert len(loads) == 1
+    assert cached["cache_stats"]["skipped"] == 1
+    assert Path(cached["episodes"][0]["annotation_path"]).parent == tmp_path / "new" / "values"
+    evaluate_selection(load_config(config_path), Fake, overwrite=True)
+    assert len(loads) == 2
+    raw["evaluation"]["fps"] = 4.0
+    config_path.write_text(yaml.safe_dump(raw))
+    evaluate_selection(load_config(config_path), Fake)
+    assert len(loads) == 3

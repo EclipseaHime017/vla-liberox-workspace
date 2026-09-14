@@ -51,6 +51,7 @@ TRAIN_SCHEMA = {
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
                "rynnvalue": None, "source": None, "stage_exponent": None,
+               "manifest_path": None, "manifest_sha256": None, "version_id": None,
                "gamma": None, "shaping_weight": None,
                "robot_description": None,
                "camera_description": None, "accumulate_primitive_steps": None},
@@ -180,6 +181,8 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
                 raise ValueError("reward.source conflicts with legacy reward.rynnvalue")
         reward.update(source=source, rynnvalue=source == "rynnvalue")
         reward.setdefault("stage_exponent", 2.0)
+        for name in ("manifest_path", "manifest_sha256", "version_id"):
+            reward.setdefault(name, None)
     if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
         raw["data"].setdefault("stage_annotations_manifest", None)
     _validate_schema(raw, TRAIN_SCHEMA)
@@ -193,6 +196,16 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     data, reward, vla, iql, logging_cfg = (
         raw["data"], raw["reward"], raw["vla"], raw["iql"], raw["logging"]
     )
+    pinned = [reward[name] for name in ("manifest_path", "manifest_sha256", "version_id")]
+    if any(value is not None for value in pinned):
+        if any(not isinstance(value, str) or not value.strip() for value in pinned):
+            raise ValueError("Pinned rewards require manifest_path, manifest_sha256 and version_id together")
+        if re.fullmatch(r"[0-9a-f]{64}", reward["manifest_sha256"]) is None:
+            raise ValueError("reward.manifest_sha256 must be a SHA256 digest")
+        manifest_path = Path(reward["manifest_path"]).expanduser()
+        reward["manifest_path"] = str(
+            (manifest_path if manifest_path.is_absolute() else path.parent / manifest_path).resolve()
+        )
     if not isinstance(data["project_id"], str) or not data["project_id"].strip():
         raise TypeError("data.project_id must be a non-empty string")
     if not isinstance(data["task_ids"], list) or any(not isinstance(x, str) for x in data["task_ids"]):

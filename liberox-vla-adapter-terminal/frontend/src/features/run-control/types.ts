@@ -120,6 +120,15 @@ export type PaginatedRuns = {
 };
 
 export type TrajectoryDetail = {
+  global_evaluation?: { source: RewardSource; config: RewardParameters; evaluated_at?: string; origin?: string } | null;
+  global_evaluation_pending?: boolean;
+  global_evaluation_error?: string;
+  dataset_context?: DatasetDetailContext | null;
+  available_dataset_contexts?: Array<{
+    dataset_id: string; dataset_name: string; reward_version_id: string | null;
+    robometer_version_id: string | null; versions: RewardVersion[];
+  }>;
+  reward_evaluation?: DatasetRewardEvaluation | null;
   run: Session;
   artifacts: Record<string, string>;
   series: {
@@ -132,16 +141,43 @@ export type TrajectoryDetail = {
   rynnvalue_evaluation: null | RynnValueEvaluation;
   robometer_evaluation: null | {
     status: "READY"; evaluated_at: string; model: string | null; revision: string | null;
+    version_id?: string;
     observation_steps: number[]; time_seconds: number[];
     progress_pred: number[]; success_probs: number[];
     evaluation_config: Record<string, unknown>;
   };
 };
 
+export type RewardSource = "sparse" | "stage" | "rynnvalue" | "robometer";
+export type RewardParameters = {
+  gamma?: number; shaping_weight?: number; stage_exponent?: number;
+  accumulate_primitive_steps?: boolean; max_frames?: number; batch_size?: number;
+  sampling_hz?: number; force_model?: boolean; checkpoint?: string; revision?: string;
+  overwrite_global?: boolean;
+  prefix_frames?: number;
+};
+export type RewardVersion = {
+  id: string; evaluator: RewardSource; status: string; parameters: RewardParameters;
+  created_at: string; completed_at?: string | null; error?: string | null; legacy?: boolean;
+};
+export type DatasetDetailContext = {
+  dataset_id: string; dataset_name: string; version_id: string | null;
+  source?: RewardSource | null; config?: RewardParameters; status?: string;
+};
+export type DatasetRewardEvaluation = {
+  status: "READY"; version_id: string; reward_config: RewardParameters;
+  source: "sparse" | "stage" | "rynnvalue";
+  time_seconds?: number[]; stage_scores?: number[]; observation_steps?: number[];
+  boundary_steps: number[]; chunk_lengths: number[];
+  chunk_start_steps: number[]; chunk_end_steps: number[];
+  sparse_reward?: number[]; dense_reward?: number[]; shape_reward?: number[]; final_reward: number[];
+};
+
 export type StageKeyframe = { step: number; kind: "positive" | "negative" };
 
 export type StageAnnotation = {
   run_id: string; status: "missing" | "ready" | "stale"; error?: string | null;
+  derivation_error?: string | null;
   action_count: number; time_seconds: number[]; success_step: number | null;
   success_consecutive_steps: number; exponent: number; keyframes: StageKeyframe[];
   scores: number[]; revision: string | null;
@@ -196,6 +232,8 @@ export type DatasetPreview = {
 };
 
 export type TrainingDataset = {
+  reward_version_id?: string | null; robometer_version_id?: string | null;
+  evaluation_versions?: RewardVersion[];
   id: string; project_id: string; name: string; task_id: string;
   status: "FROZEN"; integrity_status: "HEALTHY" | "BROKEN";
   integrity_error: string | null; annotation_status: "NOT_STARTED" | "RUNNING" | "READY" | "ERROR" | "CANCELED";
@@ -226,6 +264,7 @@ export type OfflineJob = {
   status: "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
   dataset_id: string | null; created_at: string; started_at: string | null; completed_at: string | null;
   stage: string; stage_label: string; error: string | null; output_path: string;
+  warning?: string | null;
   parameters: Record<string, unknown>; log_size: number;
   metrics?: Record<string, number | string | null>;
   training_summary?: Record<string, unknown>;
@@ -351,6 +390,10 @@ export type EvaluationFilters = {
 };
 
 export type TrainingDefaults = {
+  reward_version?: RewardVersion | null;
+  reward_parameters_locked?: boolean;
+  reward_locked_parameters?: string[];
+  reward_editable_parameters?: string[];
   basic: Record<string, number>;
   advanced: Record<string, number | string | boolean>;
   monitoring: Record<string, number | string | boolean | null>;

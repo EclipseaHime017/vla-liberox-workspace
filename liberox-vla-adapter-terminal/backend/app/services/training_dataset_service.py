@@ -637,6 +637,18 @@ class TrainingDatasetService:
     @staticmethod
     def _public(payload: dict[str, Any]) -> dict[str, Any]:
         result = dict(payload)
+        result["evaluation_versions"] = list(payload.get("evaluation_versions", []))
+        known = {item["id"] for item in result["evaluation_versions"]}
+        for previous in payload.get("annotation_history", []):
+            identifier = previous.get("annotation_id")
+            if identifier and identifier not in known:
+                result["evaluation_versions"].append({"id": identifier, "evaluator": "rynnvalue",
+                    "status": previous["status"], "parameters": previous.get("config") or {},
+                    "created_at": previous.get("completed_at"), "completed_at": previous.get("completed_at"),
+                    "error": None, "legacy": True})
+                known.add(identifier)
+        result.setdefault("reward_version_id", None)
+        result.setdefault("robometer_version_id", None)
         result["members"] = [
             {
                 key: member.get(key) for key in (
@@ -648,6 +660,114 @@ class TrainingDatasetService:
             for member in payload.get("members", [])
         ]
         return result
+
+    def members_page(self, dataset_id: str, *, page: int = 1, page_size: int = 5) -> dict[str, Any]:
+        if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 50:
+            raise ValueError("page must be positive and page_size must be in [1, 50]")
+        dataset = self.get(dataset_id)
+        members = dataset["members"]
+        pages = max(1, math.ceil(len(members) / page_size))
+        page = min(page, pages)
+        items = []
+        for member in members[(page - 1) * page_size:page * page_size]:
+            run = self.run_service.get_run(member["run_id"])
+            items.append({**run, **member, "id": member["run_id"]})
+        return {"items": items, "total": len(members), "page": page,
+                "page_size": page_size, "pages": pages}
+
+    def versions(self, dataset_id: str) -> list[dict[str, Any]]:
+        return self.get(dataset_id, quick_verify=False).get("evaluation_versions", [])
+
+    def get_version(self, dataset_id: str, version_id: str) -> dict[str, Any]:
+        dataset = self.get(dataset_id, quick_verify=False)
+        version = next((item for item in dataset.get("evaluation_versions", [])
+                        if item["id"] == version_id), None)
+        if version is None:
+            raise KeyError(f"Unknown dataset evaluation version: {version_id}")
+        directory = self.root / dataset_id / "annotations" / version_id
+        path = directory / "version.json"
+        if directory.is_symlink() or path.is_symlink():
+            raise ValueError("Symlink evaluation versions are not allowed")
+        if not path.is_file():
+            return {**version, "dataset_id": dataset_id, "work_dir": str(directory / "work"),
+                    "complete": False, "legacy": True,
+                    "prepared_manifest_path": str(directory / "work" / "dataset_manifest.json"),
+                    "reward_manifest_path": str(directory / "work" / "rewards" / "reward_manifest.json")}
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if value.get("id") != version_id or value.get("dataset_id") != dataset_id:
+            raise ValueError("Evaluation version identity mismatch")
+        if value.get("dataset_sha256") != dataset["dataset_sha256"]:
+            raise ValueError("Evaluation version dataset hash mismatch")
+        return {**value, "status": version["status"]}
+
+    def update_version(self, dataset_id: str, version: dict[str, Any]) -> dict[str, Any]:
+        """Publish a lightweight summary; successful artifacts are immutable."""
+        with self.lock:
+            path, payload = self._load(dataset_id)
+            versions = payload.setdefault("evaluation_versions", [])
+            existing = next((item for item in versions if item["id"] == version["id"]), None)
+            if existing is not None and existing.get("status") == "READY":
+                return self._public(payload)
+            summary = {key: version.get(key) for key in (
+                "id", "evaluator", "status", "parameters", "created_at", "completed_at", "error",
+            )}
+            if existing == summary:
+                return self._public(payload)
+            if existing is None:
+                versions.append(summary)
+            else:
+                existing.update(summary)
+            if version["status"] == "READY":
+                key = "robometer_version_id" if version["evaluator"] == "robometer" else "reward_version_id"
+                payload[key] = version["id"]
+                if key == "reward_version_id":
+                    payload.update(annotation_id=version["id"], annotation_status="READY",
+                                   annotation_config=version.get("parameters"))
+            payload["updated_at"] = _utc_now()
+            atomic_write_json(path, payload)
+            self.repository.upsert(payload, path)
+            return self._public(payload)
+
+    def activate_version(self, dataset_id: str, version_id: str) -> dict[str, Any]:
+        with self.lock:
+            version = self.validate_version(dataset_id, version_id)
+            if version.get("status") != "READY" or not version.get("complete"):
+                raise ConflictError("Evaluation version is not ready", code="REWARD_VERSION_NOT_READY")
+            path, payload = self._load(dataset_id)
+            key = "robometer_version_id" if version["evaluator"] == "robometer" else "reward_version_id"
+            payload[key] = version_id
+            if key == "reward_version_id":
+                payload.update(annotation_id=version_id, annotation_status="READY",
+                               annotation_config=version.get("parameters"))
+            payload["updated_at"] = _utc_now()
+            atomic_write_json(path, payload)
+            self.repository.upsert(payload, path)
+            return self._public(payload)
+
+    def validate_version(self, dataset_id: str, version_id: str) -> dict[str, Any]:
+        """Full artifact verification only on explicit activation/training, never lists."""
+        version = self.get_version(dataset_id, version_id)
+        if not version.get("complete") or version.get("status") != "READY":
+            raise ConflictError("Evaluation version is not ready", code="REWARD_VERSION_NOT_READY")
+        pairs = [("config_path", "config_sha256")]
+        if version["evaluator"] == "robometer":
+            pairs.append(("robometer_manifest_path", "robometer_manifest_sha256"))
+            value_path = version["robometer_manifest_path"]
+        else:
+            pairs.extend([("prepared_manifest_path", "prepared_manifest_sha256"),
+                          ("reward_manifest_path", "reward_manifest_sha256")])
+            value_path = version["reward_manifest_path"]
+        for path_key, hash_key in pairs:
+            current = Path(version[path_key])
+            if current.is_symlink() or not current.is_file() or _sha256(current) != version[hash_key]:
+                raise ValueError(f"Evaluation version integrity failed: {path_key}")
+        manifest = json.loads(Path(value_path).read_text(encoding="utf-8"))
+        for entry in manifest.get("episodes", []):
+            current = Path(entry.get("reward_path") or entry["annotation_path"])
+            expected = entry.get("reward_sha256") or entry.get("values_sha256") or entry["annotation_sha256"]
+            if current.is_symlink() or not current.is_file() or _sha256(current) != expected:
+                raise ValueError(f"Evaluation version integrity failed: {entry['run_id']}")
+        return version
 
     def get(self, dataset_id: str, *, quick_verify: bool = True) -> dict[str, Any]:
         path, payload = self._load(dataset_id)

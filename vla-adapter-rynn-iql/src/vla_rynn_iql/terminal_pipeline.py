@@ -25,6 +25,7 @@ from .rewards import (
     REWARD_SCHEMA_VERSION,
     official_inference_config,
     reward_derivation_config,
+    reward_implementation_fingerprint,
 )
 
 
@@ -190,6 +191,8 @@ def merged_training_config(config: TerminalPipelineConfig) -> dict[str, Any]:
                 value = str(_resolve(value, config.path.parent, "overrides.iql.resume_checkpoint"))
             elif section == "data" and key == "stage_annotations_manifest" and value is not None:
                 value = str(_resolve(value, config.path.parent, "overrides.data.stage_annotations_manifest"))
+            elif section == "reward" and key == "manifest_path" and value is not None:
+                value = str(_resolve(value, config.path.parent, "overrides.reward.manifest_path"))
             raw[section][key] = value
     reward_overrides = config.overrides.get("reward", {})
     if "source" in reward_overrides and "rynnvalue" not in reward_overrides:
@@ -523,6 +526,7 @@ def reward_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
         or rewards.get("dataset_sha256") != prepared.get("dataset_sha256")
         or rewards.get("annotation_manifest_sha256") != stable_hash(annotations)
         or rewards.get("reward_config") != reward_derivation_config(reward_config)
+        or rewards.get("derivation_implementation_sha256") != reward_implementation_fingerprint("rynnvalue")
     ):
         return False
     for episode in rewards.get("episodes", []):

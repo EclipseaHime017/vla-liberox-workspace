@@ -94,12 +94,38 @@ def test_preflight_fails_all_missing_stale_or_wrong_frozen_members(tmp_path):
         service.validate_members([{"run_id": "r"}], 5)
     service.save("r", [], 2, service.detail("r")["revision"])
     assert list(service.validate_members([{"run_id": "r"}], 5)) == ["r"]
-    with pytest.raises(ValueError, match="different success threshold"):
-        service.validate_members([{"run_id": "r"}], 6)
+    # Dataset-local success thresholds are recipe context, not label identity.
+    assert service.validate_members([{"run_id": "r"}], 6) == service.validate_members([{"run_id": "r"}], 5)
     with pytest.raises(ValueError, match="冻结数据集不匹配"):
         service.validate_members([{"run_id": "r", "artifacts": {"trajectory": {"sha256": "0"*64}}}], 5)
     (path.parent / "stage_annotation.json").write_text("broken")
     assert service.detail("r")["status"] == "stale"
+
+
+def test_preview_exponent_changes_without_relabeling(tmp_path):
+    service, path, _ = fixture(tmp_path)
+    frames = [{"step": 10, "kind": "positive"}]
+    before = service.detail("r")
+    p2 = service.save("r", frames, 2, before["revision"])
+    labels_path = path.parent / "stage_annotation.json"
+    labels = labels_path.read_bytes()
+    assert "exponent" not in json.loads(labels)
+    service._defaults = lambda: (5, 4.)
+    p4 = service.detail("r")
+    assert p4["revision"] == p2["revision"]
+    assert p4["scores"][5] != p2["scores"][5]
+    assert labels_path.read_bytes() == labels
+
+
+def test_recipe_failure_does_not_discard_saved_keyframes(tmp_path):
+    service, path, _ = fixture(tmp_path, np.ones(20, dtype=bool))
+    # An invalid successful normalization is an evaluation failure, not corrupt labels.
+    saved = service.save("r", [{"step": 2, "kind": "negative"}], 2,
+                         service.detail("r")["revision"])
+    assert saved["status"] == "ready"
+    assert "denominator" in saved["derivation_error"]
+    assert saved["scores"] == []
+    assert json.loads((path.parent / "stage_annotation.json").read_text())["keyframes"] == saved["keyframes"]
 
 
 def test_active_or_symlink_sidecars_cannot_be_written(tmp_path):

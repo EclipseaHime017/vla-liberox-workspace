@@ -17,7 +17,6 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
   const [open, setOpen] = useState(false);
   const [annotation, setAnnotation] = useState<StageAnnotation | null>(null);
   const [keyframes, setKeyframes] = useState<StageKeyframe[]>([]);
-  const [exponent, setExponent] = useState(2);
   const [step, setStep] = useState(0);
   const [kind, setKind] = useState<StageKeyframe["kind"]>("positive");
   const [loading, setLoading] = useState(true);
@@ -25,11 +24,10 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
   const [error, setError] = useState("");
   const [videoReady, setVideoReady] = useState(false);
   const requestId = useRef(0);
-  const dirty = annotation != null && (exponent !== annotation.exponent
-    || JSON.stringify(keyframes) !== JSON.stringify(annotation.keyframes));
+  const dirty = annotation != null && JSON.stringify(keyframes) !== JSON.stringify(annotation.keyframes);
 
   const accept = useCallback((next: StageAnnotation) => {
-    setAnnotation(next); setKeyframes(next.keyframes); setExponent(next.exponent);
+    setAnnotation(next); setKeyframes(next.keyframes);
     onSaved(next);
   }, [onSaved]);
   const load = useCallback(async () => {
@@ -98,14 +96,14 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
     setSaving(true); setError("");
     try {
       accept(await saveStageAnnotation(runId, {
-        keyframes, exponent, revision: annotation.revision,
+        keyframes, revision: annotation.revision,
       }));
     } catch (reason) { setError(String(reason)); }
     finally { setSaving(false); }
   };
   const close = () => {
     if (dirty && !window.confirm("切片标记尚未保存，是否丢弃本次修改？")) return;
-    if (annotation) { setKeyframes(annotation.keyframes); setExponent(annotation.exponent); }
+    if (annotation) setKeyframes(annotation.keyframes);
     setOpen(false);
   };
   const reload = () => {
@@ -132,8 +130,9 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
     <div className="stage-toolbar"><button onClick={() => open ? close() : setOpen(true)} disabled={saving}>
       {open ? "收起切片" : "切片 / 标记关键帧"}
     </button><span role="status">{loading ? "读取切片标记…" : dirty ? "有未保存的修改"
-      : annotation?.status === "ready" ? "阶段奖励已保存" : annotation?.status === "stale"
+      : annotation?.status === "ready" ? "关键帧已保存" : annotation?.status === "stale"
         ? "原数据或标注规则已变化，请检查后重新保存" : "尚未保存阶段标注"}</span></div>
+    {annotation?.derivation_error && <p className="error-banner">关键帧已保存，奖励预览计算失败：{annotation.derivation_error}。请检查评价配置，标记无需重新保存。</p>}
     {open && <div className="stage-editor">
       {(error || annotation?.error) && <div className="error-banner"><span>{error || annotation?.error}</span>
         <button onClick={reload} disabled={loading || saving}>重新加载标注</button></div>}
@@ -160,8 +159,7 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
           </select></label><button onClick={putKeyframe} disabled={!canMark}>{selected ? "更新当前关键帧" : "标记当前帧"}</button>
             {selected && <button onClick={() => setKeyframes((current) => current.filter((item) => item.step !== step))}>删除当前标记</button>}</div>
         </fieldset>
-        <div className="stage-toolbar"><label>插值指数 p<input aria-label="插值指数 p" type="number" min={1} step="any" value={exponent}
-          disabled={saving} onChange={(event) => setExponent(Number(event.target.value))} /></label>
+        <div className="stage-toolbar">
           <span>连续 {annotation.success_consecutive_steps} 步成功确认：{annotation.success_step == null ? "未确认成功" : `step ${annotation.success_step}（自动锚点，不计入 positive 数量）`}</span></div>
         <ul className="stage-keyframes">{keyframes.map((item, index) => <li key={`${item.step}-${index}`}>
           <button className={`stage-keyframe ${item.kind}`} disabled={saving || !videoReady} onClick={() => { setKind(item.kind); seek(item.step); }}>
@@ -170,8 +168,8 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
         </li>)}</ul>
         {!keyframes.length && <p className="field-hint">尚无手动关键帧。失败轨迹可保存空标注，阶段奖励保持 -1。</p>}
         <div className="stage-toolbar"><button className="primary" onClick={() => void save()}
-          disabled={saving || !Number.isFinite(exponent) || exponent < 1 || (!dirty && annotation.status === "ready")}>{saving ? "正在保存并计算奖励…" : "保存切片并计算奖励"}</button>
-          <span>保存后更新下方 Stage-based Reward；未保存的修改不参与训练。</span></div>
+          disabled={saving || (!dirty && annotation.status === "ready")}>{saving ? "正在保存关键帧…" : "保存关键帧"}</button>
+          <span>仅保存标记。p 和奖励配置在数据集的配置面板调整，重新评价时使用最新保存的关键帧。</span></div>
       </>}
     </div>}
   </section>;

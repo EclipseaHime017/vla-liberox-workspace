@@ -77,40 +77,17 @@ def make_jobs(tmp_path: Path):
     return jobs, base, dataset, calls, snapshots
 
 
-@pytest.mark.parametrize("source", ["sparse", "stage"])
-def test_direct_sources_train_without_any_rynn_annotation(tmp_path, source):
-    jobs, _, _, calls, _ = make_jobs(tmp_path)
-    jobs._validated_annotation_work = lambda _: pytest.fail("must not read RynnValue")
-    result = jobs.start_training("ds", {
-        "reward_source": source, "reward_stage_exponent": 3.0,
-        "reward_gamma": .92,
-    })
-    assert "requires_rynn" not in calls
-    assert [stage["id"] for stage in result["stages"]] == ["prepare", "rewards", "train"]
-    assert {stage["environment"] for stage in result["stages"]} == {"vla-liberox"}
-    assert all("annotate_rewards.py" not in " ".join(stage["argv"]) for stage in result["stages"])
-    raw = yaml.safe_load(result["config_path"].read_text(encoding="utf-8"))
-    assert raw["reward"]["source"] == source
-    assert raw["reward"]["rynnvalue"] is False
-    assert raw["reward"]["stage_exponent"] == 3.0
-    assert raw["reward"]["gamma"] == .92
-    assert Path(raw["paths"]["work_dir"]).parent == result["config_path"].parent
-    assert result["parameters"]["annotation_id"] is None
-    assert result["parameters"]["reward"]["source"] == source
-    assert jobs.launch_reserved is False
-
-
 @pytest.mark.parametrize("source", ["sparse", "stage", "rynnvalue"])
 def test_training_launch_and_recovery_use_real_catalog(tmp_path, monkeypatch, source):
-    jobs, _, dataset, _, _ = make_jobs(tmp_path)
+    from test_dataset_reward_versions import setup_jobs, finish
+
+    jobs, dataset = setup_jobs(tmp_path)
+    version = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source=source))
     database_path = tmp_path / "catalog.sqlite3"
     jobs.repository = OfflineJobRepository(database_path, "test")
     jobs.gpu_lock_path = tmp_path / ".gpu-task.lock"
     jobs._new_job = lambda **kwargs: OfflineJobService._new_job(jobs, **kwargs)
     jobs._prepare_launch = lambda: setattr(jobs, "launch_reserved", True)
-    dataset["annotation_id"] = "ann"  # Direct rewards must not inherit an older model evaluation.
-    if source == "rynnvalue":
-        dataset.update(annotation_status="READY", annotation_id="ann")
     spawned = []
 
     def launch(*args, **kwargs):
@@ -118,32 +95,30 @@ def test_training_launch_and_recovery_use_real_catalog(tmp_path, monkeypatch, so
         return SimpleNamespace(pid=123456)
 
     monkeypatch.setattr("backend.app.services.offline_job_service.subprocess.Popen", launch)
-    result = jobs.start_training("ds", {"reward_source": source})
+    result = jobs.start_training(dataset["id"], {"reward_source": source})
     assert len(spawned) == 1
     assert result["status"] == "STARTING"
     assert jobs.launch_reserved is False
-    annotation_id = "ann" if source == "rynnvalue" else None
+    annotation_id = version["id"]
     path = jobs.jobs_root / result["id"] / "job.json"
     assert json.loads(path.read_text())["parameters"]["annotation_id"] == annotation_id
+    assert [stage["id"] for stage in json.loads(path.read_text())["stages"]] == ["train"]
 
     with connect(database_path) as database:
         column = next(row for row in database.execute("PRAGMA table_info(training_runs)")
                       if row["name"] == "annotation_id")
-        assert column["notnull"] == 1  # Existing catalogs require no schema migration.
+        assert column["notnull"] == 1
         row = database.execute("SELECT * FROM training_runs WHERE id = ?", (result["id"],)).fetchone()
-        assert row["annotation_id"] == (annotation_id or "")
+        assert row["annotation_id"] == annotation_id
         assert row["status"] == "STARTING"
-        assert len(jobs.repository.references_for_dataset("ds")) == 1
 
-    # The pre-fix failure left a STARTING manifest before any runner was spawned.
-    # A restarted service must index it as failed instead of hiding it on every poll.
     orphan = json.loads(path.read_text())
     orphan.update(created_at="2000-01-01T00:00:00+00:00", launcher_pid=None)
     path.write_text(json.dumps(orphan))
     jobs.repository = OfflineJobRepository(database_path, "test")
     recovered = jobs.get(result["id"])
     assert recovered["status"] == "FAILED"
-    assert len(spawned) == 1  # Recovery never restarts training automatically.
+    assert len(spawned) == 1
     assert recovered["parameters"]["annotation_id"] == annotation_id
     with connect(database_path) as database:
         for table in ("offline_jobs", "training_runs"):
@@ -151,48 +126,16 @@ def test_training_launch_and_recovery_use_real_catalog(tmp_path, monkeypatch, so
             assert row["status"] == "FAILED"
 
 
-def test_stage_freezes_all_members_before_gpu_and_retains_original_snapshot(tmp_path):
-    jobs, _, _, calls, snapshots = make_jobs(tmp_path)
-    result = jobs.start_training("ds", {"reward_source": "stage"})
-    assert calls == ["requires_healthy", "stage_validation", "gpu_reservation", "spawn"]
-    raw = yaml.safe_load(result["config_path"].read_text(encoding="utf-8"))
-    snapshot_path = Path(raw["data"]["stage_annotations_manifest"])
-    assert snapshot_path.parent == result["config_path"].parent
-    assert json.loads(snapshot_path.read_text()) == {
-        "schema_version": 1, "annotations": snapshots,
-    }
-    snapshots["run"]["keyframes"].append({"step": 5, "kind": "positive"})
-    assert json.loads(snapshot_path.read_text())["annotations"]["run"]["keyframes"] == []
-
-
-def test_missing_stage_member_stops_before_job_or_gpu_creation(tmp_path):
-    jobs, _, _, calls, _ = make_jobs(tmp_path)
-
-    def reject(*_):
-        raise ValueError("Missing Stage annotations: run")
-
-    jobs.stage_annotations.validate_members = reject
-    with pytest.raises(ValueError, match="Missing Stage annotations: run"):
-        jobs.start_training("ds", {"reward_source": "stage"})
-    assert calls == ["requires_healthy"]
-    assert not jobs.jobs_root.exists()
-    assert not jobs.training_root.exists()
-
-
-def test_rynnvalue_preserves_existing_ready_gate_and_reward_only_stage(tmp_path):
-    jobs, _, dataset, calls, _ = make_jobs(tmp_path)
-    with pytest.raises(ValueError, match="annotation is not ready"):
-        jobs.start_training("ds", {"reward_source": "rynnvalue"})
-    assert calls == ["requires_rynn"]
-    dataset.update(annotation_status="READY", annotation_id="ann")
-    calls.clear()
-    result = jobs.start_training("ds", {"reward_source": "rynnvalue"})
-    assert calls == ["requires_rynn", "gpu_reservation", "spawn"]
-    assert [stage["id"] for stage in result["stages"]] == ["rewards", "train"]
-    raw = yaml.safe_load(result["config_path"].read_text())
-    assert raw["reward"]["rynnvalue"] is True
-    assert "stage_annotations_manifest" not in raw["data"]
-    assert result["parameters"]["annotation_id"] == "ann"
+def test_old_training_record_with_null_annotation_still_indexes(tmp_path):
+    repository = OfflineJobRepository(tmp_path / "catalog.sqlite3", "test")
+    payload = {"id": "old", "kind": "training", "status": "FAILED", "dataset_id": "ds",
+               "created_at": "2026-01-01", "parameters": {"annotation_id": None}}
+    path = tmp_path / "job.json"
+    path.write_text(json.dumps(payload))
+    repository.upsert(payload, path)
+    with connect(tmp_path / "catalog.sqlite3") as database:
+        row = database.execute("SELECT annotation_id FROM training_runs WHERE id='old'").fetchone()
+        assert row["annotation_id"] == ""
 
 
 def test_source_defaults_and_legacy_checkbox_remain_supported(tmp_path):
@@ -202,8 +145,7 @@ def test_source_defaults_and_legacy_checkbox_remain_supported(tmp_path):
     assert defaults["reward_source"] == "stage"
     assert defaults["reward_stage_exponent"] == 4.0
     assert jobs._reward_source(base, {"reward_rynnvalue": True}) == "rynnvalue"
-    result = jobs.start_training("ds", {"reward_rynnvalue": False})
-    assert result["parameters"]["reward"]["source"] == "sparse"
+    assert jobs._reward_source(base, {"reward_rynnvalue": False}) == "sparse"
 
 
 @pytest.mark.parametrize("annotation_ready", [False, True])

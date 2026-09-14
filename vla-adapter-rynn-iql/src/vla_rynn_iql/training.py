@@ -249,6 +249,7 @@ def _save_checkpoint(
         "schema_version": 1, "step": step, "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index),
+        "reward_version_id": config.section("reward").get("version_id"),
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
         "code_version": _code_version(),
@@ -447,6 +448,7 @@ def train(config: LoadedConfig) -> Path:
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index),
+        "reward_version_id": config.section("reward").get("version_id"),
         "base_checkpoint": config.section("vla")["base_checkpoint"],
     })
     actor_optimizer.zero_grad(set_to_none=True)

@@ -35,12 +35,14 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
   const [error, setError] = useState("");
   const monitor = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const updateCallback = useRef(onUpdate);
+  updateCallback.current = onUpdate;
   useEffect(() => {
     setJob(initial); setText(""); setError("");
     const socket = jobWebSocket(initial.id);
     socket.onmessage = (event) => {
       const payload = JSON.parse(event.data) as { type: string; job?: OfflineJob; logs?: { text: string } };
-      if (payload.job) { setJob(payload.job); onUpdate?.(payload.job); }
+      if (payload.job) { setJob(payload.job); updateCallback.current?.(payload.job); }
       if (payload.logs?.text) setText((current) => current + payload.logs!.text);
     };
     socket.onerror = () => setError("任务监视器连接中断，任务仍会在后台继续运行");
@@ -75,6 +77,7 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
       <span><small>峰值显存</small><b>{metricNumber(metric.cuda_peak_memory_gib, 3)} GiB</b></span>
     </div>}
     {error && <p className="job-warning">{error}</p>}
+    {job.warning && <p className="job-warning" role="alert">{job.warning}</p>}
     <div className="serial-monitor job-serial" ref={monitor} onScroll={() => { const node = monitor.current; if (node) follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>
       {lines.length ? lines.map((line, index) => <div key={index}><time>{line.time}</time><span className={line.level === "ERROR" ? "monitor-error" : line.level === "DONE" ? "monitor-ok" : "monitor-info"}>{line.level}</span><p>{line.message}</p></div>) : <p className="empty-log">等待后台进程输出…</p>}
     </div>

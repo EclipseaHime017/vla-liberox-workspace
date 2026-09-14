@@ -1,6 +1,7 @@
 """Persistent offline job, training, and TensorBoard endpoints."""
 
 from fastapi import APIRouter, Query, Request
+from starlette.concurrency import run_in_threadpool
 
 from .dependencies import http_error, offline_job_service
 from .models import TrainingRunRequest
@@ -54,7 +55,7 @@ async def defaults(
 @router.post("/training-runs", status_code=201)
 async def train(body: TrainingRunRequest, request: Request):
     try:
-        return offline_job_service(request).start_training(
+        return await run_in_threadpool(offline_job_service(request).start_training,
             body.dataset_id, body.parameters
         )
     except Exception as exc:

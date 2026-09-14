@@ -90,12 +90,12 @@ describe("stage keyframe editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "标记当前帧" }));
     fireEvent.change(screen.getByLabelText("关键帧类型"), { target: { value: "negative" } });
     fireEvent.click(screen.getByRole("button", { name: "更新当前关键帧" }));
-    fireEvent.change(screen.getByLabelText("插值指数 p"), { target: { value: "3" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存切片并计算奖励" }));
+    expect(screen.queryByLabelText("插值指数 p")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "保存关键帧" }));
     await waitFor(() => expect(saveStageAnnotation).toHaveBeenCalledWith("episode", {
-      keyframes: [{ step: 3, kind: "negative" }], exponent: 3, revision: "original-token",
+      keyframes: [{ step: 3, kind: "negative" }], revision: "original-token",
     }));
-    await screen.findByText("阶段奖励已保存");
+    await screen.findByText("关键帧已保存");
     expect(onSaved).toHaveBeenLastCalledWith(expect.objectContaining({ scores: Array(11).fill(-1) }));
     fireEvent.click(screen.getByRole("button", { name: "删除帧 3" }));
     expect(screen.queryByRole("button", { name: "删除帧 3" })).toBeNull();
@@ -104,9 +104,9 @@ describe("stage keyframe editor", () => {
 
   it("permits explicitly saving an empty failed trajectory", async () => {
     await openEditor();
-    fireEvent.click(screen.getByRole("button", { name: "保存切片并计算奖励" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存关键帧" }));
     await waitFor(() => expect(saveStageAnnotation).toHaveBeenCalledWith("episode", {
-      keyframes: [], exponent: 2, revision: "original-token",
+      keyframes: [], revision: "original-token",
     }));
   });
 
@@ -126,12 +126,21 @@ describe("stage keyframe editor", () => {
     await openEditor();
     fireEvent.change(screen.getByRole("slider"), { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: "标记当前帧" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存切片并计算奖励" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存关键帧" }));
     await screen.findByText(/409: annotation changed/);
     expect(screen.getByRole("button", { name: "删除帧 3" })).toBeTruthy();
     expect(getStageAnnotation).toHaveBeenCalledTimes(1);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(screen.getByRole("button", { name: "重新加载标注" }));
     await waitFor(() => expect(getStageAnnotation).toHaveBeenCalledTimes(2));
+  });
+  it("reports a derivation error without treating saved keyframes as missing", async () => {
+    vi.mocked(getStageAnnotation).mockResolvedValue({ ...annotation, status: "ready",
+      keyframes: [{ step: 2, kind: "negative" }], derivation_error: "invalid normalization" });
+    await openEditor();
+    expect(screen.getByText("关键帧已保存")).toBeTruthy();
+    expect(screen.getByText(/奖励预览计算失败：invalid normalization/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "删除帧 2" })).toBeTruthy();
+    expect(saveStageAnnotation).not.toHaveBeenCalled();
   });
 });

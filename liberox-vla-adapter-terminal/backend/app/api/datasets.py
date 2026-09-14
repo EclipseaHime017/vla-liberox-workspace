@@ -12,6 +12,7 @@ from .dependencies import (
     stage_annotation_service,
 )
 from .models import RunTestLabelRequest, TrajectoryEvaluationRequest, StageAnnotationRequest
+from ..services.dataset_evaluation_detail import attach_dataset_context
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -40,13 +41,19 @@ async def runs(
 
 
 @router.get("/runs/{run_id}")
-async def run_detail(run_id: str, request: Request):
+async def run_detail(run_id: str, request: Request,
+                     dataset_id: str | None = None, version_id: str | None = None):
     try:
         result = await run_in_threadpool(
             trajectory_evaluation_service(request).detail,
             run_id, robometer_evaluation_service(request),
+            include_global_evaluations=dataset_id is None,
         )
-        result["run"]["is_test"] = training_dataset_service(request).is_test(run_id)
+        datasets = training_dataset_service(request)
+        result["run"]["is_test"] = datasets.is_test(run_id)
+        result = await run_in_threadpool(attach_dataset_context, result, datasets, dataset_id, version_id)
+        if dataset_id is None and result.get("global_evaluation_pending"):
+            offline_job_service(request).schedule_first_reward_snapshot(result["run"])
         return result
     except Exception as exc:
         raise http_error(exc) from exc
