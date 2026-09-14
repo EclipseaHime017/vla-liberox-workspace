@@ -17,7 +17,7 @@ import numpy as np
 import yaml
 
 from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config, reward_source
-from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step
+from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step, replay_chunks
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
 from .rewards import (
@@ -439,6 +439,8 @@ def build_selection_manifest(
 
 
 def prepare_fingerprint(selection_manifest: dict[str, Any], raw: dict[str, Any]) -> str:
+    # Schema-4 evaluation tails already describe full replay and have reusable
+    # annotations. Keep their prepare identity stable across the replay policy change.
     data = raw["data"]
     return stable_hash({
         "selection_sha256": selection_manifest["dataset_sha256"],
@@ -457,6 +459,11 @@ def prepare_cache_valid(work_dir: Path, fingerprint: str) -> bool:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return False
+    try:
+        for episode in manifest["episodes"]:
+            replay_chunks(episode)
+    except (KeyError, TypeError, ValueError):
         return False
     return bool(
         state.get("fingerprint") == fingerprint

@@ -395,12 +395,15 @@ def test_sparse_reward_uses_only_debounced_terminal(configured):
     branch = next(item for item in index["episodes"] if item["run_id"] == "branch")
     with np.load(branch["reward_path"], allow_pickle=False) as annotation:
         rewards = annotation["pbrs_chunk_reward"]
-    # The final chunk is one completing macro action, irrespective of its five
-    # executed low-level actions or earlier transient done=True samples.
-    expected = 0.0
-    # Evaluation continues through the recorded post-terminal tail. The final
-    # replay chunk is therefore not necessarily the final diagnostic chunk.
-    assert np.isclose(rewards[len(prepared_branch["chunks"]) - 1], expected)
+    # The chunk completing the confirmation streak receives the success reward,
+    # irrespective of its length or earlier transient done=True samples.
+    success_chunk = next(
+        index for index, chunk in enumerate(prepared_branch["evaluation_chunks"])
+        if chunk["end"] == prepared_branch["terminal_step"] + 1
+    )
+    assert np.isclose(rewards[success_chunk], 0.0)
+    # Training also retains the recorded tail, whose saved sparse reward is zero.
+    assert success_chunk < len(rewards) - 1
     assert np.isclose(rewards[-1], 0.0)
 
 

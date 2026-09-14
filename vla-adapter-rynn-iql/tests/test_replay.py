@@ -5,10 +5,12 @@ import json
 import shutil
 
 import numpy as np
+import pytest
 
-from vla_rynn_iql.data import prepare_dataset
+from vla_rynn_iql.data import load_manifest, prepare_dataset
 from vla_rynn_iql.replay import ReplayDataset
-from vla_rynn_iql.rewards import annotate_manifest
+from vla_rynn_iql.rewards import annotate_manifest, load_reward_index
+from vla_rynn_iql.vla_adapter import env_to_dataset_actions
 
 
 class FakeAnnotator:
@@ -56,7 +58,73 @@ def test_transient_raw_done_does_not_terminate_an_earlier_chunk(configured):
         )
 
     assert replay[replay_index(5)]["bootstrap_mask"].item() == 1.0
-    assert replay[replay_index(13)]["bootstrap_mask"].item() == 0.0
+    assert replay[replay_index(13)]["bootstrap_mask"].item() == 1.0
+    assert replay[replay_index(18)]["bootstrap_mask"].item() == 0.0
+
+
+def test_post_success_actions_images_and_masks_are_sampled(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["env_action"][18:, 0] = [0.2, 0.4, 0.6, 0.8]
+    arrays["done"][18:] = False
+    np.savez_compressed(trajectory, **arrays)
+    observations = trajectory.with_name("trajectory_observations.npz")
+    agent = np.broadcast_to(np.arange(23, dtype=np.uint8)[:, None, None, None], (23, 16, 16, 3))
+    wrist = agent + 50
+    np.savez_compressed(observations, agentview_image=agent, wrist_image=wrist)
+
+    prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    replay = ReplayDataset(configured, _stats(7), _stats(8), split="train")
+    item = next(
+        replay[index] for index, (episode, chunk_index, _) in enumerate(replay.items)
+        if episode["run_id"] == "branch" and replay.chunks["branch"][chunk_index]["start"] == 18
+    )
+    assert item["chunk_length"].item() == 4
+    assert item["action_mask"].tolist() == [True] * 4 + [False] * 4
+    np.testing.assert_allclose(
+        item["actions"][:4], env_to_dataset_actions(arrays["env_action"][18:22], _stats(7)),
+    )
+    assert not item["actions"][4:].any()
+    assert item["agent_image"].unique().tolist() == [18]
+    assert item["wrist_image"].unique().tolist() == [68]
+    assert item["pixels"][:3].unique().tolist() == [18]
+    assert item["next_pixels"][:3].unique().tolist() == [22]
+    assert item["next_pixels"][3:].unique().tolist() == [72]
+    assert item["transition_type"] == "human"
+    assert item["bootstrap_mask"].item() == 0.0
+
+
+def test_replay_rejects_legacy_manifest_missing_full_tail(configured):
+    prepared = prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    rewards = load_reward_index(configured)
+    manifest = load_manifest(configured)
+    branch = next(ep for ep in manifest["episodes"] if ep["run_id"] == "branch")
+    branch["chunks"] = branch["chunks"][:-1]
+    branch["action_count"] = 18
+    branch.pop("evaluation_chunks")
+    manifest.pop("replay_policy")
+    prepared.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="full-recording replay chunks"):
+        ReplayDataset(configured, _stats(7), _stats(8), reward_index=rewards)
+
+
+def test_replay_rejects_rewards_that_omit_post_success_tail(configured):
+    prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    rewards = load_reward_index(configured)
+    branch = next(ep for ep in rewards["episodes"] if ep["run_id"] == "branch")
+    path = Path(branch["annotation_path"])
+    with np.load(path, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    key = "final_reward" if "final_reward" in arrays else "pbrs_chunk_reward"
+    arrays[key] = arrays[key][:-1]
+    np.savez_compressed(path, **arrays)
+    with pytest.raises(ValueError, match="reward array does not cover all 4"):
+        ReplayDataset(configured, _stats(7), _stats(8), reward_index=rewards)
 
 
 def test_replay_exposes_variable_duration_transition_metadata(configured):

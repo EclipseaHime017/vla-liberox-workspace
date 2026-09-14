@@ -210,3 +210,26 @@ def test_training_only_override_does_not_change_prepare_fingerprint(configured, 
     assert prepare_fingerprint(selection, raw) == before
     raw["data"]["success_consecutive_steps"] += 1
     assert prepare_fingerprint(selection, raw) != before
+
+
+@pytest.mark.parametrize("complete_tail", [True, False])
+def test_legacy_prepare_cache_requires_complete_recorded_tail(
+    configured, tmp_path: Path, complete_tail: bool,
+):
+    _, raw, _, selection = _selection(configured, tmp_path)
+    fingerprint = prepare_fingerprint(selection, raw)
+    prepared = prepare_dataset(configured)
+    manifest = json.loads(prepared.manifest.read_text(encoding="utf-8"))
+    manifest.pop("replay_policy")
+    manifest["source_dataset_sha256"] = selection["dataset_sha256"]
+    branch = next(ep for ep in manifest["episodes"] if ep["run_id"] == "branch")
+    branch["action_count"] = 18
+    branch["chunks"] = branch["chunks"][:-1]
+    if not complete_tail:
+        branch["evaluation_chunks"] = branch["evaluation_chunks"][:-1]
+    prepared.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    original = prepared.manifest.read_bytes()
+    mark_prepare_cache(prepared.manifest.parent, fingerprint, selection["dataset_sha256"])
+
+    assert prepare_cache_valid(prepared.manifest.parent, fingerprint) is complete_tail
+    assert prepared.manifest.read_bytes() == original

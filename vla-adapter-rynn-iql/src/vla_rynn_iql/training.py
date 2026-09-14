@@ -22,7 +22,7 @@ import yaml
 from torch.utils.data import default_collate
 
 from .config import LoadedConfig, reward_source
-from .data import load_manifest
+from .data import REPLAY_POLICY, load_manifest
 from .io import atomic_json, sha256_file, stable_hash
 from .iql import PixelIQL, advantage_weights, weighted_masked_l1
 from .monitoring import (
@@ -250,6 +250,7 @@ def _save_checkpoint(
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index),
         "reward_version_id": config.section("reward").get("version_id"),
+        "replay_policy": REPLAY_POLICY,
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
         "code_version": _code_version(),
@@ -328,6 +329,17 @@ def _restore_checkpoint(
 ) -> int:
     checkpoint = checkpoint.expanduser().resolve()
     metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
+    has_success_tail = any(
+        episode.get("split") == "train" and episode.get("terminal_step") is not None
+        and int(episode["recorded_action_count"]) > int(episode["terminal_step"]) + 1
+        for episode in manifest["episodes"]
+    )
+    if has_success_tail and metadata.get("replay_policy") != REPLAY_POLICY:
+        raise ValueError(
+            "Resume checkpoint used a different replay policy; post-success actions "
+            "now participate in training. Start a new run without resume_checkpoint; "
+            "existing complete reward evaluations can still be reused."
+        )
     expected = {
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index),
@@ -449,6 +461,7 @@ def train(config: LoadedConfig) -> Path:
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index),
         "reward_version_id": config.section("reward").get("version_id"),
+        "replay_policy": REPLAY_POLICY,
         "base_checkpoint": config.section("vla")["base_checkpoint"],
     })
     actor_optimizer.zero_grad(set_to_none=True)

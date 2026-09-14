@@ -117,7 +117,9 @@ dataset; successful reevaluation replaces it. Historical result IDs are internal
 training-snapshot references, not a user-facing version-management workflow.
 Macro Stage reward is `z(t+L)`, cumulative Stage reward is
 `Σ gamma^h z(t+h+1)`; the respective Bellman discounts remain `gamma` and
-`gamma^L`. Source observations, replay deduplication and terminal rules are
+`gamma^L`. Success confirmation controls reward semantics, not the replay
+endpoint: post-success actions remain trainable and only the last recorded
+chunk disables bootstrap. Source observations and replay deduplication are
 unchanged. Formulas and caveats: [Stage research §6](STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励).
 
 The existing UI CSV/video ZIP includes the optional annotation for archival use,
@@ -268,9 +270,24 @@ creates or reuses content-addressed RynnValue computations, and records the new
 dataset-local reward manifest without changing trajectory sidecars. A prepared branch keeps boundaries for its complete physical
 trajectory, including the natural rollout before takeover and any fixed-duration
 post-success tail, so RynnValue plots span the source video from time zero.
-`ReplayDataset` still stops at the confirmed terminal and removes duplicate
-`(root, start, end, action_source)` copied-prefix transitions only when training
-samples are assembled.
+`ReplayDataset` uses every recorded chunk, including the post-success tail,
+and removes duplicate `(root, start, end, action_source)` copied-prefix
+transitions only when training samples are assembled. Confirmed success
+continues to control reward labels; bootstrap stops only at the final recorded
+observation.
+
+New prepared schema-v4 manifests declare `replay_policy: full_recording_v1`,
+with `action_count == recorded_action_count`. The legacy `terminal_step` field
+still identifies the action confirming success, not the end of replay, and
+`trailing_action_count` counts post-success actions now included in training.
+Existing schema-v4 manifests and saved rewards remain read-only: the sampler
+uses their complete `evaluation_chunks` in memory and reuses the same reward
+array indices. Legacy `post_terminal_evaluation` entries are trainable and
+reported with their actual action source. Full evaluation boundaries retain
+their old layout to reuse compatible model outputs. Missing tail metadata or
+reward entries cause a clear error instead of silent truncation. Checkpoint and
+training provenance record the sampling policy; resuming an old truncated-replay
+checkpoint is rejected when the training split contains post-success actions.
 
 Trajectory use labels are stored in `catalog.sqlite3`, not in immutable run
 artifacts. A run marked as **test** remains browsable and can still be explicitly

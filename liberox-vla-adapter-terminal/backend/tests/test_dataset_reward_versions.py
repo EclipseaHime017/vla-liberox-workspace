@@ -43,10 +43,19 @@ def setup_jobs(tmp_path):
     return jobs, dataset
 
 
-def finish(jobs, dataset, job):
+def finish(jobs, dataset, job, *, prepared_episodes=None):
     work = job["output_path"] / "work"
+    if prepared_episodes is None:
+        prepared_episodes = [{
+            "run_id": "run", "root_run_id": "run", "kind": "original", "split": "train",
+            "action_count": 17, "recorded_action_count": 17,
+            "chunks": [
+                {"start": start, "end": end, "length": end - start, "action_source": "policy"}
+                for start, end in ((0, 8), (8, 16), (16, 17))
+            ],
+        }]
     prepared = {"dataset_sha256": "prepared", "source_dataset_sha256": dataset["dataset_sha256"],
-                "source_dataset_id": dataset["id"], "episodes": [{"run_id": "run"}]}
+                "source_dataset_id": dataset["id"], "episodes": prepared_episodes}
     (work / "dataset_manifest.json").write_text(json.dumps(prepared))
     rewards = work / "rewards"
     rewards.mkdir()

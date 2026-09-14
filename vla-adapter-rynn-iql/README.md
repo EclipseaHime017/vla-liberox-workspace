@@ -257,11 +257,13 @@ from the same state without treating padding as executed time. If a fixed-durati
 latched or fluctuate as the object moves out of and back into the goal region.
 `data.success_consecutive_steps` debounces this signal (default 5 steps, or
 250 ms at 20 Hz). A false sample resets the streak; the action that reaches the
-threshold becomes the effective terminal. Unconfirmed pulses are treated as a
-failed trajectory. Later actions are excluded from replay but remain in the
-full-trajectory RynnValue evaluation without changing the source NPZ. The
-manifest retains both raw and debounced
-success diagnostics, recorded/effective lengths, transition source/type, and terminal metadata. The importer groups
+threshold confirms success but does not terminate replay. Unconfirmed pulses
+are treated as a failed trajectory. All later recorded actions remain eligible
+for Q/V and actor training; bootstrap stops only at the final recorded
+observation. Source NPZ files remain unchanged. The manifest retains raw and
+debounced success diagnostics and the confirmation action as `terminal_step`,
+while new manifests set `action_count == recorded_action_count` and declare
+`replay_policy: full_recording_v1`. The importer groups
 train/validation splits by root trajectory, validates the N+1 state/image
 invariant, and constructs masked 8×7 tensors for variable-duration chunks of
 at most eight actions. Each recorded chunk is one IQL macro-action decision:
@@ -281,7 +283,7 @@ not merged by averaging overlapping windows. Annotation schema v6 records only t
 official decoded absolute distance, absolute logits/entropy, decoded relative
 distance, relative logits, and exact generated Analysis text/token IDs. Parsed
 Description / Match / Success values are display-only. Environment `done` is
-the sole success/terminal authority.
+the sole success authority, independently of the recorded replay endpoint.
 
 Reward materialization is a separate deterministic CPU stage. It reads those
 immutable official outputs and writes a second-level cache containing
@@ -296,8 +298,13 @@ Existing RynnValue diagnostics remain untouched. The RynnValue cache key include
 and `accumulate_primitive_steps`; changing any of them recomputes only these
 inexpensive arrays. Hash-valid schema-v4/v5
 sidecars reuse their complete official model heads during migration, regardless
-of the reward reduction stored beside them, so RynnValue is not run again. Chunks recorded
-after the confirmed terminal are inspection-only and never enter ReplayDataset.
+of the reward reduction stored beside them, so RynnValue is not run again.
+Post-success chunks retain the same reward formulas and participate in replay.
+Existing prepared schema-v4 files with complete `evaluation_chunks` and reward
+arrays are reused in memory without modifying their snapshots or rerunning
+the reward model; missing full-tail data is rejected. For a training split with
+post-success actions, start a new run rather than resume a checkpoint from the
+old truncated replay policy.
 
 The training default uses four uniformly sampled prefix frames, matching the
 offline reward-relabeling protocol in paper Appendix B.3. Upstream's standalone

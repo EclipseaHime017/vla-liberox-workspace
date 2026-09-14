@@ -10,7 +10,7 @@ import yaml
 import pytest
 
 from vla_rynn_iql.config import load_train_config
-from vla_rynn_iql.data import load_manifest, prepare_dataset
+from vla_rynn_iql.data import REPLAY_POLICY, load_manifest, prepare_dataset, replay_chunks
 from vla_rynn_iql.io import sha256_file, stable_hash
 
 
@@ -178,7 +178,7 @@ def test_branch_keeps_full_trajectory_and_marks_interrupted_policy_prefix(config
     manifest = load_manifest(configured)
     episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     assert [chunk["start"] for chunk in episodes["root"]["chunks"]] == [0, 8, 16]
-    assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [0, 5, 13]
+    assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [0, 5, 13, 18]
     assert episodes["branch"]["chunks"][0] == {
         "start": 0, "length": 5, "end": 5, "action_source": "policy",
         "transition_type": "policy_interrupted", "interrupted": True,
@@ -215,6 +215,7 @@ def test_branch_reward_boundaries_include_natural_rollout_before_takeover(config
         (0, 8, "policy_prefix"),
         (8, 13, "policy_interrupted"),
         (13, 18, "human"),
+        (18, 22, "human"),
     ]
     assert branch["reward_boundaries"] == [0, 8, 13, 18, 22]
 
@@ -264,10 +265,10 @@ def test_500_step_branch_evaluation_still_spans_full_25_seconds(configured):
     )
 
 
-def test_latched_done_tail_is_excluded_from_replay_without_changing_source(configured):
+def test_latched_done_tail_is_trained_without_changing_source(configured):
     source = Path(configured.section("paths")["dataset_sources"][0])
     trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
-    original_bytes = trajectory.read_bytes()
+    original_bytes = {path: path.read_bytes() for path in source.rglob("*") if path.is_file()}
 
     prepare_dataset(configured)
     branch = next(
@@ -278,23 +279,33 @@ def test_latched_done_tail_is_excluded_from_replay_without_changing_source(confi
     assert branch["recorded_action_count"] == 22
     assert branch["terminal_step"] == 17
     assert branch["success_streak_start"] == 13
-    assert branch["action_count"] == 18
+    assert branch["action_count"] == 22
     assert branch["trailing_action_count"] == 4
     assert branch["post_terminal_false_count"] == 0
-    assert branch["chunks"][-1] == {
+    assert branch["chunks"][-2] == {
         "start": 13, "length": 5, "end": 18, "action_source": "human",
         "transition_type": "human", "interrupted": False,
         "copied_prefix": False,
     }
     assert branch["reward_boundaries"][0] == 0
     assert branch["reward_boundaries"][-1] == 22
-    assert branch["evaluation_chunks"][:len(branch["chunks"])] == branch["chunks"]
+    assert branch["chunks"][-1] == {
+        "start": 18, "length": 4, "end": 22, "action_source": "human",
+        "transition_type": "human", "interrupted": False,
+        "copied_prefix": False,
+    }
+    assert branch["evaluation_chunks"][:-1] == branch["chunks"][:-1]
     assert branch["evaluation_chunks"][-1] == {
         "start": 18, "length": 4, "end": 22, "action_source": "human",
         "transition_type": "post_terminal_evaluation", "interrupted": False,
         "copied_prefix": False,
     }
-    assert trajectory.read_bytes() == original_bytes
+    assert all(path.read_bytes() == content for path, content in original_bytes.items())
+    manifest = load_manifest(configured)
+    assert manifest["replay_policy"] == REPLAY_POLICY
+    assert manifest["trajectory_chunk_count"] == manifest["chunk_count"] == 7
+    assert sum(ep["action_count"] for ep in manifest["episodes"]) == 39
+    assert sum(chunk["length"] for ep in manifest["episodes"] for chunk in replay_chunks(ep)) == 39
 
 
 def test_action_source_change_is_a_hard_chunk_boundary(configured):
@@ -320,7 +331,54 @@ def test_action_source_change_is_a_hard_chunk_boundary(configured):
         (0, 5, "policy"),
         (5, 10, "human"),
         (10, 18, "policy_requery"),
+        (18, 22, "policy_requery"),
     ]
+
+
+def test_post_success_source_change_starts_a_new_training_chunk(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["action_source"] = arrays["action_source"].astype("<U32")
+    arrays["action_source"][20:] = "policy_requery"
+    arrays["done"][19:] = False
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(ep for ep in load_manifest(configured)["episodes"] if ep["run_id"] == "branch")
+    assert branch["success"] is True
+    assert branch["terminal_step"] == 17
+    assert branch["post_terminal_false_count"] == 3
+    assert [(c["start"], c["end"], c["transition_type"]) for c in branch["chunks"][-2:]] == [
+        (18, 20, "human"), (20, 22, "policy_requery"),
+    ]
+    assert branch["action_source_segments"][-1] == {
+        "start": 20, "end": 22, "action_source": "policy_requery",
+    }
+
+
+def test_branch_can_resume_after_success_confirmation(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    run = json.loads(run_json.read_text(encoding="utf-8"))
+    run["resume_step"] = 20
+    run_json.write_text(json.dumps(run), encoding="utf-8")
+    trajectory = run_json.parent / "episodes" / "episode_000" / "trajectory.npz"
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["action_source"][:20] = "policy"
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(ep for ep in load_manifest(configured)["episodes"] if ep["run_id"] == "branch")
+    assert branch["terminal_step"] == 17
+    assert branch["resume_step"] == 20
+    assert branch["action_count"] == 22
+    assert branch["chunks"][-1]["start"] == 20
+    assert branch["chunks"][-1]["end"] == 22
+    assert branch["chunks"][-1]["action_source"] == "human"
+    assert branch["chunks"][-2]["copied_prefix"] is True
 
 
 def test_sibling_branches_keep_stable_interrupted_prefix_for_annotation(configured):
@@ -362,7 +420,7 @@ def test_transient_success_requires_a_new_complete_streak(configured):
     )
     assert branch["terminal_step"] == 20
     assert branch["success_streak_start"] == 16
-    assert branch["action_count"] == 21
+    assert branch["action_count"] == 22
     assert branch["trailing_action_count"] == 1
     assert branch["post_terminal_false_count"] == 0
 

@@ -52,6 +52,51 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _training_replay_counts(prepared: dict[str, Any]) -> dict[str, int]:
+    """Count the train split's full replay without rewriting the job's pin.
+
+    Older schema-4 manifests keep post-confirmation actions in evaluation_chunks.
+    Count those complete boundaries, including their actual controller breaks,
+    and count physically copied branch prefixes once, as the replay loader does.
+    """
+    episodes = []
+    for episode in prepared["episodes"]:
+        chunks = episode["chunks"]
+        recorded_end = int(episode["recorded_action_count"])
+        if not chunks or int(chunks[-1]["end"]) != recorded_end:
+            chunks = episode.get("evaluation_chunks", [])
+        if not chunks or int(chunks[-1]["end"]) != recorded_end:
+            raise ValueError(f"Run {episode['run_id']} lacks full-recording replay chunks")
+        episodes.append((episode, chunks))
+
+    def key(episode: dict[str, Any], chunk: dict[str, Any]) -> tuple[str, int, int, str]:
+        return (
+            str(episode["root_run_id"]), int(chunk["start"]),
+            int(chunk["end"]), str(chunk["action_source"]),
+        )
+
+    copied = {
+        key(episode, chunk) for episode, chunks in episodes for chunk in chunks
+        if chunk.get("copied_prefix", False)
+    }
+    seen: set[tuple[str, int, int, str]] = set()
+    action_count = chunk_count = 0
+    for episode, chunks in sorted(
+        episodes, key=lambda item: (item[0].get("kind") == "branch", str(item[0]["run_id"])),
+    ):
+        if episode["split"] != "train":
+            continue
+        for chunk in chunks:
+            current = key(episode, chunk)
+            if current in copied:
+                if current in seen:
+                    continue
+                seen.add(current)
+            action_count += int(chunk["length"])
+            chunk_count += 1
+    return {"action_count": action_count, "chunk_count": chunk_count}
+
+
 class OfflineJobService(DatasetRewardVersions):
     def __init__(
         self, ui_config: Any, manager: Any, datasets: Any,
@@ -1027,6 +1072,10 @@ class OfflineJobService(DatasetRewardVersions):
         raw["reward"].update(source=source, rynnvalue=source == "rynnvalue")
         annotation_id = reward_version["id"]
         work_dir = Path(reward_version["work_dir"])
+        prepared = json.loads(
+            Path(reward_version["prepared_manifest_path"]).read_text(encoding="utf-8")
+        )
+        replay_counts = _training_replay_counts(prepared)
         raw["reward"].update(manifest_path=reward_version["reward_manifest_path"],
             manifest_sha256=reward_version["reward_manifest_sha256"], version_id=annotation_id)
         for key, value in parameters.items():
@@ -1087,7 +1136,8 @@ class OfflineJobService(DatasetRewardVersions):
             config_path=config_path, output_path=output_root,
             parameters={
                 "task_id": dataset["task_id"], "member_count": dataset["member_count"],
-                "action_count": dataset["action_count"], "chunk_count": dataset["chunk_count"],
+                **replay_counts,
+                "replay_policy": "full_recording_v1",
                 "annotation_id": annotation_id,
                 "reward_version_id": annotation_id,
                 "reward_manifest_sha256": reward_version["reward_manifest_sha256"],

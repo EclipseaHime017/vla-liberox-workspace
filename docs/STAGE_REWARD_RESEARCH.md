@@ -159,7 +159,7 @@ y_t=R_t+\gamma^L m_tV(s_{t+L}).
 \end{array}
 \]
 
-`m_t` 仍使用现有 terminal 规则。成功后记录用于详情显示，不重新进入现有 replay 的成功后采样；前缀去重、动作 mask、Q/V 更新顺序和 actor advantage 均不改变。
+`m_t` 只在实际记录末尾为 0，确认成功本身不终止 bootstrap。成功后记录同时用于详情与训练采样，其 Stage 分数仍保持 0；前缀去重、动作 mask、Q/V 更新顺序和 actor advantage 均不改变。
 
 ### 6.3 配置、版本与训练
 

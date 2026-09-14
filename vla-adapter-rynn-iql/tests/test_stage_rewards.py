@@ -260,6 +260,7 @@ def test_stage_replay_uses_actual_chunk_endpoint_without_reward_model(configured
     _select(configured, "stage")
     snapshot = load_stage_annotations(configured, manifest)
     replay = ReplayDataset(configured, _stats(7), _stats(8))
+    post_success = []
     for index, (episode, chunk_index, _) in enumerate(replay.items):
         item = replay[index]
         chunk = episode["chunks"][chunk_index]
@@ -269,6 +270,12 @@ def test_stage_replay_uses_actual_chunk_endpoint_without_reward_model(configured
         score = stage_scores(context)
         assert item["reward"].item() == pytest.approx(score[chunk["end"]])
         assert item["action_mask"].sum().item() == chunk["length"]
+        if episode["terminal_step"] is not None and chunk["start"] > episode["terminal_step"]:
+            post_success.append(item)
+            assert item["reward"].item() == 0.0
+    assert [item["start"] for item in post_success] == [18]
+    assert post_success[0]["chunk_length"].item() == 4
+    assert post_success[0]["bootstrap_mask"].item() == 0.0
 
 
 @pytest.mark.parametrize("source", ["sparse", "stage"])

@@ -9,12 +9,99 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from backend.app.services.offline_job_service import OfflineJobService
+from backend.app.services.offline_job_service import OfflineJobService, _training_replay_counts
 from backend.app.storage.database import connect
 from backend.app.storage.repositories import OfflineJobRepository
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
+
+
+def _full_recording_episode(run_id, chunks, *, terminal_step=None):
+    values = [
+        {"start": start, "end": end, "length": end - start, "action_source": "policy",
+         "copied_prefix": copied}
+        for start, end, copied in chunks
+    ]
+    return {
+        "run_id": run_id, "root_run_id": "run", "kind": "original" if run_id == "run" else "branch",
+        "split": "train", "recorded_action_count": values[-1]["end"],
+        "action_count": values[-1]["end"] if terminal_step is None else terminal_step + 1,
+        "terminal_step": terminal_step,
+        "chunks": values if terminal_step is None else [
+            chunk for chunk in values if chunk["end"] <= terminal_step + 1
+        ],
+        "evaluation_chunks": values,
+    }
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_training_replay_counts_include_tail_and_deduplicate_copied_prefix(legacy):
+    episodes = [
+        _full_recording_episode("run", [(0, 8, False), (8, 10, False), (10, 17, False)],
+                                terminal_step=9 if legacy else None),
+        _full_recording_episode("branch", [(0, 8, True), (8, 10, False), (10, 18, False), (18, 25, False)],
+                                terminal_step=9 if legacy else None),
+    ]
+    before = copy.deepcopy(episodes)
+    assert _training_replay_counts({"episodes": episodes}) == {"action_count": 34, "chunk_count": 6}
+    assert episodes == before
+
+
+def test_training_replay_counts_reject_missing_recorded_tail():
+    episode = _full_recording_episode("run", [(0, 5, False), (5, 17, False)], terminal_step=4)
+    del episode["evaluation_chunks"]
+    with pytest.raises(ValueError, match="full-recording replay"):
+        _training_replay_counts({"episodes": [episode]})
+
+
+def test_training_replay_counts_exclude_validation_recordings():
+    train = _full_recording_episode("run", [(0, 5, False), (5, 17, False)], terminal_step=4)
+    validation = _full_recording_episode("held-out", [(0, 8, False)])
+    validation.update(root_run_id="held-out", split="validation")
+    assert _training_replay_counts({"episodes": [validation, train]}) == {
+        "action_count": 17, "chunk_count": 2,
+    }
+
+
+def test_new_training_job_counts_full_pinned_recording_without_changing_history(tmp_path):
+    from test_dataset_reward_versions import setup_jobs, finish
+
+    jobs, dataset = setup_jobs(tmp_path)
+    # Old replay stopped after action 5; success confirmation and a controller
+    # break at 7 make full replay contain more chunks than the frozen estimate.
+    episode = _full_recording_episode(
+        "run", [(0, 5, False), (5, 7, False), (7, 15, False), (15, 17, False)],
+        terminal_step=4,
+    )
+    for chunk in episode["evaluation_chunks"]:
+        if chunk["start"] >= 7:
+            chunk["action_source"] = "human"
+    version = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="sparse"),
+                     prepared_episodes=[episode])
+    frozen_path = jobs.datasets.root / dataset["id"] / "dataset.json"
+    prepared_path = Path(version["prepared_manifest_path"])
+    reward_path = Path(version["reward_manifest_path"])
+    historical = jobs.jobs_root / "historical" / "job.json"
+    historical.parent.mkdir(parents=True)
+    historical.write_text(json.dumps({"parameters": {"action_count": 5, "chunk_count": 1}}))
+    frozen_before = json.loads(frozen_path.read_text())
+    paths = [prepared_path, reward_path, historical]
+    originals = {path: path.read_bytes() for path in paths}
+
+    result = jobs.start_training(dataset["id"], {})
+
+    assert dataset["chunk_count"] == 3
+    assert result["parameters"]["action_count"] == 17
+    assert result["parameters"]["chunk_count"] == 4
+    assert result["parameters"]["replay_policy"] == "full_recording_v1"
+    assert result["parameters"]["reward_version_id"] == version["id"]
+    assert {path: path.read_bytes() for path in paths} == originals
+    frozen_after = json.loads(frozen_path.read_text())
+    # Existing source-integrity checks update verification timestamps only.
+    for key in frozen_before:
+        if key not in {"updated_at", "last_verified_at"}:
+            assert frozen_after[key] == frozen_before[key]
 
 
 def make_jobs(tmp_path: Path):

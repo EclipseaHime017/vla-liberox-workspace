@@ -12,8 +12,9 @@ import pytest
 import yaml
 
 from vla_rynn_iql.config import load_train_config
-from vla_rynn_iql.data import prepare_dataset
+from vla_rynn_iql.data import action_source_segments, prepare_dataset, replay_chunks
 from vla_rynn_iql.io import atomic_json, sha256_file, stable_hash
+from vla_rynn_iql.replay import ReplayDataset
 from vla_rynn_iql.rewards import (
     annotate_manifest, chunk_reward_components, load_reward_index,
     materialize_reward_manifest, reward_manifest_digest, sparse_macro_reward,
@@ -23,6 +24,7 @@ from vla_rynn_iql.stage_rewards import (
     build_stage_annotation, stage_annotation_context, stage_scores, validate_stage_annotation,
 )
 from test_rewards import CountingAnnotator
+from test_replay import _stats
 from test_stage_rewards import _save_annotations, _select
 
 
@@ -39,6 +41,61 @@ def _pin(configured, index):
         manifest_path=str(path), manifest_sha256=sha256_file(path), version_id="test-version",
     )
     return path
+
+
+def _legacy_prepared_snapshot(path):
+    """Reproduce a saved schema-4 manifest with the success-truncated replay."""
+    prepared = json.loads(path.read_text())
+    prepared.pop("replay_policy", None)
+    for episode in prepared["episodes"]:
+        endpoint = (episode["terminal_step"] + 1 if episode["terminal_step"] is not None
+                    else episode["recorded_action_count"])
+        episode["action_count"] = endpoint
+        episode["chunks"] = [copy.deepcopy(chunk) for chunk in episode["evaluation_chunks"]
+                             if chunk["end"] <= endpoint]
+        with np.load(episode["trajectory_path"], allow_pickle=False) as arrays:
+            episode["action_source_segments"] = action_source_segments(
+                arrays["action_source"].tolist(), endpoint)
+    # This is the dataset identity formula used by schema 4 before complete
+    # recorded trajectories became the replay policy.
+    prepared["dataset_sha256"] = stable_hash([{key: episode[key] for key in (
+        "run_id", "source_manifest_sha256", "trajectory_sha256", "observations_sha256",
+        "task_id", "prompt", "resume_step", "action_count", "recorded_action_count",
+        "terminal_step", "trailing_action_count", "post_terminal_false_count",
+        "recorded_success", "raw_done_true_count", "success_consecutive_steps",
+        "success_streak_start", "action_source_segments", "recorded_action_source_segments",
+        "chunks", "evaluation_chunks", "split",
+    )} for episode in prepared["episodes"]])
+    prepared["trajectory_chunk_count"] = sum(len(episode["chunks"]) for episode in prepared["episodes"])
+    # This fixture has no identical copied-prefix chunk in its parent trajectory.
+    prepared["chunk_count"] = prepared["trajectory_chunk_count"]
+    atomic_json(path, prepared)
+    return prepared
+
+
+def _assert_replay_uses_saved_post_success_rewards(configured, index):
+    replay = ReplayDataset(configured, _stats(7), _stats(8), reward_index=index)
+    success_chunks, tail_chunks = [], []
+    for item_index, (episode, chunk_index, reward_path) in enumerate(replay.items):
+        item = replay[item_index]
+        chunk = replay_chunks(episode)[chunk_index]
+        with np.load(reward_path, allow_pickle=False) as arrays:
+            assert item["reward"].item() == float(arrays["final_reward"][chunk_index])
+        assert item["action_mask"].sum().item() == chunk["length"]
+        if episode["terminal_step"] is None:
+            continue
+        if chunk["end"] == episode["terminal_step"] + 1:
+            success_chunks.append(item)
+        if chunk["start"] > episode["terminal_step"]:
+            tail_chunks.append(item)
+    assert [item["start"] for item in success_chunks] == [13]
+    assert success_chunks[0]["bootstrap_mask"].item() == 1.0
+    assert [item["start"] for item in tail_chunks] == [18]
+    assert tail_chunks[0]["chunk_length"].item() == 4
+    assert tail_chunks[0]["action_mask"].tolist() == [True] * 4 + [False] * 4
+    assert tail_chunks[0]["bootstrap_mask"].item() == 0.0
+    if index["reward_config"].get("source") in {"stage", "sparse"}:
+        assert tail_chunks[0]["reward"].item() == 0.0
 
 
 def test_label_identity_excludes_recipe_and_old_labels_need_no_resave():
@@ -266,8 +323,16 @@ def test_real_backend_seal_to_pinned_training_interface(configured, tmp_path, mo
 
 @pytest.mark.parametrize("source", ["stage", "sparse", "rynnvalue"])
 @pytest.mark.parametrize("cumulative", [False, True])
-def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(configured, monkeypatch, source, cumulative):
-    prepared = json.loads(prepare_dataset(configured).manifest.read_text())
+@pytest.mark.parametrize("legacy_prepared", [False, True], ids=["full-recording", "legacy-schema-4"])
+def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
+    configured, monkeypatch, source, cumulative, legacy_prepared,
+):
+    prepared_path = prepare_dataset(configured).manifest
+    prepared = (_legacy_prepared_snapshot(prepared_path) if legacy_prepared
+                else json.loads(prepared_path.read_text()))
+    branch = next(episode for episode in prepared["episodes"] if episode["run_id"] == "branch")
+    assert branch["action_count"] == (18 if legacy_prepared else 22)
+    assert branch["reward_boundaries"] == [0, 5, 13, 18, 22]
     _select(configured, source)
     if source == "stage":
         _save_annotations(configured, prepared)
@@ -277,17 +342,24 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(confi
     manifest_path = _pin(configured, original)
     frozen_root = Path(configured.raw["paths"]["work_dir"])
     original_files = {str(path): path.read_bytes() for path in frozen_root.rglob("*") if path.is_file()}
-    with monkeypatch.context() as same_recipe:
-        same_recipe.setattr("vla_rynn_iql.rewards._adapt_pinned_training_rewards",
-                            lambda *_: pytest.fail("Equal recipe must read the original immutable numbers"))
-        assert load_reward_index(configured) == original
-        assert not Path(configured.raw["paths"]["output_dir"]).exists()
+    official_files = {item["official_annotation_path"]: Path(item["official_annotation_path"]).read_bytes()
+                      for item in original["episodes"] if "official_annotation_path" in item}
+    monkeypatch.setattr("vla_rynn_iql.rewards.materialize_reward_manifest",
+                        lambda *_: pytest.fail("Pinned training must not regenerate evaluation rewards"))
+    monkeypatch.setattr("vla_rynn_iql.rewards.annotate_manifest",
+                        lambda *_: pytest.fail("Training must not repeat model evaluation"))
     monkeypatch.setattr("vla_rynn_iql.rewards.RynnValueAnnotator",
                         lambda _: pytest.fail("Training must not evaluate a model"))
     monkeypatch.setattr("vla_rynn_iql.stage_rewards.stage_scores",
                         lambda *_: pytest.fail("Training must not recompute the Stage curve"))
     monkeypatch.setattr("vla_rynn_iql.rewards.load_stage_annotations",
                         lambda *_: pytest.fail("Training must not read live keyframes"))
+    with monkeypatch.context() as same_recipe:
+        same_recipe.setattr("vla_rynn_iql.rewards._adapt_pinned_training_rewards",
+                            lambda *_: pytest.fail("Equal recipe must read the original immutable numbers"))
+        assert load_reward_index(configured) == original
+        _assert_replay_uses_saved_post_success_rewards(configured, original)
+        assert not Path(configured.raw["paths"]["output_dir"]).exists()
     gamma = .87
     configured.raw["reward"].update(gamma=gamma, accumulate_primitive_steps=cumulative)
     adapted = load_reward_index(configured)
@@ -296,6 +368,7 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(confi
     assert adapted["reward_config"]["gamma"] == gamma
     assert adapted["reward_config"]["accumulate_primitive_steps"] is cumulative
     assert reward_manifest_digest(adapted) != reward_manifest_digest(original)
+    _assert_replay_uses_saved_post_success_rewards(configured, adapted)
     for episode, old, new in zip(prepared["episodes"], original["episodes"], adapted["episodes"]):
         assert Path(new["reward_path"]).is_relative_to(
             Path(configured.raw["paths"]["output_dir"]) / "reward_adaptations")
@@ -323,6 +396,7 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(confi
                                     else sparse_macro_reward(done, start, length))
             np.testing.assert_allclose(values["final_reward"], expected, rtol=1e-6, atol=1e-6)
     assert {str(path): path.read_bytes() for path in frozen_root.rglob("*") if path.is_file()} == original_files
+    assert all(Path(path).read_bytes() == content for path, content in official_files.items())
     again = load_reward_index(configured)
     assert again["episodes"][0]["reward_path"] != adapted["episodes"][0]["reward_path"]
     assert reward_manifest_digest(again) == reward_manifest_digest(adapted)

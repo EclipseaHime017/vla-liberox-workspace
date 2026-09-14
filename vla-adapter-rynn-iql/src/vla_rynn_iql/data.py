@@ -19,6 +19,7 @@ from .io import atomic_json, sha256_file, stable_hash
 LOG = logging.getLogger(__name__)
 MANIFEST_NAME = "dataset_manifest.json"
 MANIFEST_SCHEMA_VERSION = 4
+REPLAY_POLICY = "full_recording_v1"
 
 
 @dataclass(frozen=True)
@@ -114,17 +115,56 @@ def build_semi_mdp_chunks(
     return chunks
 
 
+def replay_chunks(episode: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return full-recording replay without changing prepared/cache identities.
+
+    Older schema-4 manifests kept the post-success tail in evaluation_chunks
+    and annotated its rewards at those same indices. Reuse that complete list
+    in memory, while retaining the manifest and its existing reward hash.
+    """
+    recorded_end = int(episode["recorded_action_count"])
+    prepared = episode["chunks"]
+    complete = bool(prepared) and int(prepared[-1]["end"]) == recorded_end
+    chunks = prepared if complete else episode.get("evaluation_chunks", [])
+    run_id = episode["run_id"]
+    error = (
+        f"Run {run_id} lacks aligned full-recording replay chunks; "
+        "rerun preparation and reward materialization for the complete recording"
+    )
+    expected_start = 0
+    for chunk in chunks:
+        start, end, length = int(chunk["start"]), int(chunk["end"]), int(chunk["length"])
+        if start != expected_start or length <= 0 or end - start != length:
+            raise ValueError(error)
+        expected_start = end
+    if expected_start != recorded_end or not chunks:
+        raise ValueError(error)
+    if not complete:
+        if len(prepared) > len(chunks) or any(
+            any(original[key] != full[key] for key in ("start", "end", "length", "action_source"))
+            for original, full in zip(prepared, chunks)
+        ):
+            raise ValueError(error)
+        return [
+            {**chunk, "transition_type": chunk["action_source"]}
+            if chunk.get("transition_type") == "post_terminal_evaluation" else chunk
+            for chunk in chunks
+        ]
+    return chunks
+
+
 def iter_unique_replay_chunks(
     episodes: list[dict[str, Any]], *, split: str | None = None,
 ) -> Iterator[tuple[dict[str, Any], int]]:
     """Yield replay chunks while counting physically copied prefixes once."""
+    full_chunks = {str(episode["run_id"]): replay_chunks(episode) for episode in episodes}
     copied_prefix_keys = {
         (
             str(episode["root_run_id"]), int(chunk["start"]),
             int(chunk["end"]), str(chunk["action_source"]),
         )
         for episode in episodes
-        for chunk in episode["chunks"]
+        for chunk in full_chunks[str(episode["run_id"])]
         if bool(chunk.get("copied_prefix", False))
     }
     seen_copied_prefixes: set[tuple[str, int, int, str]] = set()
@@ -135,7 +175,7 @@ def iter_unique_replay_chunks(
     for episode in ordered:
         if split is not None and episode["split"] != split:
             continue
-        for chunk_index, chunk in enumerate(episode["chunks"]):
+        for chunk_index, chunk in enumerate(full_chunks[str(episode["run_id"])]):
             key = (
                 str(episode["root_run_id"]), int(chunk["start"]),
                 int(chunk["end"]), str(chunk["action_source"]),
@@ -377,13 +417,13 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         required_success_steps = int(data_cfg["success_consecutive_steps"])
         terminal_step = confirmed_terminal_step(done, required_success_steps)
         environment_success = terminal_step is not None
-        # A single-frame goal crossing is not stable completion. Preserve actions until
-        # the configured consecutive-success threshold is met, and use the confirming
-        # action (the final True in that streak) as the terminal transition.
-        action_count = terminal_step + 1 if terminal_step is not None else recorded_action_count
-        trailing_action_count = recorded_action_count - action_count
+        # Success confirmation remains the reward/outcome boundary. Replay keeps
+        # the complete recording, including actions after the confirming streak.
+        action_count = recorded_action_count
+        success_end = terminal_step + 1 if terminal_step is not None else recorded_action_count
+        trailing_action_count = recorded_action_count - success_end
         post_terminal_false_count = (
-            int(np.count_nonzero(~done[action_count:])) if terminal_step is not None else 0
+            int(np.count_nonzero(~done[success_end:])) if terminal_step is not None else 0
         )
         recorded_success = bool(run.get("success", False))
         if recorded_success != raw_environment_success:
@@ -406,7 +446,7 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         raise ValueError(f"Branch suffix contains unexpected action_source values: {run_json}")
     if trailing_action_count:
         LOG.info(
-            "Run %s confirmed success at action %d; excluding %d post-terminal actions "
+            "Run %s confirmed success at action %d; retaining %d post-success actions for replay "
             "(%d later done=False)",
             run["id"], terminal_step, trailing_action_count, post_terminal_false_count,
         )
@@ -522,12 +562,25 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
         resume_step = (
             int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
         )
+        # Preserve the existing success-aligned reward boundaries and annotation
+        # cache keys, then promote the complete recorded tail into training.
+        success_end = (
+            int(episode["terminal_step"]) + 1
+            if episode["terminal_step"] is not None else int(episode["recorded_action_count"])
+        )
         chunks = build_semi_mdp_chunks(
             first=0,
-            end=int(episode["action_count"]),
+            end=success_end,
             horizon=horizon,
             source_segments=episode["action_source_segments"],
         )
+        if success_end < int(episode["recorded_action_count"]):
+            chunks.extend(build_semi_mdp_chunks(
+                first=success_end,
+                end=int(episode["recorded_action_count"]),
+                horizon=horizon,
+                source_segments=episode["recorded_action_source_segments"],
+            ))
         if episode["kind"] == "branch":
             for chunk in chunks:
                 if int(chunk["end"]) > resume_step:
@@ -544,21 +597,13 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
                 else:
                     chunk["transition_type"] = "policy_prefix"
         episode["chunks"] = chunks
-        # Replay terminates at the debounced success transition, but trajectory
-        # evaluation must continue over every physically recorded observation.
-        # Keeping the training chunks first preserves ReplayDataset's chunk
-        # indices while RynnValue and the detail UI retain the complete timeline.
-        evaluation_chunks = list(chunks)
-        if int(episode["action_count"]) < int(episode["recorded_action_count"]):
-            trailing_chunks = build_semi_mdp_chunks(
-                first=int(episode["action_count"]),
-                end=int(episode["recorded_action_count"]),
-                horizon=horizon,
-                source_segments=episode["recorded_action_source_segments"],
-            )
-            for chunk in trailing_chunks:
-                chunk["transition_type"] = "post_terminal_evaluation"
-            evaluation_chunks.extend(trailing_chunks)
+        # The historical evaluation-only label remains in annotation metadata
+        # for cache compatibility. It does not control replay inclusion.
+        evaluation_chunks = [
+            {**chunk, "transition_type": "post_terminal_evaluation"}
+            if int(chunk["start"]) >= success_end else dict(chunk)
+            for chunk in chunks
+        ]
         episode["evaluation_chunks"] = evaluation_chunks
         episode["reward_boundaries"] = sorted({
             value for chunk in evaluation_chunks
@@ -582,6 +627,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             raise RuntimeError(message)
     payload = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
+        "replay_policy": REPLAY_POLICY,
         "chunking": "variable_duration_action_source_v2_full_branch_prefix",
         "source_dataset_id": None if selection_payload is None else selection_payload["id"],
         "source_dataset_sha256": None if selection_payload is None else selection_payload["dataset_sha256"],

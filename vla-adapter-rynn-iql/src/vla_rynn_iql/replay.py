@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from .config import LoadedConfig
-from .data import iter_unique_replay_chunks, load_manifest
+from .data import iter_unique_replay_chunks, load_manifest, replay_chunks
 from .rewards import load_reward_index, policy_view
 from .vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_from_trajectory
 
@@ -29,11 +29,26 @@ class ReplayDataset(Dataset):
         annotations = {item["run_id"]: item["annotation_path"] for item in reward_index["episodes"]}
         self.action_stats, self.proprio_stats = action_stats, proprio_stats
         self.image_size = int(config.section("iql")["critic_image_size"])
+        self.chunks = {
+            episode["run_id"]: replay_chunks(episode)
+            for episode in self.manifest["episodes"]
+        }
         self.items: list[tuple[dict[str, Any], int, Path]] = []
+        checked_annotations: set[str] = set()
         for episode, chunk_index in iter_unique_replay_chunks(
             self.manifest["episodes"], split=split,
         ):
             annotation = Path(annotations[episode["run_id"]])
+            if episode["run_id"] not in checked_annotations:
+                with np.load(annotation, allow_pickle=False) as rewards:
+                    key = "final_reward" if "final_reward" in rewards else "pbrs_chunk_reward"
+                    expected = len(self.chunks[episode["run_id"]])
+                    if rewards[key].shape != (expected,):
+                        raise ValueError(
+                            f"Run {episode['run_id']} reward array does not cover all {expected} "
+                            "full-recording replay chunks; rematerialize rewards for the complete recording"
+                        )
+                checked_annotations.add(episode["run_id"])
             self.items.append((episode, chunk_index, annotation))
         if split == "train" and not self.items:
             raise RuntimeError("Training replay is empty")
@@ -48,7 +63,7 @@ class ReplayDataset(Dataset):
 
     def __getitem__(self, item: int) -> dict[str, Any]:
         episode, chunk_index, annotation_path = self.items[item]
-        chunk = episode["chunks"][chunk_index]
+        chunk = self.chunks[episode["run_id"]][chunk_index]
         start, end, length = int(chunk["start"]), int(chunk["end"]), int(chunk["length"])
         with np.load(episode["trajectory_path"], allow_pickle=False) as source:
             trajectory = {key: source[key] for key in source.files}
@@ -66,9 +81,9 @@ class ReplayDataset(Dataset):
         with np.load(annotation_path, allow_pickle=False) as rewards:
             key = "final_reward" if "final_reward" in rewards else "pbrs_chunk_reward"
             reward = float(rewards[key][chunk_index])
-        # Raw done may flicker before the configured confirmation streak. Only the
-        # effective endpoint selected during preparation terminates a replay chunk.
-        terminal = end == episode["action_count"]
+        # Success confirmation affects rewards but replay continues through the
+        # recorded tail. Only the final recorded observation ends bootstrapping.
+        terminal = end == episode["recorded_action_count"]
         return {
             "pixels": self._pixels(agent, wrist),
             "next_pixels": self._pixels(next_agent, next_wrist),

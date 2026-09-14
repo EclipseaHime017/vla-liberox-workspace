@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from vla_rynn_iql.evaluation_store import bind_reward_manifest
 from vla_rynn_iql.config import LoadedConfig, reward_source
+from vla_rynn_iql.data import REPLAY_POLICY, iter_unique_replay_chunks
 from vla_rynn_iql.io import atomic_json
 from vla_rynn_iql.rewards import load_stage_annotations
 from vla_rynn_iql.terminal_pipeline import (
@@ -358,7 +359,8 @@ def main() -> int:
             "dataset_sha256": prepared["dataset_sha256"],
             "episode_count": prepared["episode_count"],
             "success_count": prepared["success_count"],
-            "chunk_count": prepared["chunk_count"],
+            "chunk_count": sum(1 for _ in iter_unique_replay_chunks(prepared["episodes"])),
+            "replay_policy": REPLAY_POLICY,
         }
         atomic_json(state_path, state)
 
