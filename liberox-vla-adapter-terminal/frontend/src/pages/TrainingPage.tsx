@@ -1,13 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getBootstrap, getTensorBoard, getTrainingDefaults, listOfflineJobs,
   listTrainingDatasets, startTensorBoard, startTraining,
 } from "../features/run-control/api";
 import type {
-  Bootstrap, OfflineJob, TensorBoardStatus, TrainingDataset, TrainingDefaults,
+  Bootstrap, OfflineJob, TensorBoardStatus, TrainingDataset, TrainingDefaults, TrainingRewardSource,
 } from "../features/run-control/types";
 import { JobMonitor } from "../features/training/JobMonitor";
 import { Badge } from "../components/ui/Badge";
+import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
+import { rewardSourceLabels } from "../features/dataset/rewardVersions";
 
 const basicFields = [
   ["train_steps", "训练步数", 1],
@@ -36,26 +38,35 @@ export function TrainingPage() {
   const [taskId, setTaskId] = useState("");
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [datasetId, setDatasetId] = useState("");
+  const [rewardSource, setRewardSource] = useState<TrainingRewardSource>("rynnvalue");
+  const [rewardRevision, setRewardRevision] = useState(0);
+  const [showDatasetConfig, setShowDatasetConfig] = useState(false);
   const [parameters, setParameters] = useState<Record<string, number | string | boolean | null>>({});
   const [job, setJob] = useState<OfflineJob | null>(null);
   const [tensorboard, setTensorboard] = useState<TensorBoardStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
-  const [defaultsDatasetId, setDefaultsDatasetId] = useState("");
+  const [defaultsKey, setDefaultsKey] = useState("");
   const [error, setError] = useState("");
+  const taskIdRef = useRef(taskId);
+  const refreshRequest = useRef(0);
+  taskIdRef.current = taskId;
+  const requestedDefaultsKey = JSON.stringify([datasetId, rewardSource, rewardRevision]);
 
   useEffect(() => {
     void Promise.all([getBootstrap(), getTrainingDefaults(), listOfflineJobs(), getTensorBoard()])
       .then(([nextBootstrap, nextDefaults, jobs, board]) => {
         setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskId(nextBootstrap.task.task_id);
         const { reward_rynnvalue: legacyRynn, ...advanced } = nextDefaults.advanced;
+        const configuredSource = advanced.reward_source ?? (legacyRynn === false ? "sparse" : "rynnvalue");
+        setRewardSource(configuredSource === "stage" || configuredSource === "sparse" ? configuredSource : "rynnvalue");
         setParameters({ ...nextDefaults.basic, ...advanced, ...nextDefaults.monitoring,
           reward_source: advanced.reward_source ?? (legacyRynn === false ? "sparse" : "rynnvalue"),
           reward_stage_exponent: advanced.reward_stage_exponent ?? 2, resume_checkpoint: null });
         setTensorboard(board);
         const active = jobs.find(
-          (item) => item.kind === "training" && activeJobStates.has(item.status),
+          (item) => ["training", "annotation"].includes(item.kind) && activeJobStates.has(item.status),
         );
         if (active) setJob(active);
       }).catch((reason) => setError(String(reason)));
@@ -70,7 +81,6 @@ export function TrainingPage() {
       .finally(() => { if (current) setDatasetsLoading(false); });
     return () => { current = false; };
   }, [taskId]);
-  const rewardSource = String(parameters.reward_source ?? "rynnvalue");
   const availableDatasets = datasets;
   useEffect(() => {
     setDatasetId((current) => availableDatasets.some((item) => item.id === current)
@@ -87,15 +97,16 @@ export function TrainingPage() {
     if (!datasetId) { setDefaultsLoading(false); return; }
     let current = true;
     setDefaultsLoading(true);
-    void getTrainingDefaults(datasetId).then((next) => {
+    void getTrainingDefaults(datasetId, rewardSource).then((next) => {
       if (!current) return;
       setDefaults(next);
-      setDefaultsDatasetId(datasetId);
+      setDefaultsKey(requestedDefaultsKey);
       setParameters((current) => {
-        const { reward_rynnvalue: legacyRynn, ...advanced } = next.advanced;
-        const pinned = Object.fromEntries(Object.entries(advanced).filter(([key]) => key.startsWith("reward_")));
-        return { ...current, ...pinned,
-          reward_source: advanced.reward_source ?? (legacyRynn === false ? "sparse" : "rynnvalue"),
+        const pinned = Object.fromEntries(Object.entries(next.advanced)
+          .filter(([key]) => key.startsWith("reward_") && key !== "reward_rynnvalue"));
+        const unrelated = Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith("reward_")));
+        return { ...unrelated, ...pinned,
+          reward_source: rewardSource,
           reward_version_id: next.reward_version?.id ?? null,
           resume_checkpoint: next.checkpoints.some(
             (checkpoint) => checkpoint.path === current.resume_checkpoint
@@ -105,16 +116,38 @@ export function TrainingPage() {
     }).catch((reason) => { if (current) setError(String(reason)); })
       .finally(() => { if (current) setDefaultsLoading(false); });
     return () => { current = false; };
-  }, [datasetId]);
-  const rewardReady = Boolean(datasetId && defaultsDatasetId === datasetId && defaults?.reward_version
-    && !defaults.reward_version.legacy
-    && ["READY", "COMPLETED"].includes(defaults.reward_version.status));
+  }, [datasetId, rewardSource, rewardRevision]);
+  const rewardReady = Boolean(datasetId && defaultsKey === requestedDefaultsKey && (
+    defaults?.reward_availability?.ready ?? (defaults?.reward_version
+      && defaults.reward_version.evaluator === rewardSource && !defaults.reward_version.legacy
+      && ["READY", "COMPLETED"].includes(defaults.reward_version.status))
+  ));
+  useEffect(() => {
+    if (defaultsLoading || !defaults?.reward_availability?.pending) return;
+    const timer = window.setTimeout(() => setRewardRevision((value) => value + 1), 1000);
+    return () => window.clearTimeout(timer);
+  }, [defaultsLoading, defaults]);
   const patchParameter = (name: string, value: number | string | boolean | null) => setParameters((current) => ({ ...current, [name]: value }));
+  const refreshDataset = async () => {
+    const request = ++refreshRequest.current;
+    setDefaultsKey("");
+    const requestedTaskId = taskId;
+    const values = await listTrainingDatasets(requestedTaskId);
+    if (taskIdRef.current !== requestedTaskId || request !== refreshRequest.current) return;
+    setDatasets(values.filter((item) => item.integrity_status === "HEALTHY"));
+    setRewardRevision((value) => value + 1);
+  };
+  const updateJob = (next: OfflineJob) => {
+    setJob(next);
+    if (next.kind === "annotation" && !activeJobStates.has(next.status) && job?.status !== next.status) {
+      void refreshDataset().catch((reason) => setError(String(reason)));
+    }
+  };
   const begin = async () => {
     if (busy || datasetsLoading || defaultsLoading || !rewardReady || !availableDatasets.some((item) => item.id === datasetId)) return;
     setBusy(true); setError("");
     try {
-      const next = await startTraining(datasetId, parameters);
+      const next = await startTraining(datasetId, { ...parameters, reward_source: rewardSource });
       setJob(next);
       try { setTensorboard(await startTensorBoard()); } catch (reason) { setError(`训练已启动，但 TensorBoard 启动失败：${String(reason)}`); }
     } catch (reason) { setError(String(reason)); }
@@ -136,15 +169,27 @@ export function TrainingPage() {
         <div className="training-form">
           <label>任务<select value={taskId} onChange={(event) => setTaskId(event.target.value)}>{bootstrap?.task_catalog.map((task) => <option key={task.task_id} value={task.task_id}>{task.prompt}</option>)}</select></label>
           <label>冻结数据集<select value={datasetId} disabled={datasetsLoading} onChange={(event) => setDatasetId(event.target.value)}><option value="">{datasetsLoading ? "加载数据集…" : "请选择"}</option>{availableDatasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
+          <label>Reward 来源<select value={rewardSource} disabled={busy || datasetsLoading} onChange={(event) => {
+            const source = event.target.value as TrainingRewardSource;
+            setRewardSource(source);
+            setParameters((current) => ({ ...current, reward_source: source, reward_version_id: null }));
+          }}><option value="sparse">Sparse</option><option value="rynnvalue">RynnValue</option><option value="stage">Stage-based</option></select></label>
           {dataset && <div className="training-dataset-summary"><strong>{dataset.member_count} 条轨迹</strong><span>{dataset.action_count} actions</span><span>{dataset.chunk_count} chunks</span><Badge tone="green">完整性正常</Badge>
-            <p>{defaultsLoading ? "正在读取评价结果…" : rewardReady ? `当前训练奖励：${rewardSource}` : "请先在数据集配置中完成评价，再开始训练。"}</p>
-            <p>修改 Discount ratio γ 或 cumulative reward 只影响本次训练，不重新运行评价模型，也不改变数据集当前结果。</p></div>}
+            <p>{defaultsLoading || defaultsKey !== requestedDefaultsKey ? "正在读取评价结果…" : rewardReady
+              ? `当前训练奖励：${rewardSourceLabels[rewardSource]}${defaults?.reward_availability?.origin === "global" ? " · 使用逐轨迹全局结果" : ""}`
+              : `请先完成 ${rewardSourceLabels[rewardSource]} 评价，或确保每条轨迹已有同类型全局结果。`}</p>
+            {!defaultsLoading && defaultsKey === requestedDefaultsKey && !rewardReady && defaults?.reward_availability?.errors?.map((item) =>
+              <p key={item.run_id} className="error-banner">{item.run_id}：{item.error}</p>)}
+            <p>数据集缺少所选类型结果时，按轨迹读取同类型全局结果。修改 Discount ratio γ 或 cumulative reward 只影响本次训练。</p>
+            <button aria-expanded={showDatasetConfig} onClick={() => setShowDatasetConfig((value) => !value)}>配置数据集评价</button></div>}
+          {dataset && showDatasetConfig && <FrozenDatasetCard key={dataset.id} dataset={dataset} initialExpanded
+            disabled={busy || Boolean(job && activeJobStates.has(job.status))}
+            robometerUnavailable={bootstrap?.evaluation_capabilities?.robometer?.available === false
+              ? bootstrap.evaluation_capabilities.robometer.reason ?? "Robometer 不可用" : undefined}
+            onRefresh={refreshDataset} onJob={setJob} onError={setError} />}
           <div className="parameter-grid">{basicFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name === "critic_warmup_steps" || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
           {defaults?.checkpoints.length ? <label>断点恢复<select value={String(parameters.resume_checkpoint ?? "")} onChange={(event) => patchParameter("resume_checkpoint", event.target.value || null)}><option value="">不恢复</option>{defaults.checkpoints.map((checkpoint) => <option value={checkpoint.path} key={checkpoint.path}>{checkpoint.label}</option>)}</select></label> : null}
           <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">
-            <label>Reward 来源<select value={rewardSource} disabled>
-              <option value="sparse">Sparse</option><option value="rynnvalue">RynnValue</option><option value="stage">Stage-based</option>
-            </select></label>
             <label>Discount ratio γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} disabled={defaultsLoading || !rewardReady}
               onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
             <label>cumulative reward<select disabled={defaultsLoading || !rewardReady} value={String(Boolean(parameters.reward_accumulate_primitive_steps))}
@@ -174,7 +219,7 @@ export function TrainingPage() {
       </section>
     </div>
     {job && <>
-      <JobMonitor initial={job} onUpdate={setJob} onDismiss={() => setJob(null)} />
+      <JobMonitor initial={job} onUpdate={updateJob} onDismiss={() => setJob(null)} />
       {job.training_summary && <section className="surface training-result"><div className="panel-title"><strong>训练结果</strong><span>{job.status}</span></div><div><span>Overlay</span><code>{String(job.training_summary.policy_overlay ?? "尚未发布")}</code><span>数据哈希</span><code>{String(job.training_summary.dataset_sha256 ?? "—")}</code></div></section>}
     </>}
   </section>;

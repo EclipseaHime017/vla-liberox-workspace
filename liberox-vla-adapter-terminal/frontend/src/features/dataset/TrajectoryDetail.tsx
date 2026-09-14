@@ -189,24 +189,28 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
     const values: Plot[] = [
       { title: "VLA 环境 action", unit: "normalized command [-]", times: detail.series.action_time_seconds, labels: ["dx", "dy", "dz", "dRx", "dRy", "dRz", "gripper"], values: detail.series.env_action },
     ];
-    const reward = detail.reward_evaluation;
+    const rewards = detail.reward_evaluations ?? (detail.reward_evaluation
+      ? { [detail.reward_evaluation.source]: detail.reward_evaluation } : {});
+    const reward = rewards.stage;
     if (reward?.source === "stage" && reward.stage_scores?.length) {
       const times = reward.time_seconds ?? detail.series.time_seconds;
       values.push({ title: "Stage-based Reward", unit: "reward [-]", times,
         labels: ["direct stage reward"], values: reward.stage_scores.map((score) => [score]),
         sampleLabels: times.map((_, index) => `observation step ${reward.observation_steps?.[index] ?? index}`) });
-    } else if (!detail.dataset_context && !detail.global_evaluation && !detail.global_evaluation_pending
-      && !detail.global_evaluation_error && !reward && !detail.rynnvalue_evaluation
-      && !detail.evaluation && stageAnnotation?.status === "ready" && stageAnnotation.scores.length) {
+    } else if (!detail.evaluation_sources?.stage && !reward
+      && (detail.evaluation_sources || (!detail.global_evaluation_pending && !detail.global_evaluation_error
+        && detail.dataset_context?.source !== "stage" && detail.global_evaluation?.source !== "stage"))
+      && stageAnnotation?.status === "ready" && stageAnnotation.scores.length) {
       values.push({
         title: "关键帧奖励预览（未评价）", unit: "reward [-]", times: stageAnnotation.time_seconds,
         labels: ["direct stage reward"], values: stageAnnotation.scores.map((score) => [score]),
         sampleLabels: stageAnnotation.time_seconds.map((_, step) => `observation step ${step}`),
       });
     }
-    if (reward && reward.source !== "rynnvalue") {
-      const series = chunkRewardSeries(reward.chunk_start_steps, reward.chunk_end_steps, reward.final_reward, detail.series.time_seconds);
-      values.push({ title: `${rewardSourceLabels[reward.source]} · Final Reward · ${reward.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
+    for (const saved of Object.values(rewards)) {
+      if (!saved || saved.source === "rynnvalue") continue;
+      const series = chunkRewardSeries(saved.chunk_start_steps, saved.chunk_end_steps, saved.final_reward, detail.series.time_seconds);
+      values.push({ title: `${rewardSourceLabels[saved.source]} · Final Reward · ${saved.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
         unit: "reward [-]", ...series, labels: ["final reward"], interpolation: "step" });
     }
     const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
@@ -249,9 +253,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
           values: official.absolute_value_entropy_nats,
         },
       );
-      // Raw model diagnostics may coexist with another selected reward source.
-      // Only the current source supplies the displayed training reward.
-      if (!reward || reward.source === "rynnvalue") {
+      {
         const sparseReward = evaluation.pbrs_reward.sparse_reward;
         if (sparseReward.length !== evaluation.pbrs_reward.shape_reward.length
           || sparseReward.length !== evaluation.pbrs_reward.dense_reward.length
@@ -331,7 +333,6 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
       successEnd: robo.success_probs.at(-1), environmentSuccess: detail.run.success,
     };
   }, [detail]);
-  const evaluationSource = detail.dataset_context?.source ?? detail.global_evaluation?.source;
   return <section className="content-page trajectory-detail-page">
     <div className="page-heading detail-heading"><div><p className="eyebrow">TRAJECTORY DETAIL</p><h1>轨迹 {detail.run.id}</h1><p>{detail.run.task} · {detail.run.action_count} steps</p></div><button onClick={() => {
       if (!stageDirty || window.confirm("切片标记尚未保存，是否丢弃并返回数据集？")) onBack();
@@ -343,11 +344,14 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
       </select></label>
       <div><strong>{contextLoading || detail.global_evaluation_pending ? "正在更新评价图表…" : detail.dataset_context
         ? `${detail.dataset_context.dataset_name} · 当前评价` : "全局轨迹评价"}</strong>
-        <div className="reward-parameter-chips">{evaluationSource && <span>{rewardSourceLabels[evaluationSource]}</span>}
-          {rewardParameterLabels(detail.dataset_context?.config ?? detail.global_evaluation?.config).map((label) => <span key={label}>{label}</span>)}</div>
+        {!detail.evaluation_sources && <div className="reward-parameter-chips">
+          {rewardParameterLabels(detail.dataset_context?.config ?? detail.global_evaluation?.config).map((label) => <span key={label}>{label}</span>)}</div>}
+        {Object.entries(detail.evaluation_sources ?? {}).map(([source, context]) => context && <div key={source} className="evaluation-current-summary">
+          <span>{rewardSourceLabels[source as keyof typeof rewardSourceLabels]} · {context.origin === "dataset" ? "当前数据集" : detail.dataset_context ? "全局回退" : "全局"} · {context.status}</span>
+          <div className="reward-parameter-chips">{rewardParameterLabels(context.config).map((label) => <span key={label}>{label}</span>)}</div></div>)}
         <small>关键帧保存在原轨迹中；在数据集配置中重新评价即可更新奖励。</small></div>
     </div>}
-    {!detail.dataset_context && detail.global_evaluation_error && <p className="error-banner">{detail.global_evaluation_error}</p>}
+    {detail.global_evaluation_error && <p className="error-banner">{detail.global_evaluation_error}</p>}
     {labelError && <div className="error-banner"><span>{labelError}</span><button onClick={() => setLabelError("")}>关闭</button></div>}
     <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video ref={videoRef} controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}
       <StageAnnotationPanel key={detail.run.id} runId={detail.run.id} videoRef={videoRef} onSaved={setStageAnnotation} onDirtyChange={setStageDirty} />

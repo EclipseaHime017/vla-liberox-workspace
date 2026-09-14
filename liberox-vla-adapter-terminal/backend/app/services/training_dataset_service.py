@@ -649,6 +649,7 @@ class TrainingDatasetService:
                 known.add(identifier)
         result.setdefault("reward_version_id", None)
         result.setdefault("robometer_version_id", None)
+        result["evaluation_version_ids"] = TrainingDatasetService.current_evaluation_ids(result)
         result["members"] = [
             {
                 key: member.get(key) for key in (
@@ -660,6 +661,20 @@ class TrainingDatasetService:
             for member in payload.get("members", [])
         ]
         return result
+
+    @staticmethod
+    def current_evaluation_ids(payload: dict[str, Any]) -> dict[str, str]:
+        """Recover pre-map results without rewriting immutable dataset identity."""
+        versions = payload.get("evaluation_versions", [])
+        current = {item["evaluator"]: item["id"] for item in versions
+                   if item.get("status") == "READY"}
+        for key in ("reward_version_id", "robometer_version_id"):
+            selected = next((item for item in versions if item["id"] == payload.get(key)
+                             and item.get("status") == "READY"), None)
+            if selected:
+                current[selected["evaluator"]] = selected["id"]
+        current.update(payload.get("evaluation_version_ids", {}))
+        return current
 
     def members_page(self, dataset_id: str, *, page: int = 1, page_size: int = 5) -> dict[str, Any]:
         if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 50:
@@ -705,6 +720,7 @@ class TrainingDatasetService:
         with self.lock:
             path, payload = self._load(dataset_id)
             versions = payload.setdefault("evaluation_versions", [])
+            current = self.current_evaluation_ids(payload)
             existing = next((item for item in versions if item["id"] == version["id"]), None)
             if existing is not None and existing.get("status") == "READY":
                 return self._public(payload)
@@ -718,6 +734,8 @@ class TrainingDatasetService:
             else:
                 existing.update(summary)
             if version["status"] == "READY":
+                current[version["evaluator"]] = version["id"]
+                payload["evaluation_version_ids"] = current
                 key = "robometer_version_id" if version["evaluator"] == "robometer" else "reward_version_id"
                 payload[key] = version["id"]
                 if key == "reward_version_id":
@@ -734,6 +752,8 @@ class TrainingDatasetService:
             if version.get("status") != "READY" or not version.get("complete"):
                 raise ConflictError("Evaluation version is not ready", code="REWARD_VERSION_NOT_READY")
             path, payload = self._load(dataset_id)
+            payload["evaluation_version_ids"] = self.current_evaluation_ids(payload)
+            payload["evaluation_version_ids"][version["evaluator"]] = version_id
             key = "robometer_version_id" if version["evaluator"] == "robometer" else "reward_version_id"
             payload[key] = version_id
             if key == "reward_version_id":
@@ -903,8 +923,6 @@ class TrainingDatasetService:
         value = self.verify(dataset_id)
         if value["integrity_status"] != "HEALTHY":
             raise ConflictError("Dataset is broken", code="DATASET_BROKEN")
-        if value["annotation_status"] != "READY" or not value.get("annotation_id"):
-            raise ConflictError("Dataset annotation is not ready", code="ANNOTATION_NOT_READY")
         return value
 
     def _index_existing(self) -> None:

@@ -298,6 +298,9 @@ class TrajectoryEvaluationService:
                 "official_outputs": reward.get("official_outputs") or {},
                 "pbrs_reward": reward.get("pbrs_reward") or {},
                 "environment_success": reward.get("environment_success"),
+                "episode": episode,
+                "prepared": {key: value for key, value in prepared.items() if key != "episodes"},
+                "entry": reward,
             }
             atomic_write_json(sidecar, payload)
             self._validation_cache.pop(run_id, None)
@@ -425,6 +428,8 @@ class TrajectoryEvaluationService:
             },
             "evaluation": evaluation,
             "rynnvalue_evaluation": evaluation,
-            "robometer_evaluation": (robometer.detail(run)
+            "robometer_evaluation": (robometer.detail(run, defer_validation=True)
                                      if robometer is not None and include_global_evaluations else None),
+            "native_evaluation_pending": bool(robometer is not None and include_global_evaluations
+                                              and robometer.detail_pending(run)),
         }

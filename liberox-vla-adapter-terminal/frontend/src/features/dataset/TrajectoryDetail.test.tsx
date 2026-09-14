@@ -98,7 +98,7 @@ describe("trajectory detail stage integration", () => {
     expect(screen.queryByText("关键帧奖励预览（未评价）")).toBeNull();
   });
 
-  it("keeps raw Rynn diagnostics but only displays the selected Stage training reward", async () => {
+  it("keeps Rynn diagnostics and rewards alongside Stage rewards", async () => {
     const rynn = {
       status: "READY", boundary_steps: [0, 2],
       official_outputs: { absolute_temporal_distance_seconds: [[2], [0]], relative_temporal_distance_seconds: [0, -2], absolute_value_entropy_nats: [[.4], [.2]] },
@@ -113,7 +113,7 @@ describe("trajectory detail stage integration", () => {
     expect(screen.getByText("Stage-based Reward")).toBeTruthy();
     expect(screen.getByText("Stage-based · Final Reward · 宏动作")).toBeTruthy();
     expect(screen.getByText("RynnValue Absolute Remaining Time")).toBeTruthy();
-    expect(screen.queryByText(/Reward Components/)).toBeNull();
+    expect(screen.getByText(/Reward Components/)).toBeTruthy();
     expect(screen.queryByText("关键帧奖励预览（未评价）")).toBeNull();
   });
 

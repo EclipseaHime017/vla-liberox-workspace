@@ -22,6 +22,7 @@ from ..storage.files import atomic_write_json
 
 
 SIDECAR = "trajectory_reward.json"
+SOURCES = ("sparse", "stage", "rynnvalue")
 _LOCK = threading.RLock()
 _CACHE: dict[str, tuple[tuple, dict[str, Any] | None]] = {}
 _RYNN_CACHE: dict[str, tuple[tuple, bool]] = {}
@@ -52,28 +53,60 @@ def _trajectory(run: dict) -> Path | None:
     return path if path.is_file() and not path.is_symlink() else None
 
 
-def _identity_fingerprint(trajectory: Path) -> tuple:
+def snapshot_path(run: dict, source: str | None = None) -> Path | None:
+    trajectory = _trajectory(run)
+    if trajectory is None:
+        return None
+    legacy = trajectory.with_name(SIDECAR)
+    if source is not None:
+        if source not in SOURCES:
+            raise ValueError(f"Unsupported reward source: {source}")
+        dedicated = trajectory.with_name(f"trajectory_reward.{source}.json")
+        if dedicated.exists():
+            return dedicated
+        try:
+            if json.loads(legacy.read_text()).get("source") == source:
+                return legacy
+        except (OSError, ValueError):
+            pass
+        return dedicated
+    if legacy.exists():
+        return legacy
+    candidates = [trajectory.with_name(f"trajectory_reward.{item}.json") for item in SOURCES]
+    existing = [path for path in candidates if path.exists()]
+    return min(existing, key=lambda path: path.stat().st_mtime_ns) if existing else legacy
+
+
+def _identity_fingerprint(trajectory: Path, sidecar: Path) -> tuple:
+    values = sidecar
+    try:
+        name = json.loads(sidecar.read_text())["values_file"]
+        if Path(name).name == name:
+            values = sidecar.with_name(name)
+    except (OSError, ValueError, KeyError):
+        pass
     return tuple(_stat(path) for path in (
-        trajectory, trajectory.with_name(SIDECAR),
+        trajectory, sidecar, values,
         trajectory.with_name("trajectory_observations.npz")))
 
 
-def needs_snapshot_validation(run: dict) -> bool:
+def needs_snapshot_validation(run: dict, source: str | None = None) -> bool:
     """Cheap signal for a cold/copied snapshot awaiting background validation."""
     trajectory = _trajectory(run)
-    if trajectory is None or not trajectory.with_name(SIDECAR).is_file():
+    sidecar = snapshot_path(run, source)
+    if trajectory is None or sidecar is None or not sidecar.is_file():
         return False
-    return (_IDENTITY_CHECKS.get(str(trajectory)) != _identity_fingerprint(trajectory)
-            and read_reward_snapshot(run) is None)
+    return (_IDENTITY_CHECKS.get(str(sidecar)) != _identity_fingerprint(trajectory, sidecar)
+            and read_reward_snapshot(run, source) is None)
 
 
-def _refresh_snapshot_identity(run: dict) -> dict[str, Any] | None:
+def _refresh_snapshot_identity(run: dict, source: str | None = None) -> dict[str, Any] | None:
     """Revalidate moved/touched observations off the request path, once per stat."""
     trajectory = _trajectory(run)
     if trajectory is None:
         return None
-    sidecar = trajectory.with_name(SIDECAR)
-    if _IDENTITY_CHECKS.get(str(trajectory)) == _identity_fingerprint(trajectory):
+    sidecar = snapshot_path(run, source)
+    if _IDENTITY_CHECKS.get(str(sidecar)) == _identity_fingerprint(trajectory, sidecar):
         return None
     try:
         original = sidecar.read_bytes()
@@ -91,22 +124,22 @@ def _refresh_snapshot_identity(run: dict) -> dict[str, Any] | None:
             return None
         with _LOCK:
             if sidecar.read_bytes() != original:
-                return read_reward_snapshot(run)
+                return read_reward_snapshot(run, source)
             payload["observations_fingerprint"] = list(_stat(observations))
             atomic_write_json(sidecar, payload)
             _CACHE.pop(str(sidecar), None)
-        return read_reward_snapshot(run)
+        return read_reward_snapshot(run, source)
     except (OSError, KeyError, ValueError, TypeError):
         return None
     finally:
-        _IDENTITY_CHECKS[str(trajectory)] = _identity_fingerprint(trajectory)
+        _IDENTITY_CHECKS[str(sidecar)] = _identity_fingerprint(trajectory, sidecar)
 
 
-def read_reward_snapshot(run: dict) -> dict[str, Any] | None:
+def read_reward_snapshot(run: dict, source: str | None = None) -> dict[str, Any] | None:
     trajectory = _trajectory(run)
     if trajectory is None:
         return None
-    sidecar = trajectory.with_name(SIDECAR)
+    sidecar = snapshot_path(run, source)
     if sidecar.is_symlink() or not sidecar.is_file():
         return None
     try:
@@ -121,6 +154,7 @@ def read_reward_snapshot(run: dict) -> dict[str, Any] | None:
         if cached and cached[0] == fingerprint:
             return cached[1]
         if (payload.get("schema_version") != 1 or payload.get("run_id") != str(run.get("id"))
+                or (source is not None and payload.get("source") != source)
                 or values.is_symlink() or payload["trajectory_sha256"] != _hash(trajectory)
                 or payload["values_sha256"] != _hash(values)
                 or list(_stat(observations)) != payload.get("observations_fingerprint")):
@@ -201,7 +235,8 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
         # Dataset regeneration must not reread a multi-GB observation archive
         # merely to preserve an already published first result.
         run = {"id": run_id, "trajectory": str(trajectory)}
-        if not overwrite and (read_reward_snapshot(run) is not None or _existing_rynn(trajectory, run_id)):
+        if not overwrite and (read_reward_snapshot(run, source) is not None
+                              or (source == "rynnvalue" and _existing_rynn(trajectory, run_id))):
             skipped.append(run_id)
             continue
         observations = Path(episode["observations_path"])
@@ -218,9 +253,10 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
         checked.append((run_id, episode, entry, trajectory, observations, values, expected))
     with _LOCK:
         for run_id, episode, entry, trajectory, observations, values, digest in checked:
-            sidecar = trajectory.with_name(SIDECAR)
+            sidecar = trajectory.with_name(f"trajectory_reward.{source}.json")
             run = {"id": run_id, "trajectory": str(trajectory)}
-            if not overwrite and (read_reward_snapshot(run) is not None or _existing_rynn(trajectory, run_id)):
+            if not overwrite and (read_reward_snapshot(run, source) is not None
+                                  or (source == "rynnvalue" and _existing_rynn(trajectory, run_id))):
                 skipped.append(run_id)
                 continue
             # Content-addressed arrays plus an atomic JSON pointer keep readers
@@ -246,9 +282,9 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
                 "values_file": destination.name, "values_sha256": digest,
                 "entry": {**entry, "annotator": entry.get("annotator") or rewards.get("annotator") or {},
                           "official_outputs": entry.get("official_outputs") or {}},
-                "episode": {key: episode.get(key) for key in (
-                    "run_id", "recorded_action_count", "reward_boundaries", "evaluation_chunks", "chunks",
-                    "success", "terminal_step", "prompt", "control_hz")},
+                "episode": episode,
+                "prepared": {key: value for key, value in prepared.items() if key != "episodes"},
+                "prepared_manifest_path": str(Path(prepared_path).resolve()),
                 "annotator": entry.get("annotator") or rewards.get("annotator") or {},
                 "official_outputs": entry.get("official_outputs") or {},
                 "annotation_config": rewards.get("annotation_config") or {},
@@ -260,22 +296,25 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
     return {"bound": bound, "skipped": skipped, "count": len(bound)}
 
 
-def ensure_first_reward_snapshot(run: dict, datasets: Any) -> dict[str, Any] | None:
+def ensure_first_reward_snapshot(run: dict, datasets: Any, source: str | None = None) -> dict[str, Any] | None:
     """One-time lazy initialization for packages evaluated before this feature."""
-    existing = read_reward_snapshot(run)
+    if source is None:
+        results = [ensure_first_reward_snapshot(run, datasets, item) for item in SOURCES]
+        return next((item for item in results if item is not None), None)
+    existing = read_reward_snapshot(run, source)
     trajectory = _trajectory(run)
-    if existing is None and trajectory is not None and trajectory.with_name(SIDECAR).is_file():
+    if existing is None and trajectory is not None and snapshot_path(run, source).is_file():
         # Preserve the first result's identity. A changed source is not an
         # invitation to silently substitute some other dataset's evaluation.
-        return _refresh_snapshot_identity(run)
-    if existing is not None or trajectory is None or _existing_rynn(trajectory, str(run["id"])):
+        return _refresh_snapshot_identity(run, source)
+    if existing is not None or trajectory is None or (source == "rynnvalue" and _existing_rynn(trajectory, str(run["id"]))):
         return existing
     candidates = []
     for dataset in datasets.list():
         if not any(member["run_id"] == run.get("id") for member in dataset.get("members", [])):
             continue
         for summary in dataset.get("evaluation_versions", []):
-            if summary.get("status") == "READY" and summary.get("evaluator") != "robometer":
+            if summary.get("status") == "READY" and summary.get("evaluator") == source:
                 candidates.append((summary.get("completed_at") or summary.get("created_at") or "",
                                    dataset["id"], summary["id"]))
     for timestamp, dataset_id, evaluation_id in sorted(candidates):
@@ -283,7 +322,7 @@ def ensure_first_reward_snapshot(run: dict, datasets: Any) -> dict[str, Any] | N
             version = datasets.get_version(dataset_id, evaluation_id)
             bind_reward_snapshot(Path(version["prepared_manifest_path"]), Path(version["reward_manifest_path"]),
                 run_ids=[run["id"]], evaluation_id=evaluation_id, evaluated_at=timestamp or None)
-            current = read_reward_snapshot(run)
+            current = read_reward_snapshot(run, source)
             if current is not None:
                 return current
         except (OSError, KeyError, ValueError, TypeError):

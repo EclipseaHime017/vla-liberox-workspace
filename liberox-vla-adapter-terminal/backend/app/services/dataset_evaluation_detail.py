@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from .trajectory_reward_snapshot import SIDECAR, needs_snapshot_validation, read_reward_snapshot
+from .trajectory_reward_snapshot import SOURCES, snapshot_path, needs_snapshot_validation, read_reward_snapshot
 
 
 def _signature(path: Path) -> tuple[int, ...]:
@@ -159,92 +159,127 @@ def _robometer_detail(version: dict, run_id: str) -> dict:
 
 def attach_dataset_context(result: dict, datasets: Any, dataset_id: str | None,
                            version_id: str | None) -> dict:
-    """Annotate a detail response with explicit, dataset-scoped immutable curves."""
-    run_id = result["run"]["id"]
-    contexts = []
-    global_candidates = []
-    for dataset in datasets.list(result["run"].get("task_id")):
-        if any(member["run_id"] == run_id for member in dataset.get("members", [])):
-            contexts.append({"dataset_id": dataset["id"], "dataset_name": dataset["name"],
-                             "reward_version_id": dataset.get("reward_version_id"),
-                             "robometer_version_id": dataset.get("robometer_version_id"),
-                             "versions": dataset.get("evaluation_versions", [])})
-            for saved in dataset.get("evaluation_versions", []):
-                if saved.get("status") == "READY" and saved.get("evaluator") != "robometer":
-                    global_candidates.append((saved.get("completed_at") or saved.get("created_at") or "",
-                                              dataset["id"], saved["id"]))
+    """Resolve each evaluator separately: dataset result, otherwise global."""
+    run = result["run"]
+    run_id = run["id"]
+    contexts, candidates = [], []
+    for dataset in datasets.list(run.get("task_id")):
+        if not any(member["run_id"] == run_id for member in dataset.get("members", [])):
+            continue
+        contexts.append({"dataset_id": dataset["id"], "dataset_name": dataset["name"],
+                         "reward_version_id": dataset.get("reward_version_id"),
+                         "robometer_version_id": dataset.get("robometer_version_id"),
+                         "evaluation_version_ids": dataset.get("evaluation_version_ids", {}),
+                         "versions": dataset.get("evaluation_versions", [])})
+        for saved in dataset.get("evaluation_versions", []):
+            if saved.get("status") == "READY":
+                candidates.append((saved.get("completed_at") or saved.get("created_at") or "",
+                                   dataset["id"], saved["id"], saved["evaluator"]))
     result.update(available_dataset_contexts=contexts, dataset_context=None,
-                  global_evaluation=None, reward_evaluation=None, global_evaluation_pending=False,
-                  global_evaluation_error=None)
-    if dataset_id is None:
-        if version_id is not None:
-            raise ValueError("version_id requires dataset_id")
-        snapshot = read_reward_snapshot(result["run"])
+                  global_evaluation=None, reward_evaluation=None, reward_evaluations={},
+                  evaluation_sources={}, global_evaluation_pending=bool(result.get("native_evaluation_pending")), global_evaluation_error=None)
+    times = result["series"]["time_seconds"]
+
+    def publish(source: str, reward: dict | None, output: dict | None, context: dict) -> None:
+        result["evaluation_sources"][source] = {"status": "READY", **context}
+        if reward is not None:
+            result["reward_evaluations"][source] = reward
+        if source == "rynnvalue":
+            result.update(evaluation=output, rynnvalue_evaluation=output)
+        elif source == "robometer":
+            result["robometer_evaluation"] = output
+
+    for source in (*SOURCES, "robometer"):
+        snapshot = read_reward_snapshot(run, source) if source in SOURCES else None
+        path = snapshot_path(run, source) if source in SOURCES else None
         if snapshot:
-            metadata, arrays = snapshot["metadata"], snapshot["arrays"]
-            saved = {"id": metadata.get("evaluation_id") or "global", "evaluator": metadata["source"],
-                     "completed_at": metadata.get("evaluated_at"),
-                     "parameters": metadata["reward_config"]}
-            reward, rynn = _reward_arrays_detail(
-                saved, {"reward_config": metadata["reward_config"]}, metadata["entry"],
-                arrays, result["series"]["time_seconds"],
-            )
-            result.update(reward_evaluation=reward, global_evaluation={
-                "source": metadata["source"], "config": metadata["reward_config"],
-                "evaluated_at": metadata.get("evaluated_at"), "origin": metadata.get("origin"),
-            })
-            if rynn:
-                result.update(evaluation=rynn, rynnvalue_evaluation=rynn)
-        elif result["run"].get("trajectory") and Path(result["run"]["trajectory"]).with_name(SIDECAR).exists():
-            # A recorded global choice must not silently fall back to a different
-            # dataset/evaluator while its source identity is being revalidated.
-            pending = needs_snapshot_validation(result["run"])
-            result.update(global_evaluation_pending=pending, evaluation=None, rynnvalue_evaluation=None,
-                          global_evaluation_error=None if pending else "全局评价的源数据已变化或文件损坏，请手动重新评价覆盖。")
-        elif result.get("rynnvalue_evaluation"):
-            existing = result["rynnvalue_evaluation"]
-            result["global_evaluation"] = {"source": "rynnvalue", "origin": "trajectory",
-                "config": existing.get("reward_config", {}), "evaluated_at": existing.get("evaluated_at")}
-        else:
-            # Show the first saved result immediately. Publication of the small
-            # standalone copy is queued by the API; no observation hash here.
-            for _, owner, identifier in sorted(global_candidates):
-                try:
-                    saved = datasets.get_version(owner, identifier)
-                    reward, rynn = _reward_detail(saved, run_id, result["series"]["time_seconds"],
-                                                  result["run"].get("trajectory"))
-                except (OSError, KeyError, TypeError, ValueError):
-                    continue
-                result.update(reward_evaluation=reward, global_evaluation_pending=True,
-                              global_evaluation={"source": saved["evaluator"],
-                                  "config": reward["reward_config"], "origin": "dataset",
-                                  "evaluated_at": saved.get("completed_at")})
-                if rynn:
-                    result.update(evaluation=rynn, rynnvalue_evaluation=rynn)
+            metadata = snapshot["metadata"]
+            saved = {"id": metadata.get("evaluation_id") or "global", "evaluator": source,
+                     "completed_at": metadata.get("evaluated_at"), "parameters": metadata["reward_config"]}
+            try:
+                reward, output = _reward_arrays_detail(saved, {"reward_config": metadata["reward_config"]},
+                    metadata["entry"], snapshot["arrays"], times)
+                publish(source, reward, output, {"origin": "global", "config": metadata["reward_config"],
+                        "evaluated_at": metadata.get("evaluated_at")})
+            except (KeyError, ValueError, TypeError) as exc:
+                result["evaluation_sources"][source] = {"status": "ERROR", "origin": "global", "error": str(exc)}
+            continue
+        if path is not None and path.exists():
+            pending = needs_snapshot_validation(run, source)
+            result["global_evaluation_pending"] |= pending
+            result["evaluation_sources"][source] = {"origin": "global", "status": "PENDING" if pending else "ERROR",
+                "error": None if pending else "源数据已变化或评价损坏，请重新评价该类型。"}
+            if source == "rynnvalue":
+                result.update(evaluation=None, rynnvalue_evaluation=None)
+            continue
+        native = result.get(f"{source}_evaluation")
+        if native:
+            publish(source, None, native, {"origin": "global",
+                "config": native.get("reward_config", native.get("evaluation_config", {})),
+                "evaluated_at": native.get("evaluated_at")})
+            continue
+        for _, owner, identifier, evaluator in sorted(candidates):
+            if evaluator != source:
+                continue
+            try:
+                saved = datasets.get_version(owner, identifier)
+                if source == "robometer":
+                    reward, output = None, _robometer_detail(saved, run_id)
+                else:
+                    reward, output = _reward_detail(saved, run_id, times, run.get("trajectory"))
+                publish(source, reward, output, {"origin": "global", "config": saved.get("parameters", {}),
+                        "evaluated_at": saved.get("completed_at")})
+                result["global_evaluation_pending"] |= source != "robometer"
                 break
-        return result
-    dataset = datasets.get(dataset_id, quick_verify=False)
-    if not any(member["run_id"] == run_id for member in dataset.get("members", [])):
-        raise ValueError("Trajectory is not a member of this frozen dataset")
-    selected = version_id or dataset.get("reward_version_id") or dataset.get("robometer_version_id")
-    result.update(evaluation=None, rynnvalue_evaluation=None, robometer_evaluation=None)
-    context = {"dataset_id": dataset_id, "dataset_name": dataset["name"],
-               "version_id": selected, "source": None, "config": {}, "status": "NOT_EVALUATED"}
-    result["dataset_context"] = context
-    if selected is None:
-        return result
-    version = datasets.get_version(dataset_id, selected)
-    if version.get("status") != "READY":
-        raise ValueError("Selected evaluation version is not ready")
-    context.update(source=version["evaluator"], config=version.get("parameters", {}), status="READY")
-    reward_id = selected if version["evaluator"] != "robometer" else dataset.get("reward_version_id")
-    robo_id = selected if version["evaluator"] == "robometer" else dataset.get("robometer_version_id")
-    if reward_id:
-        reward_version = version if reward_id == selected else datasets.get_version(dataset_id, reward_id)
-        reward, rynn = _reward_detail(reward_version, run_id, result["series"]["time_seconds"],
-                                     result["run"].get("trajectory"))
-        result.update(reward_evaluation=reward, evaluation=rynn, rynnvalue_evaluation=rynn)
-    if robo_id:
-        robo_version = version if robo_id == selected else datasets.get_version(dataset_id, robo_id)
-        result["robometer_evaluation"] = _robometer_detail(robo_version, run_id)
+            except (OSError, KeyError, TypeError, ValueError):
+                continue
+
+    selected = None
+    if dataset_id is not None:
+        dataset = datasets.get(dataset_id, quick_verify=False)
+        if not any(member["run_id"] == run_id for member in dataset.get("members", [])):
+            raise ValueError("Trajectory is not a member of this frozen dataset")
+        ids = dict(dataset.get("evaluation_version_ids", {}))
+        # Compatibility with lightweight callers and pre-map datasets.
+        if not ids:
+            from .training_dataset_service import TrainingDatasetService
+            ids = TrainingDatasetService.current_evaluation_ids(dataset)
+        selected = version_id or dataset.get("reward_version_id")
+        if version_id:
+            explicit = datasets.get_version(dataset_id, version_id)
+            ids[explicit["evaluator"]] = version_id
+        result["dataset_context"] = {"dataset_id": dataset_id, "dataset_name": dataset["name"],
+            "version_id": selected, "status": "READY" if ids else "GLOBAL_FALLBACK", "source": None, "config": {}}
+        for source, identifier in ids.items():
+            # Invalid local data is reported, never silently replaced by global.
+            result["reward_evaluations"].pop(source, None)
+            if source == "rynnvalue":
+                result.update(evaluation=None, rynnvalue_evaluation=None)
+            elif source == "robometer":
+                result["robometer_evaluation"] = None
+            try:
+                saved = datasets.get_version(dataset_id, identifier)
+                if saved.get("status") != "READY":
+                    raise ValueError("Evaluation is not ready")
+                if source == "robometer":
+                    reward, output = None, _robometer_detail(saved, run_id)
+                else:
+                    reward, output = _reward_detail(saved, run_id, times, run.get("trajectory"))
+                publish(source, reward, output, {"origin": "dataset", "config": saved.get("parameters", {}),
+                        "evaluated_at": saved.get("completed_at"), "version_id": identifier})
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                result["evaluation_sources"][source] = {"origin": "dataset", "status": "ERROR", "error": str(exc)}
+    elif version_id is not None:
+        raise ValueError("version_id requires dataset_id")
+    rewards = result["reward_evaluations"]
+    result["reward_evaluation"] = next((value for value in rewards.values() if value.get("version_id") == selected),
+                                       next(iter(rewards.values()), None))
+    chosen = result["reward_evaluation"]
+    if chosen:
+        context = result["evaluation_sources"][chosen["source"]]
+        result["global_evaluation"] = {"source": chosen["source"], **context} if dataset_id is None else None
+        if result["dataset_context"]:
+            result["dataset_context"].update(source=chosen["source"], config=chosen["reward_config"])
+    errors = [item["error"] for item in result["evaluation_sources"].values() if item.get("error")]
+    result["global_evaluation_error"] = "; ".join(errors) or None
     return result

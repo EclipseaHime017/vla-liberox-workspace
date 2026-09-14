@@ -88,3 +88,35 @@ def test_catalog_status_does_not_hash_or_open_observations(tmp_path: Path, monke
         lambda _path: (_ for _ in ()).throw(AssertionError("list status must not hash files")),
     )
     assert service.status(run)["status"] == "READY"
+
+
+def test_detail_defers_cold_validation_and_schedules_it_once(tmp_path: Path, monkeypatch):
+    import threading
+
+    episode = tmp_path / "episode_000"
+    episode.mkdir()
+    (episode / "trajectory.npz").write_bytes(b"trajectory")
+    (episode / "trajectory_observations.npz").write_bytes(b"observations")
+    (episode / VALUES_NAME).write_bytes(b"values")
+    (episode / SIDECAR_NAME).write_text(json.dumps({"schema_version": 1, "run_id": "r", "sample_count": 2}))
+    (tmp_path / "run.json").write_text("{}")
+    run = {"id": "r", "trajectory": str(episode / "trajectory.npz"), "output_dir": str(tmp_path)}
+    service = RobometerEvaluationService(Runs(run), tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def validate(_):
+        calls.append(threading.current_thread().name)
+        entered.set()
+        assert release.wait(3)
+
+    monkeypatch.setattr(service, "_load", validate)
+    try:
+        assert service.detail(run, defer_validation=True) is None
+        assert entered.wait(1)
+        assert service.detail_pending(run)
+        assert service.detail(run, defer_validation=True) is None
+        assert len(calls) == 1 and calls[0].startswith("robometer-validate")
+    finally:
+        release.set()
+        service._detail_executor.shutdown(wait=True)

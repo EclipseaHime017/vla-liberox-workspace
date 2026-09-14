@@ -47,12 +47,12 @@ async def run_detail(run_id: str, request: Request,
         result = await run_in_threadpool(
             trajectory_evaluation_service(request).detail,
             run_id, robometer_evaluation_service(request),
-            include_global_evaluations=dataset_id is None,
+            include_global_evaluations=True,
         )
         datasets = training_dataset_service(request)
         result["run"]["is_test"] = datasets.is_test(run_id)
         result = await run_in_threadpool(attach_dataset_context, result, datasets, dataset_id, version_id)
-        if dataset_id is None and result.get("global_evaluation_pending"):
+        if result.get("global_evaluation_pending"):
             offline_job_service(request).schedule_first_reward_snapshot(result["run"])
         return result
     except Exception as exc:

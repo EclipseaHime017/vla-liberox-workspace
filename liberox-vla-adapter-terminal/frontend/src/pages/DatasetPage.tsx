@@ -98,12 +98,13 @@ export function DatasetPage() {
   }, []);
   useEffect(() => { if (taskId) void refresh(taskId, page, pageSize).catch((reason) => setError(String(reason))); }, [taskId, page, pageSize]);
   useEffect(() => {
-    if (!detail?.global_evaluation_pending || detail.dataset_context) {
+    if (!detail?.global_evaluation_pending) {
       globalPoll.current = { runId: "", attempts: 0 }; return;
     }
     if (busy) return;
     const runId = detail.run.id;
-    if (globalPoll.current.runId !== runId) globalPoll.current = { runId, attempts: 0 };
+    const pollKey = JSON.stringify([runId, detail.dataset_context?.dataset_id]);
+    if (globalPoll.current.runId !== pollKey) globalPoll.current = { runId: pollKey, attempts: 0 };
     if (globalPoll.current.attempts >= 30) {
       setError("全局评价准备时间较长，请稍后重新打开详情；已显示的视频和标记不受影响。"); return;
     }
@@ -111,7 +112,9 @@ export function DatasetPage() {
     const timer = window.setTimeout(() => {
       const request = ++detailRequest.current;
       globalPoll.current.attempts += 1;
-      void getTrajectoryDetail(runId).then((next) => {
+      const fetchDetail = detail.dataset_context
+        ? getTrajectoryDetail(runId, detail.dataset_context.dataset_id) : getTrajectoryDetail(runId);
+      void fetchDetail.then((next) => {
         if (current && request === detailRequest.current) setDetail(next);
       }).catch((reason) => { if (current && request === detailRequest.current) setError(String(reason)); });
     }, 1000);

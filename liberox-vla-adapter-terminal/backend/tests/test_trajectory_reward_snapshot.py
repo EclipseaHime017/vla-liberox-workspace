@@ -30,28 +30,27 @@ def test_existing_first_snapshot_skips_observation_hashing(tmp_path, monkeypatch
     assert snapshots.read_reward_snapshot(result["run"])["metadata"] == first["metadata"]
 
 
-def test_existing_global_rynn_has_precedence_over_dataset_stage(tmp_path):
+def test_existing_global_rynn_does_not_block_dataset_stage(tmp_path):
     from backend.app.services.trajectory_evaluation_service import OFFICIAL_ARRAY_KEYS, PBRS_ARRAY_KEYS
 
     result, service, _, _ = global_fixture(tmp_path)
     trajectory = Path(result["run"]["trajectory"])
     values = trajectory.with_name("rynnvalue_evaluation.npz")
-    np.savez(trajectory, env_action=np.zeros((20, 7)))
     np.savez(values, boundary_steps=[0, 20], **{key: [0.] for key in OFFICIAL_ARRAY_KEYS | PBRS_ARRAY_KEYS})
     trajectory.with_name("rynnvalue_evaluation.json").write_text(json.dumps({
         "schema_version": 6, "run_id": "r",
         "trajectory_sha256": digest(trajectory), "values_sha256": digest(values),
         "observations_sha256": digest(trajectory.with_name("trajectory_observations.npz")),
     }))
-    assert snapshots.ensure_first_reward_snapshot(result["run"], service) is None
-    assert not trajectory.with_name(snapshots.SIDECAR).exists()
+    assert snapshots.ensure_first_reward_snapshot(result["run"], service)["metadata"]["source"] == "stage"
+    assert snapshots.read_reward_snapshot(result["run"], "stage") is not None
 
 
 def test_invalid_replacement_preserves_first_snapshot(tmp_path):
     result, service, _, versions = global_fixture(tmp_path)
     first = snapshots.ensure_first_reward_snapshot(result["run"], service)
     trajectory = Path(result["run"]["trajectory"])
-    sidecar = trajectory.with_name(snapshots.SIDECAR)
+    sidecar = snapshots.snapshot_path(result["run"], "stage")
     original = sidecar.read_bytes()
     later = versions[("b", "v1")]
     manifest = json.loads(Path(later["reward_manifest_path"]).read_text())
@@ -74,7 +73,7 @@ def test_identical_observation_copy_revalidates_without_dataset(tmp_path):
     service.list = lambda *_: pytest.fail("owned snapshot must survive dataset deletion")
     assert snapshots.read_reward_snapshot(result["run"]) is None
     assert snapshots.needs_snapshot_validation(result["run"])
-    restored = snapshots.ensure_first_reward_snapshot(result["run"], service)
+    restored = snapshots.ensure_first_reward_snapshot(result["run"], service, "stage")
     assert restored["metadata"]["values_sha256"] == original["metadata"]["values_sha256"]
     assert restored["metadata"]["evaluated_at"] == original["metadata"]["evaluated_at"]
     assert not snapshots.needs_snapshot_validation(result["run"])
@@ -84,12 +83,12 @@ def test_changed_observations_do_not_silently_replace_first_result(tmp_path):
     result, service, _, _ = global_fixture(tmp_path)
     snapshots.ensure_first_reward_snapshot(result["run"], service)
     trajectory = Path(result["run"]["trajectory"])
-    sidecar = trajectory.with_name(snapshots.SIDECAR)
+    sidecar = snapshots.snapshot_path(result["run"], "stage")
     original = sidecar.read_bytes()
     trajectory.with_name("trajectory_observations.npz").write_bytes(b"changed observations")
     service.list = lambda *_: pytest.fail("invalid first result cannot be substituted")
     assert snapshots.needs_snapshot_validation(result["run"])
-    assert snapshots.ensure_first_reward_snapshot(result["run"], service) is None
+    assert snapshots.ensure_first_reward_snapshot(result["run"], service, "stage") is None
     assert sidecar.read_bytes() == original
     assert not snapshots.needs_snapshot_validation(result["run"])
 

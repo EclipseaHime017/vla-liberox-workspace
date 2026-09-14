@@ -183,21 +183,46 @@ class OfflineJobService(DatasetRewardVersions):
                 paths[name] = str((path if path.is_absolute() else base / path).resolve())
         return raw
 
-    def defaults(self, dataset_id: str | None = None) -> dict[str, Any]:
+    def defaults(self, dataset_id: str | None = None, reward_source: str | None = None) -> dict[str, Any]:
         raw = self._load_base_config()
         version = None
+        availability = None
+        if reward_source is not None:
+            self._reward_source(raw, {"reward_source": reward_source})
         if dataset_id:
             dataset = self.datasets.get(dataset_id, quick_verify=False)
-            if dataset.get("reward_version_id"):
-                version = self.datasets.get_version(dataset_id, dataset["reward_version_id"])
+            identifier = (dataset.get("evaluation_version_ids", {}).get(reward_source)
+                          if reward_source else dataset.get("reward_version_id"))
+            if identifier:
+                version = self.datasets.get_version(dataset_id, identifier)
                 sealed = yaml.safe_load(Path(version["config_path"]).read_text(encoding="utf-8"))
                 raw["reward"] = sealed["reward"]
+                availability = {"ready": bool(version.get("complete") and version.get("status") == "READY"),
+                                "origin": "dataset", "missing_run_ids": []}
+            else:
+                from .global_reward_binding import global_members
+                source = reward_source or self._reward_source(raw, {})
+                records, missing = global_members(self, dataset, source)
+                availability = {"ready": bool(records) and not missing, "origin": "global",
+                                "missing_run_ids": [item["run_id"] for item in missing], "errors": missing}
+                from .trajectory_reward_snapshot import needs_snapshot_validation
+                availability["pending"] = False
+                for item in missing:
+                    run = self.datasets.run_service.get_run(item["run_id"])
+                    if needs_snapshot_validation(run, source):
+                        availability["pending"] = True
+                        self.schedule_first_reward_snapshot(run)
+                if records:
+                    raw["reward"].update(records[0][1]["reward_config"])
+        if reward_source is not None:
+            raw["reward"].update(source=reward_source, rynnvalue=reward_source == "rynnvalue")
         reward_source = self._reward_source(raw, {})
         return {
             "reward_version": version,
+            "reward_availability": availability,
             "reward_parameters_locked": False,
             "reward_locked_parameters": [
-                "reward_source", "reward_stage_exponent", "reward_shaping_weight", "reward_rynnvalue",
+                "reward_stage_exponent", "reward_shaping_weight",
             ] if dataset_id else [],
             "reward_editable_parameters": ["reward_gamma", "reward_accumulate_primitive_steps"],
             "basic": {

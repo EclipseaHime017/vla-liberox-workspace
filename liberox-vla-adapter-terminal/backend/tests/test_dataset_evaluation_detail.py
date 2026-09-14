@@ -53,7 +53,9 @@ def test_same_trajectory_has_independent_dataset_curves(tmp_path):
     assert b["dataset_context"]["config"]["stage_exponent"] == 4
     assert len(a["reward_evaluation"]["stage_scores"]) == 21
     assert a["reward_evaluation"]["chunk_end_steps"][-1] == 20
-    assert a["rynnvalue_evaluation"] is None  # never mix a global Rynn reward into Stage
+    assert a["rynnvalue_evaluation"] == {"global": True}
+    assert a["evaluation_sources"]["rynnvalue"]["origin"] == "global"
+    assert a["evaluation_sources"]["stage"]["origin"] == "dataset"
     assert len(a["available_dataset_contexts"]) == 2
     global_detail = attach_dataset_context(copy.deepcopy(result), service, None, None)
     assert global_detail["rynnvalue_evaluation"] == {"global": True}
@@ -68,8 +70,9 @@ def test_detail_never_recalculates_and_rejects_corrupted_artifacts(tmp_path, mon
     assert attach_dataset_context(copy.deepcopy(result), service, "a", "v1") == first
     manifest = json.loads(Path(versions[("a", "v1")]["reward_manifest_path"]).read_text())
     Path(manifest["episodes"][0]["reward_path"]).write_bytes(b"corrupt")
-    with pytest.raises(ValueError, match="hash mismatch"):
-        attach_dataset_context(copy.deepcopy(result), service, "a", "v1")
+    broken = attach_dataset_context(copy.deepcopy(result), service, "a", "v1")
+    assert "hash mismatch" in broken["evaluation_sources"]["stage"]["error"]
+    assert broken["rynnvalue_evaluation"] == {"global": True}
 
 
 def test_context_requires_membership_and_ready_version(tmp_path):
@@ -77,19 +80,21 @@ def test_context_requires_membership_and_ready_version(tmp_path):
     with pytest.raises(ValueError, match="requires dataset"):
         attach_dataset_context(copy.deepcopy(result), service, None, "v1")
     versions[("a", "v1")]["status"] = "RUNNING"
-    with pytest.raises(ValueError, match="not ready"):
-        attach_dataset_context(copy.deepcopy(result), service, "a", "v1")
+    detail = attach_dataset_context(copy.deepcopy(result), service, "a", "v1")
+    assert "not ready" in detail["evaluation_sources"]["stage"]["error"]
     datasets["a"]["members"] = []
     with pytest.raises(ValueError, match="not a member"):
         attach_dataset_context(copy.deepcopy(result), service, "a", "v1")
 
 
-def test_unannotated_dataset_does_not_fall_back_to_global_evaluation(tmp_path):
+def test_unannotated_dataset_uses_independent_global_evaluations(tmp_path):
     result, service, datasets, _ = fixture(tmp_path)
     datasets["a"]["reward_version_id"] = None
+    datasets["a"]["evaluation_versions"] = []
     detail = attach_dataset_context(result, service, "a", None)
-    assert detail["dataset_context"]["status"] == "NOT_EVALUATED"
-    assert detail["reward_evaluation"] is None and detail["rynnvalue_evaluation"] is None
+    assert detail["dataset_context"]["status"] == "GLOBAL_FALLBACK"
+    assert detail["reward_evaluations"]["stage"]["reward_config"]["stage_exponent"] == 4
+    assert detail["rynnvalue_evaluation"] == {"global": True}
 
 
 def global_fixture(tmp_path):
@@ -98,7 +103,7 @@ def global_fixture(tmp_path):
     episode.mkdir()
     trajectory = episode / "trajectory.npz"
     observations = episode / "trajectory_observations.npz"
-    np.savez(trajectory, done=np.zeros(20, dtype=bool))
+    np.savez(trajectory, done=np.zeros(20, dtype=bool), env_action=np.zeros((20, 7)))
     np.savez(observations, agentview_image=np.zeros((21, 2, 2, 3), dtype=np.uint8))
     result["run"]["trajectory"] = str(trajectory)
     result.update(evaluation=None, rynnvalue_evaluation=None)
@@ -164,7 +169,7 @@ def test_explicit_global_overwrite_refreshes_curve_without_mutating_dataset(tmp_
     bind_reward_snapshot(Path(later["prepared_manifest_path"]), path,
                          overwrite=True, origin="manual", evaluation_id="manual")
     updated = attach_dataset_context(copy.deepcopy(result), service, None, None)
-    assert updated["global_evaluation"]["origin"] == "manual"
+    assert updated["global_evaluation"]["origin"] == "global"
     assert updated["reward_evaluation"]["stage_scores"] != original["reward_evaluation"]["stage_scores"]
     assert path.read_bytes() == before
 

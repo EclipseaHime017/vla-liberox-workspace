@@ -269,10 +269,21 @@ class DatasetRewardVersions:
             raise
 
     def pinned_reward(self, dataset: dict, parameters: dict) -> tuple[dict, dict]:
-        version_id = parameters.get("reward_version_id") or dataset.get("reward_version_id")
-        if not version_id:
-            raise ConflictError("请先在数据集配置中生成奖励版本", code="REWARD_VERSION_NOT_READY")
-        version = self.datasets.validate_version(dataset["id"], version_id)
+        selected_source = parameters.get("reward_source")
+        if selected_source is None and "reward_rynnvalue" in parameters:
+            selected_source = "rynnvalue" if parameters["reward_rynnvalue"] else "sparse"
+        version_id = parameters.get("reward_version_id") or (
+            dataset.get("evaluation_version_ids", {}).get(selected_source)
+            if selected_source else dataset.get("reward_version_id"))
+        if version_id:
+            version = self.datasets.validate_version(dataset["id"], version_id)
+        else:
+            from .global_reward_binding import bind_global_rewards
+            selected_source = selected_source or self._reward_source(self._load_base_config(), {})
+            version = bind_global_rewards(self, dataset, selected_source)
+            version_id = version["id"]
+        if selected_source is not None and selected_source != version["evaluator"]:
+            raise ConflictError("reward_source conflicts with selected evaluation", code="REWARD_CONFIG_LOCKED")
         if version.get("status") != "READY" or not version.get("complete") or version["evaluator"] == "robometer":
             raise ConflictError("Training reward version is not ready", code="REWARD_VERSION_NOT_READY")
         settings = yaml.safe_load(Path(version["config_path"]).read_text(encoding="utf-8"))["reward"]

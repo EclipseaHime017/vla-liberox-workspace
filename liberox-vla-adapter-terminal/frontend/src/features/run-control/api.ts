@@ -4,7 +4,7 @@ import type {
   EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
   PaginatedRuns, PolicyDetail, PolicyInfo, TensorBoardStatus, TrajectoryDetail,
   TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe, RewardParameters,
-  RewardSource,
+  RewardSource, TrainingRewardSource,
 } from "./types";
 
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
@@ -100,9 +100,12 @@ export const stopOfflineJob = (id: string) => api<OfflineJob>(
 export const getJobLogs = (id: string, offset = 0) => api<{
   offset: number; next_offset: number; text: string;
 }>(`/api/jobs/${encodeURIComponent(id)}/logs?offset=${offset}`);
-export const getTrainingDefaults = (datasetId?: string) => api<TrainingDefaults>(
-  "/api/training/defaults" + (datasetId ? `?dataset_id=${encodeURIComponent(datasetId)}` : ""),
-);
+export const getTrainingDefaults = (datasetId?: string, rewardSource?: TrainingRewardSource) => {
+  const query = new URLSearchParams();
+  if (datasetId) query.set("dataset_id", datasetId);
+  if (rewardSource) query.set("reward_source", rewardSource);
+  return api<TrainingDefaults>(`/api/training/defaults${query.size ? `?${query}` : ""}`);
+};
 export const startTraining = (datasetId: string, parameters: Record<string, unknown>) =>
   api<OfflineJob>("/api/training-runs", {
     method: "POST", body: JSON.stringify({ dataset_id: datasetId, parameters }),

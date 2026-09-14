@@ -260,6 +260,8 @@ td code { font-size: 11px; }
 .training-config > .panel-title strong { font-size: 24px; }
 .training-config > .panel-title span { font-size: 16.5px; }
 .training-config .training-form { gap: 18px; padding: 24px; }
+.training-config .dataset-card { grid-template-columns: minmax(0, 1fr); border: 1px solid var(--line); border-radius: 16px; }
+.training-config .dataset-card-actions { justify-content: flex-start; }
 .training-config .training-form > label, .training-config .parameter-grid label { gap: 8px; font-size: 16.5px; }
 .training-config .training-form input, .training-config .training-form select { padding: 12px 14px; border-radius: 11px; font-size: 16.5px; }
 .training-dataset-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); font-size: 11px; }

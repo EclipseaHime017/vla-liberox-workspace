@@ -248,8 +248,7 @@ def test_training_discount_overrides_do_not_mutate_evaluation(tmp_path, source, 
 
 
 @pytest.mark.parametrize("override", [
-    {"reward_source": "sparse"}, {"reward_stage_exponent": 3},
-    {"reward_shaping_weight": .2}, {"reward_rynnvalue": True},
+    {"reward_stage_exponent": 3}, {"reward_shaping_weight": .2},
 ])
 def test_other_reward_recipe_fields_remain_locked(tmp_path, override):
     jobs, dataset = setup_jobs(tmp_path)

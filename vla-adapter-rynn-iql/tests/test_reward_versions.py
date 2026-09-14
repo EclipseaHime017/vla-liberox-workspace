@@ -35,6 +35,62 @@ def _stage(configured):
     return manifest
 
 
+def test_global_bindings_use_per_member_shaping_and_content_identity(configured):
+    prepared = json.loads(prepare_dataset(configured).manifest.read_text())
+    annotate_manifest(configured, CountingAnnotator())
+    first = load_reward_index(configured)
+    configured.raw["reward"]["shaping_weight"] = .7
+    second = load_reward_index(configured)
+    combined = copy.deepcopy(first)
+    combined["binding_kind"] = "global_trajectory_snapshots"
+    for i, entry in enumerate(combined["episodes"]):
+        source = first if i == 0 else second
+        entry.update(copy.deepcopy(source["episodes"][i]))
+        entry.update(saved_reward_config=source["reward_config"],
+                     saved_annotation_config=source["annotation_config"])
+    path = _pin(configured, combined)
+    atomic_json(path, combined)
+    configured.raw["reward"].update(manifest_sha256=sha256_file(path), gamma=.8)
+    adapted = load_reward_index(configured)
+    for episode, entry in zip(prepared["episodes"], adapted["episodes"]):
+        weight = entry["saved_reward_config"]["shaping_weight"]
+        with np.load(entry["reward_path"]) as arrays:
+            np.testing.assert_allclose(arrays["dense_reward"], weight * arrays["pbrs_shaping_reward"])
+        assert entry["training_reward_config"]["shaping_weight"] == weight
+    moved = copy.deepcopy(adapted)
+    moved.update(version_id="new-random-id", source_reward_manifest_sha256="new-private-hash")
+    for entry in moved["episodes"]:
+        entry.update(reward_path="different-copy", annotation_path="different-copy")
+    assert reward_manifest_digest(moved) == reward_manifest_digest(adapted)
+    moved["episodes"][0]["saved_reward_config"]["shaping_weight"] += .1
+    assert reward_manifest_digest(moved) != reward_manifest_digest(adapted)
+
+
+def test_global_adaptation_preserves_unchanged_members_even_without_semantic_signals(configured):
+    _stage(configured)
+    first = load_reward_index(configured)
+    configured.raw["reward"]["gamma"] = .8
+    second = load_reward_index(configured)
+    combined = copy.deepcopy(first)
+    combined["binding_kind"] = "global_trajectory_snapshots"
+    for i, entry in enumerate(combined["episodes"]):
+        source = first if i == 0 else second
+        entry.update(copy.deepcopy(source["episodes"][i]))
+        entry["saved_reward_config"] = source["reward_config"]
+    unchanged = combined["episodes"][0]
+    with np.load(unchanged["reward_path"]) as values:
+        arrays = {name: values[name] for name in values.files if name != "stage_score"}
+    np.savez_compressed(unchanged["reward_path"], **arrays)
+    unchanged["reward_sha256"] = unchanged["annotation_sha256"] = sha256_file(Path(unchanged["reward_path"]))
+    path = _pin(configured, combined)
+    atomic_json(path, combined)
+    configured.raw["reward"].update(manifest_sha256=sha256_file(path), gamma=first["reward_config"]["gamma"])
+    before = Path(unchanged["reward_path"]).read_bytes()
+    adapted = load_reward_index(configured)
+    assert adapted["episodes"][0] == unchanged
+    assert Path(unchanged["reward_path"]).read_bytes() == before
+
+
 def _pin(configured, index):
     path = Path(index["episodes"][0]["reward_path"]).parent / "reward_manifest.json"
     configured.raw["reward"].update(

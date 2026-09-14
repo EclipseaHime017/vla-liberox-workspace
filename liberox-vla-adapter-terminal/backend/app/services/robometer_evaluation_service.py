@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,6 +48,9 @@ class RobometerEvaluationService:
         # of list endpoints and reuse it until one of the relevant files
         # changes on disk.
         self._validation_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any] | None]] = {}
+        self._detail_lock = threading.Lock()
+        self._detail_workers = {}
+        self._detail_executor = None
 
     @staticmethod
     def _fingerprint(paths: tuple[Path, ...]) -> tuple[Any, ...]:
@@ -128,8 +133,8 @@ class RobometerEvaluationService:
                     finite = all(np.isfinite(arrays[key]).all() for key in ARRAY_KEYS)
                     steps = arrays["observation_steps"].astype(int)
             if payload is not None:
-                with np.load(observations, allow_pickle=False) as source:
-                    observation_count = len(source["agentview_image"])
+                with np.load(episode / "trajectory.npz", allow_pickle=False) as source:
+                    observation_count = len(source["env_action"]) + 1
                 if lengths != {int(payload.get("sample_count", -1))} or not finite:
                     payload = None
                 if not len(steps) or int(steps[0]) != 0 or int(steps[-1]) != observation_count - 1:
@@ -271,8 +276,29 @@ class RobometerEvaluationService:
             bound.append(run_id)
         return {"bound": bound, "skipped": skipped, "count": len(bound)}
 
-    def detail(self, run: dict[str, Any]) -> dict[str, Any] | None:
-        payload = self._load(run)
+    def detail_pending(self, run: dict[str, Any]) -> bool:
+        future = self._detail_workers.get(str(run.get("id")))
+        return future is not None and not future.done()
+
+    def detail(self, run: dict[str, Any], *, defer_validation: bool = False) -> dict[str, Any] | None:
+        if defer_validation:
+            episode = self._episode_dir(run)
+            paths = (episode / SIDECAR_NAME, episode / VALUES_NAME,
+                     episode / "trajectory_observations.npz", self._manifest_path(run, episode),
+                     episode / "trajectory.npz")
+            cached = self._validation_cache.get(str(run.get("id")))
+            if cached is None or cached[0] != self._fingerprint(paths):
+                if self._load_status(run) is not None:
+                    with self._detail_lock:
+                        key = str(run.get("id"))
+                        if not self.detail_pending(run):
+                            if self._detail_executor is None:
+                                self._detail_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="robometer-validate")
+                            self._detail_workers[key] = self._detail_executor.submit(self._load, dict(run))
+                return None
+            payload = cached[1]
+        else:
+            payload = self._load(run)
         if payload is None:
             return None
         episode = self._episode_dir(run)

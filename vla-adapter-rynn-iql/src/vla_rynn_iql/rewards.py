@@ -107,6 +107,11 @@ def _episode_timeline_arrays(episode: dict[str, Any]) -> dict[str, np.ndarray]:
 
 def reward_manifest_digest(index: dict[str, Any]) -> str:
     """Content identity for direct rewards; legacy RynnValue hashes stay unchanged."""
+    if index.get("binding_kind") == "global_trajectory_snapshots":
+        return stable_hash({"dataset_sha256": index["dataset_sha256"], "episodes": [
+            {key: entry.get(key) for key in ("run_id", "reward_sha256", "saved_reward_config",
+                "saved_annotation_config", "training_reward_config", "stage_annotation_sha256")}
+            for entry in sorted(index["episodes"], key=lambda item: item["run_id"])]})
     if (index.get("reward_config", {}).get("source", "rynnvalue") == "rynnvalue"
             and not index.get("source_reward_manifest_sha256")):
         return stable_hash(index)
@@ -1223,13 +1228,14 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
         raise ValueError("Pinned reward version belongs to a different prepared dataset")
     requested_recipe = reward_derivation_config(reward)
     stored_recipe = payload.get("reward_config")
-    if not isinstance(stored_recipe, dict) or {
+    composed = payload.get("binding_kind") == "global_trajectory_snapshots"
+    if not isinstance(stored_recipe, dict) or (not composed and {
         key: value for key, value in stored_recipe.items() if key not in TRAINING_REDUCTION_CONFIG_KEYS
     } != {
         key: value for key, value in requested_recipe.items() if key not in TRAINING_REDUCTION_CONFIG_KEYS
-    }:
+    }):
         raise ValueError("Training reward parameters conflict with the pinned reward version")
-    if (reward_source(reward) == "rynnvalue"
+    if (not composed and reward_source(reward) == "rynnvalue"
             and payload.get("annotation_config") != official_inference_config(reward)):
         raise ValueError("Training model-evaluation parameters conflict with the pinned reward version")
     if payload.get("version_id", reward["version_id"]) != reward["version_id"]:
@@ -1240,6 +1246,9 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
             or {str(item.get("run_id")) for item in entries} != set(expected)):
         raise ValueError("Pinned reward members do not match the prepared dataset")
     for entry in entries:
+        if composed and (not isinstance(entry.get("saved_reward_config"), dict)
+                         or reward_source(entry["saved_reward_config"]) != reward_source(reward)):
+            raise ValueError("Global reward binding contains a different reward source")
         episode = expected[str(entry["run_id"])]
         for path_key, hash_key in (("trajectory_path", "trajectory_sha256"),
                                    ("observations_path", "observations_sha256")):
@@ -1270,7 +1279,9 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
         if (snapshot.is_symlink() or not snapshot.is_file()
                 or stable_hash(json.loads(snapshot.read_text())) != payload.get("stage_annotations_sha256")):
             raise ValueError("Pinned Stage keyframe snapshot is missing or corrupted")
-    if stored_recipe != requested_recipe:
+    if stored_recipe != requested_recipe or (composed and any(
+        any(entry["saved_reward_config"].get(key) != requested_recipe.get(key)
+            for key in TRAINING_REDUCTION_CONFIG_KEYS) for entry in entries)):
         return _adapt_pinned_training_rewards(config, payload, manifest, requested_recipe)
     return payload
 
@@ -1295,6 +1306,15 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
     # Validate all saved semantic signals before creating an output directory.
     for episode in prepared["episodes"]:
         entry = entries[str(episode["run_id"])]
+        effective = recipe
+        if pinned.get("binding_kind") == "global_trajectory_snapshots":
+            effective = {**entry["saved_reward_config"], **{
+                key: recipe[key] for key in TRAINING_REDUCTION_CONFIG_KEYS}}
+            if all(effective[key] == entry["saved_reward_config"].get(key)
+                   for key in TRAINING_REDUCTION_CONFIG_KEYS):
+                generated.append((entry, episode, None))
+                continue
+        gamma, cumulative = float(effective["gamma"]), bool(effective["accumulate_primitive_steps"])
         with np.load(entry["reward_path"], allow_pickle=False) as values:
             arrays = {name: values[name] for name in values.files}
         chunks = episode.get("evaluation_chunks", episode["chunks"])
@@ -1320,11 +1340,11 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
             components = np.asarray([
                 chunk_reward_components(done, int(chunk["start"]), int(chunk["length"]),
                     lookup[int(chunk["start"])], lookup[int(chunk["end"])], gamma,
-                    float(recipe["shaping_weight"]), cumulative, True)
+                    float(effective["shaping_weight"]), cumulative, True)
                 for chunk in chunks
             ], dtype=np.float32)
             arrays["sparse_reward"], arrays["pbrs_shaping_reward"], final = components.T
-            arrays["dense_reward"] = float(recipe["shaping_weight"]) * arrays["pbrs_shaping_reward"]
+            arrays["dense_reward"] = float(effective["shaping_weight"]) * arrays["pbrs_shaping_reward"]
         else:
             final = np.asarray([
                 sparse_primitive_return(done, int(chunk["start"]), int(chunk["length"]), gamma)
@@ -1335,7 +1355,7 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
         arrays.update(final_reward=final, pbrs_chunk_reward=final)
         if not np.isfinite(final).all():
             raise ValueError(f"Non-finite adapted reward: {episode['run_id']}")
-        generated.append((entry, episode, arrays))
+        generated.append(({**entry, "training_reward_config": effective}, episode, arrays))
 
     directory = target_root / uuid.uuid4().hex
     directory.mkdir(parents=True, exist_ok=False)
@@ -1346,8 +1366,12 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
               "derivation_implementation_sha256": implementation,
               "training_adaptation_manifest_path": str(directory / "reward_manifest.json")}
     for entry, episode, arrays in generated:
+        if arrays is None:
+            result["episodes"].append(entry)
+            continue
+        effective = entry.get("training_reward_config", recipe)
         key = stable_hash({"source_reward_sha256": entry["reward_sha256"],
-                           "run_id": episode["run_id"], "reward_config": recipe,
+                           "run_id": episode["run_id"], "reward_config": effective,
                            "derivation_implementation_sha256": implementation})
         path = directory / f"{key}.npz"
         np.savez_compressed(path, **arrays)
@@ -1355,7 +1379,7 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
         adapted = {**entry, "source_key": key, "reward_path": str(path), "annotation_path": str(path),
                    "reward_sha256": digest, "annotation_sha256": digest}
         if "pbrs_reward" in adapted:
-            adapted["pbrs_reward"] = {**adapted["pbrs_reward"], **recipe,
+            adapted["pbrs_reward"] = {**adapted["pbrs_reward"], **effective,
                                      "description": "Training-local reduction of pinned model outputs"}
         result["episodes"].append(adapted)
     atomic_json(directory / "reward_manifest.json", result)

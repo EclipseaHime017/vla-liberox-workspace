@@ -218,18 +218,41 @@ source recording. Lists read lightweight metadata rather than hashing or
 decompressing observation arrays; artifact verification runs in background jobs
 or cached detail reads.
 
-Global reward plots use `trajectory_reward.json` beside the source trajectory,
+Global reward plots use `trajectory_reward.<source>.json` (`sparse`, `stage`,
+`rynnvalue`) beside the source trajectory,
 pointing to a copied, content-addressed `trajectory_reward.<sha256>.npz`. The
 metadata retains the input hashes, evaluator, recipe and evaluation time. The
-first successful evaluation initializes this snapshot; reevaluating a dataset
+first successful evaluation of each source initializes its own snapshot; reevaluating a dataset
 does not automatically replace it. An explicit manual overwrite, including
 `overwrite_global: true` on a dataset evaluation, atomically replaces the global
-pointer. This also allows Stage curves to be updated without relabeling. Existing
-valid global RynnValue sidecars retain precedence during initialization. Stored
+pointer for that source only. This also allows Stage curves to be updated without relabeling. Existing
+valid global RynnValue sidecars retain precedence only for RynnValue. Legacy
+`trajectory_reward.json` is read only for its declared source; a dedicated
+source sidecar takes precedence, without deleting the legacy file. Stored
 global reward arrays are independent of dataset directories, so deleting a
 dataset does not remove its previously copied global result. Robometer globals
 remain independent diagnostic sidecars. The UI has only a global/dataset source
 selector; it no longer exposes evaluation-history selection or activation.
+
+Datasets persist `evaluation_version_ids`, keyed independently by `sparse`,
+`stage`, `rynnvalue`, and `robometer`. Older READY summaries recover missing
+per-source pointers; `reward_version_id` remains a compatibility/default alias.
+Detail returns all `reward_evaluations` and `evaluation_sources`, plus the
+independent RynnValue/Robometer outputs. Each source resolves dataset-first and
+then trajectory-global. A corrupt local result is reported, not silently replaced.
+
+Training selects one of Sparse/Stage/RynnValue. Without a local result, every
+member must have a valid global result of that source. The backend copies saved
+arrays and prepared episode metadata to a private `global_*` training binding,
+without creating a dataset evaluation or running a model. Entries retain their
+own `saved_reward_config` and `saved_annotation_config`; changes to training
+gamma/cumulative reuse saved curves and preserve per-member p/kappa. Source
+sidecars now retain full prepared episode/header metadata so deleting the
+originating dataset does not remove their replay description. Legacy native
+RynnValue metadata is recovered from matching existing prepared/reward manifests;
+missing unverifiable metadata blocks training instead of guessing chunk semantics.
+Checkpoint reward identity is based on member/config/value content, not random
+private-copy paths, so an identical global binding can resume a previous run.
 
 After a successful UI evaluation job, a combined evaluation snapshot may be
 atomically copied beside the source episode as `rynnvalue_evaluation.npz`; its

@@ -11,14 +11,14 @@ import { RunTable } from "./RunTable";
 import { rewardParameterLabels, rewardSourceLabels } from "./rewardVersions";
 const successful = (status: string) => ["COMPLETED", "READY"].includes(status);
 
-export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onRemove, onDerive,
+export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onRemove, onDerive, initialExpanded = false,
   onRefresh, onJob, onError, onOpen }: {
   dataset: TrainingDataset; disabled: boolean; robometerUnavailable?: string;
-  onRemove: () => void; onDerive: () => void; onRefresh: () => Promise<void>;
+  onRemove?: () => void; onDerive?: () => void; initialExpanded?: boolean; onRefresh: () => Promise<void>;
   onJob: (job: OfflineJob) => void; onError: (error: string) => void;
-  onOpen: (runId: string, datasetId: string) => void;
+  onOpen?: (runId: string, datasetId: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(initialExpanded);
   const [showMembers, setShowMembers] = useState(false);
   const [configs, setConfigs] = useState<Partial<Record<RewardSource, RewardParameters>>>({});
   const [configReady, setConfigReady] = useState(false);
@@ -29,11 +29,16 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
   const [members, setMembers] = useState<PaginatedRuns | null>(null);
   const [membersLoading, setMembersLoading] = useState(false);
   const versions = dataset.evaluation_versions ?? [];
-  const active = versions.find((item) => item.id === dataset.reward_version_id);
+  const currentFor = (evaluator: RewardSource) => {
+    const id = dataset.evaluation_version_ids
+      ? dataset.evaluation_version_ids[evaluator]
+      : evaluator === "robometer" ? dataset.robometer_version_id : dataset.reward_version_id;
+    const selected = versions.find((item) => item.id === id && item.evaluator === evaluator && successful(item.status));
+    return selected ?? (dataset.evaluation_version_ids ? undefined
+      : [...versions].reverse().find((item) => item.evaluator === evaluator && successful(item.status)));
+  };
   const parameters = configs[source] ?? {};
-  const currentId = source === "robometer" ? dataset.robometer_version_id : dataset.reward_version_id;
-  const currentEvaluation = versions.find((item) => item.id === currentId && item.evaluator === source && successful(item.status))
-    ?? [...versions].reverse().find((item) => item.evaluator === source && successful(item.status));
+  const currentEvaluation = currentFor(source);
   const latestAttempt = [...versions].reverse().find((item) => item.evaluator === source);
   const taskRunning = dataset.annotation_status === "RUNNING"
     || versions.some((version) => ["STARTING", "RUNNING", "STOPPING"].includes(version.status));
@@ -47,13 +52,11 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
       if (!current) return;
       const next = { ...defaults };
       for (const evaluator of Object.keys(rewardSourceLabels) as RewardSource[]) {
-        const version = evaluator === "robometer"
-          ? versions.find((item) => item.id === dataset.robometer_version_id)
-          : versions.find((item) => item.id === dataset.reward_version_id && item.evaluator === evaluator)
-            ?? [...versions].reverse().find((item) => item.evaluator === evaluator && successful(item.status));
+        const version = currentFor(evaluator);
         next[evaluator] = { ...next[evaluator], ...version?.parameters, force_model: false, overwrite_global: false };
       }
-      setConfigs(next); setSource(active?.evaluator ?? "rynnvalue"); setConfigReady(true);
+      setConfigs(next); setSource(currentFor("rynnvalue") ? "rynnvalue"
+        : (Object.keys(rewardSourceLabels) as RewardSource[]).find((evaluator) => currentFor(evaluator)) ?? "rynnvalue"); setConfigReady(true);
     }).catch((error) => { if (current) onError(String(error)); })
       .finally(() => { if (current) setBusy(false); });
     return () => { current = false; };
@@ -106,21 +109,21 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
 
   return <article className="dataset-card">
     <div className="dataset-card-description"><h2>{dataset.name}</h2><p>{dataset.member_count} 条轨迹 · {dataset.action_count} actions · {dataset.chunk_count} chunks</p>
-      <p>{active ? `当前训练奖励：${rewardSourceLabels[active.evaluator]}`
-        : dataset.annotation_id ? "已有评价，请配置后更新训练奖励" : "尚未评价，请展开配置"}</p></div>
+      <p>{(Object.keys(rewardSourceLabels) as RewardSource[]).map((evaluator) =>
+        `${rewardSourceLabels[evaluator]}：${currentFor(evaluator) ? "已评价" : "使用全局结果（如有）"}`).join(" · ")}</p></div>
     <div className="dataset-badges"><Badge tone={dataset.integrity_status === "HEALTHY" ? "green" : "red"}>{dataset.integrity_status}</Badge>
       <Badge tone={dataset.annotation_status === "READY" ? "green" : dataset.annotation_status === "ERROR" ? "red" : "neutral"}>{dataset.annotation_status}</Badge></div>
     <div className="dataset-card-actions">
-      <button className="danger" disabled={blocked} onClick={onRemove}>{dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集"}</button>
+      {onRemove && <button className="danger" disabled={blocked} onClick={onRemove}>{dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集"}</button>}
       <button disabled={blocked} onClick={() => void run(async () => { await verifyTrainingDataset(dataset.id); await onRefresh(); })}>验证完整性</button>
-      <button disabled={blocked} onClick={onDerive}>调整成员并另存</button>
-      <button aria-expanded={showMembers} onClick={() => setShowMembers((value) => !value)}>成员</button>
+      {onDerive && <button disabled={blocked} onClick={onDerive}>调整成员并另存</button>}
+      {onOpen && <button aria-expanded={showMembers} onClick={() => setShowMembers((value) => !value)}>成员</button>}
       <button aria-expanded={expanded} aria-controls={`reward-config-${dataset.id}`} onClick={() => setExpanded((value) => !value)}>配置</button>
     </div>
     {dataset.integrity_error && <p className="dataset-integrity-error">{dataset.integrity_error}</p>}
     {expanded && <section id={`reward-config-${dataset.id}`} className="dataset-reward-config" aria-label={`${dataset.name} 评价配置`}>
       {!configReady ? <p role="status">{busy ? "正在加载评价配置…" : "配置加载失败，请收起后重试。"}</p> : <>
-        <div className="evaluation-config-heading"><div><h3>评价配置</h3><p>重新评价会更新当前数据集结果，原始关键帧保持不变。</p></div>
+        <div className="evaluation-config-heading"><div><h3>评价配置</h3><p>重新评价仅更新当前数据集的所选类型结果，原始关键帧保持不变。</p></div>
           {currentEvaluation && <Badge tone="green">已评价</Badge>}</div>
         <fieldset disabled={blocked} className="parameter-grid">
           <label>评价类型<select value={source} onChange={(event) => setSource(event.target.value as RewardSource)}>
@@ -136,7 +139,7 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
         </fieldset>
         {(source === "rynnvalue" || source === "robometer") && <div className="evaluation-model-summary"><span>评价模型</span><strong title={parameters.revision ? `固定 revision：${parameters.revision}` : undefined}>{parameters.checkpoint ?? "未配置"}</strong><Badge>已锁定</Badge></div>}
         {currentEvaluation && <div className="evaluation-current-summary"><span>当前结果配置</span><div className="reward-parameter-chips">{rewardParameterLabels(currentEvaluation.parameters).map((label) => <span key={label}>{label}</span>)}</div></div>}
-        <p className="field-hint">首次评价会自动用于全局详情；开启同步覆盖后，全局详情也更新为本次结果。</p>
+        <p className="field-hint">首次评价会保存该类型的全局结果；同步覆盖仅更新同类型的全局结果。数据集缺少某类型结果时，每条轨迹使用对应的全局结果。</p>
         <p className="field-hint">{source === "stage" ? "使用最新保存的关键帧重新计算；修改 p 或奖励公式不需要重新标记。缺少标注时会列出相应轨迹并停止。"
           : source === "robometer" ? "仅用于诊断与对比，不改变当前训练奖励。"
             : source === "sparse" ? "仅计算 Sparse 训练奖励，不加载模型。"
@@ -148,7 +151,7 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
     </section>}
     {showMembers && <section className="dataset-member-browser" aria-label={`${dataset.name} 成员`}>
       <div className="panel-title"><strong>数据集成员</strong><span>详情显示当前数据集的评价结果</span></div>
-      {membersLoading ? <p role="status">正在加载成员…</p> : members && <RunTable runs={members.items} onOpen={(runId) => onOpen(runId, dataset.id)} />}
+      {membersLoading ? <p role="status">正在加载成员…</p> : members && <RunTable runs={members.items} onOpen={(runId) => onOpen?.(runId, dataset.id)} />}
       <div className="table-pagination"><button disabled={page <= 1 || membersLoading} onClick={() => setPage((value) => value - 1)}>上一页</button><span>第 {members?.page ?? page} / {members?.pages ?? 1} 页</span>
         <button disabled={page >= (members?.pages ?? 1) || membersLoading} onClick={() => setPage((value) => value + 1)}>下一页</button><label>每页<select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>{[5, 10, 20, 50].map((size) => <option key={size} value={size}>{size}</option>)}</select></label></div>
     </section>}

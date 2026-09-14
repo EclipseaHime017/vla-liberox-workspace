@@ -122,7 +122,9 @@ export type PaginatedRuns = {
 export type TrajectoryDetail = {
   global_evaluation?: { source: RewardSource; config: RewardParameters; evaluated_at?: string; origin?: string } | null;
   global_evaluation_pending?: boolean;
-  global_evaluation_error?: string;
+  global_evaluation_error?: string | null;
+  reward_evaluations?: Partial<Record<TrainingRewardSource, DatasetRewardEvaluation>>;
+  evaluation_sources?: Partial<Record<RewardSource, EvaluationSourceContext>>;
   dataset_context?: DatasetDetailContext | null;
   available_dataset_contexts?: Array<{
     dataset_id: string; dataset_name: string; reward_version_id: string | null;
@@ -149,6 +151,12 @@ export type TrajectoryDetail = {
 };
 
 export type RewardSource = "sparse" | "stage" | "rynnvalue" | "robometer";
+export type TrainingRewardSource = Exclude<RewardSource, "robometer">;
+export type EvaluationSourceContext = {
+  status: string; origin: "global" | "dataset";
+  config?: RewardParameters; error?: string | null;
+  evaluated_at?: string | null; version_id?: string;
+};
 export type RewardParameters = {
   gamma?: number; shaping_weight?: number; stage_exponent?: number;
   accumulate_primitive_steps?: boolean; max_frames?: number; batch_size?: number;
@@ -232,6 +240,7 @@ export type DatasetPreview = {
 };
 
 export type TrainingDataset = {
+  evaluation_version_ids?: Partial<Record<RewardSource, string | null>>;
   reward_version_id?: string | null; robometer_version_id?: string | null;
   evaluation_versions?: RewardVersion[];
   id: string; project_id: string; name: string; task_id: string;
@@ -390,6 +399,11 @@ export type EvaluationFilters = {
 };
 
 export type TrainingDefaults = {
+  reward_availability?: {
+    pending?: boolean;
+    ready: boolean; origin?: "dataset" | "global" | null;
+    missing_run_ids?: string[]; errors?: { run_id: string; error: string }[];
+  };
   reward_version?: RewardVersion | null;
   reward_parameters_locked?: boolean;
   reward_locked_parameters?: string[];
