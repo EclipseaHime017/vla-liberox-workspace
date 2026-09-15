@@ -10,10 +10,17 @@ import type {
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
 export const listRuns = () => api<Session[]>("/api/runs");
 export const getDatasetSummary = () => api<DatasetSummary>("/api/datasets/summary");
-export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5) => api<PaginatedRuns>(
-  "/api/datasets/runs?task_id=" + encodeURIComponent(taskId)
-  + `&page=${page}&page_size=${pageSize}`,
-);
+function taskQuery(taskId?: string, taskIds?: string[]) {
+  const query = new URLSearchParams();
+  if (taskId) query.set("task_id", taskId);
+  if (taskIds !== undefined) (taskIds.length ? taskIds : [""]).forEach((id) => query.append("task_ids", id));
+  return query;
+}
+export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5, taskIds?: string[]) => {
+  const query = taskQuery(taskId, taskIds);
+  query.set("page", String(page)); query.set("page_size", String(pageSize));
+  return api<PaginatedRuns>(`/api/datasets/runs?${query}`);
+};
 export const getTrajectoryDetail = (runId: string, datasetId?: string) => {
   const query = new URLSearchParams();
   if (datasetId) query.set("dataset_id", datasetId);
@@ -72,9 +79,10 @@ export const deleteTrainingDataset = (id: string, force = false) => api<{
   method: "DELETE", body: JSON.stringify({ confirm_dataset_id: id, force }),
 });
 
-export const listTrainingDatasets = (taskId?: string) => api<TrainingDataset[]>(
-  "/api/training-datasets" + (taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""),
-);
+export const listTrainingDatasets = (taskId?: string, taskIds?: string[]) => {
+  const query = taskQuery(taskId, taskIds);
+  return api<TrainingDataset[]>("/api/training-datasets" + (query.size ? `?${query}` : ""));
+};
 export const verifyTrainingDataset = (id: string) => api<TrainingDataset>(
   `/api/training-datasets/${encodeURIComponent(id)}/verify`, { method: "POST" },
 );
@@ -145,7 +153,8 @@ export const startEvaluation = (config: EvaluationConfig) => api<EvaluationJobRe
 export const listEvaluations = (filters: EvaluationFilters = {}) => {
   const query = new URLSearchParams();
   Object.entries(filters).forEach(([name, value]) => {
-    if (value) query.set(name, value);
+    if (Array.isArray(value)) (value.length ? value : [""]).forEach((id) => query.append(name, id));
+    else if (value) query.set(name, value);
   });
   const suffix = query.size ? `?${query.toString()}` : "";
   return api<EvaluationRecord[]>(`/api/evaluations${suffix}`);

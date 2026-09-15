@@ -117,12 +117,13 @@ class PreviewService:
                     except queue.Empty:
                         break
                 try:
-                    target_context = (task_id, int(target.seed))
+                    bddl, _ = self.manager.catalog.paths(task_id)
+                    # LEVEL5 prompt variants share the same LEVEL4 scene.
+                    target_context = (str(bddl), int(target.seed))
                     if env is None or env_context != target_context:
                         if env is not None:
                             self.manager.simulator.close(env)
                             env = None
-                        bddl, _ = self.manager.catalog.paths(task_id)
                         env = self.manager.simulator.create(
                             bddl,
                             config,
@@ -175,7 +176,7 @@ class PreviewService:
                     if env is not None:
                         self.manager.simulator.close(env)
                         env = None
-                        env_task_id = None
+                        env_context = None
                 last_render = time.monotonic()
         except Exception as exc:
             LOGGER.exception("Preview service failed")
@@ -202,6 +203,7 @@ class SimulationManager:
             liberox_root,
             self.eval_config,
             self.ui_config.additional_tasks,
+            self.ui_config.task_families,
         )
         self.policy_catalog = PolicyCatalog(
             self.ui_config.policy_registry,

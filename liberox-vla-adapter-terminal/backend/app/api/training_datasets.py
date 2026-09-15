@@ -17,8 +17,9 @@ router = APIRouter(prefix="/api/training-datasets", tags=["training-datasets"])
 
 
 @router.get("")
-async def list_datasets(request: Request, task_id: str | None = Query(default=None)):
-    return training_dataset_service(request).list(task_id)
+async def list_datasets(request: Request, task_id: str | None = Query(default=None),
+                        task_ids: list[str] | None = Query(default=None)):
+    return training_dataset_service(request).list(task_id, **({"task_ids": task_ids} if task_ids is not None else {}))
 
 
 @router.get("/{dataset_id}")
@@ -129,6 +130,7 @@ async def reward_config(dataset_id: str, request: Request):
 async def members(dataset_id: str, request: Request, page: int = Query(default=1, ge=1),
                   page_size: int = Query(default=5, ge=1, le=50)):
     try:
-        return training_dataset_service(request).members_page(dataset_id, page=page, page_size=page_size)
+        return await run_in_threadpool(training_dataset_service(request).members_page,
+                                      dataset_id, page=page, page_size=page_size)
     except Exception as exc:
         raise http_error(exc) from exc

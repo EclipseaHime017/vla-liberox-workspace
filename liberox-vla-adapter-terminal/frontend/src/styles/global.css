@@ -52,24 +52,24 @@ h2 { font-size: 16px; letter-spacing: -.01em; }
 .panel-title span { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, monospace; }
 .session-panel { position: sticky; top: 90px; max-height: calc(100vh - 110px); display: flex; flex-direction: column; }
 .new-run { padding: 15px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.new-run label { color: var(--muted); font-size: 11px; }
+.new-run label { color: var(--muted); font-size: 14px; }
 .new-run input, .new-run select { width: 100%; margin-top: 5px; color: var(--text); background: rgba(255,255,255,.9); border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px; }
 .new-run label:has(select), .create-draft, .new-run > .danger { grid-column: 1 / -1; }
 .branch-config-title { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.branch-config-title strong { font-size: 13px; }
-.branch-config-title span, .locked-field-note { color: var(--muted); font-size: 10px; }
+.branch-config-title strong { font-size: 14px; }
+.branch-config-title span, .locked-field-note { color: var(--muted); font-size: 14px; }
 .new-run .locked-field input:disabled { color: #6e6e73; background: #f1f1f3; border-color: #e2e2e6; opacity: 1; }
 .branch-step-field, .locked-field-note { grid-column: 1 / -1; }
 .locked-field-note { line-height: 1.5; }
 .policy-camera-fieldset { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
-.policy-camera-fieldset legend { padding: 0 4px; color: var(--muted); font-size: 11px; }
-.new-run .policy-camera-option { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 12px; }
+.policy-camera-fieldset legend { padding: 0 4px; color: var(--muted); font-size: 14px; }
+.new-run .policy-camera-option { display: flex; align-items: center; gap: 7px; color: var(--text); }
 .new-run .policy-camera-option input { width: auto; margin: 0; }
-.policy-camera-fieldset p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.policy-camera-fieldset p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
 .button-row { display: flex; gap: 8px; grid-column: 1 / -1; }
 .session-filter { padding: 11px 15px; border-bottom: 1px solid var(--line); }
-.session-filter label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .075em; }
-.session-filter select { min-width: 0; width: 100%; padding: 8px 9px; border: 1px solid var(--line-strong); border-radius: 9px; background: rgba(255,255,255,.9); color: var(--text); font-size: 11px; text-transform: none; letter-spacing: 0; }
+.session-filter label { display: grid; gap: 6px; color: var(--muted); font-size: 14px; }
+.session-filter select { min-width: 0; width: 100%; padding: 8px 9px; border: 1px solid var(--line-strong); border-radius: 9px; background: rgba(255,255,255,.9); color: var(--text); font-size: 14px; text-transform: none; letter-spacing: 0; }
 .session-empty { padding: 18px 10px; color: var(--muted); font-size: 11px; text-align: center; }
 button { border: 1px solid var(--line); background: rgba(255,255,255,.9); border-radius: 10px; padding: 9px 12px; transition: transform .15s ease, box-shadow .15s ease, background .15s; }
 button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 5px 15px rgba(0,0,0,.08); }
@@ -534,6 +534,19 @@ td code { font-size: 11px; }
 .model-training-records article { padding: 14px; border: 1px solid var(--line); border-radius: 12px; }
 .model-training-records article > div { display: flex; justify-content: space-between; }
 .model-training-records p, .model-training-records code { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+/* One shared task → difficulty → prompt hierarchy for setup and retrieval. */
+.task-hierarchy { display: grid; grid-template-columns: minmax(0, 1fr) minmax(110px, .45fr) minmax(0, 1.25fr); gap: 12px; min-width: 0; }
+.task-hierarchy label { display: grid; align-content: start; gap: 7px; min-width: 0; font-size: 14px; color: var(--muted); letter-spacing: normal; text-transform: none; }
+.task-hierarchy select { width: 100%; min-width: 0; min-height: 42px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 11px; background: #fff; color: var(--text); font-size: 14px; text-overflow: ellipsis; }
+.new-run > .task-hierarchy, .evaluation-form > .task-hierarchy, .dataset-toolbar > .task-hierarchy, .evaluation-filters > .task-hierarchy { grid-column: 1 / -1; }
+.new-run .task-hierarchy, .session-filter .task-hierarchy, .training-form .task-hierarchy { grid-template-columns: minmax(0, 1fr); }
+.task-filter-heading { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+.training-config .task-hierarchy label { font-size: 16.5px; }
+.dataset-toolbar .task-scope-note { grid-column: 1 / -1; }
+@media (max-width: 760px) {
+  .task-hierarchy { grid-template-columns: minmax(0, 1fr); }
+}
 
 @media (max-width: 1100px) {
   .models-layout { grid-template-columns: 1fr; }

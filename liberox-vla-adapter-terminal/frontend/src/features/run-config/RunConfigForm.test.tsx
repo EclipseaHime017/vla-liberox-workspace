@@ -90,6 +90,7 @@ describe("original simulation configuration", () => {
     const initStateInput = screen.getByLabelText("初始状态索引") as HTMLInputElement;
     expect(initStateInput.min).toBe("0");
     expect(initStateInput.max).toBe("9");
+    expect(screen.queryByText(/这是本次仿真的 seed|当前任务可选范围/)).toBeNull();
     fireEvent.change(initStateInput, { target: { value: "4" } });
     expect(onInitStateIndex).toHaveBeenCalledWith(4, false);
     fireEvent.click(screen.getByLabelText("腕部视角"));

@@ -160,7 +160,7 @@ and success threshold. A ZIP retaining original NPZ files and sidecars is
 supported; the UI's existing lightweight CSV/video export archives labels but
 cannot reuse that binding after reconstructing a different NPZ. Retain the
 original trajectory files for portable Stage training; hashes are never silently
-rewritten. Detailed formulas: [Stage research §6](../docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励).
+rewritten. Usage: [Chinese guide §4.4.2](../README_CN.md#442-annotate-与-reward-materialize-的边界).
 
 ## Training monitoring
 
@@ -379,5 +379,5 @@ is accepted only when `data.allow_no_success: true` and always emits a warning.
 
 Platform-managed datasets, jobs, annotations and training outputs live under
 `dataset-root/projects/<project_id>/`; see the workspace
-[`docs/DATA_LAYOUT.md`](../docs/DATA_LAYOUT.md). Their JSON/YAML files remain the
+[Chinese guide](../README_CN.md). Their JSON/YAML files remain the
 recoverable source of truth while SQLite is only a rebuildable query index.

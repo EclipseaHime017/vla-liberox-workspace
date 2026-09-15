@@ -1,8 +1,14 @@
 export type TaskInfo = {
+  family_id?: string;
+  family_label?: string;
   task_id: string;
   level: string;
   task_name: string;
   prompt: string;
+  prompt_variant?: string | null;
+  scene_level?: string;
+  available?: boolean;
+  unavailable_reason?: string;
   init_state_count: number;
   init_state_index_min: number;
   init_state_index_max: number;
@@ -101,12 +107,14 @@ export type Session = {
   training_start_step?: number; training_action_count?: number; training_chunk_count?: number;
   is_test?: boolean;
   rynn_evaluation?: {
-    status: "NOT_EVALUATED" | "READY";
+    status: "NOT_EVALUATED" | "READY" | "ERROR";
+    origin?: "dataset" | "global"; error?: string;
     evaluated_at?: string | null; model?: string | null; revision?: string | null;
     boundary_count?: number; source_key?: string | null;
   };
   robometer_evaluation?: {
-    status: "NOT_EVALUATED" | "READY";
+    status: "NOT_EVALUATED" | "READY" | "ERROR";
+    origin?: "dataset" | "global"; error?: string;
     evaluated_at?: string | null; model?: string | null; revision?: string | null;
     sample_count?: number; source_key?: string | null;
   };
@@ -392,6 +400,7 @@ export type EvaluationRecord = {
 };
 
 export type EvaluationFilters = {
+  task_ids?: string[];
   task_id?: string;
   policy_id?: string;
   status?: EvaluationStatus;

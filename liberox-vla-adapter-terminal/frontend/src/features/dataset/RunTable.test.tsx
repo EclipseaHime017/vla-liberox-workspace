@@ -1,7 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunTable } from "./RunTable";
 import type { Session } from "../run-control/types";
+
+afterEach(cleanup);
 
 const run = (patch: Partial<Session>): Session => ({
   id: "run", kind: "original", task_id: "task", level: "LEVEL1",
@@ -24,6 +26,31 @@ const run = (patch: Partial<Session>): Session => ({
 });
 
 describe("training run catalog", () => {
+  it("shows inherited and dataset-specific evaluation status independently", () => {
+    render(<RunTable runs={[run({
+      rynn_evaluation: { status: "READY", origin: "global" },
+      robometer_evaluation: { status: "ERROR", origin: "dataset", error: "Evaluation values are unavailable" },
+    })]} />);
+    expect(screen.getByText("已评价").classList.contains("badge-green")).toBe(true);
+    expect(screen.queryByText("继承全局")).toBeNull();
+    expect(screen.getByText("评价异常")).toBeTruthy();
+    expect(screen.queryByText("数据集专属")).toBeNull();
+    expect(screen.getByTitle("Evaluation values are unavailable")).toBeTruthy();
+    expect(screen.queryByText("未评价")).toBeNull();
+  });
+
+  it("does not treat global fallback as an existing model evaluation", () => {
+    render(<RunTable runs={[run({
+      rynn_evaluation: { status: "NOT_EVALUATED", origin: "global" },
+      robometer_evaluation: { status: "READY", origin: "dataset" },
+    })]} />);
+    expect(screen.getAllByText("已评价")).toHaveLength(1);
+    expect(screen.getByText("已评价").classList.contains("badge-green")).toBe(true);
+    expect(screen.getByText("未评价")).toBeTruthy();
+    expect(screen.queryByText("继承全局")).toBeNull();
+    expect(screen.queryByText("数据集专属")).toBeNull();
+  });
+
   it("distinguishes manual and policy-requery suffixes and disables invalid rows", () => {
     const onToggle = vi.fn();
     render(<RunTable selectable onToggle={onToggle} runs={[

@@ -15,6 +15,9 @@
 /tmp/
 /annotation-cache/
 
+# Local development notes are not distributed with the source repository.
+/docs/
+
 # Python
 **/__pycache__/
 *.py[cod]

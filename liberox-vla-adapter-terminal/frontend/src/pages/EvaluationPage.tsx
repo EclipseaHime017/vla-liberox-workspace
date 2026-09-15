@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { TaskFilter, TaskSelector } from "../features/run-config/TaskSelector";
+import { ALL_TASK_SCOPE, taskIdsForScope, type TaskScope } from "../features/run-config/taskHierarchy";
 import { Badge } from "../components/ui/Badge";
 import {
   deleteEvaluation, getBootstrap, getEvaluation, listEvaluations, listOfflineJobs,
@@ -131,6 +133,7 @@ export function EvaluationPage() {
   const [selected, setSelected] = useState<EvaluationRecord | null>(null);
   const [job, setJob] = useState<OfflineJob | null>(null);
   const [filters, setFilters] = useState<EvaluationFilters>({});
+  const [historyScope, setHistoryScope] = useState<TaskScope>(ALL_TASK_SCOPE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -146,7 +149,8 @@ export function EvaluationPage() {
   const invalidate = (change: () => void) => { change(); setPreview(null); };
 
   const loadHistory = async (nextFilters = filters) => {
-    const next = await listEvaluations(nextFilters);
+    const next = await listEvaluations({ ...nextFilters, task_id: historyScope.task_id || undefined,
+      task_ids: historyScope.task_id ? undefined : taskIdsForScope(bootstrap?.task_catalog ?? [], historyScope) });
     setRecords(next);
     if (selected) {
       const refreshed = next.find((item) => item.id === selected.id);
@@ -215,7 +219,7 @@ export function EvaluationPage() {
     <section className="surface evaluation-builder">
       <div className="panel-title"><strong>创建测试</strong><span>done 连续 5 步确认成功</span></div>
       <div className="evaluation-form">
-        <label>任务<select aria-label="测试任务" value={taskId} onChange={(event) => changeTask(event.target.value)}>{bootstrap?.task_catalog.map((item) => <option key={item.task_id} value={item.task_id}>{item.prompt}</option>)}</select></label>
+        <TaskSelector tasks={bootstrap?.task_catalog ?? []} value={taskId} onChange={changeTask} labelPrefix="测试" />
         <label>模型<select aria-label="测试模型" value={policyId} onChange={(event) => invalidate(() => setPolicyId(event.target.value))}>{bootstrap?.policy_catalog.map((policy) => <option key={policy.policy_id} value={policy.policy_id}>{policy.label}{policy.training_step == null ? "" : ` · step ${policy.training_step}`}</option>)}</select></label>
         <label>仿真次数<input aria-label="仿真次数" type="number" min={1} max={1000} value={trials} onChange={(event) => invalidate(() => setTrials(Number(event.target.value)))} /></label>
         <label>每回合控制步数<input aria-label="每回合控制步数" type="number" min={1} max={10000} value={maxSteps} onChange={(event) => invalidate(() => setMaxSteps(Number(event.target.value)))} /></label>
@@ -254,7 +258,7 @@ export function EvaluationPage() {
     <section className="surface evaluation-history">
       <div className="panel-title"><strong>测试历史</strong><span>{records.length}</span></div>
       <div className="evaluation-filters">
-        <label>任务<select value={filters.task_id ?? ""} onChange={(event) => setFilters((current) => ({ ...current, task_id: event.target.value || undefined }))}><option value="">全部任务</option>{bootstrap?.task_catalog.map((item) => <option key={item.task_id} value={item.task_id}>{item.prompt}</option>)}</select></label>
+        <TaskFilter tasks={bootstrap?.task_catalog ?? []} value={historyScope} onChange={setHistoryScope} labelPrefix="测试记录" />
         <label>模型<select value={filters.policy_id ?? ""} onChange={(event) => setFilters((current) => ({ ...current, policy_id: event.target.value || undefined }))}><option value="">全部模型</option>{bootstrap?.policy_catalog.map((item) => <option key={item.policy_id} value={item.policy_id}>{item.label}</option>)}</select></label>
         <label>状态<select value={filters.status ?? ""} onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value as EvaluationStatus || undefined }))}><option value="">全部状态</option>{["STARTING", "RUNNING", "STOPPING", "COMPLETED", "FAILED", "CANCELED"].map((status) => <option key={status}>{status}</option>)}</select></label>
         <label>开始日期<input type="date" value={filters.date_from ?? ""} onChange={(event) => setFilters((current) => ({ ...current, date_from: event.target.value || undefined }))} /></label><label>结束日期<input type="date" value={filters.date_to ?? ""} onChange={(event) => setFilters((current) => ({ ...current, date_to: event.target.value || undefined }))} /></label>

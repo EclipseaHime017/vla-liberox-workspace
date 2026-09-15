@@ -99,6 +99,7 @@ class TrainingDatasetService:
         source_type: str | None = None,
         outcome: str | None = None,
         eligible: bool | None = None,
+        *, task_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         if source_type is not None and source_type not in SOURCE_TYPES:
             raise ValueError(f"Unknown source_type: {source_type}")
@@ -106,8 +107,11 @@ class TrainingDatasetService:
             raise ValueError(f"Unknown outcome: {outcome}")
         result = []
         test_ids = self.labels.test_ids()
+        allowed_tasks = None if task_ids is None else set(task_ids)
         for run in self.run_service.list_runs():
             if task_id and run.get("task_id") != task_id:
+                continue
+            if allowed_tasks is not None and run.get("task_id") not in allowed_tasks:
                 continue
             current_source, current_outcome, trainable, reason = self.classify(run)
             if source_type and current_source != source_type:
@@ -146,12 +150,13 @@ class TrainingDatasetService:
         *,
         page: int = 1,
         page_size: int = 5,
+        task_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         if type(page) is not int or page < 1:
             raise ValueError("page must be a positive integer")
         if type(page_size) is not int or not 1 <= page_size <= 50:
             raise ValueError("page_size must be in [1, 50]")
-        values = self.list_runs(task_id, source_type, outcome, eligible)
+        values = self.list_runs(task_id, source_type, outcome, eligible, task_ids=task_ids)
         total = len(values)
         pages = max(1, math.ceil(total / page_size))
         if page > pages and total:
@@ -681,6 +686,8 @@ class TrainingDatasetService:
         return current
 
     def members_page(self, dataset_id: str, *, page: int = 1, page_size: int = 5) -> dict[str, Any]:
+        from .dataset_evaluation_status import MemberEvaluationStatus
+
         if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 50:
             raise ValueError("page must be positive and page_size must be in [1, 50]")
         dataset = self.get(dataset_id)
@@ -688,9 +695,12 @@ class TrainingDatasetService:
         pages = max(1, math.ceil(len(members) / page_size))
         page = min(page, pages)
         items = []
+        evaluations = MemberEvaluationStatus(self, dataset)
         for member in members[(page - 1) * page_size:page * page_size]:
             run = self.run_service.get_run(member["run_id"])
-            items.append({**run, **member, "id": member["run_id"]})
+            items.append({**run, **member, "id": member["run_id"],
+                          "rynn_evaluation": evaluations.status("rynnvalue", run),
+                          "robometer_evaluation": evaluations.status("robometer", run)})
         return {"items": items, "total": len(members), "page": page,
                 "page_size": page_size, "pages": pages}
 
@@ -810,14 +820,15 @@ class TrainingDatasetService:
                 self.repository.upsert(payload, path)
         return self._public(payload)
 
-    def list(self, task_id: str | None = None) -> list[dict[str, Any]]:
+    def list(self, task_id: str | None = None, *, task_ids: list[str] | None = None) -> list[dict[str, Any]]:
         values = []
+        allowed_tasks = None if task_ids is None else set(task_ids)
         for path in sorted(self.root.glob("*/dataset.json")):
             try:
                 value = self.get(path.parent.name)
             except Exception:
                 continue
-            if task_id is None or value["task_id"] == task_id:
+            if (not task_id or value["task_id"] == task_id) and (allowed_tasks is None or value["task_id"] in allowed_tasks):
                 values.append(value)
         return sorted(values, key=lambda item: item["created_at"], reverse=True)
 

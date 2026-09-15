@@ -29,6 +29,9 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
   const [members, setMembers] = useState<PaginatedRuns | null>(null);
   const [membersLoading, setMembersLoading] = useState(false);
   const versions = dataset.evaluation_versions ?? [];
+  const evaluationRevision = JSON.stringify([dataset.evaluation_version_ids,
+    dataset.reward_version_id, dataset.robometer_version_id,
+    versions.map(({ id, status, completed_at }) => [id, status, completed_at])]);
   const currentFor = (evaluator: RewardSource) => {
     const id = dataset.evaluation_version_ids
       ? dataset.evaluation_version_ids[evaluator]
@@ -72,7 +75,7 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
     }).catch((error) => { if (current) onError(String(error)); })
       .finally(() => { if (current) setMembersLoading(false); });
     return () => { current = false; };
-  }, [showMembers, dataset.id, page, pageSize]);
+  }, [showMembers, dataset.id, page, pageSize, evaluationRevision]);
 
   const patch = (values: Partial<RewardParameters>) => setConfigs((current) => ({
     ...current, [source]: { ...current[source], ...values },

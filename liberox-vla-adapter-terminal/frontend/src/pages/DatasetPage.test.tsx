@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatasetPage } from "./DatasetPage";
+import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
 import * as api from "../features/run-control/api";
 import type { Bootstrap, DatasetSummary, TrainingDataset } from "../features/run-control/types";
 
@@ -41,6 +42,32 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("dataset evaluation configuration", () => {
+  it("retrieves a task family across levels in one paginated query and requires a prompt for mutations", async () => {
+    const tasks = [
+      { task_id: "LEVEL1::bowl", level: "LEVEL1", family_id: "bowl", family_label: "place bowl", prompt: "black bowl" },
+      { task_id: "LEVEL4::cyan", level: "LEVEL4", family_id: "bowl", family_label: "place bowl", prompt: "cyan bowl" },
+      { task_id: "LEVEL4::grey", level: "LEVEL4", family_id: "bowl", family_label: "place bowl", prompt: "grey bowl" },
+      { task_id: "LEVEL1::drawer", level: "LEVEL1", family_id: "drawer", family_label: "open drawer", prompt: "open drawer" },
+    ];
+    vi.mocked(api.getBootstrap).mockResolvedValue({ task: tasks[0], task_catalog: tasks } as unknown as Bootstrap);
+    vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
+    render(<DatasetPage />);
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenCalledWith("LEVEL1::bowl", 1, 5));
+    vi.mocked(api.listDatasetRuns).mockClear();
+    fireEvent.change(screen.getByLabelText("数据任务"), { target: { value: "bowl" } });
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenCalledWith("", 1, 5, tasks.slice(0, 3).map((task) => task.task_id)));
+    expect(api.listDatasetRuns).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole("button", { name: "批量评价" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("数据提示词") as HTMLSelectElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("数据难度"), { target: { value: "LEVEL4" } });
+    await waitFor(() => expect(api.listTrainingDatasets).toHaveBeenLastCalledWith(undefined, ["LEVEL4::cyan", "LEVEL4::grey"]));
+    fireEvent.change(screen.getByLabelText("数据提示词"), { target: { value: "LEVEL4::grey" } });
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenLastCalledWith("LEVEL4::grey", 1, 5));
+    expect((screen.getByRole("button", { name: "批量评价" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.change(screen.getByLabelText("数据任务"), { target: { value: "" } });
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenLastCalledWith("", 1, 5, undefined));
+  });
+
   it("freezes membership without launching any evaluator", async () => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
     vi.mocked(api.previewTrainingDataset).mockResolvedValue({ task_id: "task", eligible_count: 1, selected_count: 1,
@@ -120,7 +147,8 @@ describe("dataset evaluation configuration", () => {
       evaluation_versions: ["v1", "v2"].map((id) => ({ id, evaluator: "stage", status: "COMPLETED", parameters: { stage_exponent: id === "v1" ? 2 : 4 }, created_at: "" })),
     } as TrainingDataset]);
     vi.mocked(api.listTrainingDatasetMembers).mockImplementation(async (_id, page = 1, pageSize = 5) => ({
-      items: [{ id: "member", status: "COMPLETED", source_type: "manual", action_count: 10, success: true }],
+      items: [{ id: "member", status: "COMPLETED", source_type: "manual", action_count: 10, success: true,
+        rynn_evaluation: { status: "READY", origin: "global" }, robometer_evaluation: { status: "READY", origin: "global" } }],
       page, page_size: pageSize, pages: 2, total: 6,
     } as Awaited<ReturnType<typeof api.listTrainingDatasetMembers>>));
     render(<DatasetPage />);
@@ -133,6 +161,11 @@ describe("dataset evaluation configuration", () => {
     fireEvent.click(screen.getByRole("button", { name: "成员" }));
     const members = await screen.findByRole("region", { name: "Dataset 成员" });
     await waitFor(() => expect(api.listTrainingDatasetMembers).toHaveBeenCalledWith("dataset", 1, 5));
+    const evaluated = await within(members).findAllByText("已评价");
+    expect(evaluated).toHaveLength(2);
+    expect(evaluated.every((badge) => badge.classList.contains("badge-green"))).toBe(true);
+    expect(within(members).queryByText("继承全局")).toBeNull();
+    expect(within(members).queryByText("未评价")).toBeNull();
     const size = within(members).getByLabelText("每页") as HTMLSelectElement;
     expect(Array.from(size.options, (option) => option.value)).toEqual(["5", "10", "20", "50"]);
     fireEvent.change(size, { target: { value: "50" } });
@@ -153,6 +186,31 @@ describe("dataset evaluation configuration", () => {
     expect(screen.queryByText(/legacy/)).toBeNull();
     expect(screen.queryByRole("button", { name: "启用" })).toBeNull();
     await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenCalledWith("dataset", expect.objectContaining({ source: "rynnvalue", force_model: false })));
+  });
+
+  it("refreshes an open member list when an evaluation completes, not on unchanged polling", async () => {
+    const dataset = { id: "dataset", name: "Dataset", integrity_status: "HEALTHY",
+      annotation_status: "NOT_STARTED", evaluation_versions: [], evaluation_version_ids: {},
+    } as unknown as TrainingDataset;
+    const page = { items: [{ id: "member", status: "COMPLETED", action_count: 10,
+      rynn_evaluation: { status: "NOT_EVALUATED", origin: "global" },
+      robometer_evaluation: { status: "NOT_EVALUATED", origin: "global" } }],
+      page: 1, page_size: 5, pages: 1, total: 1,
+    } as Awaited<ReturnType<typeof api.listTrainingDatasetMembers>>;
+    vi.mocked(api.listTrainingDatasetMembers).mockResolvedValue(page);
+    const props = { disabled: false, onRefresh: vi.fn(), onJob: vi.fn(), onError: vi.fn(), onOpen: vi.fn() };
+    const { rerender } = render(<FrozenDatasetCard {...props} dataset={dataset} />);
+    fireEvent.click(screen.getByRole("button", { name: "成员" }));
+    await screen.findAllByText("未评价");
+    rerender(<FrozenDatasetCard {...props} dataset={{ ...dataset }} />);
+    expect(api.listTrainingDatasetMembers).toHaveBeenCalledTimes(1);
+    vi.mocked(api.listTrainingDatasetMembers).mockResolvedValue({ ...page, items: [{ ...page.items[0],
+      rynn_evaluation: { status: "READY", origin: "dataset" },
+    }] });
+    rerender(<FrozenDatasetCard {...props} dataset={{ ...dataset, evaluation_version_ids: { rynnvalue: "new" } }} />);
+    await screen.findByText("已评价");
+    expect(api.listTrainingDatasetMembers).toHaveBeenCalledTimes(2);
+    expect(api.annotateTrainingDataset).not.toHaveBeenCalled();
   });
 
   it("uses the overwrite choice when evaluating selected trajectories", async () => {

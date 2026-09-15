@@ -31,6 +31,7 @@ async def create(body: EvaluationRequest, request: Request):
 async def history(
     request: Request,
     task_id: str | None = Query(default=None),
+    task_ids: list[str] | None = Query(default=None),
     policy_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
     date_from: str | None = Query(default=None),
@@ -39,6 +40,7 @@ async def history(
     try:
         return offline_job_service(request).list_evaluations(
             task_id=task_id,
+            **({"task_ids": task_ids} if task_ids is not None else {}),
             policy_id=policy_id,
             status=status,
             date_from=date_from,

@@ -29,12 +29,14 @@ async def runs(
     eligible: bool | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=5, ge=1, le=50),
+    task_ids: list[str] | None = Query(default=None),
 ):
     try:
         return await run_in_threadpool(
             training_dataset_service(request).list_runs_page,
             task_id, source_type, outcome, eligible,
             page=page, page_size=page_size,
+            **({"task_ids": task_ids} if task_ids is not None else {}),
         )
     except Exception as exc:
         raise http_error(exc) from exc

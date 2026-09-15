@@ -1756,6 +1756,7 @@ class OfflineJobService(DatasetRewardVersions):
         self,
         *,
         task_id: str | None = None,
+        task_ids: list[str] | None = None,
         policy_id: str | None = None,
         status: str | None = None,
         date_from: str | None = None,
@@ -1766,6 +1767,7 @@ class OfflineJobService(DatasetRewardVersions):
         if date_from and date_to and date_from > date_to:
             raise ValueError("date_from must not be later than date_to")
         result: list[dict[str, Any]] = []
+        allowed_tasks = None if task_ids is None else set(task_ids)
         for path in self.evaluations_root.glob("*/*/*/evaluation.json"):
             try:
                 payload = self._synchronize_evaluation(
@@ -1781,6 +1783,8 @@ class OfflineJobService(DatasetRewardVersions):
             ).get("policy_id")
             created_date = str(payload.get("created_at") or "")[:10]
             if task_id is not None and task != task_id:
+                continue
+            if allowed_tasks is not None and task not in allowed_tasks:
                 continue
             if policy_id is not None and policy != policy_id:
                 continue

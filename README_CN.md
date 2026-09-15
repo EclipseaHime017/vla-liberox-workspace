@@ -7,7 +7,7 @@
 1. 新增 FACTR 遥操作支持，保留 SpaceMouse，统一接管与数据记录。
 2. 新增 Stage-based reward，支持人工关键帧标注和独立训练奖励选择。
 
-这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse / FACTR 人工接管与数据管理终端。当前 UI 已验证三个 LEVEL1 任务；下文保留黑碗任务作为 CLI 配置示例。FACTR 独立测试使用官方整臂参考姿态校准，同一校准用于末端跟随和手动重力补偿；UI 中的 FACTR 接管仍为被动读取。实体设备验收须在连接对应硬件后进行。
+这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse / FACTR 人工接管与数据管理终端。UI 按「任务 → 难度 → 提示词」提供三个任务族的 LEVEL1–4 官方变体，暂不开放 LEVEL5；下文保留 LEVEL1 黑碗任务作为 CLI 配置示例。实体控制器能力仍需在连接对应硬件后验收。
 
 默认任务：
 
@@ -547,19 +547,32 @@ curl -s http://127.0.0.1:8000/api/controller | python -m json.tool
 
 确认 UI 使用的同一个环境安装了 `requirements-spacemouse.txt`，并按 3.6 节安装精确 udev 规则、重新加载规则后拔插设备。无需修改 VID/PID。
 
-UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。任务目录默认包含该配置的黑碗任务，并由 `configs/ui_config.yaml` 追加两个 LEVEL1 Franka 任务：
+UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。`configs/ui_config.yaml` 的 `task_families` 显式定义三个实际目的，不以颜色或提示词措辞拆成不同任务：
 
-- `place the black bowl on the flat stove`；
+- `place the bowl on the stove`；
 - `open the top drawer of the wooden cabinet`；
-- `stack the blue bowl on the green bowl`。
+- `stack the bowls`。
 
-三个任务都使用 `VLA-Adapter/LIBERO-Object-Pro`，不附加 `experimental_ood` 标签，也不修改环境成功条件：成功仍完全由对应 BDDL/LIBERO 环境判定，`success` 和成功率沿用原有统计语义。
+随后选择难度和真实提示词，例如 `place the bowl on the stove → LEVEL1 → place the black bowl on the flat stove`。LEVEL4 同一任务内可再选青色碗或大浅灰碗；最终仍提交唯一原始 `task_id`，不改变轨迹身份、训练提示词或数据存储格式。
+
+| 难度 | 资源与变化 | 当前选择数 |
+|---|---|---:|
+| LEVEL1 | 局部空间扰动；原有三个任务 | 3 |
+| LEVEL2 | 扩展空间扰动；同名任务对应 LEVEL2 BDDL/init | 3 |
+| LEVEL3 | 场景布局重构；按官方 T7/T70/T133 对应任务 | 3 |
+| LEVEL4 | 物体视觉属性变体；放炉任务为青色碗/大浅灰碗两个版本，叠碗为青色碗，抽屉保留真实原任务提示词 | 4 |
+
+等级含义见 [LIBERO-X 官方说明](https://meituan.github.io/LIBERO-X/)。LEVEL5 资源仍保留在 `LIBERO-X/libero/libero_x/LEVEL5/`，它是复用 LEVEL4 场景的语言改写评价，不是另一个物理难度场景；本阶段从默认选择和检索选项中移除，不删除上游文件或历史数据。
+
+当前共 13 个场景，本地每个场景有 10 个 init states。仿真和测试配置使用三个关联选择框，切换上级会同步选择有效下级；活动仿真和分支仍锁定场景。数据检索也使用相同顺序，允许停在「全部任务／全部难度／全部提示词」；跨场景筛选在分页之前执行，计数与结果一致。创建数据集、轨迹评价和 ZIP 导出仍需选定具体提示词，训练可从检索结果中选择一个冻结数据集。缺失可选资源禁止创建仿真，但历史数据仍可检索。
+
+所有任务继续使用所选基础策略或 overlay，不附加 `experimental_ood` 标签，不改变环境 done、连续成功阈值或成功率统计逻辑。扩展难度不意味着已测得策略成功率；本机已完成资源验证和短无模型场景烟测。seed 和初始状态索引的说明保留在文档，表单下方不再显示说明段落；数值范围校验不变。
 
 新建原始仿真采用明确的两阶段流程：先点击“创建仿真”，在内存草稿中切换任务、调整以下参数并检查所选 init state 的静态预览；只有预览就绪后，“开始仿真”才会创建唯一结果目录并加载策略：
 
 - `max_steps`：本次总控制步数；
 - `open_loop_steps`：每次 VLA 预测 8 个 action 后实际执行的数量，有效范围 `1..8`；
-- `seed`：本次环境与策略随机种子，有效范围 `0..2147483647`。它可影响 reset 时生成的部分固定装置或目标位置，但不会替代 benchmark init state；
+- `seed`：本次运行上下文的随机种子，有效范围 `0..2147483647`，默认 0；策略会话设置 Python/NumPy/Torch RNG，环境 reset 也使用此值，但随后恢复明确选定的 benchmark state，因此改变 seed **不保证画面改变**，也不会继承训练的 seed=7。不同训练 seed 通过学到的权重影响结果，不通过 overlay 恢复 RNG。各类选择、划分、训练和测试 seed 分别由对应流程的配置控制；
 - `init_state_index`：选择当前任务预先保存的 benchmark 初始状态，采用从 0 开始的索引。UI 根据任务实际状态数动态显示范围 `0..N-1`，切换任务时自动重置为 0，越界值会在创建会话前被后端拒绝；
 - `VLA 摄像头输入`：可关闭 `agentview` 或 `robot0_eye_in_hand` 中的一个做视觉消融。关闭后对应的固定输入槽传入同尺寸黑帧，避免破坏 Object-Pro 的双图像结构；至少保留一个摄像头。四视角实时预览、轨迹 observation 和两路录像仍保存未经遮挡的原图。
 
@@ -583,9 +596,18 @@ additional_tasks:
     task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
   - level: LEVEL1
     task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+  # 完整 LEVEL2–4 目录及三个任务分组见 configs/ui_config.yaml。
+task_families:
+  - family_id: bowl_on_stove
+    label: place the bowl on the stove
+    task_names:
+      - EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+      - EXTENSION_KITCHEN_SCENE11_LEVEL3__T70_place_the_black_bowl_on_the_flat_stove
+      - EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A1_place_the_cyan_bowl_on_the_stove
+      - EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A2_place_the_large_light_grey_bowl_on_the_stove
 ```
 
-草稿不写入 `runs/`、不加载 VLA、也不推进物理仿真；切换任务、seed 或 `init_state_index` 会重建预览，修改步数或 VLA 摄像头输入不会重复渲染。点击“取消草稿”或刷新页面会丢弃草稿。活动仿真期间不能创建或修改草稿。模型权重仍跨会话复用，但每次开始都会更新本会话的 `open_loop_steps`、seed 和视觉消融设置，不会沿用第一次加载模型时的旧值。分支继承父会话的 seed、`init_state_index`、策略和摄像头输入，防止回溯前后实验条件漂移。
+草稿不写结果目录、不加载 VLA、也不推进物理仿真；切换具体场景、seed 或 `init_state_index` 会重新生成预览，修改步数或 VLA 摄像头输入不会重复渲染。目录只在启动时校验小型 BDDL/提示词/init，后续查询复用缓存；MuJoCo 按需加载。相同物理场景和 seed 复用预览环境，其他场景安全关闭后重建，旧异步预览不能覆盖新任务。点击“取消草稿”或刷新页面会丢弃草稿。活动仿真期间不能创建或修改草稿。模型权重跨会话复用，每次开始更新 `open_loop_steps`、seed 和视觉消融设置。分支继承父会话的完整任务 ID、seed、init 索引、策略和摄像头输入。
 
 同一时刻只允许一个活动会话。状态依次为：
 
@@ -615,7 +637,7 @@ UI 启动后只探测控制器，不占用动作输出。选择 SpaceMouse 并�
 
 新会话按 `dataset-root/projects/libero_x_vla/runs/<task_name>/<YYYY-MM-DD>/<时间>__<session_id>/` 分组，不覆盖历史结果。`catalog.sqlite3` 只保存可重建的检索和成功率索引；run 目录仍是事实来源。`run.json` 是生命周期和安全删除所需的极简清单，`config.yaml` 固化任务、模型和控制参数，`summary.json` 只记录用户关心的结果与关键时序；轨迹、视频、图表和 SpaceMouse 采样统一放在 `episodes/episode_000/`。不再重复生成 `results.jsonl`、`trajectory.json`、`source_trajectory.json` 或 `spacemouse_device_summary.json`。完整回放 metadata 已内嵌在 `trajectory.npz`，逐步可读数据保留在 `trajectory.csv`。
 
-采集主界面的会话侧栏提供“全部任务数据”和三个具体任务的检索选项，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。数据集页进一步拆成“轨迹评价”和“打包训练数据集”：批量评价默认跳过已有 RynnValue sidecar，也可显式覆盖；选择一条或多条轨迹时可显式开启覆盖，未开启时只补充缺失结果。评价成功后 `rynnvalue_evaluation.json/npz` 与 `trajectory.npz` 位于同一 episode，后续冻结不同数据集时直接复用。轨迹表默认每页 5 条，可选 10/20/50，详情页显示结果视频、7维action、RynnValue的absolute/relative remaining time、由 `Φ(s)=-v(s)` 得到的observation potential与entropy估计，并在同一图中显示稀疏奖励、Shape Reward和Final Reward；点击后可拖动滑块或自动播放并查看chunk范围和实际长度`L`。完整head logits和Analysis仍保存在sidecar供审计，但不在详情UI展示。冻结数据集只固定成员；通过每行右侧“配置”更新当前评价结果，训练固定使用启动时的快照，具体操作见 §4.9。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV、可用的 RynnValue 评价 sidecar，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。核心 `trajectory.npz`、observation NPZ、普通图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。详细 transition 对齐、视频拆分、轨迹评价和接管分段规则见 `docs/DATA_LAYOUT.md`。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
+采集主界面的会话侧栏按“任务 → 难度 → 提示词”检索，支持全部任务、全部难度和全部提示词，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。数据集页进一步拆成“轨迹评价”和“打包训练数据集”：批量评价默认跳过已有 RynnValue sidecar，也可显式覆盖；选择一条或多条轨迹时可显式开启覆盖，未开启时只补充缺失结果。评价成功后 `rynnvalue_evaluation.json/npz` 与 `trajectory.npz` 位于同一 episode，后续冻结不同数据集时直接复用。轨迹表默认每页 5 条，可选 10/20/50，详情页显示结果视频、7维action、RynnValue的absolute/relative remaining time、由 `Φ(s)=-v(s)` 得到的observation potential与entropy估计，并在同一图中显示稀疏奖励、Shape Reward和Final Reward；点击后可拖动滑块或自动播放并查看chunk范围和实际长度`L`。完整head logits和Analysis仍保存在sidecar供审计，但不在详情UI展示。冻结数据集只固定成员；通过每行右侧“配置”更新当前评价结果，训练固定使用启动时的快照，具体操作见 §4.9。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV、可用的 RynnValue 评价 sidecar，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。核心 `trajectory.npz`、observation NPZ、普通图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
 
 创建分支时会立即把父轨迹控制数据物理复制为子目录中的 `source_trajectory.npz`，但不复制父 observations、视频或图表；因此父会话被删除后，子分支仍能独立恢复状态和绘制对比。原始会话生成轨迹图和 7 张 action 图；回溯分支不生成只包含二次推理的单独图表，只生成 7 张“完整原始轨迹 + 从回溯帧开始的二次推理/人工接管”action 对比图。若准备阶段尚未执行新动作就失败，仅保存精简轨迹、清单和 summary，不再重建整段视频、observations 或对比图。已有历史目录不会自动删除或迁移。
 
@@ -623,7 +645,7 @@ UI 启动后只探测控制器，不占用动作输出。选择 SpaceMouse 并�
 
 结果文件链接使用浏览器内联打开：MP4、PNG、JSON、CSV 等由浏览器直接预览，并在新标签页显示；浏览器无法原生显示的 NPZ 等二进制格式仍会按浏览器自身规则保存。视频接口支持 HTTP Range，因此播放器可直接跳转到时间轴指定位置。
 
-后端遵循 `API → RunService → SimulationWorker → Simulator / Policy / Recorder / Evaluator` 的单向依赖，React 不直接接触 MuJoCo，模拟器不写数据库，Recorder 不回调 UI。前端拆分为采集、运行记录、数据集与设置页面；采集页始终挂载，浏览数据时不会使活动 SpaceMouse WebSocket 意外断开。界面使用浅色半透明面板，不再使用深蓝渐变背景。详细边界见 `docs/ARCHITECTURE.md`，目录规则见 `docs/DATA_LAYOUT.md`。
+后端遵循 `API → RunService → SimulationWorker → Simulator / Policy / Recorder / Evaluator` 的单向依赖，React 不直接接触 MuJoCo，模拟器不写数据库，Recorder 不回调 UI。前端拆分为采集、运行记录、数据集与设置页面；采集页始终挂载，浏览数据时不会使活动 SpaceMouse WebSocket 意外断开。界面使用浅色半透明面板，不再使用深蓝渐变背景。
 
 当前 bootstrap 返回 `model_switching=true`、`task_switching=true`。这里的“模型切换”仅指在创建草稿时选择基础 Object-Pro 或与其兼容的 IQL policy overlay，不会更换视觉/语言 backbone；会话开始后策略锁定，分支继承父会话策略。缺失、被篡改、维度不符或基础 checkpoint 不兼容的 overlay 会在仿真开始前报错，不会静默回退到基础模型。
 
@@ -909,7 +931,7 @@ conda run -n vla-liberox python \
 
 先选择 `reward.source`：`rynnvalue` 沿用下文的模型评价＋PBRS；`sparse` 只使用环境稀疏奖励；`stage` 使用人工关键帧直接奖励。后两者不需要运行 annotate，执行 `prepare_dataset.py → materialize_rewards.py → train_iql.py` 即可，且不需要 RynnValue 环境。终端流水线会根据来源自动选择这些阶段。
 
-**Stage 标注：**进入数据集的单条数据详情，点击“切片 / 标记关键帧”，拖动主视角录像或逐帧定位，选择 Positive/Negative 后保存。关键帧是持久标注，p 和奖励数组不写入标注身份；已有旧格式标注无需重新保存。不裁剪源数据；success 按数据集连续 done 阈值自动添加。失败轨迹无关键事件时也需要显式保存空标注。公式、边界和不裁剪分数的语义见 [Stage 直接奖励说明](docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励)。
+**Stage 标注：**进入数据集的单条数据详情，点击“切片 / 标记关键帧”，拖动主视角录像或逐帧定位，选择 Positive/Negative 后保存。关键帧是持久标注，p 和奖励数组不写入标注身份；已有旧格式标注无需重新保存。不裁剪源数据；success 按数据集连续 done 阈值自动添加。失败轨迹无关键事件时也需要显式保存空标注。Stage 公式结果不裁剪。
 
 ```yaml
 reward:
@@ -1351,7 +1373,7 @@ UI 只接受与当前基础 checkpoint、8×7 action、8 维 proprio 兼容且�
 
 ### 4.7 测试、限制与参考资料
 
-Stage-based 的调研及人工关键帧直接奖励定义见 [docs/STAGE_REWARD_RESEARCH.md](docs/STAGE_REWARD_RESEARCH.md)。第 1–5 节保留文献及候选实验，第 6 节说明实际实现、归一化、插值、快照和消融边界；该直接奖励独立于 RynnValue/Robometer，不改变 IQL 更新设计。
+Stage-based 人工关键帧直接奖励独立于 RynnValue/Robometer，不改变 IQL 更新设计。`docs/` 中的开发调研文档仅保留在本地，不随仓库分发。
 
 当前已有数据即使全部失败也允许完成流程烟测，但会明确警告，不能据此预期策略提升。4B RynnValue 评价和 VLA/IQL 严格串行使用 GPU；任一阶段显存不足会报告具体阶段且不会自动回退 CPU。
 
@@ -1415,7 +1437,7 @@ dataset-root/projects/libero_x_vla/
 └── runs/...
 ```
 
-生产 UI 的 `frontend/dist` 仍是本机构建产物。拉取包含此页面的代码后，直接重启 `run_ui.py` 会检测源码指纹并运行 `npm run build`；新机器应先在 `liberox-vla-adapter-terminal/frontend` 执行 `npm ci`。完整持久化格式和引用关系见 `docs/DATA_LAYOUT.md`。
+生产 UI 的 `frontend/dist` 仍是本机构建产物。拉取包含此页面的代码后，直接重启 `run_ui.py` 会检测源码指纹并运行 `npm run build`；新机器应先在 `liberox-vla-adapter-terminal/frontend` 执行 `npm ci`。
 
 #### Robometer 独立轨迹评价
 

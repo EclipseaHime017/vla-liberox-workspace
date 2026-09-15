@@ -14,7 +14,8 @@ import { RunConfigForm } from "../features/run-config/RunConfigForm";
 import { RunStatus } from "../features/run-control/RunStatus";
 import { SessionMonitor } from "../features/run-control/SessionMonitor";
 import { formatComputeDevice } from "../features/run-control/formatters";
-import { ALL_TASKS, filterSessionsByTask } from "../features/run-control/sessionFilters";
+import { TaskFilter } from "../features/run-config/TaskSelector";
+import { ALL_TASK_SCOPE, filterByTaskScope, scopeForTask, type TaskScope } from "../features/run-config/taskHierarchy";
 import { useSimulationStream } from "../features/simulation-view/useSimulationStream";
 
 function fixed(values: number[] | null, digits = 4): string {
@@ -36,7 +37,7 @@ function CollectPage() {
   const [disabledPolicyCameras, setDisabledPolicyCameras] = useState<PolicyCameraId[]>([]);
   const [taskId, setTaskId] = useState("");
   const [policyId, setPolicyId] = useState("base");
-  const [sessionTaskFilter, setSessionTaskFilter] = useState(ALL_TASKS);
+  const [sessionTaskFilter, setSessionTaskFilter] = useState<TaskScope>(ALL_TASK_SCOPE);
   const [translationGain, setTranslationGain] = useState(0.25);
   const [rotationGain, setRotationGain] = useState(0.08);
   const [controller, setController] = useState<ControllerStatus | null>(null);
@@ -60,8 +61,8 @@ function CollectPage() {
     [sessions, selectedId],
   );
   const visibleSessions = useMemo(
-    () => filterSessionsByTask(sessions, sessionTaskFilter),
-    [sessions, sessionTaskFilter],
+    () => filterByTaskScope(sessions, bootstrap?.task_catalog ?? [], sessionTaskFilter),
+    [sessions, bootstrap, sessionTaskFilter],
   );
   const active = sessions.find((session) => ACTIVE.has(session.status)) ?? null;
   const manualSessionActive = Boolean(
@@ -347,7 +348,7 @@ function CollectPage() {
       const session = await api<Session>("/api/draft/start", { method: "POST" });
       setDraft(null);
       setSessions((current) => [session, ...current]);
-      setSessionTaskFilter(session.task_id ?? ALL_TASKS);
+      setSessionTaskFilter(session.task_id ? scopeForTask(bootstrap?.task_catalog ?? [], session.task_id) : ALL_TASK_SCOPE);
       setSelectedId(session.id);
       setSelectedStep(0);
     } catch (reason) { setError(String(reason)); }
@@ -451,7 +452,7 @@ function CollectPage() {
       const remaining = sessions.filter((item) => item.id !== deleteTarget.id);
       setSessions(remaining);
       if (selectedId === deleteTarget.id) {
-        setSelectedId(filterSessionsByTask(remaining, sessionTaskFilter)[0]?.id ?? "");
+        setSelectedId(filterByTaskScope(remaining, bootstrap?.task_catalog ?? [], sessionTaskFilter)[0]?.id ?? "");
         setSelectedStep(0);
       }
       setDeleteTarget(null);
@@ -464,10 +465,10 @@ function CollectPage() {
     finally { setBusy(false); }
   };
 
-  const changeSessionTaskFilter = (value: string) => {
+  const changeSessionTaskFilter = (value: TaskScope) => {
     setSessionTaskFilter(value);
     setPolicyBranchDraft(null);
-    const next = filterSessionsByTask(sessions, value)[0] ?? null;
+    const next = filterByTaskScope(sessions, bootstrap?.task_catalog ?? [], value)[0] ?? null;
     setSelectedId(next?.id ?? "");
     setSelectedStep(0);
   };
@@ -550,12 +551,8 @@ function CollectPage() {
           <div className="panel-title"><h2>会话</h2><span>{visibleSessions.length}/{sessions.length}</span></div>
           <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={(value) => { setPolicyId(value); void updateDraft({ policy_id: value }); }} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
           <div className="session-filter">
-            <label>数据检索
-              <select value={sessionTaskFilter} disabled={Boolean(active)} onChange={(event) => changeSessionTaskFilter(event.target.value)}>
-                <option value={ALL_TASKS}>全部任务数据</option>
-                {bootstrap.task_catalog.map((task) => <option key={task.task_id} value={task.task_id}>{task.prompt}</option>)}
-              </select>
-            </label>
+            <p className="task-filter-heading">数据检索</p>
+            <TaskFilter tasks={bootstrap.task_catalog} value={sessionTaskFilter} disabled={Boolean(active)} onChange={changeSessionTaskFilter} labelPrefix="检索" />
           </div>
           <div className="session-list">
             {visibleSessions.map((session) => (

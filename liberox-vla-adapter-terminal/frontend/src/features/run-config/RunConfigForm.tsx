@@ -59,13 +59,12 @@ export function RunConfigForm(props: Props) {
         <Button disabled={props.active || props.busy} onClick={props.onCancelBranch}>取消配置</Button>
       </div>
     </> : !props.draft ? <Button className="primary create-draft" disabled={props.active || props.busy} onClick={props.onCreate}>创建仿真</Button> : <>
-      <label>任务场景<TaskSelector tasks={props.tasks} value={props.taskId} disabled={props.active || props.busy} onChange={props.onTask} /></label>
+      <TaskSelector tasks={props.tasks} value={props.taskId} disabled={props.active || props.busy} onChange={props.onTask} labelPrefix="仿真" />
       <label>策略模型<PolicySelector policies={props.policies} value={props.policyId} disabled={props.active || props.busy} onChange={props.onPolicy} /></label>
       <label>总控制步数<Input type="number" min={1} max={10000} value={props.maxSteps} disabled={props.active || props.busy} onChange={(event) => props.onMaxSteps(Number(event.target.value), false)} onBlur={() => props.onMaxSteps(props.maxSteps, true)} /></label>
       <label>每次预测执行步数<Input type="number" min={1} max={8} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>
       <label>随机种子<Input type="number" min={0} max={2147483647} step={1} value={props.seed} disabled={props.active || props.busy} onChange={(event) => props.onSeed(Number(event.target.value), false)} onBlur={() => props.onSeed(props.seed, true)} /></label>
       <label>初始状态索引<Input type="number" min={props.draft.task.init_state_index_min} max={props.draft.task.init_state_index_max} step={1} value={props.initStateIndex} disabled={props.active || props.busy} onChange={(event) => props.onInitStateIndex(Number(event.target.value), false)} onBlur={() => props.onInitStateIndex(props.initStateIndex, true)} /></label>
-      <p className="locked-field-note">当前任务可选范围：{props.draft.task.init_state_index_min}–{props.draft.task.init_state_index_max}（共 {props.draft.task.init_state_count} 个）。切换索引会改变 benchmark 初始布局。</p>
       <fieldset className="policy-camera-fieldset" disabled={props.active || props.busy}>
         <legend>VLA 摄像头输入</legend>
         {([

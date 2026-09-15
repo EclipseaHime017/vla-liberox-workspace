@@ -17,6 +17,8 @@ import { Badge } from "../components/ui/Badge";
 import { ApiError } from "../api/client";
 import { TrajectoryDetail } from "../features/dataset/TrajectoryDetail";
 import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
+import { TaskFilter } from "../features/run-config/TaskSelector";
+import { ALL_TASK_SCOPE, filterByTaskScope, scopeForTask, taskIdsForScope, type TaskScope } from "../features/run-config/taskHierarchy";
 
 const sources = ["inference", "manual", "policy_requery"] as const;
 const outcomes = ["success", "failure"] as const;
@@ -38,7 +40,8 @@ function initialSelection(): DatasetSelection {
 export function DatasetPage() {
   const [summary, setSummary] = useState<DatasetSummary | null>(null);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
-  const [taskId, setTaskId] = useState("");
+  const [taskScope, setTaskScope] = useState<TaskScope>(ALL_TASK_SCOPE);
+  const taskId = taskScope.task_id;
   const [runs, setRuns] = useState<Session[]>([]);
   const [runPage, setRunPage] = useState<PaginatedRuns | null>(null);
   const [page, setPage] = useState(1);
@@ -63,40 +66,48 @@ export function DatasetPage() {
   const [datasetsLoading, setDatasetsLoading] = useState(false);
   const [error, setError] = useState("");
   const detailRequest = useRef(0);
+  const listRequest = useRef(0);
   const requestedContext = useRef<{ datasetId?: string }>({});
   const completedJobs = useRef(new Set<string>());
   const globalPoll = useRef({ runId: "", attempts: 0 });
 
   const refresh = async (nextTask = taskId, nextPage = page, nextPageSize = pageSize) => {
-    if (!nextTask) return;
+    if (!bootstrap) return;
+    const request = ++listRequest.current;
+    const ids = taskIdsForScope(bootstrap.task_catalog, taskScope);
     setRunsLoading(true); setDatasetsLoading(true);
-    const runsRequest = listDatasetRuns(nextTask, nextPage, nextPageSize)
+    const runsRequest = (nextTask ? listDatasetRuns(nextTask, nextPage, nextPageSize) : listDatasetRuns("", nextPage, nextPageSize, ids))
       .then((nextRuns) => {
+        if (request !== listRequest.current) return;
         setRunPage(nextRuns); setRuns(nextRuns.items);
         if (nextRuns.page !== nextPage) setPage(nextRuns.page);
       })
-      .finally(() => setRunsLoading(false));
-    const metadataRequest = Promise.all([listTrainingDatasets(nextTask), listOfflineJobs()])
+      .finally(() => { if (request === listRequest.current) setRunsLoading(false); });
+    const metadataRequest = Promise.all([nextTask ? listTrainingDatasets(nextTask) : listTrainingDatasets(undefined, ids), listOfflineJobs()])
       .then(([nextDatasets, jobs]) => {
+        if (request !== listRequest.current) return;
         setDatasets(nextDatasets);
         const active = jobs.find((job) => ["annotation", "trajectory_evaluation"].includes(job.kind) && ["STARTING", "RUNNING", "STOPPING"].includes(job.status));
         if (active) setAnnotationJob(active);
       })
-      .finally(() => setDatasetsLoading(false));
+      .finally(() => { if (request === listRequest.current) setDatasetsLoading(false); });
     const settled = await Promise.allSettled([runsRequest, metadataRequest]);
     const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (rejected) throw rejected.reason;
+    if (rejected && request === listRequest.current) throw rejected.reason;
   };
 
   useEffect(() => {
     void Promise.all([getDatasetSummary(), getBootstrap()])
       .then(([nextSummary, nextBootstrap]) => {
         setSummary(nextSummary); setBootstrap(nextBootstrap);
-        setTaskId(nextBootstrap.task.task_id);
+        setTaskScope(scopeForTask(nextBootstrap.task_catalog, nextBootstrap.task.task_id));
       })
       .catch((reason) => setError(String(reason)));
   }, []);
-  useEffect(() => { if (taskId) void refresh(taskId, page, pageSize).catch((reason) => setError(String(reason))); }, [taskId, page, pageSize]);
+  useEffect(() => {
+    if (bootstrap) void refresh(taskId, page, pageSize).catch((reason) => setError(String(reason)));
+    return () => { listRequest.current += 1; };
+  }, [taskScope, page, pageSize, bootstrap]);
   useEffect(() => {
     if (!detail?.global_evaluation_pending) {
       globalPoll.current = { runId: "", attempts: 0 }; return;
@@ -121,7 +132,12 @@ export function DatasetPage() {
     return () => { current = false; window.clearTimeout(timer); };
   }, [detail, busy]);
 
-  const taskStats = summary?.tasks.find((task) => task.task_id === taskId);
+  const taskStats = useMemo(() => {
+    const groups = filterByTaskScope(summary?.tasks ?? [], bootstrap?.task_catalog ?? [], taskScope);
+    const runs = groups.reduce((total, group) => total + group.runs, 0);
+    const successes = groups.reduce((total, group) => total + group.successes, 0);
+    return { runs, success_rate: runs ? successes / runs : 0 };
+  }, [summary, bootstrap, taskScope]);
   const robometerCapability = bootstrap?.evaluation_capabilities?.robometer;
   const eligible = runs.filter((run) => run.training_eligible);
   const eligibleCount = runPage?.eligible_count ?? eligible.length;
@@ -142,6 +158,7 @@ export function DatasetPage() {
   const openBuilder = (parent?: TrainingDataset) => {
     setBuilder(true); setPreview(null); setError("");
     if (parent) {
+      setTaskScope(scopeForTask(bootstrap?.task_catalog ?? [], parent.task_id)); setPage(1);
       setParentId(parent.id); setName(`${parent.name} · 派生`);
       setValidationFraction(parent.validation_fraction ?? 0.2);
       setSplitSeed(parent.split_seed ?? 7); setSuccessSteps(parent.success_consecutive_steps ?? 5);
@@ -172,6 +189,7 @@ export function DatasetPage() {
     finally { setBusy(false); }
   };
   const evaluate = async (runIds: string[] | null, overwrite: boolean) => {
+    if (!taskId) return;
     if (!evaluators.length) { setError("请至少选择一个评价器"); return; }
     setBusy(true); setError("");
     try {
@@ -254,14 +272,17 @@ export function DatasetPage() {
       <div className="dataset-section-tabs surface"><button className={section === "evaluation" ? "active" : ""} onClick={() => { setSection("evaluation"); setBuilder(false); }}>轨迹评价</button><button className={section === "package" ? "active" : ""} onClick={() => setSection("package")}>打包训练数据集</button></div>
       <div className="surface dataset-browser">
         <div className="dataset-toolbar">
-          <label>任务<select value={taskId} onChange={(event) => { setTaskId(event.target.value); setPage(1); setBuilder(false); setEvaluationSelection([]); }}>{bootstrap?.task_catalog.map((task) => <option value={task.task_id} key={task.task_id}>{task.prompt}</option>)}</select></label>
+          <TaskFilter tasks={bootstrap?.task_catalog ?? []} value={taskScope} onChange={(value) => {
+            setTaskScope(value); setPage(1); setBuilder(false); setEvaluationSelection([]); setRunPage(null); setRuns([]);
+          }} labelPrefix="数据" />
           <span>{runPage?.total ?? 0} 条记录</span>
           {section === "evaluation" ? <div className="evaluation-actions">
             <label><input type="checkbox" checked={evaluators.includes("rynnvalue")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "rynnvalue"] : current.filter((value) => value !== "rynnvalue"))} />RynnValue</label>
             <label title={robometerCapability?.reason ?? undefined}><input type="checkbox" disabled={robometerCapability?.available === false} checked={evaluators.includes("robometer")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "robometer"] : current.filter((value) => value !== "robometer"))} />Robometer{robometerCapability?.available === false ? "（未配置）" : ""}</label>
             <label><input type="checkbox" checked={batchOverwrite} onChange={(event) => setBatchOverwrite(event.target.checked)} />覆盖已有评价</label>
-            <button disabled={busy || !evaluators.length} onClick={() => void evaluate(null, batchOverwrite)}>批量评价</button><button className="primary" disabled={busy || !evaluationSelection.length || !evaluators.length} onClick={() => void evaluate(evaluationSelection, batchOverwrite)}>{batchOverwrite ? "评价所选（覆盖已有）" : "评价所选（仅补缺失）"}</button>
-          </div> : <><button className="primary" onClick={() => openBuilder()}>创建训练数据集</button><a className="export-button" href={taskId ? datasetExportUrl(taskId) : undefined} download aria-disabled={!taskId}>导出任务 ZIP</a></>}
+            <button disabled={busy || !taskId || !evaluators.length} onClick={() => void evaluate(null, batchOverwrite)}>批量评价</button><button className="primary" disabled={busy || !taskId || !evaluationSelection.length || !evaluators.length} onClick={() => void evaluate(evaluationSelection, batchOverwrite)}>{batchOverwrite ? "评价所选（覆盖已有）" : "评价所选（仅补缺失）"}</button>
+          </div> : <><button className="primary" disabled={!taskId} onClick={() => openBuilder()}>创建训练数据集</button><a className="export-button" href={taskId ? datasetExportUrl(taskId) : undefined} download aria-disabled={!taskId}>导出任务 ZIP</a></>}
+          {!taskId && <span className="task-scope-note">请选择具体提示词后进行评价、打包或导出。</span>}
         </div>
         {runsLoading && !runPage ? <div className="empty-table">正在加载轨迹索引…</div> : <RunTable runs={runs} selectable={section === "evaluation" || (builder && selection.mode === "manual")} excludeTests={section === "package"} selected={section === "evaluation" ? evaluationSelection : selection.run_ids} onToggle={(runId, checked) => section === "evaluation" ? setEvaluationSelection((current) => checked ? [...current, runId] : current.filter((value) => value !== runId)) : patchSelection({ run_ids: checked ? [...selection.run_ids, runId] : selection.run_ids.filter((value) => value !== runId) })} onOpen={(runId) => void openDetail(runId)} />}
         <div className="table-pagination"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>上一页</button><span>第 {runPage?.page ?? page} / {runPage?.pages ?? 1} 页</span><button disabled={page >= (runPage?.pages ?? 1)} onClick={() => setPage((value) => value + 1)}>下一页</button><label>每页<select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>{[5, 10, 20, 50].map((value) => <option key={value} value={value}>{value}</option>)}</select></label></div>

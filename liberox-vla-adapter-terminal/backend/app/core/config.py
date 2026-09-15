@@ -41,6 +41,15 @@ UniqueKeyLoader.add_constructor(
 class AdditionalTaskConfig:
     level: str
     task_name: str
+    prompt_variants: tuple[str, ...] = ()
+    optional: bool = False
+
+
+@dataclass(frozen=True)
+class TaskFamilyConfig:
+    family_id: str
+    label: str
+    task_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -65,6 +74,7 @@ class UIConfig:
     tensorboard_host: str
     tensorboard_port: int
     additional_tasks: tuple[AdditionalTaskConfig, ...]
+    task_families: tuple[TaskFamilyConfig, ...] = ()
 
     @property
     def project_root(self) -> Path:
@@ -120,7 +130,7 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
     if not isinstance(raw, dict):
         raise TypeError("UI configuration root must be a mapping")
     expected = {field.name for field in fields(UIConfig)}
-    missing = sorted(expected - set(raw))
+    missing = sorted(expected - set(raw) - {"task_families"})
     unknown = sorted(set(raw) - expected)
     if missing:
         raise ValueError(f"Missing UI configuration keys: {missing}")
@@ -140,14 +150,23 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         if not isinstance(value, dict):
             raise TypeError(f"additional_tasks[{index}] must be a mapping")
         expected_task_keys = {"level", "task_name"}
-        if set(value) != expected_task_keys:
+        if not expected_task_keys <= set(value) or set(value) - expected_task_keys - {"prompt_variants", "optional"}:
             raise ValueError(
-                f"additional_tasks[{index}] keys must be {sorted(expected_task_keys)}"
+                f"additional_tasks[{index}] requires level/task_name; optional keys: prompt_variants, optional"
             )
         level = _strict_string(value, "level")
         task_name = _strict_string(value, "task_name")
-        if level not in {"LEVEL1", "LEVEL2", "LEVEL3", "LEVEL4"}:
-            raise ValueError(f"additional_tasks[{index}].level must be LEVEL1..LEVEL4")
+        if level not in {"LEVEL1", "LEVEL2", "LEVEL3", "LEVEL4", "LEVEL5"}:
+            raise ValueError(f"additional_tasks[{index}].level must be LEVEL1..LEVEL5")
+        variants = value.get("prompt_variants", [])
+        if (not isinstance(variants, list) or any(not isinstance(item, str) or item not in {f"L5-{i}" for i in range(1, 6)} for item in variants)
+                or len(set(variants)) != len(variants)):
+            raise ValueError("prompt_variants must contain unique L5-1..L5-5 values")
+        if (level == "LEVEL5") != bool(variants):
+            raise ValueError("Only LEVEL5 requires non-empty prompt_variants")
+        optional = value.get("optional", False)
+        if type(optional) is not bool:
+            raise TypeError("additional_tasks.optional must be a boolean")
         if (
             Path(task_name).name != task_name
             or task_name.endswith(".bddl")
@@ -159,7 +178,27 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         if identity in seen_tasks:
             raise ValueError(f"Duplicate additional task: {level}/{task_name}")
         seen_tasks.add(identity)
-        parsed_tasks.append(AdditionalTaskConfig(level=level, task_name=task_name))
+        parsed_tasks.append(AdditionalTaskConfig(level=level, task_name=task_name,
+                                                 prompt_variants=tuple(variants), optional=optional))
+    families = raw.get("task_families", [])
+    if not isinstance(families, list):
+        raise TypeError("task_families must be a list")
+    parsed_families = []
+    family_ids: set[str] = set()
+    assigned_names: set[str] = set()
+    for value in families:
+        if not isinstance(value, dict) or set(value) != {"family_id", "label", "task_names"}:
+            raise ValueError("task_families entries require family_id, label and task_names")
+        family_id = _strict_string(value, "family_id")
+        label = _strict_string(value, "label")
+        names = value["task_names"]
+        if not isinstance(names, list) or not names or any(not isinstance(name, str) or not name.strip() for name in names):
+            raise ValueError("task_families.task_names must be a non-empty string list")
+        if family_id in family_ids or len(set(names)) != len(names) or assigned_names.intersection(names):
+            raise ValueError("Duplicate task family or task assigned to multiple families")
+        family_ids.add(family_id)
+        assigned_names.update(names)
+        parsed_families.append(TaskFamilyConfig(family_id, label, tuple(names)))
     base = path.parent
     config = UIConfig(
         host=_strict_string(raw, "host"),
@@ -182,6 +221,7 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         tensorboard_host=_strict_string(raw, "tensorboard_host"),
         tensorboard_port=_strict_int(raw, "tensorboard_port"),
         additional_tasks=tuple(parsed_tasks),
+        task_families=tuple(parsed_families),
     )
     if config.host != "127.0.0.1":
         raise ValueError("The first UI version is local-only; host must be 127.0.0.1")

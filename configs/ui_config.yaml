@@ -24,3 +24,56 @@ additional_tasks:
     task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
   - level: LEVEL1
     task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+  # Optional extensions remain visible but disabled if assets are not installed.
+  - level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+    optional: true
+  - level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+    optional: true
+  - level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+    optional: true
+  - level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE11_LEVEL3__T70_place_the_black_bowl_on_the_flat_stove
+    optional: true
+  - level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet
+    optional: true
+  - level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE25_LEVEL3__T133_stack_the_blue_bowl_on_the_green_bowl
+    optional: true
+  - level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A1_place_the_cyan_bowl_on_the_stove
+    optional: true
+  - level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A2_place_the_large_light_grey_bowl_on_the_stove
+    optional: true
+  - level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet
+    optional: true
+  - level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE25_LEVEL4__T133__A1_stack_the_cyan_bowl_on_the_green_bowl
+    optional: true
+# Purpose-based UI grouping; exact scene IDs/prompts remain unchanged.
+# LEVEL5 language reformulations are intentionally not offered for now.
+task_families:
+  - family_id: bowl_on_stove
+    label: place the bowl on the stove
+    task_names:
+      - EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+      - EXTENSION_KITCHEN_SCENE11_LEVEL3__T70_place_the_black_bowl_on_the_flat_stove
+      - EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A1_place_the_cyan_bowl_on_the_stove
+      - EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A2_place_the_large_light_grey_bowl_on_the_stove
+  - family_id: open_top_drawer
+    label: open the top drawer of the wooden cabinet
+    task_names:
+      - EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+      - EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet
+      - EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet
+  - family_id: stack_bowls
+    label: stack the bowls
+    task_names:
+      - EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+      - EXTENSION_KITCHEN_SCENE25_LEVEL3__T133_stack_the_blue_bowl_on_the_green_bowl
+      - EXTENSION_KITCHEN_SCENE25_LEVEL4__T133__A1_stack_the_cyan_bowl_on_the_green_bowl

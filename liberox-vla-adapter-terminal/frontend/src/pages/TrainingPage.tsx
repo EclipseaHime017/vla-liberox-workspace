@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { TaskFilter } from "../features/run-config/TaskSelector";
+import { ALL_TASK_SCOPE, scopeForTask, taskIdsForScope, type TaskScope } from "../features/run-config/taskHierarchy";
 import {
   getBootstrap, getTensorBoard, getTrainingDefaults, listOfflineJobs,
   listTrainingDatasets, startTensorBoard, startTraining,
@@ -35,7 +37,8 @@ const activeJobStates = new Set(["STARTING", "RUNNING", "STOPPING"]);
 export function TrainingPage() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [defaults, setDefaults] = useState<TrainingDefaults | null>(null);
-  const [taskId, setTaskId] = useState("");
+  const [taskScope, setTaskScope] = useState<TaskScope>(ALL_TASK_SCOPE);
+  const taskId = taskScope.task_id;
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [datasetId, setDatasetId] = useState("");
   const [rewardSource, setRewardSource] = useState<TrainingRewardSource>("rynnvalue");
@@ -50,15 +53,15 @@ export function TrainingPage() {
   const [defaultsKey, setDefaultsKey] = useState("");
   const [error, setError] = useState("");
   const [defaultsError, setDefaultsError] = useState("");
-  const taskIdRef = useRef(taskId);
+  const taskIdRef = useRef(JSON.stringify(taskScope));
   const refreshRequest = useRef(0);
-  taskIdRef.current = taskId;
+  taskIdRef.current = JSON.stringify(taskScope);
   const requestedDefaultsKey = JSON.stringify([datasetId, rewardSource, rewardRevision]);
 
   useEffect(() => {
     void Promise.all([getBootstrap(), getTrainingDefaults(), listOfflineJobs(), getTensorBoard()])
       .then(([nextBootstrap, nextDefaults, jobs, board]) => {
-        setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskId(nextBootstrap.task.task_id);
+        setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskScope(scopeForTask(nextBootstrap.task_catalog, nextBootstrap.task.task_id));
         const { reward_rynnvalue: legacyRynn, ...advanced } = nextDefaults.advanced;
         const configuredSource = advanced.reward_source ?? (legacyRynn === false ? "sparse" : "rynnvalue");
         setRewardSource(configuredSource === "stage" || configuredSource === "sparse" ? configuredSource : "rynnvalue");
@@ -73,15 +76,15 @@ export function TrainingPage() {
       }).catch((reason) => setError(String(reason)));
   }, []);
   useEffect(() => {
-    if (!taskId) return;
+    if (!bootstrap) return;
     let current = true;
     setDatasetsLoading(true); setDatasets([]); setDatasetId("");
-    void listTrainingDatasets(taskId).then((values) => {
+    void (taskId ? listTrainingDatasets(taskId) : listTrainingDatasets(undefined, taskIdsForScope(bootstrap.task_catalog, taskScope))).then((values) => {
       if (current) setDatasets(values.filter((item) => item.integrity_status === "HEALTHY"));
     }).catch((reason) => { if (current) setError(String(reason)); })
       .finally(() => { if (current) setDatasetsLoading(false); });
     return () => { current = false; };
-  }, [taskId]);
+  }, [taskScope, bootstrap]);
   const availableDatasets = datasets;
   useEffect(() => {
     setDatasetId((current) => availableDatasets.some((item) => item.id === current)
@@ -134,9 +137,9 @@ export function TrainingPage() {
   const refreshDataset = async () => {
     const request = ++refreshRequest.current;
     setDefaultsKey("");
-    const requestedTaskId = taskId;
-    const values = await listTrainingDatasets(requestedTaskId);
-    if (taskIdRef.current !== requestedTaskId || request !== refreshRequest.current) return;
+    const requestedScope = JSON.stringify(taskScope);
+    const values = await (taskId ? listTrainingDatasets(taskId) : listTrainingDatasets(undefined, taskIdsForScope(bootstrap?.task_catalog ?? [], taskScope)));
+    if (taskIdRef.current !== requestedScope || request !== refreshRequest.current) return;
     setDatasets(values.filter((item) => item.integrity_status === "HEALTHY"));
     setRewardRevision((value) => value + 1);
   };
@@ -170,7 +173,7 @@ export function TrainingPage() {
       <section className="surface training-config">
         <div className="panel-title"><strong>训练配置</strong><span>{defaults?.environments.training ?? "vla-liberox"}</span></div>
         <div className="training-form">
-          <label>任务<select value={taskId} onChange={(event) => setTaskId(event.target.value)}>{bootstrap?.task_catalog.map((task) => <option key={task.task_id} value={task.task_id}>{task.prompt}</option>)}</select></label>
+          <TaskFilter tasks={bootstrap?.task_catalog ?? []} value={taskScope} onChange={setTaskScope} labelPrefix="训练" />
           <label>冻结数据集<select value={datasetId} disabled={datasetsLoading} onChange={(event) => setDatasetId(event.target.value)}><option value="">{datasetsLoading ? "加载数据集…" : "请选择"}</option>{availableDatasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
           <label>Reward 来源<select value={rewardSource} disabled={busy || datasetsLoading} onChange={(event) => {
             const source = event.target.value as TrainingRewardSource;

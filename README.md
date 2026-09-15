@@ -7,7 +7,7 @@ human Stage-based rewards with keyframe annotation and training source selection
 
 Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse / FACTR takeover,
 offline post-training, and reproducible batch policy testing for the three
-validated Franka/LIBERO-X tasks.
+Franka/LIBERO-X task families, including their official LEVEL1–4 variants.
 
 - Backend: FastAPI application service with a background simulation worker.
 - Frontend: React + TypeScript, served by FastAPI after a Vite production build.
@@ -16,11 +16,12 @@ validated Franka/LIBERO-X tasks.
 - Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
 - FACTR Franka: GUI and CLI share official calibration and gravity compensation, with one reference capture and explicit ON/OFF. Joint following includes slow leader alignment; GUI records measured end-effector action labels, trajectories and dual-camera video through the standard manual-data pipeline. Physical acceptance is still required.
-- Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
+- Three cascading selectors resolve task purpose → LEVEL1–4 → exact prompt, covering 13 physical scenes; the same hierarchy filters sessions, datasets, training datasets and test history. Purpose groups are explicitly configured in `ui_config.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
+- Run drafts can choose a simulation seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact. Simulation, dataset selection/split, training and test-schedule seeds have distinct roles. Changing the simulation seed does not select a new benchmark init state or inherit the training RNG.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
 - Integrated workflow: freeze a dataset, expand its per-row configuration, and evaluate with Sparse, Stage-based, RynnValue or Robometer. Reevaluation replaces the dataset's current results only after success; no evaluation-version management is needed. Durable keyframes and cached model outputs remain reusable. Global trajectory details retain the first evaluation unless explicitly overwritten. Training takes a fixed snapshot while gamma and cumulative reward remain adjustable per run; p and κ are configured only on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#49-在-web-ui-中创建数据集标注与训练).
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
-- Human stage rewards: mark positive/negative keyframes in trajectory details without cutting the recording. Stage evaluation validates every member and snapshots the latest labels; changing the exponent or formula creates a new reward version, preserving historical results and active training. Legacy labels remain readable without resaving. See [the implemented formulas and workflow](docs/STAGE_REWARD_RESEARCH.md#6-已实现人工关键帧直接奖励) and [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
+- Human stage rewards: mark positive/negative keyframes in trajectory details without cutting the recording. Stage evaluation validates every member and snapshots the latest labels; changing the exponent or formula creates a new reward version, preserving historical results and active training. Legacy labels remain readable without resaving. See [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
 - Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
 
 ## Repository layout
@@ -32,7 +33,7 @@ vla-liberox-workspace/
 ├── configs/                       # terminal/UI runtime configuration
 ├── dataset-root/                  # recorded source data (Git-ignored)
 ├── policy-registry/               # immutable policy overlays (Git-ignored)
-├── docs/                          # architecture and data-layout documentation
+├── docs/                          # local development notes (Git-ignored)
 └── README_CN.md                   # complete Chinese setup and operating guide
 ```
 
@@ -58,7 +59,7 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 
 On a new checkout, run `npm ci` once in `liberox-vla-adapter-terminal/frontend/`. The launcher fingerprints the frontend sources, prints the exact build command before running it, and automatically rebuilds the Git-ignored `frontend/dist` after later pulls. Run `npm run build` there for a manual source-only rebuild, or `npm ci && npm run build` after `package-lock.json` changes. Neither `npm run build` nor `npm test` installs or upgrades dependencies.
 
-Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup and operation, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries, and [docs/DATA_LAYOUT.md](docs/DATA_LAYOUT.md) for persistence rules.
+Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup, operation and data management. Development notes under `docs/` stay local and are not distributed with the repository.
 
 ## FACTR calibration and manual gravity compensation
 
@@ -238,12 +239,3 @@ prefix protocol and batch-size tuning are documented in the
 - [LIBERO-X official implementation](https://github.com/meituan/LIBERO-X)
 - [Robometer paper](https://arxiv.org/abs/2603.02115)
 - [Robometer official implementation](https://github.com/robometer/robometer)
-
-## Stage-based reward research
-
-[Stage reward research and ablations](docs/STAGE_REWARD_RESEARCH.md) compares
-SARM, STDR, Reward Machines and Relay Policy Learning, then separates two proposed
-experiments: stage-potential PBRS and stage-dependent time cost. It covers
-failure rollback, uncertain labels, macro/Semi-MDP discount consistency and
-controlled evaluation. This is research documentation only: no stage model,
-training reward, IQL update or existing evaluation sidecar is changed.
