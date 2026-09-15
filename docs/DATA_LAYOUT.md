@@ -240,17 +240,35 @@ per-source pointers; `reward_version_id` remains a compatibility/default alias.
 Detail returns all `reward_evaluations` and `evaluation_sources`, plus the
 independent RynnValue/Robometer outputs. Each source resolves dataset-first and
 then trajectory-global. A corrupt local result is reported, not silently replaced.
+The lightweight `evaluation_origins` response declares `global` by default for
+each type, or `dataset` when a local override exists. Inheritance is a live
+reference, not another evaluation version: no source arrays are copied when
+freezing or browsing a dataset. A successful local reevaluation overrides only
+its own type; subsequent global updates still apply to the other inherited types.
 
 Training selects one of Sparse/Stage/RynnValue. Without a local result, every
-member must have a valid global result of that source. The backend copies saved
+member inherits the same-type global input. RynnValue requires valid bound
+model outputs; Stage can use saved `stage_annotation.json` directly, and Sparse
+uses environment success flags without an evaluation job. Missing derived
+Sparse/Stage arrays are computed on CPU with the existing reward functions;
+neither model inference nor source-sidecar writes occur. The backend copies saved
 arrays and prepared episode metadata to a private `global_*` training binding,
 without creating a dataset evaluation or running a model. Entries retain their
 own `saved_reward_config` and `saved_annotation_config`; changes to training
 gamma/cumulative reuse saved curves and preserve per-member p/kappa. Source
 sidecars now retain full prepared episode/header metadata so deleting the
-originating dataset does not remove their replay description. Legacy native
-RynnValue metadata is recovered from matching existing prepared/reward manifests;
-missing unverifiable metadata blocks training instead of guessing chunk semantics.
+originating dataset does not remove their replay description. If legacy native
+RynnValue metadata has no prepared episode, the shared Prepare control-data and
+chunking functions reconstruct it from frozen source records. This requires no
+old job directories or annotation cache and does not decode observation images
+on the training page. Full source hashes are still checked before training.
+Saved RynnValue boundary steps must exactly match the reconstructed chunks;
+missing time points never trigger silent interpolation or model evaluation.
+Inherited Stage entries also retain their actual keyframe snapshot and hash.
+When no explicit global reward array exists, saved Stage labels and environment
+outcomes take precedence over another dataset's local Stage/Sparse recipe.
+Automatic completion binding preserves these implicit global sources; only
+`overwrite_global: true` replaces them with an explicit global reward snapshot.
 Checkpoint reward identity is based on member/config/value content, not random
 private-copy paths, so an identical global binding can resume a previous run.
 

@@ -12,7 +12,7 @@ from .dependencies import (
     stage_annotation_service,
 )
 from .models import RunTestLabelRequest, TrajectoryEvaluationRequest, StageAnnotationRequest
-from ..services.dataset_evaluation_detail import attach_dataset_context
+from ..services.dataset_evaluation_detail import attach_dataset_context, attach_inherited_rewards
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -52,6 +52,9 @@ async def run_detail(run_id: str, request: Request,
         datasets = training_dataset_service(request)
         result["run"]["is_test"] = datasets.is_test(run_id)
         result = await run_in_threadpool(attach_dataset_context, result, datasets, dataset_id, version_id)
+        if dataset_id is not None:
+            result = await run_in_threadpool(attach_inherited_rewards, result,
+                                            offline_job_service(request), dataset_id)
         if result.get("global_evaluation_pending"):
             offline_job_service(request).schedule_first_reward_snapshot(result["run"])
         return result

@@ -41,6 +41,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("dataset-pinned training reward", () => {
+  it("starts a newly frozen dataset directly from global labels without an evaluation request", async () => {
+    vi.mocked(api.listTrainingDatasets).mockResolvedValue([datasets[1]]);
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (id) => id ? {
+      ...defaults, reward_version: null, reward_availability: { ready: true, origin: "global" },
+    } : defaults);
+    render(<TrainingPage />);
+    const start = await screen.findByRole("button", { name: "开始训练" });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByText(/使用逐轨迹全局结果/)).toBeTruthy();
+    fireEvent.click(start);
+    await waitFor(() => expect(api.startTraining).toHaveBeenCalledWith("unready",
+      expect.objectContaining({ reward_source: "stage", reward_version_id: null })));
+    expect(api.annotateTrainingDataset).not.toHaveBeenCalled();
+  });
+
   it("shows legacy evaluation guidance without disabling dataset configuration", async () => {
     const message = "旧评价缺少训练快照，请在配置数据集评价中重新生成该类型结果";
     vi.mocked(api.getTrainingDefaults).mockImplementation(async (id) => id ? {

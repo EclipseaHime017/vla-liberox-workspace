@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import io
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .trajectory_reward_snapshot import SOURCES, snapshot_path, needs_snapshot_validation, read_reward_snapshot
+from .trajectory_reward_snapshot import (
+    SOURCES, has_implicit_global, snapshot_path, needs_snapshot_validation, read_reward_snapshot,
+)
 
 
 def _signature(path: Path) -> tuple[int, ...]:
@@ -32,6 +35,34 @@ def _read_checked(path_name: str, digest: str, signature: tuple[int, ...], array
         result = json.loads(path.read_text(encoding="utf-8"))
     if signature != _signature(path):
         raise ValueError("Evaluation artifact changed during read")
+    return result
+
+
+def attach_inherited_rewards(result: dict, jobs: Any, dataset_id: str | None) -> dict:
+    """Show the same implicit Sparse/Stage source used by training defaults."""
+    if dataset_id is None:
+        return result
+    from .global_reward_binding import global_members
+
+    dataset = jobs.datasets.get(dataset_id, quick_verify=False)
+    for source in ("sparse", "stage"):
+        if source in result["evaluation_sources"]:
+            continue  # Never replace a local override or hide an invalid sidecar.
+        records, errors = global_members(jobs, dataset, source, run_ids={result["run"]["id"]})
+        if errors or not records:
+            result["evaluation_sources"][source] = {"origin": "global", "status": "NOT_EVALUATED",
+                "error": errors[0]["error"] if errors else "缺少全局评价"}
+            continue
+        _, metadata, values, _, _ = records[0]
+        with np.load(io.BytesIO(values) if isinstance(values, bytes) else values, allow_pickle=False) as archive:
+            arrays = {key: archive[key] for key in archive.files}
+        reward, _ = _reward_arrays_detail(
+            {"id": metadata.get("evaluation_id") or "global", "evaluator": source},
+            {"reward_config": metadata["reward_config"]}, metadata.get("entry", {}), arrays,
+            result["series"]["time_seconds"])
+        result["reward_evaluations"][source] = reward
+        result["evaluation_sources"][source] = {"origin": "global", "status": "READY",
+                                               "config": metadata["reward_config"]}
     return result
 
 
@@ -217,6 +248,8 @@ def attach_dataset_context(result: dict, datasets: Any, dataset_id: str | None,
             publish(source, None, native, {"origin": "global",
                 "config": native.get("reward_config", native.get("evaluation_config", {})),
                 "evaluated_at": native.get("evaluated_at")})
+            continue
+        if has_implicit_global(run, source):
             continue
         for _, owner, identifier, evaluator in sorted(candidates):
             if evaluator != source:

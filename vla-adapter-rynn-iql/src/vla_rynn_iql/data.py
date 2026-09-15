@@ -333,7 +333,8 @@ def _materialize_export(run_dir: Path, cache_dir: Path) -> tuple[Path, Path]:
     return trajectory_path, observations_path
 
 
-def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
+def _load_run(run_json: Path, config: LoadedConfig, *,
+              frozen_observations_sha256: str | None = None) -> dict[str, Any] | None:
     run = json.loads(run_json.read_text(encoding="utf-8"))
     if run.get("status") != "COMPLETED" or run.get("error"):
         return None
@@ -345,6 +346,8 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
     trajectory = episode_dir / "trajectory.npz"
     observations = episode_dir / "trajectory_observations.npz"
     observation_orientation = "libero_raw"
+    if frozen_observations_sha256 is not None and (not trajectory.is_file() or not observations.is_file()):
+        raise ValueError("Frozen source files are unavailable; cannot reconstruct reward inputs")
     if not trajectory.is_file() or not observations.is_file():
         cache = Path(config.section("paths")["work_dir"]) / "materialized" / str(run["id"])
         trajectory, observations = _materialize_export(run_json.parent, cache)
@@ -428,14 +431,18 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         recorded_success = bool(run.get("success", False))
         if recorded_success != raw_environment_success:
             raise ValueError(f"run.success and environment done disagree: {run_json}")
-    with np.load(observations, allow_pickle=False) as images:
-        for key in ("agentview_image", "wrist_image"):
-            if key not in images or images[key].shape[0] != recorded_action_count + 1:
-                raise ValueError(f"Invalid {key} alignment: {observations}")
-            if images[key].ndim != 4 or images[key].shape[-1] != 3:
-                raise ValueError(f"Invalid {key} image dimensions: {observations}")
-            if images[key].dtype != np.uint8:
-                raise ValueError(f"{key} must contain uint8 RGB images: {observations}")
+    # UI reward inheritance only reconstructs control/chunk metadata from
+    # already frozen sources. Full source hashes are verified before training;
+    # status requests must not repeatedly decompress the two image archives.
+    if frozen_observations_sha256 is None:
+        with np.load(observations, allow_pickle=False) as images:
+            for key in ("agentview_image", "wrist_image"):
+                if key not in images or images[key].shape[0] != recorded_action_count + 1:
+                    raise ValueError(f"Invalid {key} alignment: {observations}")
+                if images[key].ndim != 4 or images[key].shape[-1] != 3:
+                    raise ValueError(f"Invalid {key} image dimensions: {observations}")
+                if images[key].dtype != np.uint8:
+                    raise ValueError(f"{key} must contain uint8 RGB images: {observations}")
     kind = str(run.get("kind", "original"))
     resume = int(run.get("resume_step") or 0) if kind == "branch" else 0
     if not 0 <= resume < action_count:
@@ -484,7 +491,7 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
-        "observations_sha256": sha256_file(observations),
+        "observations_sha256": frozen_observations_sha256 or sha256_file(observations),
         "observation_orientation": observation_orientation,
         "source_manifest": str(run_json.resolve()),
         "source_manifest_sha256": sha256_file(run_json),
@@ -495,6 +502,38 @@ def _split(root_run_id: str, seed: int, validation_fraction: float) -> str:
     digest = hashlib.sha256(f"{seed}:{root_run_id}".encode()).digest()
     value = int.from_bytes(digest[:8], "big") / float(2**64)
     return "validation" if value < validation_fraction else "train"
+
+
+def add_episode_chunks(episode: dict[str, Any], horizon: int) -> None:
+    """Describe the complete recording identically for Prepare and inheritance."""
+    resume_step = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
+    success_end = (int(episode["terminal_step"]) + 1 if episode["terminal_step"] is not None
+                   else int(episode["recorded_action_count"]))
+    chunks = build_semi_mdp_chunks(first=0, end=success_end, horizon=horizon,
+                                   source_segments=episode["action_source_segments"])
+    if success_end < int(episode["recorded_action_count"]):
+        chunks.extend(build_semi_mdp_chunks(first=success_end,
+            end=int(episode["recorded_action_count"]), horizon=horizon,
+            source_segments=episode["recorded_action_source_segments"]))
+    if episode["kind"] == "branch":
+        for chunk in chunks:
+            if int(chunk["end"]) > resume_step:
+                continue
+            if str(chunk["action_source"]) != "policy":
+                raise ValueError(f"Branch {episode['run_id']} has non-policy action "
+                                 f"before resume_step={resume_step}: {chunk['action_source']!r}")
+            chunk["copied_prefix"] = True
+            if int(chunk["end"]) == resume_step and int(chunk["length"]) < horizon:
+                chunk["transition_type"] = "policy_interrupted"
+                chunk["interrupted"] = True
+            else:
+                chunk["transition_type"] = "policy_prefix"
+    episode["chunks"] = chunks
+    episode["evaluation_chunks"] = [
+        {**chunk, "transition_type": "post_terminal_evaluation"}
+        if int(chunk["start"]) >= success_end else dict(chunk) for chunk in chunks]
+    episode["reward_boundaries"] = sorted({
+        value for chunk in episode["evaluation_chunks"] for value in (chunk["start"], chunk["end"])})
 
 
 def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
@@ -559,56 +598,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             selected[episode["run_id"]]["split"]
             if selected else _split(episode["root_run_id"], seed, fraction)
         )
-        resume_step = (
-            int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
-        )
-        # Preserve the existing success-aligned reward boundaries and annotation
-        # cache keys, then promote the complete recorded tail into training.
-        success_end = (
-            int(episode["terminal_step"]) + 1
-            if episode["terminal_step"] is not None else int(episode["recorded_action_count"])
-        )
-        chunks = build_semi_mdp_chunks(
-            first=0,
-            end=success_end,
-            horizon=horizon,
-            source_segments=episode["action_source_segments"],
-        )
-        if success_end < int(episode["recorded_action_count"]):
-            chunks.extend(build_semi_mdp_chunks(
-                first=success_end,
-                end=int(episode["recorded_action_count"]),
-                horizon=horizon,
-                source_segments=episode["recorded_action_source_segments"],
-            ))
-        if episode["kind"] == "branch":
-            for chunk in chunks:
-                if int(chunk["end"]) > resume_step:
-                    continue
-                if str(chunk["action_source"]) != "policy":
-                    raise ValueError(
-                        f"Branch {episode['run_id']} has non-policy action "
-                        f"before resume_step={resume_step}: {chunk['action_source']!r}"
-                    )
-                chunk["copied_prefix"] = True
-                if int(chunk["end"]) == resume_step and int(chunk["length"]) < horizon:
-                    chunk["transition_type"] = "policy_interrupted"
-                    chunk["interrupted"] = True
-                else:
-                    chunk["transition_type"] = "policy_prefix"
-        episode["chunks"] = chunks
-        # The historical evaluation-only label remains in annotation metadata
-        # for cache compatibility. It does not control replay inclusion.
-        evaluation_chunks = [
-            {**chunk, "transition_type": "post_terminal_evaluation"}
-            if int(chunk["start"]) >= success_end else dict(chunk)
-            for chunk in chunks
-        ]
-        episode["evaluation_chunks"] = evaluation_chunks
-        episode["reward_boundaries"] = sorted({
-            value for chunk in evaluation_chunks
-            for value in (chunk["start"], chunk["end"])
-        })
+        add_episode_chunks(episode, horizon)
     if not selected and all(ep["split"] == "validation" for ep in episodes):
         # Tiny smoke-test datasets still need at least one train root.
         root = episodes[0]["root_run_id"]

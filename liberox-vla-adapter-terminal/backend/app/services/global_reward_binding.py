@@ -11,8 +11,9 @@ from pathlib import Path
 from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
 from .trajectory_reward_snapshot import (
-    _hash, _refresh_snapshot_identity, read_reward_snapshot, snapshot_path,
+    _hash, _refresh_snapshot_identity, has_implicit_global, read_reward_snapshot, snapshot_path,
 )
+from .inherited_reward_inputs import direct_global_reward, reconstruct_episode, validate_global_values
 
 
 def _json(path: Path) -> dict:
@@ -21,34 +22,24 @@ def _json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _saved_metadata(jobs, run_id: str, metadata: dict) -> tuple[dict, dict]:
-    """Read original chunk semantics, including old sidecars lacking a full episode."""
-    if metadata.get("episode", {}).get("trajectory_path") and metadata.get("prepared"):
+def _saved_metadata(jobs, dataset: dict, member: dict, metadata: dict) -> tuple[dict, dict]:
+    """Reuse complete descriptors, otherwise reconstruct without old job folders."""
+    if (metadata.get("episode", {}).get("trajectory_path") and metadata.get("prepared")
+            and metadata["prepared"].get("success_consecutive_steps", dataset["success_consecutive_steps"])
+                == dataset["success_consecutive_steps"]):
         return metadata["episode"], metadata["prepared"]
-    candidates = list(jobs.datasets.root.glob("*/annotations/*/work/dataset_manifest.json"))
-    project = getattr(jobs, "project_root", jobs.datasets.root.parent)
-    candidates += list((project / "trajectory-evaluations").glob("*/work/rynnvalue/dataset_manifest.json"))
-    if metadata.get("prepared_manifest_path"):
-        candidates.insert(0, Path(metadata["prepared_manifest_path"]))
-    for path in candidates:
-        try:
-            prepared = _json(path)
-            rewards = _json(path.parent / "rewards" / "reward_manifest.json")
-            entry = next(item for item in rewards["episodes"] if item["run_id"] == run_id)
-            episode = next(item for item in prepared["episodes"] if item["run_id"] == run_id)
-            if (entry.get("reward_sha256", entry.get("annotation_sha256")) == metadata["values_sha256"]
-                    and episode["trajectory_sha256"] == metadata["trajectory_sha256"]
-                    and episode["observations_sha256"] == metadata["observations_sha256"]):
-                return episode, {key: value for key, value in prepared.items() if key != "episodes"}
-        except (OSError, ValueError, KeyError, StopIteration):
-            continue
-    raise ValueError("旧全局评价缺少可验证的 chunk 元数据，请用已有模型输出重新生成该类型评价")
+    # Sidecars outlive their original temporary Prepare/cache directories.
+    # Reconstruct indices from the frozen control data; model outputs stay intact.
+    return reconstruct_episode(jobs, dataset, member)
 
 
-def global_members(jobs, dataset: dict, source: str, *, validate: bool = False) -> tuple[list, list]:
+def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
+                   run_ids: set[str] | None = None) -> tuple[list, list]:
     _, frozen = jobs.datasets._load(dataset["id"])
     records, missing = [], []
     for member in frozen["members"]:
+        if run_ids is not None and member["run_id"] not in run_ids:
+            continue
         try:
             run = jobs.datasets.run_service.get_run(member["run_id"])
         except KeyError:
@@ -72,20 +63,30 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False) 
                 values = path.with_name("rynnvalue_evaluation.npz")
                 if metadata.get("schema_version") not in (5, 6):
                     raise ValueError("全局 RynnValue 评价需要升级")
+            elif has_implicit_global(run, source):
+                metadata, values = direct_global_reward(jobs, dataset, member, source)
             else:
-                metadata, values = _first_saved_result(jobs, member["run_id"], source)
-            if (metadata.get("run_id") != member["run_id"] or values.is_symlink()
-                    or _hash(values) != metadata["values_sha256"]):
+                try:
+                    metadata, values = _first_saved_result(jobs, member["run_id"], source)
+                except FileNotFoundError:
+                    if source not in {"sparse", "stage"}:
+                        raise
+                    metadata, values = direct_global_reward(jobs, dataset, member, source)
+            values_hash = hashlib.sha256(values).hexdigest() if isinstance(values, bytes) else _hash(values)
+            if (metadata.get("run_id") != member["run_id"]
+                    or (not isinstance(values, bytes) and values.is_symlink())
+                    or values_hash != metadata["values_sha256"]):
                 raise ValueError("全局评价身份或数组哈希不匹配")
             for name in ("trajectory", "observations"):
                 if member["artifacts"][name]["sha256"] != metadata[f"{name}_sha256"]:
                     raise ValueError("全局评价与冻结数据源不匹配")
-            episode, header = _saved_metadata(jobs, member["run_id"], metadata)
+            episode, header = _saved_metadata(jobs, dataset, member, metadata)
             if episode.get("source_manifest_sha256") != member["artifacts"]["manifest"]["sha256"]:
                 raise ValueError("全局评价与冻结轨迹的任务清单不匹配")
             recipe = metadata.get("reward_config") or {}
             if recipe.get("source", "rynnvalue") != source:
                 raise ValueError("全局评价类型不匹配")
+            validate_global_values(values, episode, source, jobs.ui_config.offline_rl_root)
             records.append((member, metadata, values, episode, header))
         except (OSError, ValueError, KeyError, TypeError) as exc:
             missing.append({"run_id": member["run_id"], "error": str(exc)})
@@ -118,7 +119,7 @@ def _first_saved_result(jobs, run_id: str, source: str) -> tuple[dict, Path]:
             }, Path(entry["reward_path"])
         except (KeyError, ValueError, OSError, StopIteration):
             continue
-    raise ValueError("缺少全局评价")
+    raise FileNotFoundError("缺少全局评价")
 
 
 def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
@@ -143,19 +144,25 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
             episode[field] = member["artifacts"][name]["path"]
         episodes.append(episode)
         entries.append({**metadata.get("entry", {}), "run_id": member["run_id"],
-            "reward_path": str(values), "annotation_path": str(values),
+            "reward_path": str(values) if isinstance(values, Path) else "",
+            "annotation_path": str(values) if isinstance(values, Path) else "",
             "reward_sha256": metadata["values_sha256"], "annotation_sha256": metadata["values_sha256"],
             "saved_reward_config": metadata["reward_config"],
             "saved_annotation_config": metadata.get("annotation_config", {}),
             "annotator": metadata.get("annotator", {}), "official_outputs": metadata.get("official_outputs", {}),
             "source_values_sha256": metadata["values_sha256"], "source_evaluated_at": metadata.get("evaluated_at"),
             "source_evaluation_id": metadata.get("evaluation_id"), "source_origin": "global"})
+        if metadata.get("stage_annotation"):
+            entries[-1]["stage_annotation"] = metadata["stage_annotation"]
     identifier = "global_" + uuid.uuid4().hex
     work = jobs.jobs_root / identifier / "work"
     work.mkdir(parents=True, exist_ok=False)
-    for entry in entries:
+    for entry, record in zip(entries, records):
         destination = work / f"{entry['reward_sha256']}.npz"
-        shutil.copyfile(entry["reward_path"], destination)
+        if isinstance(record[2], bytes):
+            destination.write_bytes(record[2])
+        else:
+            shutil.copyfile(record[2], destination)
         if _hash(destination) != entry["reward_sha256"]:
             raise ValueError("Global reward changed while taking training snapshot")
         entry.update(reward_path=str(destination), annotation_path=str(destination))

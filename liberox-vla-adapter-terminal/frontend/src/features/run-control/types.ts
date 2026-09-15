@@ -241,6 +241,7 @@ export type DatasetPreview = {
 
 export type TrainingDataset = {
   evaluation_version_ids?: Partial<Record<RewardSource, string | null>>;
+  evaluation_origins?: Partial<Record<RewardSource, "dataset" | "global">>;
   reward_version_id?: string | null; robometer_version_id?: string | null;
   evaluation_versions?: RewardVersion[];
   id: string; project_id: string; name: string; task_id: string;

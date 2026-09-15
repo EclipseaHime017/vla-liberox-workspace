@@ -650,6 +650,10 @@ class TrainingDatasetService:
         result.setdefault("reward_version_id", None)
         result.setdefault("robometer_version_id", None)
         result["evaluation_version_ids"] = TrainingDatasetService.current_evaluation_ids(result)
+        result["evaluation_origins"] = {
+            source: "dataset" if source in result["evaluation_version_ids"] else "global"
+            for source in ("sparse", "stage", "rynnvalue", "robometer")
+        }
         result["members"] = [
             {
                 key: member.get(key) for key in (

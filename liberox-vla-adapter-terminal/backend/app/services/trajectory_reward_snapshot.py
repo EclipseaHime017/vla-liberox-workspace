@@ -296,6 +296,13 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
     return {"bound": bound, "skipped": skipped, "count": len(bound)}
 
 
+def has_implicit_global(run: dict, source: str) -> bool:
+    """Environment outcomes and saved keyframes already define global inputs."""
+    trajectory = _trajectory(run)
+    return trajectory is not None and (source == "sparse" or (
+        source == "stage" and trajectory.with_name("stage_annotation.json").exists()))
+
+
 def ensure_first_reward_snapshot(run: dict, datasets: Any, source: str | None = None) -> dict[str, Any] | None:
     """One-time lazy initialization for packages evaluated before this feature."""
     if source is None:
@@ -309,6 +316,10 @@ def ensure_first_reward_snapshot(run: dict, datasets: Any, source: str | None = 
         return _refresh_snapshot_identity(run, source)
     if existing is not None or trajectory is None or (source == "rynnvalue" and _existing_rynn(trajectory, str(run["id"]))):
         return existing
+    if has_implicit_global(run, source):
+        # A dataset-local recipe must not replace a sibling's implicit global
+        # baseline. Explicit overwrite_global still publishes a saved snapshot.
+        return None
     candidates = []
     for dataset in datasets.list():
         if not any(member["run_id"] == run.get("id") for member in dataset.get("members", [])):

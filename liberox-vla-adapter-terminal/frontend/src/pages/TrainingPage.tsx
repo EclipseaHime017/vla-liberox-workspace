@@ -185,7 +185,7 @@ export function TrainingPage() {
               <p className="error-banner">{defaults.reward_availability.message}</p>}
             {!defaultsLoading && defaultsKey === requestedDefaultsKey && !rewardReady && defaults?.reward_availability?.errors?.map((item) =>
               <p key={item.run_id} className="error-banner">{item.run_id}：{item.error}</p>)}
-            <p>数据集缺少所选类型结果时，按轨迹读取同类型全局结果。修改 Discount ratio γ 或 cumulative reward 只影响本次训练。</p>
+            <p>新数据集默认继承同类型全局评价，已有标签可直接训练，无需再次评价。只有数据集重新评价后才使用专属结果；修改 γ / cumulative reward 只影响本次训练。</p>
             <button aria-expanded={showDatasetConfig} onClick={() => setShowDatasetConfig((value) => !value)}>配置数据集评价</button></div>}
           {dataset && showDatasetConfig && <FrozenDatasetCard key={dataset.id} dataset={dataset} initialExpanded
             disabled={busy || Boolean(job && activeJobStates.has(job.status))}

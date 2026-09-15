@@ -110,9 +110,9 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
   return <article className="dataset-card">
     <div className="dataset-card-description"><h2>{dataset.name}</h2><p>{dataset.member_count} 条轨迹 · {dataset.action_count} actions · {dataset.chunk_count} chunks</p>
       <p>{(Object.keys(rewardSourceLabels) as RewardSource[]).map((evaluator) =>
-        `${rewardSourceLabels[evaluator]}：${currentFor(evaluator) ? "已评价" : "使用全局结果（如有）"}`).join(" · ")}</p></div>
+        `${rewardSourceLabels[evaluator]}：${currentFor(evaluator) ? "数据集专属" : "继承全局"}`).join(" · ")}</p></div>
     <div className="dataset-badges"><Badge tone={dataset.integrity_status === "HEALTHY" ? "green" : "red"}>{dataset.integrity_status}</Badge>
-      <Badge tone={dataset.annotation_status === "READY" ? "green" : dataset.annotation_status === "ERROR" ? "red" : "neutral"}>{dataset.annotation_status}</Badge></div>
+      <Badge tone={dataset.annotation_status === "READY" ? "green" : dataset.annotation_status === "ERROR" ? "red" : "neutral"}>{dataset.annotation_status === "NOT_STARTED" ? "全局继承" : dataset.annotation_status}</Badge></div>
     <div className="dataset-card-actions">
       {onRemove && <button className="danger" disabled={blocked} onClick={onRemove}>{dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集"}</button>}
       <button disabled={blocked} onClick={() => void run(async () => { await verifyTrainingDataset(dataset.id); await onRefresh(); })}>验证完整性</button>
@@ -123,8 +123,8 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
     {dataset.integrity_error && <p className="dataset-integrity-error">{dataset.integrity_error}</p>}
     {expanded && <section id={`reward-config-${dataset.id}`} className="dataset-reward-config" aria-label={`${dataset.name} 评价配置`}>
       {!configReady ? <p role="status">{busy ? "正在加载评价配置…" : "配置加载失败，请收起后重试。"}</p> : <>
-        <div className="evaluation-config-heading"><div><h3>评价配置</h3><p>重新评价仅更新当前数据集的所选类型结果，原始关键帧保持不变。</p></div>
-          {currentEvaluation && <Badge tone="green">已评价</Badge>}</div>
+        <div className="evaluation-config-heading"><div><h3>评价配置</h3><p>默认复用各轨迹的全局评价，无需为新数据集再次评价。重新评价只覆盖当前数据集的所选类型。</p></div>
+          <Badge tone={currentEvaluation ? "green" : undefined}>{currentEvaluation ? "数据集专属评价" : "默认继承全局评价"}</Badge></div>
         <fieldset disabled={blocked} className="parameter-grid">
           <label>评价类型<select value={source} onChange={(event) => setSource(event.target.value as RewardSource)}>
             {Object.entries(rewardSourceLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
