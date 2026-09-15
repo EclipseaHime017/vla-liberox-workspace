@@ -51,6 +51,11 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False) 
     for member in frozen["members"]:
         try:
             run = jobs.datasets.run_service.get_run(member["run_id"])
+        except KeyError:
+            missing.append({"run_id": member["run_id"],
+                            "error": "轨迹记录不存在或尚未加载，请检查部署设备的数据目录与会话索引"})
+            continue
+        try:
             path = snapshot_path(run, source)
             snapshot = read_reward_snapshot(run, source)
             if snapshot is None and path and path.is_file() and validate:

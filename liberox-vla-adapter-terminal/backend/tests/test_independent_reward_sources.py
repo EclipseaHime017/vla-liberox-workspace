@@ -106,6 +106,87 @@ def test_source_selection_never_falls_back_to_another_type(tmp_path):
         jobs.start_training(dataset["id"], {"reward_source": "sparse"})
 
 
+def test_legacy_evaluation_without_version_config_does_not_break_defaults(tmp_path):
+    jobs, dataset = setup_jobs(tmp_path)
+    jobs.datasets.update_annotation(dataset["id"], "READY", annotation_id="legacy", annotation_config={"max_frames": 4})
+    before = (jobs.datasets.root / dataset["id"] / "dataset.json").read_bytes()
+    defaults = jobs.defaults(dataset["id"], "rynnvalue")
+    assert defaults["reward_version"]["legacy"]
+    assert not defaults["reward_availability"]["ready"]
+    assert "旧评价" in defaults["reward_availability"]["message"]
+    assert defaults["basic"]["train_steps"] > 0
+    assert (jobs.datasets.root / dataset["id"] / "dataset.json").read_bytes() == before
+
+
+def test_missing_run_stays_a_member_error_instead_of_raising_from_defaults(tmp_path):
+    jobs, dataset = setup_jobs(tmp_path)
+    jobs.datasets.run_service.runs.clear()
+    jobs.schedule_first_reward_snapshot = lambda *_: pytest.fail("missing run cannot be validated")
+    defaults = jobs.defaults(dataset["id"], "stage")
+    availability = defaults["reward_availability"]
+    assert not availability["ready"] and not availability["pending"]
+    assert availability["missing_run_ids"] == ["run"]
+    assert "轨迹记录" in availability["errors"][0]["error"]
+
+
+def test_missing_saved_config_reports_unavailable_without_using_global(tmp_path):
+    jobs, dataset = setup_jobs(tmp_path)
+    version = full_reward(jobs, dataset)
+    # Keep the selected version but simulate an incomplete deployment copy.
+    Path(version["config_path"]).rename(Path(version["config_path"]).with_suffix(".missing"))
+    defaults = jobs.defaults(dataset["id"], "stage")
+    assert defaults["reward_availability"]["origin"] == "dataset"
+    assert not defaults["reward_availability"]["ready"]
+    assert "配置" in defaults["reward_availability"]["message"]
+    assert defaults["reward_version"]["id"] == version["id"]
+
+
+def test_training_defaults_api_keeps_legacy_data_inspectable(tmp_path, monkeypatch):
+    import asyncio
+    from fastapi import FastAPI, Request
+    from backend.app.api import offline_jobs as api
+
+    async def invoke(function, *args):
+        return function(*args)
+    monkeypatch.setattr(api, "run_in_threadpool", invoke)
+
+    jobs, dataset = setup_jobs(tmp_path)
+    jobs.datasets.update_annotation(dataset["id"], "READY", annotation_id="legacy")
+    app = FastAPI()
+    app.state.offline_job_service = jobs
+    request = Request({"type": "http", "app": app})
+    response = asyncio.run(api.defaults(request, dataset["id"], "rynnvalue"))
+    assert not response["reward_availability"]["ready"]
+    assert "旧评价" in response["reward_availability"]["message"]
+
+
+@pytest.mark.parametrize("endpoint", ["defaults", "train"])
+def test_training_api_does_not_disguise_config_key_errors_as_missing_runs(tmp_path, caplog, endpoint, monkeypatch):
+    import asyncio
+    from fastapi import FastAPI, HTTPException, Request
+    from backend.app.api import offline_jobs as api
+    from backend.app.api.models import TrainingRunRequest
+
+    async def invoke(function, *args):
+        return function(*args)
+    monkeypatch.setattr(api, "run_in_threadpool", invoke)
+
+    jobs, _ = setup_jobs(tmp_path)
+    def broken(*_):
+        raise KeyError("critic_optimizer")
+    jobs.defaults = jobs.start_training = broken
+    app = FastAPI()
+    app.state.offline_job_service = jobs
+    request = Request({"type": "http", "app": app})
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api.defaults(request, None, None) if endpoint == "defaults" else
+                    api.train(TrainingRunRequest(dataset_id="dataset", parameters={}), request))
+    assert caught.value.status_code == 500
+    assert "critic_optimizer" in caught.value.detail
+    assert "Run not found" not in caught.value.detail
+    assert "KeyError" in caplog.text
+
+
 def test_legacy_global_stage_and_new_sparse_coexist_and_overwrite_independently(tmp_path):
     result, datasets, _, versions = global_fixture(tmp_path)
     stage = versions[("a", "v1")]

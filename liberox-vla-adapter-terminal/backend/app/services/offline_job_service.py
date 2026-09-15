@@ -195,10 +195,36 @@ class OfflineJobService(DatasetRewardVersions):
                           if reward_source else dataset.get("reward_version_id"))
             if identifier:
                 version = self.datasets.get_version(dataset_id, identifier)
-                sealed = yaml.safe_load(Path(version["config_path"]).read_text(encoding="utf-8"))
-                raw["reward"] = sealed["reward"]
-                availability = {"ready": bool(version.get("complete") and version.get("status") == "READY"),
-                                "origin": "dataset", "missing_run_ids": []}
+                availability = {"ready": False, "origin": "dataset", "missing_run_ids": []}
+                if version.get("legacy"):
+                    availability["message"] = (
+                        "旧评价尚未包含可用于训练的奖励快照，请在“配置数据集评价”中重新生成该类型结果；"
+                        "保持模型参数不变且关闭强制模型评价，可复用已有模型输出，无需重新标记关键帧。"
+                    )
+                else:
+                    try:
+                        config_path = version.get("config_path")
+                        if not config_path:
+                            raise ValueError("缺少 config_path")
+                        sealed = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+                        settings = sealed.get("reward") if isinstance(sealed, dict) else None
+                        if not isinstance(settings, dict):
+                            raise ValueError("缺少 reward 配置")
+                        required = {"gamma", "accumulate_primitive_steps"}
+                        if version["evaluator"] == "stage":
+                            required.add("stage_exponent")
+                        elif version["evaluator"] == "rynnvalue":
+                            required.add("shaping_weight")
+                        missing_fields = sorted(required - settings.keys())
+                        if missing_fields:
+                            raise ValueError(f"缺少 reward 字段：{', '.join(missing_fields)}")
+                        raw["reward"].update(settings)
+                        availability["ready"] = bool(version.get("complete") and version.get("status") == "READY")
+                    except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+                        availability["message"] = (
+                            f"无法读取数据集评价配置（{identifier}）：{exc}。"
+                            "请检查部署路径或在“配置数据集评价”中重新生成该类型结果。"
+                        )
             else:
                 from .global_reward_binding import global_members
                 source = reward_source or self._reward_source(raw, {})
@@ -208,7 +234,11 @@ class OfflineJobService(DatasetRewardVersions):
                 from .trajectory_reward_snapshot import needs_snapshot_validation
                 availability["pending"] = False
                 for item in missing:
-                    run = self.datasets.run_service.get_run(item["run_id"])
+                    try:
+                        run = self.datasets.run_service.get_run(item["run_id"])
+                    except KeyError:
+                        # global_members already recorded this missing member.
+                        continue
                     if needs_snapshot_validation(run, source):
                         availability["pending"] = True
                         self.schedule_first_reward_snapshot(run)

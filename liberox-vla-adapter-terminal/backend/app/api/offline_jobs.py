@@ -49,7 +49,7 @@ async def defaults(
     try:
         return await run_in_threadpool(offline_job_service(request).defaults, dataset_id, reward_source)
     except Exception as exc:
-        raise http_error(exc) from exc
+        raise http_error(exc, key_error_context="Training configuration could not be loaded") from exc
 
 
 @router.post("/training-runs", status_code=201)
@@ -59,7 +59,7 @@ async def train(body: TrainingRunRequest, request: Request):
             body.dataset_id, body.parameters
         )
     except Exception as exc:
-        raise http_error(exc) from exc
+        raise http_error(exc, key_error_context="Training could not be started") from exc
 
 
 @router.get("/tensorboard")

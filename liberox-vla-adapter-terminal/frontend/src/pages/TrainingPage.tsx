@@ -49,6 +49,7 @@ export function TrainingPage() {
   const [defaultsLoading, setDefaultsLoading] = useState(false);
   const [defaultsKey, setDefaultsKey] = useState("");
   const [error, setError] = useState("");
+  const [defaultsError, setDefaultsError] = useState("");
   const taskIdRef = useRef(taskId);
   const refreshRequest = useRef(0);
   taskIdRef.current = taskId;
@@ -94,6 +95,8 @@ export function TrainingPage() {
   }, []);
   const dataset = useMemo(() => datasets.find((item) => item.id === datasetId) ?? null, [datasets, datasetId]);
   useEffect(() => {
+    setDefaultsError("");
+    setDefaultsKey("");
     if (!datasetId) { setDefaultsLoading(false); return; }
     let current = true;
     setDefaultsLoading(true);
@@ -113,7 +116,7 @@ export function TrainingPage() {
           ) ? current.resume_checkpoint : null,
         };
       });
-    }).catch((reason) => { if (current) setError(String(reason)); })
+    }).catch((reason) => { if (current) setDefaultsError(String(reason)); })
       .finally(() => { if (current) setDefaultsLoading(false); });
     return () => { current = false; };
   }, [datasetId, rewardSource, rewardRevision]);
@@ -162,7 +165,7 @@ export function TrainingPage() {
 
   return <section className="content-page training-page">
     <div className="page-heading"><p className="eyebrow">OFFLINE RL TRAINING</p><h1>VLA-Adapter + Pixel-IQL</h1><p>选择已评价的数据集，后训练 action head 与 proprio projector。Discount ratio 与 cumulative reward 可为本次训练单独调整。</p></div>
-    {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
+    {(error || defaultsError) && <div className="error-banner"><span>{error || defaultsError}</span><button onClick={() => { setError(""); setDefaultsError(""); }}>关闭</button></div>}
     <div className="training-layout">
       <section className="surface training-config">
         <div className="panel-title"><strong>训练配置</strong><span>{defaults?.environments.training ?? "vla-liberox"}</span></div>
@@ -178,6 +181,8 @@ export function TrainingPage() {
             <p>{defaultsLoading || defaultsKey !== requestedDefaultsKey ? "正在读取评价结果…" : rewardReady
               ? `当前训练奖励：${rewardSourceLabels[rewardSource]}${defaults?.reward_availability?.origin === "global" ? " · 使用逐轨迹全局结果" : ""}`
               : `请先完成 ${rewardSourceLabels[rewardSource]} 评价，或确保每条轨迹已有同类型全局结果。`}</p>
+            {!defaultsLoading && defaultsKey === requestedDefaultsKey && defaults?.reward_availability?.message &&
+              <p className="error-banner">{defaults.reward_availability.message}</p>}
             {!defaultsLoading && defaultsKey === requestedDefaultsKey && !rewardReady && defaults?.reward_availability?.errors?.map((item) =>
               <p key={item.run_id} className="error-banner">{item.run_id}：{item.error}</p>)}
             <p>数据集缺少所选类型结果时，按轨迹读取同类型全局结果。修改 Discount ratio γ 或 cumulative reward 只影响本次训练。</p>

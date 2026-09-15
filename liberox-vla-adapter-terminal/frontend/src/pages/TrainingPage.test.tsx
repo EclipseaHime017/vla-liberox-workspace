@@ -41,6 +41,31 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("dataset-pinned training reward", () => {
+  it("shows legacy evaluation guidance without disabling dataset configuration", async () => {
+    const message = "旧评价缺少训练快照，请在配置数据集评价中重新生成该类型结果";
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (id) => id ? {
+      ...defaults, reward_availability: { ready: false, origin: "dataset", message },
+    } : defaults);
+    render(<TrainingPage />);
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "配置数据集评价" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(api.startTraining).not.toHaveBeenCalled();
+  });
+
+  it("clears a previous defaults error when another reward source loads successfully", async () => {
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (id, source) => {
+      if (id && source === "stage") throw new Error("Missing saved evaluation config");
+      return { ...defaults, reward_availability: { ready: true, origin: "global" } };
+    });
+    render(<TrainingPage />);
+    await screen.findByText(/Missing saved evaluation config/);
+    expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Reward 来源"), { target: { value: "sparse" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByText(/Missing saved evaluation config/)).toBeNull();
+  });
+
   it("selects global rewards without requiring a dataset-local result ID", async () => {
     vi.mocked(api.getTrainingDefaults).mockImplementation(async (id, source) => id ? {
       ...defaults, reward_version: null,

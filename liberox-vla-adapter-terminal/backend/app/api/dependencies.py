@@ -1,5 +1,7 @@
 """FastAPI dependencies and exception translation."""
 
+import logging
+
 from fastapi import HTTPException, Request
 
 from ..services.run_service import RunService
@@ -62,12 +64,17 @@ def stage_annotation_service(request: Request) -> StageAnnotationService:
     return current
 
 
-def http_error(exc: Exception) -> HTTPException:
+def http_error(exc: Exception, *, key_error_context: str | None = None) -> HTTPException:
     from ..core.exceptions import ConflictError
 
     if isinstance(exc, ConflictError):
         return HTTPException(status_code=409, detail=exc.detail())
     if isinstance(exc, KeyError):
+        if key_error_context:
+            logging.getLogger(__name__).error("%s: %s", key_error_context, exc, exc_info=True)
+            return HTTPException(status_code=500, detail=(
+                f"{key_error_context}: missing field or reference {exc}. Check the server log."
+            ))
         return HTTPException(status_code=404, detail="Run not found")
     if isinstance(exc, (ValueError, IndexError)):
         return HTTPException(status_code=422, detail=str(exc))

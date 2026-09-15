@@ -400,6 +400,7 @@ export type EvaluationFilters = {
 
 export type TrainingDefaults = {
   reward_availability?: {
+    message?: string;
     pending?: boolean;
     ready: boolean; origin?: "dataset" | "global" | null;
     missing_run_ids?: string[]; errors?: { run_id: string; error: string }[];
