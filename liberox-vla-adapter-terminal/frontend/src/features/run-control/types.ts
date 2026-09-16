@@ -285,7 +285,7 @@ export type TrainingDataset = {
 
 export type OfflineJob = {
   id: string; kind: "annotation" | "trajectory_evaluation" | "training" | "evaluation";
-  status: "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
+  status: "QUEUED" | "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
   dataset_id: string | null; created_at: string; started_at: string | null; completed_at: string | null;
   stage: string; stage_label: string; error: string | null; output_path: string;
   warning?: string | null;
@@ -294,6 +294,10 @@ export type OfflineJob = {
   training_summary?: Record<string, unknown>;
   evaluation_summary?: EvaluationAggregate & { evaluation_id?: string };
 };
+
+export type TrainingQueueItem = Pick<OfflineJob, "id" | "kind" | "status" | "dataset_id" | "created_at"
+  | "started_at" | "completed_at" | "stage" | "stage_label" | "error" | "parameters">;
+export type TrainingQueueState = { jobs: TrainingQueueItem[]; waiting_reason: string | null };
 
 export type EvaluationStatus = OfflineJob["status"];
 

@@ -37,6 +37,7 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
   const follow = useRef(true);
   const updateCallback = useRef(onUpdate);
   updateCallback.current = onUpdate;
+  useEffect(() => { setJob(initial); }, [initial]);
   useEffect(() => {
     setJob(initial); setText(""); setError("");
     const socket = jobWebSocket(initial.id);
@@ -63,7 +64,9 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
       <span><b>{job.status}</b>{job.stage_label}</span>
       <span>阶段 <b>{phase}</b></span>
       {metric && <><span>Step <b>{String(metric.step ?? "—")}</b></span><span>进度 <b>{Number(metric.progress_percent ?? 0).toFixed(1)}%</b></span><span>速度 <b>{metricNumber(metric.steps_per_second, 3)} step/s</b></span><span>已用 <b>{duration(metric.elapsed_seconds)}</b></span><span>ETA <b>{duration(metric.estimated_remaining_seconds)}</b></span><span>完成时间 <b>{String(metric.estimated_completion_time ?? "计算中")}</b></span></>}
-      {!terminal.has(job.status) && <button className="danger" onClick={() => void stopOfflineJob(job.id).then(setJob).catch((reason) => setError(String(reason)))}>停止任务</button>}
+      {!terminal.has(job.status) && <button className="danger" onClick={() => void stopOfflineJob(job.id).then((next) => {
+        setJob(next); updateCallback.current?.(next);
+      }).catch((reason) => setError(String(reason)))}>{job.status === "QUEUED" ? "取消排队" : "停止任务"}</button>}
       {terminal.has(job.status) && onDismiss && <button onClick={onDismiss}>关闭记录</button>}
     </div>
     {metric && <div className="job-metric-grid">

@@ -37,7 +37,7 @@ async def logs(
 @router.post("/jobs/{job_id}/stop")
 async def stop(job_id: str, request: Request):
     try:
-        return offline_job_service(request).stop(job_id)
+        return await run_in_threadpool(offline_job_service(request).stop, job_id)
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -65,6 +65,20 @@ async def train(body: TrainingRunRequest, request: Request):
 @router.get("/tensorboard")
 async def tensorboard(request: Request):
     return offline_job_service(request).tensorboard_status()
+
+
+@router.get("/training-queue")
+async def training_queue(request: Request):
+    return await run_in_threadpool(offline_job_service(request).training_queue)
+
+
+@router.post("/training-queue", status_code=201)
+async def enqueue_training(body: TrainingRunRequest, request: Request):
+    try:
+        return await run_in_threadpool(offline_job_service(request).enqueue_training,
+                                      body.dataset_id, body.parameters)
+    except Exception as exc:
+        raise http_error(exc, key_error_context="Training could not be queued") from exc
 
 
 @router.post("/tensorboard/start")

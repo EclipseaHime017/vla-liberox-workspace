@@ -79,6 +79,7 @@ def create_app(
                 stage_annotations=app.state.stage_annotation_service,
             )
             worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
+            app.state.offline_job_service.start_training_queue()
         else:
             app.state.dataset_service = DatasetService(app.state.run_service)
             app.state.training_dataset_service = None

@@ -2,14 +2,22 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrainingPage } from "./TrainingPage";
 import * as api from "../features/run-control/api";
-import type { Bootstrap, TrainingDataset, TrainingDefaults } from "../features/run-control/types";
+import type { Bootstrap, OfflineJob, TrainingDataset, TrainingDefaults } from "../features/run-control/types";
 
 vi.mock("../features/run-control/api", () => ({
   getBootstrap: vi.fn(), getTensorBoard: vi.fn(), getTrainingDefaults: vi.fn(),
-  listOfflineJobs: vi.fn(), listTrainingDatasets: vi.fn(), startTensorBoard: vi.fn(), startTraining: vi.fn(),
+  listOfflineJobs: vi.fn(), listTrainingDatasets: vi.fn(), startTensorBoard: vi.fn(), enqueueTraining: vi.fn(),
+  getTrainingQueue: vi.fn(), getOfflineJob: vi.fn(), stopOfflineJob: vi.fn(),
   getDatasetRewardConfig: vi.fn(), annotateTrainingDataset: vi.fn(), verifyTrainingDataset: vi.fn(),
 }));
-vi.mock("../features/training/JobMonitor", () => ({ JobMonitor: () => null }));
+vi.mock("../features/training/JobMonitor", () => ({ JobMonitor: ({ initial }: { initial: OfflineJob }) =>
+  <output data-testid="monitor">{initial.id}:{initial.status}</output> }));
+const runningJob: OfflineJob = {
+  id: "running", kind: "training", status: "RUNNING", dataset_id: "ready",
+  created_at: "2026-09-16T01:00:00Z", started_at: null, completed_at: null,
+  stage: "train", stage_label: "训练中", error: null, output_path: "/tmp", log_size: 0,
+  parameters: { dataset_name: "First dataset", micro_batch_size: 1, train_steps: 10000, seed: 7 },
+};
 const defaults: TrainingDefaults = {
   basic: { train_steps: 10000, micro_batch_size: 1 },
   advanced: { reward_source: "final", reward_stage_exponent: 4, reward_gamma: .92,
@@ -33,25 +41,99 @@ beforeEach(() => {
   vi.mocked(api.getTrainingDefaults).mockImplementation(async (datasetId) => datasetId === "unready"
     ? { ...defaults, reward_version: null } : defaults);
   vi.mocked(api.listOfflineJobs).mockResolvedValue([]);
+  vi.mocked(api.getTrainingQueue).mockResolvedValue({ jobs: [], waiting_reason: null });
   vi.mocked(api.listTrainingDatasets).mockResolvedValue(datasets);
   vi.mocked(api.getTensorBoard).mockResolvedValue({ url: "/board", running: false, managed: false, pid: null, logdir: "/tmp" });
-  vi.mocked(api.startTraining).mockResolvedValue({ id: "training", kind: "training", status: "STARTING" } as Awaited<ReturnType<typeof api.startTraining>>);
+  vi.mocked(api.enqueueTraining).mockResolvedValue({ id: "training", kind: "training", status: "QUEUED",
+    dataset_id: "ready", created_at: "2026-09-16T01:00:00Z", parameters: { dataset_name: "Ready dataset" },
+    started_at: null, completed_at: null, stage: "queued", stage_label: "等待中", error: null,
+    output_path: "/tmp", log_size: 0 });
   vi.mocked(api.startTensorBoard).mockResolvedValue({ url: "/board", running: true, managed: true, pid: 123, logdir: "/tmp" });
 });
 afterEach(cleanup);
 
 describe("dataset-pinned training reward", () => {
+  it("registers independent tasks while training and preserves the active monitor", async () => {
+    vi.mocked(api.listOfflineJobs).mockResolvedValue([runningJob]);
+    vi.mocked(api.getTrainingQueue).mockResolvedValue({ jobs: [runningJob], waiting_reason: null });
+    vi.mocked(api.getOfflineJob).mockResolvedValue(runningJob);
+    vi.mocked(api.getTrainingDefaults).mockResolvedValue({ ...defaults,
+      checkpoints: [{ path: "/previous.pt", label: "Previous checkpoint" }] });
+    vi.mocked(api.enqueueTraining).mockImplementation(async (id, parameters) => ({ ...runningJob,
+      id: `queued-${parameters.micro_batch_size}`, status: "QUEUED", dataset_id: id,
+      parameters: { ...parameters, dataset_name: "New dataset" },
+    }));
+    render(<TrainingPage />);
+    await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByLabelText("断点恢复")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Micro batch size"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready",
+      expect.objectContaining({ micro_batch_size: 4, resume_checkpoint: null })));
+    await screen.findByText(/Batch 4/);
+    expect(screen.getByTestId("monitor").textContent).toBe("running:RUNNING");
+    await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByRole("button", { name: "注册训练任务" }).closest("details")).toBeNull();
+    expect(screen.queryByRole("button", { name: "新增训练任务" })).toBeNull();
+    expect((screen.getByLabelText("Micro batch size") as HTMLInputElement).value).toBe("4");
+    fireEvent.change(screen.getByLabelText("Micro batch size"), { target: { value: "8" } });
+    fireEvent.change(screen.getByLabelText("Discount ratio γ"), { target: { value: ".95" } });
+    fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
+    await screen.findByText(/Batch 8/);
+    expect(screen.getByText(/Batch 4/)).toBeTruthy();
+    expect(vi.mocked(api.enqueueTraining).mock.calls[0][1].reward_gamma).toBe(.92);
+    expect(vi.mocked(api.enqueueTraining).mock.calls[1][1].reward_gamma).toBe(.95);
+  });
+
+  it("restores pending tasks and cancels only the selected item", async () => {
+    const pending = { ...runningJob, id: "pending", status: "QUEUED" as const };
+    vi.mocked(api.listOfflineJobs).mockResolvedValue([runningJob]);
+    vi.mocked(api.getTrainingQueue).mockResolvedValue({ jobs: [runningJob, pending], waiting_reason: null });
+    vi.mocked(api.getOfflineJob).mockResolvedValue(runningJob);
+    vi.mocked(api.stopOfflineJob).mockResolvedValue({ ...pending, status: "CANCELED" });
+    render(<TrainingPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "取消排队" }));
+    await waitFor(() => expect(api.stopOfflineJob).toHaveBeenCalledExactlyOnceWith("pending"));
+    expect(screen.getByRole("button", { name: "停止本轮" })).toBeTruthy();
+    expect(screen.getByTestId("monitor").textContent).toBe("running:RUNNING");
+  });
+
+  it("advances to the next running task even if the previous websocket was stale", async () => {
+    const second = { ...runningJob, id: "second" };
+    vi.mocked(api.listOfflineJobs).mockResolvedValue([runningJob]);
+    vi.mocked(api.getTrainingQueue).mockResolvedValueOnce({ jobs: [runningJob], waiting_reason: null })
+      .mockResolvedValue({ jobs: [{ ...runningJob, status: "COMPLETED" }, second], waiting_reason: null });
+    vi.mocked(api.getOfflineJob).mockImplementation(async (id) => id === "second" ? second : runningJob);
+    render(<TrainingPage />);
+    await waitFor(() => expect(screen.getByTestId("monitor").textContent).toBe("running:RUNNING"));
+    await waitFor(() => expect(screen.getByTestId("monitor").textContent).toBe("second:RUNNING"), { timeout: 4500 });
+  });
+
+  it("does not override deliberate inspection of a waiting task during polling", async () => {
+    const pending = { ...runningJob, id: "pending", status: "QUEUED" as const };
+    vi.mocked(api.listOfflineJobs).mockResolvedValue([runningJob]);
+    vi.mocked(api.getTrainingQueue).mockResolvedValue({ jobs: [runningJob, pending], waiting_reason: null });
+    vi.mocked(api.getOfflineJob).mockImplementation(async (id) => id === "pending" ? pending : runningJob);
+    render(<TrainingPage />);
+    await screen.findByRole("button", { name: "取消排队" });
+    fireEvent.click(screen.getAllByRole("button", { name: "查看进度" })[1]);
+    await waitFor(() => expect(screen.getByTestId("monitor").textContent).toBe("pending:QUEUED"));
+    await waitFor(() => expect(api.getTrainingQueue).toHaveBeenCalledTimes(2), { timeout: 4500 });
+    expect(screen.getByTestId("monitor").textContent).toBe("pending:QUEUED");
+    expect(screen.getByRole("button", { name: "跟随当前训练" })).toBeTruthy();
+  });
+
   it.each(["multiplicative", "mixed"])("%s results hide cumulative and submit macro even with a stale On default", async (mode) => {
     vi.mocked(api.getTrainingDefaults).mockResolvedValue({ ...defaults,
       advanced: { ...defaults.advanced, reward_fusion_mode: mode === "mixed" ? "additive" : mode,
         reward_accumulate_primitive_steps: true }, reward_editable_parameters: ["reward_gamma"] });
     render(<TrainingPage />);
-    const start = await screen.findByRole("button", { name: "开始训练" });
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByLabelText("cumulative reward")).toBeNull();
     fireEvent.change(screen.getByLabelText("Discount ratio γ"), { target: { value: ".95" } });
     fireEvent.click(start);
-    await waitFor(() => expect(api.startTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
       reward_accumulate_primitive_steps: false, reward_gamma: .95,
     })));
   });
@@ -62,11 +144,11 @@ describe("dataset-pinned training reward", () => {
       ...defaults, reward_version: null, reward_availability: { ready: true, origin: "global" },
     } : defaults);
     render(<TrainingPage />);
-    const start = await screen.findByRole("button", { name: "开始训练" });
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     expect(screen.getByText(/使用逐轨迹全局结果/)).toBeTruthy();
     fireEvent.click(start);
-    await waitFor(() => expect(api.startTraining).toHaveBeenCalledWith("unready",
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("unready",
       expect.objectContaining({ reward_source: "final", reward_version_id: null })));
     expect(api.annotateTrainingDataset).not.toHaveBeenCalled();
   });
@@ -78,9 +160,9 @@ describe("dataset-pinned training reward", () => {
     } : defaults);
     render(<TrainingPage />);
     expect(await screen.findByText(message)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "配置数据集评价" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(api.startTraining).not.toHaveBeenCalled();
+    expect(api.enqueueTraining).not.toHaveBeenCalled();
   });
 
   it("clears a previous defaults error when another dataset loads successfully", async () => {
@@ -90,9 +172,9 @@ describe("dataset-pinned training reward", () => {
     });
     render(<TrainingPage />);
     await screen.findByText(/Missing saved evaluation config/);
-    expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
-    await waitFor(() => expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByText(/Missing saved evaluation config/)).toBeNull();
   });
 
@@ -103,14 +185,14 @@ describe("dataset-pinned training reward", () => {
       reward_availability: { ready: true, origin: "global" },
     } : defaults);
     render(<TrainingPage />);
-    const start = await screen.findByRole("button", { name: "开始训练" });
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     expect(screen.getByText(/使用逐轨迹全局结果/)).toBeTruthy();
     expect(screen.queryByLabelText("Reward 来源")).toBeNull();
     await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "final"));
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(start);
-    await waitFor(() => expect(api.startTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
       reward_source: "final", reward_version_id: null,
     })));
     expect(screen.queryByRole("option", { name: "Robometer" })).toBeNull();
@@ -123,7 +205,7 @@ describe("dataset-pinned training reward", () => {
       return defaults;
     });
     render(<TrainingPage />);
-    const start = await screen.findByRole("button", { name: "开始训练" });
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
     await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("unready", "final"));
@@ -133,7 +215,7 @@ describe("dataset-pinned training reward", () => {
     resolveSparse({ ...defaults, reward_version: null, advanced: { ...defaults.advanced, reward_gamma: .1 } });
     await waitFor(() => expect((screen.getByLabelText("Discount ratio γ") as HTMLInputElement).value).toBe("0.92"));
     fireEvent.click(start);
-    await waitFor(() => expect(api.startTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
       reward_source: "final", reward_version_id: "version-p4",
     })));
   });
@@ -150,7 +232,7 @@ describe("dataset-pinned training reward", () => {
     vi.mocked(api.getTrainingDefaults).mockResolvedValue({ ...defaults,
       advanced: { ...defaults.advanced, reward_accumulate_primitive_steps: cumulative } });
     render(<TrainingPage />);
-    await waitFor(() => expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByLabelText("Reward 来源")).toBeNull();
     expect(screen.queryByLabelText("Shape reward 系数 κ")).toBeNull();
     expect(screen.queryByLabelText("Stage 插值指数 p")).toBeNull();
@@ -166,8 +248,8 @@ describe("dataset-pinned training reward", () => {
     fireEvent.change(selector, { target: { value: String(!cumulative) } });
     expect((screen.getByLabelText("训练步数") as HTMLInputElement).disabled).toBe(false);
     fireEvent.change(screen.getByLabelText("训练步数"), { target: { value: "20000" } });
-    fireEvent.click(screen.getByRole("button", { name: "开始训练" }));
-    await waitFor(() => expect(api.startTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+    fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
       reward_version_id: "version-p4", reward_source: "final", reward_stage_exponent: 4,
       reward_gamma: .95, reward_accumulate_primitive_steps: !cumulative, train_steps: 20000,
     })));
@@ -180,8 +262,8 @@ describe("dataset-pinned training reward", () => {
     expect(screen.queryByRole("option", { name: /Broken dataset/ })).toBeNull();
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
     await screen.findByText(/请先完成 Final Reward 评价/);
-    expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(api.startTraining).not.toHaveBeenCalled();
+    expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.enqueueTraining).not.toHaveBeenCalled();
   });
 
   it("loads each dataset's reward defaults while retaining unrelated training edits", async () => {
@@ -189,21 +271,21 @@ describe("dataset-pinned training reward", () => {
       ? { ...defaults, advanced: { ...defaults.advanced, reward_source: "final", reward_gamma: .95 },
         reward_version: { ...defaults.reward_version!, id: "sparse-v1", evaluator: "final" } } : defaults);
     render(<TrainingPage />);
-    await waitFor(() => expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.change(screen.getByLabelText("训练步数"), { target: { value: "77" } });
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
     await waitFor(() => expect((screen.getByLabelText("Discount ratio γ") as HTMLInputElement).value).toBe("0.95"));
     expect(screen.queryByLabelText("Reward 来源")).toBeNull();
     expect((screen.getByLabelText("训练步数") as HTMLInputElement).value).toBe("77");
-    fireEvent.click(screen.getByRole("button", { name: "开始训练" }));
-    await waitFor(() => expect(api.startTraining).toHaveBeenCalledWith("unready", expect.objectContaining({ reward_version_id: "sparse-v1", reward_gamma: .95, train_steps: 77 })));
+    fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("unready", expect.objectContaining({ reward_version_id: "sparse-v1", reward_gamma: .95, train_steps: 77 })));
   });
 
   it("shows a rejected pinned-version error without starting TensorBoard", async () => {
-    vi.mocked(api.startTraining).mockRejectedValue(new Error("Reward version artifacts missing"));
+    vi.mocked(api.enqueueTraining).mockRejectedValue(new Error("Reward version artifacts missing"));
     render(<TrainingPage />);
-    await waitFor(() => expect((screen.getByRole("button", { name: "开始训练" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "开始训练" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
     await screen.findByText(/Reward version artifacts missing/);
     expect(api.startTensorBoard).not.toHaveBeenCalled();
   });

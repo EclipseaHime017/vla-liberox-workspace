@@ -217,6 +217,46 @@ class OfflineJobRepository:
         self.project_id = project_id
         migrate(database_path)
 
+    def active_ids(self) -> list[str]:
+        with connect(self.database_path) as database:
+            return [row["id"] for row in database.execute(
+                "SELECT id FROM offline_jobs WHERE project_id=? AND status IN ('STARTING','RUNNING','STOPPING')",
+                (self.project_id,),
+            )]
+
+    def fail_unreadable_job(self, job_id: str) -> None:
+        # Keep corrupt/missing manifests untouched, but don't let an orphaned
+        # index entry permanently block unrelated pending jobs.
+        with connect(self.database_path) as database:
+            for table in ("offline_jobs", "training_runs", "annotation_runs"):
+                database.execute(f"UPDATE {table} SET status='FAILED', completed_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?",
+                                 (job_id, self.project_id))
+
+    def indexed_job(self, job_id: str) -> dict:
+        with connect(self.database_path) as database:
+            row = database.execute("SELECT * FROM offline_jobs WHERE id=? AND project_id=?",
+                                   (job_id, self.project_id)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            return dict(row)
+
+    def training_queue_ids(self, *, pending_only: bool = False) -> list[str]:
+        """All pending runs plus a bounded recent history, in registration order."""
+        with connect(self.database_path) as database:
+            if pending_only:
+                return [row["id"] for row in database.execute(
+                    """SELECT id FROM offline_jobs WHERE project_id=? AND kind='training'
+                    AND status IN ('QUEUED','STARTING','RUNNING','STOPPING') ORDER BY created_at, id""",
+                    (self.project_id,),
+                )]
+            return [row["id"] for row in database.execute(
+                """SELECT id FROM offline_jobs WHERE project_id=? AND kind='training'
+                AND (status IN ('QUEUED','STARTING','RUNNING','STOPPING') OR id IN (
+                    SELECT id FROM offline_jobs WHERE project_id=? AND kind='training'
+                    ORDER BY created_at DESC, id DESC LIMIT 20
+                )) ORDER BY created_at, id""", (self.project_id, self.project_id),
+            )]
+
     def upsert(self, job: dict[str, Any], job_path: Path) -> None:
         with connect(self.database_path) as database:
             database.execute(

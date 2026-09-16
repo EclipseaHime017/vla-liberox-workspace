@@ -28,6 +28,7 @@ from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
 from ..storage.repositories import EvaluationRepository, OfflineJobRepository
 from .dataset_reward_versions import DatasetRewardVersions, macro_only_reward
+from .training_queue import TrainingQueue
 
 
 ACTIVE_JOB_STATES = frozenset({"STARTING", "RUNNING", "STOPPING"})
@@ -97,7 +98,7 @@ def _training_replay_counts(prepared: dict[str, Any]) -> dict[str, int]:
     return {"action_count": action_count, "chunk_count": chunk_count}
 
 
-class OfflineJobService(DatasetRewardVersions):
+class OfflineJobService(TrainingQueue, DatasetRewardVersions):
     def __init__(
         self, ui_config: Any, manager: Any, datasets: Any,
         trajectory_evaluations: Any | None = None,
@@ -334,8 +335,15 @@ class OfflineJobService(DatasetRewardVersions):
     def _load_job(self, job_id: str) -> tuple[Path, dict[str, Any]]:
         path = self._job_path(job_id)
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("id") != job_id or payload.get("schema_version") != 1:
+        if (not isinstance(payload, dict) or payload.get("id") != job_id
+                or payload.get("schema_version") != 1 or not isinstance(payload.get("parameters", {}), dict)):
             raise ValueError(f"Invalid job manifest: {path}")
+        launcher = path.with_name("launcher.json")
+        if not (payload.get("pid") or payload.get("launcher_pid")) and launcher.is_file():
+            marker = json.loads(launcher.read_text())
+            if not isinstance(marker, dict) or type(marker.get("pid")) is not int or marker["pid"] <= 0:
+                raise ValueError(f"Invalid launcher record: {launcher}")
+            payload["launcher_pid"] = marker["pid"]
         return path, payload
 
     @staticmethod
@@ -346,20 +354,26 @@ class OfflineJobService(DatasetRewardVersions):
             os.kill(int(pid), 0)
         except (ProcessLookupError, PermissionError):
             return False
+        try:
+            # An exited, unreaped launcher still passes kill(pid, 0).
+            if Path(f"/proc/{int(pid)}/stat").read_text().rsplit(") ", 1)[-1].split()[0] == "Z":
+                return False
+        except (OSError, IndexError):
+            pass
         return True
 
     def _reconcile(self, job_id: str) -> dict[str, Any]:
         path, job = self._load_job(job_id)
         process_id = job.get("pid") or job.get("launcher_pid")
-        created = datetime.fromisoformat(job["created_at"])
+        created = datetime.fromisoformat(job.get("dispatched_at") or job["created_at"])
         missing_process = (
-            job["status"] == "STARTING"
+            job["status"] in ACTIVE_JOB_STATES
             and not process_id
             and (datetime.now(timezone.utc) - created).total_seconds() > 5
         )
         dead_process = bool(process_id) and not self._pid_alive(process_id)
         if job["status"] in ACTIVE_JOB_STATES and (missing_process or dead_process):
-            job["status"] = "FAILED"
+            job["status"] = "CANCELED" if job["status"] == "STOPPING" else "FAILED"
             job["completed_at"] = _utc_now()
             job["error"] = "Detached job process exited without a terminal status"
             atomic_write_json(path, job)
@@ -454,7 +468,7 @@ class OfflineJobService(DatasetRewardVersions):
             references = list(references_by_id.values())
             active = [
                 job["id"] for job in references
-                if job.get("status") in ACTIVE_JOB_STATES
+                if job.get("status") in ACTIVE_JOB_STATES or job.get("status") == "QUEUED"
             ]
             if active:
                 raise ConflictError(
@@ -571,9 +585,15 @@ class OfflineJobService(DatasetRewardVersions):
         return any(job["status"] in ACTIVE_JOB_STATES for job in self.list())
 
     def has_active_gpu_job(self) -> bool:
-        return any(job["status"] in ACTIVE_JOB_STATES
-                   and job.get("parameters", {}).get("requires_gpu", True)
-                   for job in self.list())
+        for identifier in self.repository.active_ids():
+            try:
+                job = self._reconcile(identifier)
+            except (OSError, ValueError, KeyError, TypeError):
+                self.repository.fail_unreadable_job(identifier)
+                continue
+            if job["status"] in ACTIVE_JOB_STATES and job.get("parameters", {}).get("requires_gpu", True):
+                return True
+        return False
 
     def _external_gpu_lock(self) -> bool:
         self.gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -624,6 +644,7 @@ class OfflineJobService(DatasetRewardVersions):
         config_path: Path,
         output_path: Path,
         parameters: dict[str, Any],
+        queued: bool = False,
     ) -> dict[str, Any]:
         now = _utc_now()
         job_id = config_path.parent.name
@@ -631,7 +652,7 @@ class OfflineJobService(DatasetRewardVersions):
             "schema_version": 1,
             "id": job_id,
             "kind": kind,
-            "status": "STARTING",
+            "status": "QUEUED" if queued else "STARTING",
             "dataset_id": dataset_id,
             "created_at": now,
             "started_at": None,
@@ -639,8 +660,8 @@ class OfflineJobService(DatasetRewardVersions):
             "heartbeat_at": None,
             "pid": None,
             "process_group_id": None,
-            "stage": "starting",
-            "stage_label": "准备后台任务",
+            "stage": "queued" if queued else "starting",
+            "stage_label": "等待前序训练完成" if queued else "准备后台任务",
             "error": None,
             "config_path": str(config_path.resolve()),
             "output_path": str(output_path.resolve()),
@@ -652,6 +673,12 @@ class OfflineJobService(DatasetRewardVersions):
         job_dir = config_path.parent
         atomic_write_json(job_dir / "job.json", payload)
         self.repository.upsert(payload, job_dir / "job.json")
+        if queued:
+            return self._public_job(payload)
+        return self._spawn_job(payload)
+
+    def _spawn_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+        job_dir = self.jobs_root / payload["id"]
         runner = Path(__file__).resolve().parents[1] / "workers" / "offline_job_runner.py"
         try:
             process = subprocess.Popen(
@@ -671,8 +698,9 @@ class OfflineJobService(DatasetRewardVersions):
             self.repository.upsert(payload, job_dir / "job.json")
             raise
         payload["launcher_pid"] = process.pid
-        atomic_write_json(job_dir / "job.json", payload)
-        self.repository.upsert(payload, job_dir / "job.json")
+        # The runner owns job.json after Popen; never overwrite a newer RUNNING
+        # or terminal status with the parent's stale STARTING payload.
+        atomic_write_json(job_dir / "launcher.json", {"pid": process.pid})
         return self._public_job(payload)
 
     def _effective_config(self, dataset: dict[str, Any]) -> dict[str, Any]:
@@ -1136,6 +1164,7 @@ class OfflineJobService(DatasetRewardVersions):
     def _launch_training(
         self, dataset_id: str, dataset: dict[str, Any], parameters: dict[str, Any],
         *, reward_version: dict[str, Any],
+        queued: bool = False,
     ) -> dict[str, Any]:
         # Start from the sealed evaluation configuration: input sampling, reward
         # parameters and prepared-data identity must not drift with base YAML.
@@ -1212,7 +1241,9 @@ class OfflineJobService(DatasetRewardVersions):
         return self._new_job(
             kind="training", dataset_id=dataset_id, stages=stages,
             config_path=config_path, output_path=output_root,
+            queued=queued,
             parameters={
+                "dataset_name": dataset["name"],
                 "task_id": dataset["task_id"], "member_count": dataset["member_count"],
                 **replay_counts,
                 "replay_policy": "full_recording_v1",
@@ -1896,7 +1927,18 @@ class OfflineJobService(DatasetRewardVersions):
             }
 
     def stop(self, job_id: str) -> dict[str, Any]:
+        with self.lock, (self.jobs_root.parent / ".training-queue.lock").open("a+") as dispatch_lock:
+            fcntl.flock(dispatch_lock.fileno(), fcntl.LOCK_EX)
+            return self._stop_job(job_id)
+
+    def _stop_job(self, job_id: str) -> dict[str, Any]:
         path, job = self._load_job(job_id)
+        if job["status"] == "QUEUED":
+            job.update(status="CANCELED", stage="canceled", stage_label="已取消排队", completed_at=_utc_now())
+            atomic_write_json(path, job)
+            self.repository.upsert(job, path)
+            self._wake_training_queue()
+            return self._public_job(job)
         if job["status"] not in ACTIVE_JOB_STATES:
             return self._public_job(job)
         job["status"] = "STOPPING"
@@ -2056,6 +2098,7 @@ class OfflineJobService(DatasetRewardVersions):
 
     def close(self) -> None:
         # Offline jobs and TensorBoard intentionally survive a UI backend restart.
+        self.close_training_queue()
         executor = getattr(self, "_binding_executor", None)
         if executor is not None:
             # Cancel queued publishers; unfinished jobs will be rediscovered on

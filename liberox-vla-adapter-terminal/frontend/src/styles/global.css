@@ -546,9 +546,24 @@ td code { font-size: 11px; }
 .new-run .task-hierarchy, .session-filter .task-hierarchy, .training-form .task-hierarchy { grid-template-columns: minmax(0, 1fr); }
 .task-filter-heading { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
 .training-config .task-hierarchy label { font-size: 16.5px; }
+.training-page .training-form .task-hierarchy { grid-template-columns: minmax(0, 1fr) minmax(90px, .45fr) minmax(0, 1.25fr); }
+.training-queue { margin-top: 20px; }
+.training-queue summary { cursor: pointer; }
+.training-queue-body { padding: 0 22px 22px; }
+.training-queue-body > p, .queue-parameters { color: var(--muted); font-size: 14px; }
+.training-queue-item { border: 1px solid var(--line); border-radius: 16px; margin-top: 12px; padding: 16px; display: flex; gap: 16px; align-items: start; }
+.training-queue-item > details { flex: 1; min-width: 0; }
+.training-queue-item summary { font-size: 16px; }
+.training-queue-item summary > span { margin-left: 14px; }
+.queue-parameters, .queue-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.queue-parameters { margin-top: 14px; overflow-wrap: anywhere; }
+.queue-actions { flex-shrink: 0; }
+.training-queue-history { margin-top: 18px; }
 .dataset-toolbar .task-scope-note { grid-column: 1 / -1; }
 @media (max-width: 760px) {
   .task-hierarchy { grid-template-columns: minmax(0, 1fr); }
+  .training-page .training-form .task-hierarchy { grid-template-columns: minmax(0, 1fr); }
+  .training-queue-item { flex-direction: column; }
 }
 
 @media (max-width: 1100px) {

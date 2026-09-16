@@ -118,6 +118,11 @@ export const startTraining = (datasetId: string, parameters: Record<string, unkn
   api<OfflineJob>("/api/training-runs", {
     method: "POST", body: JSON.stringify({ dataset_id: datasetId, parameters }),
   });
+export const enqueueTraining = (datasetId: string, parameters: Record<string, unknown>) =>
+  api<OfflineJob>("/api/training-queue", {
+    method: "POST", body: JSON.stringify({ dataset_id: datasetId, parameters }),
+  });
+export const getTrainingQueue = () => api<import("./types").TrainingQueueState>("/api/training-queue");
 export const getTensorBoard = () => api<TensorBoardStatus>("/api/tensorboard");
 export const startTensorBoard = () => api<TensorBoardStatus>(
   "/api/tensorboard/start", { method: "POST" },

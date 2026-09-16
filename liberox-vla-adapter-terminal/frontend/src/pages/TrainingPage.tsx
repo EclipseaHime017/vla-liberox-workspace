@@ -3,12 +3,13 @@ import { TaskFilter } from "../features/run-config/TaskSelector";
 import { ALL_TASK_SCOPE, scopeForTask, taskIdsForScope, type TaskScope } from "../features/run-config/taskHierarchy";
 import {
   getBootstrap, getTensorBoard, getTrainingDefaults, listOfflineJobs,
-  listTrainingDatasets, startTensorBoard, startTraining,
+  listTrainingDatasets, startTensorBoard, enqueueTraining, getTrainingQueue, getOfflineJob, stopOfflineJob,
 } from "../features/run-control/api";
 import type {
-  Bootstrap, OfflineJob, TensorBoardStatus, TrainingDataset, TrainingDefaults,
+  Bootstrap, OfflineJob, TensorBoardStatus, TrainingDataset, TrainingDefaults, TrainingQueueState,
 } from "../features/run-control/types";
 import { JobMonitor } from "../features/training/JobMonitor";
+import { TrainingQueuePanel } from "../features/training/TrainingQueuePanel";
 import { Badge } from "../components/ui/Badge";
 import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
 import { rewardSourceLabels } from "../features/dataset/rewardVersions";
@@ -46,6 +47,13 @@ export function TrainingPage() {
   const [showDatasetConfig, setShowDatasetConfig] = useState(false);
   const [parameters, setParameters] = useState<Record<string, number | string | boolean | null>>({});
   const [job, setJob] = useState<OfflineJob | null>(null);
+  const [queue, setQueue] = useState<TrainingQueueState>({ jobs: [], waiting_reason: null });
+  const [stoppingId, setStoppingId] = useState<string | null>(null);
+  const jobRef = useRef(job);
+  jobRef.current = job;
+  const [followQueue, setFollowQueue] = useState(true);
+  const followQueueRef = useRef(true);
+  const selectionRequest = useRef(0);
   const [tensorboard, setTensorboard] = useState<TensorBoardStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
@@ -70,7 +78,7 @@ export function TrainingPage() {
         const active = jobs.find(
           (item) => ["training", "annotation"].includes(item.kind) && activeJobStates.has(item.status),
         );
-        if (active) setJob(active);
+        if (active && followQueueRef.current) setJob(active);
       }).catch((reason) => setError(String(reason)));
   }, []);
   useEffect(() => {
@@ -94,6 +102,31 @@ export function TrainingPage() {
     }, 3000);
     return () => window.clearInterval(timer);
   }, []);
+  useEffect(() => {
+    let current = true;
+    let timer: number;
+    const refresh = async () => {
+      try {
+        const next = await getTrainingQueue();
+        if (!current) return;
+        setQueue(next);
+        const active = next.jobs.find((item) => activeJobStates.has(item.status));
+        const selected = jobRef.current;
+        const latestSelected = next.jobs.find((item) => item.id === selected?.id);
+        if (selected && latestSelected && latestSelected.status !== selected.status) {
+          setJob({ ...selected, ...latestSelected });
+        }
+        if (followQueueRef.current && active && active.id !== selected?.id && (!selected || !activeJobStates.has(latestSelected?.status ?? selected.status))) {
+          const request = selectionRequest.current;
+          const running = await getOfflineJob(active.id);
+          if (current && followQueueRef.current && request === selectionRequest.current) setJob(running);
+        }
+      } catch (reason) { if (current) setError(`训练队列读取失败：${String(reason)}`); }
+      finally { if (current) timer = window.setTimeout(() => void refresh(), 3000); }
+    };
+    void refresh();
+    return () => { current = false; window.clearTimeout(timer); };
+  }, []);
   const dataset = useMemo(() => datasets.find((item) => item.id === datasetId) ?? null, [datasets, datasetId]);
   useEffect(() => {
     setDefaultsError("");
@@ -116,9 +149,7 @@ export function TrainingPage() {
         return { ...unrelated, ...pinned,
           reward_source: rewardSource,
           reward_version_id: next.reward_version?.id ?? null,
-          resume_checkpoint: next.checkpoints.some(
-            (checkpoint) => checkpoint.path === current.resume_checkpoint
-          ) ? current.resume_checkpoint : null,
+          resume_checkpoint: null,
         };
       });
     }).catch((reason) => { if (current) setDefaultsError(String(reason)); })
@@ -148,7 +179,9 @@ export function TrainingPage() {
     setRewardRevision((value) => value + 1);
   };
   const updateJob = (next: OfflineJob) => {
+    if (jobRef.current?.id !== next.id) return;
     setJob(next);
+    setQueue((current) => ({ ...current, jobs: current.jobs.map((item) => item.id === next.id ? next : item) }));
     if (next.kind === "annotation" && !activeJobStates.has(next.status) && job?.status !== next.status) {
       void refreshDataset().catch((reason) => setError(String(reason)));
     }
@@ -157,12 +190,30 @@ export function TrainingPage() {
     if (busy || datasetsLoading || defaultsLoading || !rewardReady || !availableDatasets.some((item) => item.id === datasetId)) return;
     setBusy(true); setError("");
     try {
-      const next = await startTraining(datasetId, { ...parameters, reward_source: rewardSource,
+      const next = await enqueueTraining(datasetId, { ...parameters, resume_checkpoint: null, reward_source: rewardSource,
         reward_accumulate_primitive_steps: cumulativeAllowed ? Boolean(parameters.reward_accumulate_primitive_steps) : false });
-      setJob(next);
-      try { setTensorboard(await startTensorBoard()); } catch (reason) { setError(`训练已启动，但 TensorBoard 启动失败：${String(reason)}`); }
+      setQueue((current) => ({ ...current, jobs: [...current.jobs.filter((item) => item.id !== next.id), next] }));
+      if (followQueueRef.current && (!jobRef.current || !activeJobStates.has(jobRef.current.status))) setJob(next);
+      try { setTensorboard(await startTensorBoard()); } catch (reason) { setError(`训练已注册，但 TensorBoard 启动失败：${String(reason)}`); }
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
+  };
+  const inspectJob = async (id: string) => {
+    followQueueRef.current = false; setFollowQueue(false);
+    const request = ++selectionRequest.current;
+    try {
+      const selected = await getOfflineJob(id);
+      if (request === selectionRequest.current) setJob(selected);
+    } catch (reason) { if (request === selectionRequest.current) setError(String(reason)); }
+  };
+  const stopJob = async (id: string) => {
+    setStoppingId(id);
+    try {
+      const next = await stopOfflineJob(id);
+      setQueue((current) => ({ ...current, jobs: current.jobs.map((item) => item.id === id ? next : item) }));
+      if (jobRef.current?.id === id) setJob(next);
+    } catch (reason) { setError(String(reason)); }
+    finally { setStoppingId(null); }
   };
   const startBoard = async () => {
     setBusy(true); setError("");
@@ -196,7 +247,6 @@ export function TrainingPage() {
               ? bootstrap.evaluation_capabilities.robometer.reason ?? "Robometer 不可用" : undefined}
             onRefresh={refreshDataset} onJob={setJob} onError={setError} />}
           <div className="parameter-grid">{basicFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name === "critic_warmup_steps" || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
-          {defaults?.checkpoints.length ? <label>断点恢复<select value={String(parameters.resume_checkpoint ?? "")} onChange={(event) => patchParameter("resume_checkpoint", event.target.value || null)}><option value="">不恢复</option>{defaults.checkpoints.map((checkpoint) => <option value={checkpoint.path} key={checkpoint.path}>{checkpoint.label}</option>)}</select></label> : null}
           <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">
             <label>Discount ratio γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} disabled={defaultsLoading || !rewardReady}
               onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
@@ -218,7 +268,7 @@ export function TrainingPage() {
             <label>W&amp;B 日志间隔<input type="number" min={1} step={1} value={String(parameters.wandb_log_interval_steps ?? "")} onChange={(event) => patchParameter("wandb_log_interval_steps", Number(event.target.value))} /></label>
           </div></details>
           {defaults && <div className="fixed-parameters"><h2>固定兼容项</h2>{Object.entries(defaults.fixed).map(([name, value]) => <span key={name}><b>{name}</b>{String(value)}</span>)}</div>}
-          <button className="primary start-training" disabled={busy || datasetsLoading || defaultsLoading || !rewardReady || !availableDatasets.some((item) => item.id === datasetId) || Boolean(job && activeJobStates.has(job.status))} onClick={() => void begin()}>开始训练</button>
+          <button className="primary start-training" disabled={busy || datasetsLoading || defaultsLoading || !rewardReady || !availableDatasets.some((item) => item.id === datasetId)} onClick={() => void begin()}>注册训练任务</button>
         </div>
       </section>
       <section className="surface tensorboard-card">
@@ -226,6 +276,11 @@ export function TrainingPage() {
         <div><span className={`tensorboard-dot ${tensorboard?.running ? "online" : ""}`} /><strong>{tensorboard?.url ?? "http://127.0.0.1:6006/"}</strong><p>集中查看所有平台训练的 loss、Q/V、advantage、动作误差、吞吐与显存曲线。</p>{tensorboard?.running ? <a className="export-button" href={tensorboard.url} target="_blank" rel="noreferrer">打开 TensorBoard</a> : <button onClick={() => void startBoard()} disabled={busy}>启动 TensorBoard</button>}</div>
       </section>
     </div>
+    <TrainingQueuePanel queue={queue} onInspect={(id) => void inspectJob(id)} onStop={(id) => void stopJob(id)} busyId={stoppingId} />
+    {!followQueue && <button className="follow-training" onClick={() => {
+      selectionRequest.current += 1;
+      followQueueRef.current = true; setFollowQueue(true);
+    }}>跟随当前训练</button>}
     {job && <>
       <JobMonitor initial={job} onUpdate={updateJob} onDismiss={() => setJob(null)} />
       {job.training_summary && <section className="surface training-result"><div className="panel-title"><strong>训练结果</strong><span>{job.status}</span></div><div><span>Overlay</span><code>{String(job.training_summary.policy_overlay ?? "尚未发布")}</code><span>数据哈希</span><code>{String(job.training_summary.dataset_sha256 ?? "—")}</code></div></section>}
