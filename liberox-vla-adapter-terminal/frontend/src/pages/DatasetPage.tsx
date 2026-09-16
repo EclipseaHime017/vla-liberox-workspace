@@ -217,8 +217,7 @@ export function DatasetPage() {
     finally { if (request === detailRequest.current) setBusy(false); }
   };
   const removeDataset = async (dataset: TrainingDataset) => {
-    const action = dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集";
-    if (!window.confirm(`${action}“${dataset.name}”？\n\n将删除该数据集清单和专属标注目录，但不会删除源轨迹或全局共享奖励缓存。`)) return;
+    if (!window.confirm(`删除数据集“${dataset.name}”？\n\n将删除该数据集清单和专属标注目录，但不会删除源轨迹或全局共享奖励缓存。`)) return;
     setBusy(true); setError("");
     try {
       try {

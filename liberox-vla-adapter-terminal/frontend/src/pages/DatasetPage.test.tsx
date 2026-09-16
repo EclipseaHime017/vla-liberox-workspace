@@ -42,9 +42,28 @@ beforeEach(() => {
     robometer: { sampling_hz: 3, batch_size: 1, prefix_frames: 4, checkpoint: "Robo-LIBERO", revision: "robo-revision" },
   });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("dataset evaluation configuration", () => {
+  it.each(["NOT_STARTED", "READY"])("uses the same delete label and confirmation for %s datasets", async (status) => {
+    vi.mocked(api.listTrainingDatasets).mockResolvedValue([{
+      id: "dataset", name: "Dataset", integrity_status: "HEALTHY", annotation_status: status,
+    } as TrainingDataset]);
+    vi.mocked(api.deleteTrainingDataset).mockResolvedValue({ deleted: "dataset", annotation_status: status,
+      source_runs_deleted: false, shared_cache_deleted: false, retained_training_jobs: [] });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<DatasetPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "打包训练数据集" }));
+    const remove = await screen.findByRole("button", { name: "删除数据集" });
+    expect(screen.queryByRole("button", { name: "取消冻结" })).toBeNull();
+    fireEvent.click(remove);
+    expect(confirm).toHaveBeenCalledWith("删除数据集“Dataset”？\n\n将删除该数据集清单和专属标注目录，但不会删除源轨迹或全局共享奖励缓存。");
+    expect(api.deleteTrainingDataset).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    fireEvent.click(remove);
+    await waitFor(() => expect(api.deleteTrainingDataset).toHaveBeenCalledExactlyOnceWith("dataset"));
+  });
+
   it.each(["final", "all"])("%s multiplication clears cumulative and does not restore hidden On state", async (source) => {
     const dataset = { id: "dataset", name: "Dataset", integrity_status: "HEALTHY",
       annotation_status: "NOT_STARTED" } as TrainingDataset;

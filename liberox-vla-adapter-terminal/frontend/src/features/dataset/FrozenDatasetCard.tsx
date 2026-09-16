@@ -133,7 +133,7 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
     <div className="dataset-badges"><Badge tone={dataset.integrity_status === "HEALTHY" ? "green" : "red"}>{dataset.integrity_status}</Badge>
       <Badge tone={dataset.annotation_status === "READY" ? "green" : dataset.annotation_status === "ERROR" ? "red" : "neutral"}>{dataset.annotation_status === "NOT_STARTED" ? "全局继承" : dataset.annotation_status}</Badge></div>
     <div className="dataset-card-actions">
-      {onRemove && <button className="danger" disabled={blocked} onClick={onRemove}>{dataset.annotation_status === "NOT_STARTED" ? "取消冻结" : "删除数据集"}</button>}
+      {onRemove && <button className="danger" disabled={blocked} onClick={onRemove}>删除数据集</button>}
       <button disabled={blocked} onClick={() => void run(async () => { await verifyTrainingDataset(dataset.id); await onRefresh(); })}>验证完整性</button>
       {onDerive && <button disabled={blocked} onClick={onDerive}>调整成员并另存</button>}
       {onOpen && <button aria-expanded={showMembers} onClick={() => setShowMembers((value) => !value)}>成员</button>}
