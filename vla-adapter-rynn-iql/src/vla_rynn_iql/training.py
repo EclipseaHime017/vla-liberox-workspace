@@ -283,7 +283,7 @@ def _publish_overlay(
         "action_dim": ACTION_DIM,
         "proprio_dim": PROPRIO_DIM,
     }
-    reward_label = {"rynnvalue": "RynnValue", "sparse": "Sparse", "stage": "Stage-based"}[
+    reward_label = {"rynnvalue": "RynnValue", "sparse": "Sparse", "stage": "Stage-based", "final": "Final Reward"}[
         reward_source(config.section("reward"))
     ]
     payload = {

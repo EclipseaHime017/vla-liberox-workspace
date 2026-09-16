@@ -53,6 +53,47 @@ def test_reward_accumulation_mode_must_be_boolean(configured, tmp_path: Path):
         load_train_config(path)
 
 
+@pytest.mark.parametrize("mode, expected", [("additive", True), ("multiplicative", False)])
+def test_final_cumulative_config_and_recipe_agree(configured, tmp_path, mode, expected):
+    from vla_rynn_iql.rewards import reward_derivation_config
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"].update(source="final", fusion_mode=mode, alpha=.5, accumulate_primitive_steps=True)
+    path = tmp_path / "fusion.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    reward = load_train_config(path).section("reward")
+    assert reward["accumulate_primitive_steps"] is expected
+    assert reward_derivation_config(reward)["accumulate_primitive_steps"] is expected
+
+
+@pytest.mark.parametrize("normalization", [None, "none", "initial_chunk_v1"])
+def test_final_normalization_preserves_legacy_recipe_identity(configured, tmp_path, normalization):
+    from vla_rynn_iql.rewards import reward_derivation_config
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"].update(source="final")
+    raw["reward"].pop("final_normalization")
+    if normalization is not None:
+        raw["reward"]["final_normalization"] = normalization
+    path = tmp_path / "normalization.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    reward = load_train_config(path).section("reward")
+    assert reward["final_normalization"] == (normalization or "none")
+    recipe = reward_derivation_config(reward)
+    if normalization == "initial_chunk_v1":
+        assert recipe["final_normalization"] == normalization
+    else:
+        assert "final_normalization" not in recipe
+
+
+def test_default_final_normalization_and_invalid_rule(configured, tmp_path):
+    assert configured.section("reward")["final_normalization"] == "initial_chunk_v1"
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"]["final_normalization"] = "clip"
+    path = tmp_path / "invalid-normalization.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="reward.final_normalization"):
+        load_train_config(path)
+
+
 def test_rynnvalue_reward_switch_must_be_boolean(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
     raw["reward"]["rynnvalue"] = "false"

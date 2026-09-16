@@ -92,7 +92,7 @@ def test_new_dataset_trains_from_global_inputs_without_any_evaluation_job(tmp_pa
     if values:
         assert Path(entry["reward_path"]).read_bytes() == values.read_bytes()
     assert jobs.datasets.get(dataset["id"])["evaluation_origins"] == dict.fromkeys(
-        ("sparse", "stage", "rynnvalue", "robometer"), "global")
+        ("sparse", "stage", "rynnvalue", "robometer", "final"), "global")
     assert not jobs.datasets.get(dataset["id"])["evaluation_versions"]
     assert all(path.read_bytes() == data for path, data in protected.items())
 

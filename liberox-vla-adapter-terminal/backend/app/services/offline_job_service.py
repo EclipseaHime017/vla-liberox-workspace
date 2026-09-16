@@ -27,7 +27,7 @@ import yaml
 from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
 from ..storage.repositories import EvaluationRepository, OfflineJobRepository
-from .dataset_reward_versions import DatasetRewardVersions
+from .dataset_reward_versions import DatasetRewardVersions, macro_only_reward
 
 
 ACTIVE_JOB_STATES = frozenset({"STARTING", "RUNNING", "STOPPING"})
@@ -187,6 +187,7 @@ class OfflineJobService(DatasetRewardVersions):
         raw = self._load_base_config()
         version = None
         availability = None
+        macro_only = False
         if reward_source is not None:
             self._reward_source(raw, {"reward_source": reward_source})
         if dataset_id:
@@ -219,6 +220,7 @@ class OfflineJobService(DatasetRewardVersions):
                         if missing_fields:
                             raise ValueError(f"缺少 reward 字段：{', '.join(missing_fields)}")
                         raw["reward"].update(settings)
+                        raw["reward"]["final_normalization"] = settings.get("final_normalization", "none")
                         availability["ready"] = bool(version.get("complete") and version.get("status") == "READY")
                     except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
                         availability["message"] = (
@@ -244,17 +246,23 @@ class OfflineJobService(DatasetRewardVersions):
                         self.schedule_first_reward_snapshot(run)
                 if records:
                     raw["reward"].update(records[0][1]["reward_config"])
+                    raw["reward"]["final_normalization"] = records[0][1]["reward_config"].get("final_normalization", "none")
+                    macro_only = any(macro_only_reward(record[1]["reward_config"]) for record in records)
         if reward_source is not None:
-            raw["reward"].update(source=reward_source, rynnvalue=reward_source == "rynnvalue")
+            raw["reward"].update(source=reward_source, rynnvalue=reward_source == "rynnvalue" or (
+                reward_source == "final" and raw["reward"]["shaping_weight"] > 0))
         reward_source = self._reward_source(raw, {})
+        macro_only = macro_only or macro_only_reward({**raw["reward"], "source": reward_source})
+        if macro_only:
+            raw["reward"]["accumulate_primitive_steps"] = False
         return {
             "reward_version": version,
             "reward_availability": availability,
             "reward_parameters_locked": False,
             "reward_locked_parameters": [
-                "reward_stage_exponent", "reward_shaping_weight",
+                "reward_stage_exponent", "reward_shaping_weight", "reward_alpha", "reward_fusion_mode",
             ] if dataset_id else [],
-            "reward_editable_parameters": ["reward_gamma", "reward_accumulate_primitive_steps"],
+            "reward_editable_parameters": ["reward_gamma"] + ([] if macro_only else ["reward_accumulate_primitive_steps"]),
             "basic": {
                 name: raw["iql"][name] for name in (
                     "train_steps", "critic_warmup_steps",
@@ -273,7 +281,10 @@ class OfflineJobService(DatasetRewardVersions):
             } | {
                 "reward_source": reward_source,
                 "reward_stage_exponent": raw["reward"].get("stage_exponent", 2.0),
-                "reward_rynnvalue": reward_source == "rynnvalue",
+                "reward_alpha": raw["reward"].get("alpha", 0.0),
+                "reward_fusion_mode": raw["reward"].get("fusion_mode", "additive"),
+                "reward_rynnvalue": reward_source == "rynnvalue" or (
+                    reward_source == "final" and raw["reward"]["shaping_weight"] > 0),
                 "reward_gamma": raw["reward"]["gamma"],
                 "reward_shaping_weight": raw["reward"]["shaping_weight"],
                 "reward_accumulate_primitive_steps": raw["reward"][
@@ -354,18 +365,20 @@ class OfflineJobService(DatasetRewardVersions):
             atomic_write_json(path, job)
         self.repository.upsert(job, path)
         if job["kind"] == "annotation" and (job.get("parameters") or {}).get("reward_version_id"):
-            version = self.datasets.get_version(job["dataset_id"], job["id"])
-            if job["status"] == "COMPLETED" and not version.get("complete"):
+            identifiers = job["parameters"].get("related_version_ids", [job["id"]])
+            versions = [self.datasets.get_version(job["dataset_id"], identifier) for identifier in identifiers]
+            if job["status"] == "COMPLETED" and not all(v.get("complete") for v in versions):
                 job.update(status="FAILED", error="Evaluation version was not sealed")
                 atomic_write_json(path, job)
                 self.repository.upsert(job, path)
             status = {"COMPLETED": "READY", "FAILED": "ERROR", "CANCELED": "CANCELED"}.get(job["status"], "RUNNING")
-            if version.get("status") != "READY":
-                version.update(status=status, error=job.get("error"), completed_at=job.get("completed_at"))
-                if status in {"ERROR", "CANCELED"} and not version.get("complete"):
-                    version_path = self.datasets.root / job["dataset_id"] / "annotations" / job["id"] / "version.json"
-                    atomic_write_json(version_path, version)
-            self.datasets.update_version(job["dataset_id"], version)
+            for version in versions:
+                if version.get("status") != "READY":
+                    version.update(status=status, error=job.get("error"), completed_at=job.get("completed_at"))
+                    if status in {"ERROR", "CANCELED"}:
+                        version_path = self.datasets.root / job["dataset_id"] / "annotations" / version["id"] / "version.json"
+                        atomic_write_json(version_path, version)
+            self.datasets.update_versions(job["dataset_id"], versions)
         elif job["kind"] == "annotation":
             desired = {
                 "COMPLETED": "READY",
@@ -904,7 +917,7 @@ class OfflineJobService(DatasetRewardVersions):
             "wandb_group", "wandb_tags", "wandb_log_interval_steps",
             "reward_rynnvalue", "reward_gamma", "reward_shaping_weight",
             "reward_accumulate_primitive_steps", "reward_source", "reward_stage_exponent",
-            "reward_version_id",
+            "reward_version_id", "reward_alpha", "reward_fusion_mode",
         }
         unknown = sorted(set(parameters) - allowed)
         if unknown:
@@ -956,7 +969,7 @@ class OfflineJobService(DatasetRewardVersions):
         if "reward_accumulate_primitive_steps" in parameters and type(parameters["reward_accumulate_primitive_steps"]) is not bool:
             raise ValueError("reward_accumulate_primitive_steps must be boolean")
         if "reward_source" in parameters and parameters["reward_source"] not in (
-            "sparse", "rynnvalue", "stage",
+            "sparse", "rynnvalue", "stage", "final",
         ):
             raise ValueError("reward_source must be sparse, rynnvalue, or stage")
         if "reward_stage_exponent" in parameters:
@@ -966,6 +979,12 @@ class OfflineJobService(DatasetRewardVersions):
                 or not math.isfinite(exponent) or exponent < 1
             ):
                 raise ValueError("reward_stage_exponent must be a finite number >= 1")
+        if "reward_alpha" in parameters:
+            alpha = parameters["reward_alpha"]
+            if type(alpha) not in (float, int) or not math.isfinite(alpha) or not 0 <= alpha <= 1:
+                raise ValueError("reward_alpha must be in [0, 1]")
+        if parameters.get("reward_fusion_mode", "additive") not in {"additive", "multiplicative"}:
+            raise ValueError("Invalid reward_fusion_mode")
         for name in ("critic_optimizer", "value_optimizer"):
             value = parameters.get(name)
             if value is not None and value not in {"adam", "adamw"}:
@@ -1094,9 +1113,10 @@ class OfflineJobService(DatasetRewardVersions):
             source = "rynnvalue" if parameters["reward_rynnvalue"] else "sparse"
         else:
             source = raw["reward"].get("source") or (
+                "final" if "alpha" in raw["reward"] and "rynnvalue" not in raw["reward"] else
                 "rynnvalue" if raw["reward"].get("rynnvalue", True) else "sparse"
             )
-        if source not in ("sparse", "rynnvalue", "stage"):
+        if source not in ("sparse", "rynnvalue", "stage", "final"):
             raise ValueError("reward_source must be sparse, rynnvalue, or stage")
         return source
 
@@ -1123,8 +1143,10 @@ class OfflineJobService(DatasetRewardVersions):
         raw = self._effective_config(dataset)
         for section in ("data", "reward", "paths", "vla"):
             raw[section] = copy.deepcopy(sealed[section])
+        raw["reward"].setdefault("final_normalization", "none")
         source = self._reward_source(raw, parameters)
-        raw["reward"].update(source=source, rynnvalue=source == "rynnvalue")
+        raw["reward"].update(source=source, rynnvalue=source == "rynnvalue" or (
+            source == "final" and raw["reward"]["shaping_weight"] > 0))
         annotation_id = reward_version["id"]
         work_dir = Path(reward_version["work_dir"])
         prepared = json.loads(
@@ -1143,6 +1165,7 @@ class OfflineJobService(DatasetRewardVersions):
             "reward_shaping_weight": "shaping_weight",
             "reward_accumulate_primitive_steps": "accumulate_primitive_steps",
             "reward_stage_exponent": "stage_exponent",
+            "reward_alpha": "alpha", "reward_fusion_mode": "fusion_mode",
         }.items():
             if parameter_name in parameters:
                 raw["reward"][config_name] = parameters[parameter_name]
@@ -1199,6 +1222,8 @@ class OfflineJobService(DatasetRewardVersions):
                 "source_dataset_sha256": dataset.get("dataset_sha256"),
                 "reward": {
                     "source": source,
+                    "alpha": raw["reward"].get("alpha", 0.0),
+                    "fusion_mode": raw["reward"].get("fusion_mode", "additive"),
                     "stage_exponent": raw["reward"].get("stage_exponent", 2.0),
                     "rynnvalue": raw["reward"]["rynnvalue"],
                     "gamma": raw["reward"]["gamma"],

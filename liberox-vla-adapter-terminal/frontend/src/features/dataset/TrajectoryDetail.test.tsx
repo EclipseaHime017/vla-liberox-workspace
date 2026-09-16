@@ -111,10 +111,22 @@ describe("trajectory detail stage integration", () => {
     }} onBack={() => {}} />);
     await screen.findByText("尚未保存阶段标注");
     expect(screen.getByText("Stage-based Reward")).toBeTruthy();
-    expect(screen.getByText("Stage-based · Final Reward · 宏动作")).toBeTruthy();
+    expect(screen.queryByText("Final Reward · 宏动作")).toBeNull();
     expect(screen.getByText("RynnValue Absolute Remaining Time")).toBeTruthy();
-    expect(screen.getByText(/Reward Components/)).toBeTruthy();
+    expect(screen.getByText(/Original Final Reward/)).toBeTruthy();
     expect(screen.queryByText("关键帧奖励预览（未评价）")).toBeNull();
+  });
+
+  it("plots generated Final separately from its three original components", async () => {
+    render(<TrajectoryDetail detail={{ ...detail,
+      reward_evaluations: { final: { status: "READY", source: "final", version_id: "f", reward_config: { alpha: .5 },
+        boundary_steps: [0, 1, 2], chunk_start_steps: [0, 1], chunk_end_steps: [1, 2], chunk_lengths: [1, 1],
+        original_final_reward: [-.8, -.3], sparse_reward: [-1, -.5], dense_reward: [.2, .2], final_reward: [-.6, -.1] } },
+    }} onBack={() => {}} />);
+    expect(screen.getByText("Original Final Reward · 宏动作")).toBeTruthy();
+    expect(screen.getByText("Final Reward · 宏动作")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看Final Reward · 宏动作逐时间点数据" }));
+    expect(screen.getByText("-0.60000")).toBeTruthy();
   });
 
   it("reports an invalid global evaluation instead of substituting a fresh Stage preview", async () => {

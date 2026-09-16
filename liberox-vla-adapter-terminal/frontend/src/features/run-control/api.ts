@@ -4,7 +4,7 @@ import type {
   EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
   PaginatedRuns, PolicyDetail, PolicyInfo, TensorBoardStatus, TrajectoryDetail,
   TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe, RewardParameters,
-  RewardSource, TrainingRewardSource,
+  RewardSource, TrainingRewardSource, EvaluationOperation,
 } from "./types";
 
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
@@ -87,14 +87,14 @@ export const verifyTrainingDataset = (id: string) => api<TrainingDataset>(
   `/api/training-datasets/${encodeURIComponent(id)}/verify`, { method: "POST" },
 );
 export const annotateTrainingDataset = (
-  id: string, parameters: RewardParameters & { source: RewardSource },
+  id: string, parameters: RewardParameters & { source: RewardSource | EvaluationOperation },
 ) => api<OfflineJob>(
   `/api/training-datasets/${encodeURIComponent(id)}/annotations`, {
     method: "POST",
     body: JSON.stringify(parameters),
   },
 );
-export const getDatasetRewardConfig = (id: string) => api<Record<RewardSource, RewardParameters>>(
+export const getDatasetRewardConfig = (id: string) => api<Record<RewardSource | EvaluationOperation, RewardParameters>>(
   `/api/training-datasets/${encodeURIComponent(id)}/reward-config`,
 );
 export const listTrainingDatasetMembers = (id: string, page = 1, pageSize = 5) => api<PaginatedRuns>(

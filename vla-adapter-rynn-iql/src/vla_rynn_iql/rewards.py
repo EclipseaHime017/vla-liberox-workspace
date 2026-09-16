@@ -17,7 +17,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from .config import LoadedConfig, reward_source
+from .config import LoadedConfig, effective_cumulative, reward_source, needs_rynnvalue, needs_stage
 from .data import load_manifest
 from .io import atomic_json, sha256_file, stable_hash
 
@@ -63,20 +63,29 @@ def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
         for key in sorted(REWARD_DERIVATION_CONFIG_KEYS)
     }
     source = reward_source(reward_config)
-    result["rynnvalue"] = source == "rynnvalue"
+    result["rynnvalue"] = needs_rynnvalue(reward_config)
+    result["accumulate_primitive_steps"] = effective_cumulative(reward_config)
     # Preserve RynnValue's existing manifest/checkpoint identity exactly.
     if source != "rynnvalue":
         result["source"] = source
-    if source == "stage":
+    if source in {"stage", "final"}:
         result["stage_exponent"] = float(reward_config.get("stage_exponent", 2.0))
+    if source == "final":
+        result.update(fusion_mode=reward_config.get("fusion_mode", "additive"),
+                      alpha=float(reward_config.get("alpha", 0.0)))
+        normalization = reward_config.get("final_normalization", "none")
+        if normalization != "none":
+            result["final_normalization"] = normalization
     return result
 
 
 def reward_implementation_fingerprint(source: str) -> str:
     """Invalidate cheap derived caches when formula code changes, never raw VLM outputs."""
     files = [Path(__file__)]
-    if source == "stage":
+    if source in {"stage", "final"}:
         files.append(Path(__file__).with_name("stage_rewards.py"))
+    if source == "final":
+        files.append(Path(__file__).with_name("fusion_rewards.py"))
     return stable_hash({path.name: sha256_file(path) for path in files})
 
 
@@ -823,6 +832,7 @@ def annotate_manifest(
     annotator: TemporalValueAnnotator | None = None,
     *,
     overwrite: bool = False,
+    reuse_only: bool = False,
 ) -> Path:
     manifest = load_manifest(config)
     reward_cfg = config.section("reward")
@@ -833,6 +843,9 @@ def annotate_manifest(
     def live_annotator() -> TemporalValueAnnotator:
         nonlocal active_annotator
         if active_annotator is None:
+            if reuse_only:
+                raise ValueError("Required RynnValue evaluation is missing or incompatible; "
+                                 "evaluate RynnValue or use All before generating Final Reward")
             active_annotator = RynnValueAnnotator(config)
         return active_annotator
 
@@ -1015,6 +1028,9 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
         # Explicit version consumers must never mutate or regenerate their input.
         index = load_pinned_reward_index(config)
         return Path(index.get("training_adaptation_manifest_path") or config.section("reward")["manifest_path"])
+    if reward_source(config.section("reward")) == "final":
+        from .fusion_rewards import materialize_final_reward
+        return materialize_final_reward(config, force=force)
     if reward_source(config.section("reward")) != "rynnvalue":
         return _materialize_direct_rewards(config, force=force)
     manifest = load_manifest(config)
@@ -1245,6 +1261,11 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
     if (not isinstance(entries, list) or len(entries) != len(expected)
             or {str(item.get("run_id")) for item in entries} != set(expected)):
         raise ValueError("Pinned reward members do not match the prepared dataset")
+    if composed and requested_recipe["accumulate_primitive_steps"] and any(
+        entry.get("saved_reward_config", {}).get("source") == "final"
+        and entry["saved_reward_config"].get("fusion_mode") == "multiplicative" for entry in entries
+    ):
+        raise ValueError("Global Final Reward includes multiplication; cumulative reward must be Off for the entire run")
     for entry in entries:
         if composed and (not isinstance(entry.get("saved_reward_config"), dict)
                          or reward_source(entry["saved_reward_config"]) != reward_source(reward)):
@@ -1321,7 +1342,11 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
         done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
         if episode["terminal_step"] is not None:
             done[int(episode["terminal_step"]):] = True
-        if source == "stage":
+        if source == "final":
+            from .fusion_rewards import fused_reward_arrays
+            arrays.update(fused_reward_arrays(episode, effective, arrays))
+            final = arrays["final_reward"]
+        elif source == "stage":
             scores = arrays.get("stage_score")
             if scores is None or scores.shape != (len(done) + 1,) or not np.isfinite(scores).all():
                 raise ValueError(f"Pinned Stage score timeline is unavailable: {episode['run_id']}")

@@ -31,7 +31,7 @@ def setup_jobs(tmp_path):
     jobs.cache_root = tmp_path / "cache"
     jobs.launch_reserved = False
     jobs.trajectory_evaluations = None
-    jobs.stage_annotations = SimpleNamespace(validate_members=lambda members, threshold: {
+    jobs.stage_annotations = SimpleNamespace(validate_members=lambda members, threshold, **_: {
         "run": {"schema_version": 2, "keyframes": [{"step": 5, "kind": "positive"}],
                 "annotation_sha256": "label"}})
     jobs.ui_config = SimpleNamespace(offline_rl_root=WORKSPACE / "vla-adapter-rynn-iql",

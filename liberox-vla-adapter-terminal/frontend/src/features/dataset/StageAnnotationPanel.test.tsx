@@ -49,6 +49,7 @@ describe("stage keyframe editor", () => {
   });
   it("seeks the existing video at integer steps without refetch or source churn", async () => {
     const video = await openEditor();
+    expect(screen.queryByText(/仅保存标记/)).toBeNull();
     const slider = screen.getByRole("slider", { name: "切片进度" });
     fireEvent.change(slider, { target: { value: "3" } });
     expect(video.currentTime).toBeCloseTo(.15);

@@ -191,8 +191,8 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
     ];
     const rewards = detail.reward_evaluations ?? (detail.reward_evaluation
       ? { [detail.reward_evaluation.source]: detail.reward_evaluation } : {});
-    const reward = rewards.stage;
-    if (reward?.source === "stage" && reward.stage_scores?.length) {
+    const reward = rewards.final?.stage_scores?.length ? rewards.final : rewards.stage;
+    if (reward?.stage_scores?.length) {
       const times = reward.time_seconds ?? detail.series.time_seconds;
       values.push({ title: "Stage-based Reward", unit: "reward [-]", times,
         labels: ["direct stage reward"], values: reward.stage_scores.map((score) => [score]),
@@ -208,10 +208,16 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
       });
     }
     for (const saved of Object.values(rewards)) {
-      if (!saved || saved.source === "rynnvalue") continue;
+      if (!saved || saved.source !== "final") continue;
       const series = chunkRewardSeries(saved.chunk_start_steps, saved.chunk_end_steps, saved.final_reward, detail.series.time_seconds);
-      values.push({ title: `${rewardSourceLabels[saved.source]} · Final Reward · ${saved.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
-        unit: "reward [-]", ...series, labels: ["final reward"], interpolation: "step" });
+      if (saved.original_final_reward && saved.sparse_reward && saved.dense_reward) {
+        values.push({ title: `Original Final Reward · ${saved.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
+          unit: "reward [-]", ...series, labels: ["sparse reward", "dense reward (κ × shape)", "original final reward"],
+          values: saved.original_final_reward.map((value, i) => [saved.sparse_reward![i], saved.dense_reward![i], value]),
+          interpolation: "linear" });
+      }
+      values.push({ title: `Final Reward · ${saved.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
+        unit: "reward [-]", ...series, labels: ["final reward"], interpolation: "linear" });
     }
     const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
     if (evaluation) {
@@ -253,7 +259,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
           values: official.absolute_value_entropy_nats,
         },
       );
-      {
+      if (!rewards.final?.original_final_reward) {
         const sparseReward = evaluation.pbrs_reward.sparse_reward;
         if (sparseReward.length !== evaluation.pbrs_reward.shape_reward.length
           || sparseReward.length !== evaluation.pbrs_reward.dense_reward.length
@@ -263,17 +269,17 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
         const shapeSeries = chunkRewardSeries(evaluation.pbrs_reward.chunk_start_steps,
           evaluation.pbrs_reward.chunk_end_steps, evaluation.pbrs_reward.shape_reward, detail.series.time_seconds);
         values.push({
-          title: `Reward Components · ${evaluation.pbrs_reward.accumulate_primitive_steps
+          title: `Original Final Reward · ${evaluation.pbrs_reward.accumulate_primitive_steps
             ? "逐步累计" : "宏动作"}`,
           unit: "reward [-]",
           times: shapeSeries.times,
-          labels: ["sparse reward", "dense reward (κ × shape)", "final reward"],
+          labels: ["sparse reward", "dense reward (κ × shape)", "original final reward"],
           values: sparseReward.map((sparse, index) => [
             sparse, evaluation.pbrs_reward.dense_reward[index],
             evaluation.pbrs_reward.final_reward[index],
           ]),
           sampleLabels: shapeSeries.sampleLabels,
-          interpolation: "step",
+          interpolation: "linear",
         });
       }
     }

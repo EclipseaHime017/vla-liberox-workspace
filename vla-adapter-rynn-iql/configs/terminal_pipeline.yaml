@@ -37,7 +37,9 @@ overrides:
     success_consecutive_steps: 5
   reward:
     # Cheap reward reduction override. Existing RynnValue evaluations are reused.
-    source: rynnvalue  # sparse | rynnvalue | stage
+    fusion_mode: additive
+    alpha: 0.0
+    shaping_weight: 0.1  # kappa; zero disables RynnValue dependency
     stage_exponent: 2.0
     accumulate_primitive_steps: false
   vla: {}

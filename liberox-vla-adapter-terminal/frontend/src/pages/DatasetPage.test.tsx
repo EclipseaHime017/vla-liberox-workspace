@@ -33,6 +33,9 @@ beforeEach(() => {
     id: "annotation", kind: "annotation", status: "STARTING",
   } as Awaited<ReturnType<typeof api.annotateTrainingDataset>>);
   vi.mocked(api.getDatasetRewardConfig).mockResolvedValue({
+    final: { gamma: .99, stage_exponent: 2, alpha: .5, shaping_weight: .1, fusion_mode: "additive", accumulate_primitive_steps: false },
+    all: { gamma: .99, stage_exponent: 2, alpha: .5, shaping_weight: .1, fusion_mode: "additive", accumulate_primitive_steps: false,
+      max_frames: 4, batch_size: 1, sampling_hz: 3, robometer_batch_size: 8 },
     sparse: { gamma: .99, accumulate_primitive_steps: false },
     stage: { gamma: .99, stage_exponent: 2, accumulate_primitive_steps: false },
     rynnvalue: { gamma: .99, shaping_weight: .1, max_frames: 4, batch_size: 1, accumulate_primitive_steps: false, checkpoint: "Rynn-4B", revision: "rynn-revision" },
@@ -42,6 +45,50 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("dataset evaluation configuration", () => {
+  it.each(["final", "all"])("%s multiplication clears cumulative and does not restore hidden On state", async (source) => {
+    const dataset = { id: "dataset", name: "Dataset", integrity_status: "HEALTHY",
+      annotation_status: "NOT_STARTED" } as TrainingDataset;
+    render(<FrozenDatasetCard dataset={dataset} initialExpanded disabled={false} onRefresh={async () => {}}
+      onJob={() => {}} onError={() => {}} />);
+    fireEvent.change(await screen.findByLabelText("评价类型"), { target: { value: source } });
+    fireEvent.change(screen.getByLabelText("cumulative reward"), { target: { value: "true" } });
+    fireEvent.change(screen.getByLabelText("形式"), { target: { value: "multiplicative" } });
+    expect(screen.queryByLabelText("cumulative reward")).toBeNull();
+    expect(screen.queryByLabelText("Stage 系数 α")).toBeNull();
+    expect(screen.getByLabelText("Discount γ")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "开始评价" }));
+    await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenCalledWith("dataset", expect.objectContaining({
+      source, fusion_mode: "multiplicative", accumulate_primitive_steps: false,
+    })));
+    fireEvent.change(screen.getByLabelText("形式"), { target: { value: "additive" } });
+    expect((screen.getByLabelText("cumulative reward") as HTMLSelectElement).value).toBe("false");
+    fireEvent.change(screen.getByLabelText("评价类型"), { target: { value: "rynnvalue" } });
+    expect(screen.getByLabelText("cumulative reward")).toBeTruthy();
+  });
+
+  it("hides alpha for multiplication and All inherits saved Final parameters", async () => {
+    const dataset = { id: "dataset", name: "Dataset", integrity_status: "HEALTHY", annotation_status: "READY",
+      evaluation_version_ids: { final: "f" }, evaluation_versions: [{ id: "f", evaluator: "final", status: "READY",
+        parameters: { alpha: .8, stage_exponent: 5, shaping_weight: .2 }, created_at: "" }],
+    } as unknown as TrainingDataset;
+    render(<FrozenDatasetCard dataset={dataset} initialExpanded disabled={false} onRefresh={async () => {}}
+      onJob={() => {}} onError={() => {}} />);
+    const source = await screen.findByLabelText("评价类型");
+    expect((screen.getByLabelText("Stage 系数 α") as HTMLInputElement).value).toBe("0.8");
+    fireEvent.change(screen.getByLabelText("形式"), { target: { value: "multiplicative" } });
+    expect(screen.queryByLabelText("Stage 系数 α")).toBeNull();
+    expect(screen.getByLabelText("Stage 指数 p")).toBeTruthy();
+    expect(screen.queryByLabelText(/正下限/)).toBeNull();
+    fireEvent.change(source, { target: { value: "all" } });
+    expect((screen.getByLabelText("Stage 指数 p") as HTMLInputElement).value).toBe("5");
+    expect((screen.getByLabelText("Stage 系数 α") as HTMLInputElement).value).toBe("0.8");
+    expect(screen.getByLabelText("RynnValue batch size")).toBeTruthy();
+    expect(screen.getByLabelText("Robometer batch size")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重新评价" }));
+    await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenCalledWith("dataset", expect.objectContaining({
+      source: "all", force_model: true, alpha: .8, stage_exponent: 5, shaping_weight: .2,
+    })));
+  });
   it("retrieves a task family across levels in one paginated query and requires a prompt for mutations", async () => {
     const tasks = [
       { task_id: "LEVEL1::bowl", level: "LEVEL1", family_id: "bowl", family_label: "place bowl", prompt: "black bowl" },
@@ -98,6 +145,7 @@ describe("dataset evaluation configuration", () => {
     expect(screen.queryByRole("combobox", { name: "cumulative reward" })).toBeNull();
     expect(api.getDatasetRewardConfig).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    fireEvent.change(await screen.findByLabelText("评价类型"), { target: { value: "rynnvalue" } });
     const cumulative = await screen.findByRole("combobox", { name: "cumulative reward" }) as HTMLSelectElement;
     expect(cumulative.value).toBe(String(initial));
     expect(Array.from(cumulative.options, (option) => option.text)).toEqual(["Off", "On"]);
@@ -110,7 +158,7 @@ describe("dataset evaluation configuration", () => {
     })));
   });
 
-  it("offers independent Stage/global overwrite and Robometer model-refresh settings", async () => {
+  it("offers Final/global overwrite and independent Robometer model-refresh settings", async () => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([{
       id: "dataset", name: "Dataset", integrity_status: "HEALTHY", annotation_status: "NOT_STARTED", evaluation_versions: [],
     } as unknown as TrainingDataset]);
@@ -118,13 +166,14 @@ describe("dataset evaluation configuration", () => {
     fireEvent.click(await screen.findByRole("button", { name: "打包训练数据集" }));
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
     const source = await screen.findByLabelText("评价类型");
-    fireEvent.change(source, { target: { value: "stage" } });
-    fireEvent.change(screen.getByLabelText("Stage 插值指数 p"), { target: { value: "4" } });
+    expect(Array.from((source as HTMLSelectElement).options, (option) => option.text)).toEqual(["Final Reward", "RynnValue", "Robometer", "All"]);
+    fireEvent.change(screen.getByLabelText("Stage 指数 p"), { target: { value: "4" } });
     fireEvent.change(screen.getByLabelText("同步覆盖全局评价"), { target: { value: "true" } });
     expect(screen.queryByLabelText("max_frames")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "开始评价" }));
     await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenCalledWith("dataset", {
-      source: "stage", gamma: .99, stage_exponent: 4, accumulate_primitive_steps: false, overwrite_global: true,
+      source: "final", gamma: .99, stage_exponent: 4, accumulate_primitive_steps: false, overwrite_global: true,
+      alpha: .5, shaping_weight: .1, fusion_mode: "additive",
     }));
     await waitFor(() => expect((source as HTMLSelectElement).disabled).toBe(false));
     fireEvent.change(source, { target: { value: "robometer" } });
@@ -133,7 +182,7 @@ describe("dataset evaluation configuration", () => {
     expect((screen.getByLabelText("前缀帧数") as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByTitle("固定 revision：robo-revision").textContent).toBe("Robo-LIBERO");
     expect((screen.getByLabelText("同步覆盖全局评价") as HTMLSelectElement).value).toBe("false");
-    fireEvent.change(screen.getByLabelText("评价 fps"), { target: { value: "2" } });
+    fireEvent.change(screen.getByLabelText("Robometer fps"), { target: { value: "2" } });
     fireEvent.change(screen.getByLabelText("重新运行模型"), { target: { value: "true" } });
     fireEvent.click(screen.getByRole("button", { name: "开始评价" }));
     await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenLastCalledWith("dataset", {
@@ -154,7 +203,7 @@ describe("dataset evaluation configuration", () => {
     render(<DatasetPage />);
     fireEvent.click(await screen.findByRole("button", { name: "打包训练数据集" }));
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
-    await screen.findByLabelText("Stage 插值指数 p");
+    await screen.findByLabelText("Stage 指数 p");
     expect(screen.queryByText(/v1|v2|历史版本/)).toBeNull();
     expect(screen.queryByRole("button", { name: "启用" })).toBeNull();
     expect(screen.queryByLabelText("评价版本")).toBeNull();
@@ -182,6 +231,7 @@ describe("dataset evaluation configuration", () => {
     render(<DatasetPage />);
     fireEvent.click(await screen.findByRole("button", { name: "打包训练数据集" }));
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    fireEvent.change(await screen.findByLabelText("评价类型"), { target: { value: "rynnvalue" } });
     fireEvent.click(await screen.findByRole("button", { name: "重新评价" }));
     expect(screen.queryByText(/legacy/)).toBeNull();
     expect(screen.queryByRole("button", { name: "启用" })).toBeNull();

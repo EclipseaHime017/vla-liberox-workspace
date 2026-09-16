@@ -170,7 +170,8 @@ class StageAnnotationService:
             atomic_write_json(sidecar, payload)
             return self._view(run, threshold, exponent)
 
-    def validate_members(self, members: list[dict], success_consecutive_steps: int) -> dict[str, dict]:
+    def validate_members(self, members: list[dict], success_consecutive_steps: int,
+                         *, exponent: float | None = None, nonpositive: bool = False) -> dict[str, dict]:
         """Preflight all selected members, even ones whose prefixes replay deduplicates."""
         result, errors = {}, []
         with self._lock:
@@ -189,6 +190,12 @@ class StageAnnotationService:
                         payload, run_id=run_id, trajectory_sha256=source["trajectory_sha256"],
                         done=source["done"], success_consecutive_steps=success_consecutive_steps,
                     )
+                    if nonpositive:
+                        core = self._module()
+                        context = core.stage_annotation_context(result[run_id], done=source["done"],
+                            success_consecutive_steps=success_consecutive_steps, exponent=exponent)
+                        if np.any(core.stage_scores(context) > 0):
+                            raise ValueError("Stage 分数大于 0，请检查关键帧；Final Reward 不会裁剪标注结果")
                 except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
                     errors.append(f"{run_id}: {exc}")
         if errors:

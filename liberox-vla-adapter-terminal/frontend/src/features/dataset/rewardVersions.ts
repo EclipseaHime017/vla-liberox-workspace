@@ -1,11 +1,16 @@
-import type { RewardParameters, RewardSource } from "../run-control/types";
+import type { EvaluationOperation, RewardParameters, RewardSource } from "../run-control/types";
 
 export const rewardSourceLabels: Record<RewardSource, string> = {
-  sparse: "Sparse", stage: "Stage-based", rynnvalue: "RynnValue", robometer: "Robometer",
+  sparse: "Sparse", stage: "Stage-based", rynnvalue: "RynnValue", robometer: "Robometer", final: "Final Reward",
+};
+export const evaluationOperationLabels: Record<EvaluationOperation, string> = {
+  final: "Final Reward", rynnvalue: "RynnValue", robometer: "Robometer", all: "All",
 };
 
 export function rewardParameterLabels(parameters: RewardParameters = {}): string[] {
   const labels: string[] = [];
+  if (parameters.fusion_mode) labels.push(parameters.fusion_mode === "multiplicative" ? "相乘" : "相加");
+  if (parameters.alpha != null && parameters.fusion_mode !== "multiplicative") labels.push(`Stage 系数 α ${parameters.alpha}`);
   if (parameters.stage_exponent != null) labels.push(`插值指数 p ${parameters.stage_exponent}`);
   if (parameters.shaping_weight != null) labels.push(`塑形系数 κ ${parameters.shaping_weight}`);
   if (parameters.gamma != null) labels.push(`折扣 γ ${parameters.gamma}`);

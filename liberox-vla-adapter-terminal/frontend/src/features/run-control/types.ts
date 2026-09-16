@@ -158,7 +158,8 @@ export type TrajectoryDetail = {
   };
 };
 
-export type RewardSource = "sparse" | "stage" | "rynnvalue" | "robometer";
+export type RewardSource = "sparse" | "stage" | "rynnvalue" | "robometer" | "final";
+export type EvaluationOperation = "final" | "rynnvalue" | "robometer" | "all";
 export type TrainingRewardSource = Exclude<RewardSource, "robometer">;
 export type EvaluationSourceContext = {
   status: string; origin: "global" | "dataset";
@@ -166,6 +167,7 @@ export type EvaluationSourceContext = {
   evaluated_at?: string | null; version_id?: string;
 };
 export type RewardParameters = {
+  alpha?: number; fusion_mode?: "additive" | "multiplicative"; robometer_batch_size?: number;
   gamma?: number; shaping_weight?: number; stage_exponent?: number;
   accumulate_primitive_steps?: boolean; max_frames?: number; batch_size?: number;
   sampling_hz?: number; force_model?: boolean; checkpoint?: string; revision?: string;
@@ -182,11 +184,15 @@ export type DatasetDetailContext = {
 };
 export type DatasetRewardEvaluation = {
   status: "READY"; version_id: string; reward_config: RewardParameters;
-  source: "sparse" | "stage" | "rynnvalue";
+  source: TrainingRewardSource;
   time_seconds?: number[]; stage_scores?: number[]; observation_steps?: number[];
   boundary_steps: number[]; chunk_lengths: number[];
   chunk_start_steps: number[]; chunk_end_steps: number[];
   sparse_reward?: number[]; dense_reward?: number[]; shape_reward?: number[]; final_reward: number[];
+  original_final_reward?: number[];
+  raw_final_reward?: number[];
+  final_reward_reference?: number;
+  final_reward_scale?: number;
 };
 
 export type StageKeyframe = { step: number; kind: "positive" | "negative" };

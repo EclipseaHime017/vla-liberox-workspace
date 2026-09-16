@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from vla_rynn_iql.config import load_train_config, reward_source
+from vla_rynn_iql.config import load_train_config, needs_rynnvalue
 
 
 def run(environment: str, script: str, config: Path) -> None:
@@ -28,7 +28,7 @@ def main() -> int:
     parser.add_argument("--skip-evaluation", action="store_true")
     args = parser.parse_args()
     run(args.train_env, "prepare_dataset.py", args.config.resolve())
-    if reward_source(load_train_config(args.config).section("reward")) == "rynnvalue":
+    if needs_rynnvalue(load_train_config(args.config).section("reward")):
         run(args.reward_env, "annotate_rewards.py", args.config.resolve())
     run(args.train_env, "materialize_rewards.py", args.config.resolve())
     run(args.train_env, "train_iql.py", args.config.resolve())

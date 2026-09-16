@@ -22,12 +22,47 @@ REWARD_PARAMETERS = {
     "reward_source": "source", "reward_stage_exponent": "stage_exponent",
     "reward_gamma": "gamma", "reward_shaping_weight": "shaping_weight",
     "reward_accumulate_primitive_steps": "accumulate_primitive_steps",
+    "reward_alpha": "alpha", "reward_fusion_mode": "fusion_mode",
 }
 EDITABLE_REWARD_PARAMETERS = frozenset({"reward_gamma", "reward_accumulate_primitive_steps"})
 
 
+def macro_only_reward(settings: dict) -> bool:
+    return settings.get("source") in {"final", "all"} and settings.get("fusion_mode") == "multiplicative"
+
+
 class DatasetRewardVersions:
     """Mixin kept separate from simulation and model-training orchestration."""
+
+    def _final_model_inputs(self, dataset: dict) -> dict:
+        """Select saved outputs by dataset/global scope, not current inference defaults."""
+        current = dataset.get("evaluation_version_ids", {}).get("rynnvalue")
+        entries = []
+        if current:
+            version = self.datasets.validate_version(dataset["id"], current)
+            prepared = json.loads(Path(version["prepared_manifest_path"]).read_text())
+            index = json.loads(Path(version["reward_manifest_path"]).read_text())
+            by_run = {entry["run_id"]: entry for entry in index["episodes"]}
+            for episode in prepared["episodes"]:
+                entry = by_run[episode["run_id"]]
+                entries.append({**episode, "annotation_path": entry["reward_path"],
+                    "annotation_sha256": entry["reward_sha256"],
+                    "annotation_config": index.get("annotation_config", {}),
+                    "official_outputs": entry.get("official_outputs", {}),
+                    "annotator": entry.get("annotator", index.get("annotator", {}))})
+        else:
+            from .global_reward_binding import global_members
+            records, missing = global_members(self, dataset, "rynnvalue", validate=True)
+            if missing:
+                raise ValueError("Required RynnValue evaluation is missing or invalid:\n" +
+                                 "\n".join(f"{e['run_id']}: {e['error']}" for e in missing))
+            for member, metadata, values, episode, _ in records:
+                entries.append({**episode, "annotation_path": str(values),
+                    "annotation_sha256": metadata["values_sha256"],
+                    "annotation_config": metadata.get("annotation_config", {}),
+                    "official_outputs": metadata.get("official_outputs", {}),
+                    "annotator": metadata.get("annotator", {})})
+        return {"source_dataset_sha256": dataset["dataset_sha256"], "episodes": entries}
 
     def _seed_dataset_outputs(self, dataset: dict, source: str, raw: dict, work: Path) -> None:
         """Reuse compatible output snapshots across packages, never their rewards."""
@@ -98,7 +133,7 @@ class DatasetRewardVersions:
                   "accumulate_primitive_steps": reward["accumulate_primitive_steps"]}
         robo_path = self.ui_config.robometer_root / "configs" / "robometer_evaluation.yaml"
         robo = yaml.safe_load(robo_path.read_text()) if robo_path.is_file() else {}
-        return {
+        configs = {
             "sparse": dict(common),
             "stage": {**common, "stage_exponent": reward.get("stage_exponent", 2.0)},
             "rynnvalue": {**common, "shaping_weight": reward["shaping_weight"],
@@ -110,9 +145,20 @@ class DatasetRewardVersions:
                           "prefix_frames": 4, "checkpoint": robo.get("model", {}).get("checkpoint"),
                           "revision": robo.get("model", {}).get("revision")},
         }
+        configs["final"] = {**common, "stage_exponent": reward.get("stage_exponent", 2.0),
+                            "alpha": reward.get("alpha", 0.0),
+                            "fusion_mode": reward.get("fusion_mode", "additive"),
+                            "shaping_weight": reward["shaping_weight"]}
+        if configs["final"]["fusion_mode"] == "multiplicative":
+            configs["final"]["accumulate_primitive_steps"] = False
+        configs["all"] = {**configs["final"], "max_frames": configs["rynnvalue"]["max_frames"],
+                          "batch_size": configs["rynnvalue"]["batch_size"],
+                          "sampling_hz": configs["robometer"]["sampling_hz"],
+                          "robometer_batch_size": configs["robometer"]["batch_size"]}
+        return configs
 
     def start_reward_version(self, dataset_id: str, *, source: str = "rynnvalue", **options: Any) -> dict:
-        if source not in {"sparse", "stage", "rynnvalue", "robometer"}:
+        if source not in {"sparse", "stage", "rynnvalue", "robometer", "final", "all"}:
             raise ValueError("Unsupported evaluation source")
         options = {key: value for key, value in options.items() if value is not None}
         defaults = self.reward_configuration(dataset_id)[source]
@@ -126,45 +172,56 @@ class DatasetRewardVersions:
         for key in ("accumulate_primitive_steps", "force_model", "overwrite_global"):
             if key in parameters and type(parameters[key]) is not bool:
                 raise ValueError(f"{key} must be boolean")
-        for key in ("gamma", "stage_exponent", "shaping_weight", "sampling_hz"):
+        for key in ("gamma", "stage_exponent", "shaping_weight", "sampling_hz", "alpha"):
             if key not in parameters:
                 continue
             value = parameters[key]
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError(f"{key} must be finite")
             if ((key == "gamma" and not 0 <= value <= 1)
+                    or (key == "alpha" and not 0 <= value <= 1)
                     or (key == "stage_exponent" and value < 1)
                     or (key == "shaping_weight" and value < 0)
                     or (key == "sampling_hz" and not 0 < value <= 20)):
                 raise ValueError(f"Invalid {key}")
-        for key in ("batch_size", "max_frames"):
+        for key in ("batch_size", "robometer_batch_size", "max_frames"):
             if key in parameters and (type(parameters[key]) is not int or parameters[key] < 1):
                 raise ValueError(f"{key} must be a positive integer")
         if "max_frames" in parameters and not 2 <= parameters["max_frames"] <= 64:
             raise ValueError("max_frames must be in [2, 64]")
-        if source in {"sparse", "stage"} and parameters["force_model"]:
+        if source in {"sparse", "stage", "final"} and parameters["force_model"]:
             raise ValueError("This reward source does not run a model")
+        if parameters.get("fusion_mode", "additive") not in {"additive", "multiplicative"}:
+            raise ValueError("Unsupported fusion_mode")
+        if macro_only_reward(parameters):
+            parameters["accumulate_primitive_steps"] = False
         with self.lock:
             dataset = self.datasets.require_ready_for_annotation(dataset_id)
             if any(item["status"] == "RUNNING" for item in dataset.get("evaluation_versions", [])):
                 raise ConflictError("Dataset evaluation is running", code="ANNOTATION_RUNNING")
             snapshot = None
-            if source == "stage":
+            if source == "stage" or (source in {"final", "all"} and (
+                    parameters["alpha"] > 0 or parameters["fusion_mode"] == "multiplicative")):
                 if self.stage_annotations is None:
                     raise ValueError("Stage annotation service is unavailable")
                 _, frozen = self.datasets._load(dataset_id)
                 snapshot = self.stage_annotations.validate_members(
                     frozen["members"], dataset["success_consecutive_steps"],
+                    **({"exponent": parameters["stage_exponent"], "nonpositive": True}
+                       if source in {"final", "all"} else {}),
                 )
-            gpu = source in {"rynnvalue", "robometer"}
+            gpu = source in {"rynnvalue", "robometer", "all"}
             if gpu:
                 self._prepare_launch()
             try:
+                if source == "all":
+                    return self._launch_all_rewards(dataset, parameters, snapshot)
                 return self._launch_reward_version(dataset, parameters, snapshot)
             finally:
                 self.launch_reserved = False
 
-    def _launch_reward_version(self, dataset: dict, parameters: dict, snapshot: dict | None) -> dict:
+    def _launch_reward_version(self, dataset: dict, parameters: dict, snapshot: dict | None,
+                               *, deferred: bool = False, annotation_input: Path | None = None) -> dict:
         source, dataset_id = parameters["source"], dataset["id"]
         version_id = f"ann_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         job_dir = self.jobs_root / version_id
@@ -175,8 +232,12 @@ class DatasetRewardVersions:
         raw = self._effective_config(dataset)
         raw["data"].pop("stage_annotations_manifest", None)
         raw["reward"].update(source=source if source != "robometer" else "sparse",
-                             rynnvalue=source == "rynnvalue")
-        for key in ("gamma", "stage_exponent", "shaping_weight", "accumulate_primitive_steps", "max_frames"):
+                             rynnvalue=source == "rynnvalue" or (
+                                 source == "final" and parameters["shaping_weight"] > 0))
+        if source == "final":
+            raw["reward"]["final_normalization"] = "initial_chunk_v1"
+        for key in ("gamma", "stage_exponent", "shaping_weight", "accumulate_primitive_steps", "max_frames",
+                    "alpha", "fusion_mode"):
             if key in parameters:
                 raw["reward"][key] = parameters[key]
         if source == "rynnvalue":
@@ -188,6 +249,10 @@ class DatasetRewardVersions:
             snapshot_path = root / "stage_annotations.json"
             atomic_write_json(snapshot_path, {"schema_version": 1, "annotations": snapshot})
             raw["data"]["stage_annotations_manifest"] = str(snapshot_path.resolve())
+        model_inputs = None
+        if source == "final" and parameters["shaping_weight"] > 0 and annotation_input is None:
+            model_inputs = root / "model_inputs.json"
+            atomic_write_json(model_inputs, self._final_model_inputs(dataset))
         scripts = self.ui_config.offline_rl_root / "scripts"
         stages = []
 
@@ -196,8 +261,12 @@ class DatasetRewardVersions:
                            "argv": ["python", str(script), "--config", str(config), *extra],
                            "cwd": str(script.parent.parent)})
 
+        input_source = "rynnvalue" if source == "final" else source
         previous = next((item for item in reversed(dataset.get("evaluation_versions", []))
-                         if item["evaluator"] == source and item["status"] == "READY"), None)
+                         if item["evaluator"] == input_source and item["status"] == "READY"), None)
+        current_input = dataset.get("evaluation_version_ids", {}).get(input_source)
+        if current_input:
+            previous = self.datasets.get_version(dataset_id, current_input)
         previous_id = previous["id"] if previous else dataset.get("annotation_id") if source == "rynnvalue" else None
         previous_work = self.datasets.root / dataset_id / "annotations" / str(previous_id) / "work"
         if source == "robometer":
@@ -239,13 +308,16 @@ class DatasetRewardVersions:
                         target = work / "rewards" / "reward_manifest.json"
                         target.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copyfile(legacy, target)
-                self._seed_dataset_outputs(dataset, source, raw, work)
+                self._seed_dataset_outputs(dataset, "rynnvalue", raw, work)
             atomic_write_yaml(config_path, raw)
             stage("prepare", "准备冻结数据集", scripts / "prepare_dataset.py", config_path, self.ui_config.train_environment)
             if source == "rynnvalue":
                 stage("annotate", "RynnValue 轨迹评价", scripts / "annotate_rewards.py", config_path,
                       self.ui_config.reward_environment, *(["--overwrite"] if parameters["force_model"] else []))
-            stage("rewards", "计算数据集奖励", scripts / "materialize_rewards.py", config_path, self.ui_config.train_environment)
+            stage("rewards", "计算数据集奖励", scripts / "materialize_rewards.py", config_path,
+                  self.ui_config.train_environment,
+                  *(["--annotation-manifest", str(annotation_input)] if annotation_input else
+                    ["--model-inputs", str(model_inputs)] if model_inputs else []))
         now = datetime.now(timezone.utc).isoformat()
         version = {"schema_version": 1, "id": version_id, "dataset_id": dataset_id,
                    "dataset_sha256": dataset["dataset_sha256"], "evaluator": source,
@@ -259,6 +331,9 @@ class DatasetRewardVersions:
         stages.append({"id": "seal", "label": "冻结评价与奖励版本", "environment": self.ui_config.train_environment,
                        "argv": ["python", str(finalizer), "--version", str(version_path)]})
         self.datasets.update_version(dataset_id, version)
+        if deferred:
+            return {"version": version, "stages": stages, "config_path": config_path,
+                    "output_path": root, "parameters": parameters}
         try:
             return self._new_job(kind="annotation", dataset_id=dataset_id, stages=stages,
                 config_path=config_path, output_path=root,
@@ -266,6 +341,37 @@ class DatasetRewardVersions:
                             "member_count": dataset["member_count"], "requires_gpu": source in {"rynnvalue", "robometer"}})
         except Exception as exc:
             self.datasets.update_version(dataset_id, {**version, "status": "ERROR", "error": str(exc)})
+            raise
+
+    def _launch_all_rewards(self, dataset: dict, parameters: dict, snapshot: dict | None) -> dict:
+        """One serial job, three independent artifacts, one successful publication."""
+        parameters = {**parameters, "force_model": True}
+        defaults = self.reward_configuration(dataset["id"])
+        bundles = []
+        try:
+            for source in ("rynnvalue", "robometer", "final"):
+                selected = {**defaults[source], **{k: v for k, v in parameters.items() if k in defaults[source]},
+                            "source": source, "force_model": source != "final",
+                            "overwrite_global": parameters["overwrite_global"]}
+                if source == "robometer":
+                    selected["batch_size"] = parameters["robometer_batch_size"]
+                if source == "final":
+                    selected["max_frames"] = parameters["max_frames"]
+                incoming = (Path(bundles[0]["version"]["work_dir"]) / "annotations" / "annotation_manifest.json"
+                            if source == "final" else None)
+                bundles.append(self._launch_reward_version(dataset, selected, snapshot if source == "final" else None,
+                                                            deferred=True, annotation_input=incoming))
+            final = bundles[-1]
+            stages = [{**stage, "id": f"{bundle['version']['evaluator']}_{stage['id']}"}
+                      for bundle in bundles for stage in bundle["stages"]]
+            return self._new_job(kind="annotation", dataset_id=dataset["id"], stages=stages,
+                config_path=final["config_path"], output_path=final["output_path"],
+                parameters={**parameters, "requires_gpu": True, "reward_version_id": final["version"]["id"],
+                            "related_version_ids": [b["version"]["id"] for b in bundles],
+                            "task_id": dataset["task_id"], "member_count": dataset["member_count"]})
+        except Exception as exc:
+            for bundle in bundles:
+                self.datasets.update_version(dataset["id"], {**bundle["version"], "status": "ERROR", "error": str(exc)})
             raise
 
     def pinned_reward(self, dataset: dict, parameters: dict) -> tuple[dict, dict]:
@@ -288,13 +394,17 @@ class DatasetRewardVersions:
             raise ConflictError("Training reward version is not ready", code="REWARD_VERSION_NOT_READY")
         settings = yaml.safe_load(Path(version["config_path"]).read_text(encoding="utf-8"))["reward"]
         expected = {key: settings[name] for key, name in REWARD_PARAMETERS.items() if name in settings}
-        expected["reward_rynnvalue"] = version["evaluator"] == "rynnvalue"
+        expected["reward_rynnvalue"] = version["evaluator"] == "rynnvalue" or (
+            version["evaluator"] == "final" and settings["shaping_weight"] > 0)
         for key, value in expected.items():
             if key not in EDITABLE_REWARD_PARAMETERS and key in parameters and parameters[key] != value:
                 raise ConflictError(f"{key} is locked to dataset reward version {version_id}", code="REWARD_CONFIG_LOCKED")
         # Omitted knobs retain the dataset defaults. Explicit values only affect
         # this training run's derived reward and Bellman discount.
-        return version, {**expected, **parameters, "reward_version_id": version_id}
+        selected = {**expected, **parameters, "reward_version_id": version_id}
+        if macro_only_reward(settings) or version.get("macro_only"):
+            selected["reward_accumulate_primitive_steps"] = False
+        return version, selected
 
     def _schedule_result_binding(self, job: dict) -> None:
         """Publish globals once on completion without doing disk work in polling."""
@@ -384,6 +494,11 @@ class DatasetRewardVersions:
         parameters = job.get("parameters", {})
         result = {}
         if job["kind"] == "annotation":
+            related = parameters.get("related_version_ids")
+            if related:
+                return {identifier: self._bind_completed_result({**job, "id": identifier,
+                    "parameters": {key: value for key, value in parameters.items() if key != "related_version_ids"}})
+                    for identifier in related}
             version = self.datasets.get_version(job["dataset_id"], job["id"])
             source = version["evaluator"]
             overwrite = bool(parameters.get("overwrite_global", False))

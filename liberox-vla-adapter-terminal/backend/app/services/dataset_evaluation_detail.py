@@ -119,12 +119,20 @@ def _reward_arrays_detail(version: dict, manifest: dict, item: dict,
         "chunk_lengths": np.diff(boundaries).tolist(), "final_reward": final.tolist(),
     }
     for stored, public in (("sparse_reward", "sparse_reward"), ("dense_reward", "dense_reward"),
-                           ("pbrs_shaping_reward", "shape_reward")):
+                           ("pbrs_shaping_reward", "shape_reward"),
+                           ("raw_final_reward", "raw_final_reward"),
+                           ("original_final_reward", "original_final_reward")):
         if stored in arrays:
             values = arrays[stored]
             if values.shape != final.shape or not np.isfinite(values).all():
                 raise ValueError(f"Invalid reward component: {stored}")
             result[public] = values.tolist()
+    for key in ("final_reward_reference", "final_reward_scale"):
+        if key in arrays:
+            value = np.asarray(arrays[key])
+            if value.shape != () or not np.isfinite(value):
+                raise ValueError(f"Invalid Final Reward rescale metadata: {key}")
+            result[key] = float(value)
     if source == "rynnvalue" and "shape_reward" in result:
         # Old combined files stored Shape/Final only. Recover the displayed
         # components from those stored values, never from today's formula.
@@ -132,7 +140,7 @@ def _reward_arrays_detail(version: dict, manifest: dict, item: dict,
                                       * np.asarray(result["shape_reward"])))
         result.setdefault("dense_reward", dense.tolist())
         result.setdefault("sparse_reward", (final - dense).tolist())
-    if source == "stage":
+    if source == "stage" or (source == "final" and "stage_score" in arrays):
         scores = np.asarray(arrays["stage_score"])
         stored_times = arrays.get("time_seconds", np.asarray(times))
         if scores.shape != (len(times),) or not np.isfinite(scores).all():

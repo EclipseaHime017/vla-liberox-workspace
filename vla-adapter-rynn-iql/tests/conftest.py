@@ -63,6 +63,9 @@ def configured(tmp_path: Path):
         action_count=22, success=True, success_from=13,
     )
     raw = yaml.safe_load(DEFAULT_TRAIN_CONFIG.read_text(encoding="utf-8"))
+    # Existing numerical regressions intentionally exercise the legacy Rynn path.
+    # Fusion tests explicitly opt into source=final using the same data fixture.
+    raw["reward"]["source"] = "rynnvalue"
     raw["paths"].update({
         "dataset_sources": [str(dataset)], "work_dir": str(tmp_path / "work"),
         "output_dir": str(tmp_path / "output"),

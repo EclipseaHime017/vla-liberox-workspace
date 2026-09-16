@@ -16,7 +16,7 @@ from typing import Any, Iterable
 import numpy as np
 import yaml
 
-from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config, reward_source
+from .config import TRAIN_SCHEMA, UniqueKeyLoader, effective_cumulative, load_train_config, reward_source, needs_rynnvalue
 from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step, replay_chunks
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
@@ -195,10 +195,17 @@ def merged_training_config(config: TerminalPipelineConfig) -> dict[str, Any]:
                 value = str(_resolve(value, config.path.parent, "overrides.reward.manifest_path"))
             raw[section][key] = value
     reward_overrides = config.overrides.get("reward", {})
+    if ("alpha" in reward_overrides or "fusion_mode" in reward_overrides) and "source" not in reward_overrides:
+        raw["reward"]["source"] = "final"
     if "source" in reward_overrides and "rynnvalue" not in reward_overrides:
         raw["reward"]["rynnvalue"] = raw["reward"]["source"] == "rynnvalue"
     elif "rynnvalue" in reward_overrides and "source" not in reward_overrides:
         raw["reward"]["source"] = "rynnvalue" if raw["reward"]["rynnvalue"] else "sparse"
+    if raw["reward"]["source"] == "final":
+        raw["reward"]["rynnvalue"] = needs_rynnvalue(raw["reward"])
+    if type(raw["reward"]["accumulate_primitive_steps"]) is not bool:
+        raise TypeError("reward.accumulate_primitive_steps must be boolean")
+    raw["reward"]["accumulate_primitive_steps"] = effective_cumulative(raw["reward"])
     raw["data"]["task_ids"] = [config.selection["task_id"]]
     raw["data"]["selection_manifest"] = None
     return raw

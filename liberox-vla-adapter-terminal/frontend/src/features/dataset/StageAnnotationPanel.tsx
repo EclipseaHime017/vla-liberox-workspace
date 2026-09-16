@@ -168,8 +168,7 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
         </li>)}</ul>
         {!keyframes.length && <p className="field-hint">尚无手动关键帧。失败轨迹可保存空标注，阶段奖励保持 -1。</p>}
         <div className="stage-toolbar"><button className="primary" onClick={() => void save()}
-          disabled={saving || (!dirty && annotation.status === "ready")}>{saving ? "正在保存关键帧…" : "保存关键帧"}</button>
-          <span>仅保存标记。p 和奖励配置在数据集的配置面板调整，重新评价时使用最新保存的关键帧。</span></div>
+          disabled={saving || (!dirty && annotation.status === "ready")}>{saving ? "正在保存关键帧…" : "保存关键帧"}</button></div>
       </>}
     </div>}
   </section>;

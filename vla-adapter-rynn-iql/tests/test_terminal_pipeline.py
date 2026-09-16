@@ -100,6 +100,16 @@ def test_terminal_yaml_rejects_duplicate_keys(configured, tmp_path: Path):
         load_terminal_config(path)
 
 
+def test_new_fusion_override_promotes_a_legacy_base(configured, tmp_path: Path):
+    from vla_rynn_iql.config import needs_stage, needs_rynnvalue
+    terminal = load_terminal_config(_terminal_config(tmp_path, configured.path))
+    terminal.overrides["reward"] = {"alpha": .5, "shaping_weight": 0.}
+    raw = merged_training_config(terminal)
+    assert raw["reward"]["source"] == "final"
+    assert needs_stage(raw["reward"])
+    assert not needs_rynnvalue(raw["reward"])
+
+
 def test_terminal_yaml_rejects_invalid_environment_and_unknown_override(
     configured, tmp_path: Path,
 ):

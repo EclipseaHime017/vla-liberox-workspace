@@ -62,6 +62,17 @@ def test_intermediate_positive_scores_preserve_exact_formula():
     assert stage_scores(payload)[15] == 0
 
 
+@pytest.mark.parametrize("positives", [9, 11, 12, 17])
+def test_zero_anchor_has_no_positive_rounding_residue(positives):
+    payload = annotation([
+        *[{"step": step, "kind": "positive"} for step in range(1, positives + 1)],
+        {"step": positives + 1, "kind": "negative"},
+    ], done=[False] * 30 + [True] * 5)
+    scores = stage_scores(payload)
+    assert scores[positives] == 0
+    assert np.all(scores <= 0)
+
+
 @pytest.mark.parametrize("frames", [
     [{"step": 0, "kind": "positive"}], [{"step": 21, "kind": "negative"}],
     [{"step": 1, "kind": "success"}], [{"step": True, "kind": "positive"}],

@@ -51,6 +51,7 @@ TRAIN_SCHEMA = {
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
                "rynnvalue": None, "source": None, "stage_exponent": None,
+               "fusion_mode": None, "alpha": None, "final_normalization": None,
                "manifest_path": None, "manifest_sha256": None, "version_id": None,
                "gamma": None, "shaping_weight": None,
                "robot_description": None,
@@ -161,10 +162,29 @@ def _cuda_device(value: Any, name: str) -> None:
 
 def reward_source(reward: dict[str, Any]) -> str:
     """Resolve legacy sparse ablations without depending on any reward model."""
-    source = reward.get("source", "rynnvalue" if reward.get("rynnvalue", True) else "sparse")
-    if source not in ("sparse", "rynnvalue", "stage"):
-        raise ValueError("reward.source must be sparse, rynnvalue or stage")
+    legacy = "rynnvalue" if reward.get("rynnvalue", True) else "sparse"
+    source = reward.get("source", legacy if "rynnvalue" in reward else
+                        "final" if "alpha" in reward or "fusion_mode" in reward else legacy)
+    if source not in ("sparse", "rynnvalue", "stage", "final"):
+        raise ValueError("reward.source must be sparse, rynnvalue, stage or final")
     return source
+
+
+def needs_rynnvalue(reward: dict[str, Any]) -> bool:
+    source = reward_source(reward)
+    return source == "rynnvalue" or (source == "final" and reward["shaping_weight"] > 0)
+
+
+def needs_stage(reward: dict[str, Any]) -> bool:
+    source = reward_source(reward)
+    return source == "stage" or (source == "final" and (
+        reward.get("fusion_mode", "additive") == "multiplicative" or reward.get("alpha", 0) > 0))
+
+
+def effective_cumulative(reward: dict[str, Any]) -> bool:
+    """Multiplicative Final Reward is defined only on macro-action transitions."""
+    return bool(reward["accumulate_primitive_steps"]) and not (
+        reward_source(reward) == "final" and reward.get("fusion_mode") == "multiplicative")
 
 
 def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
@@ -177,10 +197,14 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
         if "rynnvalue" in reward:
             if type(reward["rynnvalue"]) is not bool:
                 raise TypeError("reward.rynnvalue must be boolean")
-            if "source" in reward and reward["rynnvalue"] != (source == "rynnvalue"):
+            if "source" in reward and source != "final" and reward["rynnvalue"] != (source == "rynnvalue"):
                 raise ValueError("reward.source conflicts with legacy reward.rynnvalue")
-        reward.update(source=source, rynnvalue=source == "rynnvalue")
+        reward.update(source=source, rynnvalue=needs_rynnvalue({**reward, "source": source}))
         reward.setdefault("stage_exponent", 2.0)
+        reward.setdefault("fusion_mode", "additive")
+        reward.setdefault("alpha", 0.0)
+        # Absence denotes historical, unscaled Final Reward snapshots.
+        reward.setdefault("final_normalization", "none")
         for name in ("manifest_path", "manifest_sha256", "version_id"):
             reward.setdefault(name, None)
     if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
@@ -250,8 +274,16 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     if not math.isfinite(reward["stage_exponent"]):
         raise ValueError("reward.stage_exponent must be finite")
     _number(reward, "shaping_weight", low=0)
+    _number(reward, "alpha", low=0, high=1)
+    if any(not math.isfinite(reward[key]) for key in ("gamma", "shaping_weight", "alpha")):
+        raise ValueError("Reward parameters must be finite")
+    if reward["fusion_mode"] not in {"additive", "multiplicative"}:
+        raise ValueError("reward.fusion_mode must be additive or multiplicative")
+    if reward["final_normalization"] not in {"none", "initial_chunk_v1"}:
+        raise ValueError("Unsupported reward.final_normalization")
     if type(reward["accumulate_primitive_steps"]) is not bool:
         raise TypeError("reward.accumulate_primitive_steps must be boolean")
+    reward["accumulate_primitive_steps"] = effective_cumulative(reward)
     if reward["dtype"] != "bfloat16":
         raise ValueError(
             "Version 1 requires reward.dtype=bfloat16 to match the pinned RynnValue-4B "

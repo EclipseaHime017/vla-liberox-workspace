@@ -1,9 +1,10 @@
 # LIBERO-X Local Data Studio
 
-Current release: **v0.5.0**
+Current release: **v0.6.0**
 
-Release highlights: FACTR teleoperation alongside SpaceMouse, and independent
-human Stage-based rewards with keyframe annotation and training source selection.
+Release highlights: unified Stage/RynnValue Final Reward with additive or
+macro-only multiplicative fusion, dataset-level evaluation controls, and
+separate Original Final Reward / Final Reward comparisons.
 
 Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse / FACTR takeover,
 offline post-training, and reproducible batch policy testing for the three
@@ -19,9 +20,9 @@ Franka/LIBERO-X task families, including their official LEVEL1–4 variants.
 - Three cascading selectors resolve task purpose → LEVEL1–4 → exact prompt, covering 13 physical scenes; the same hierarchy filters sessions, datasets, training datasets and test history. Purpose groups are explicitly configured in `ui_config.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
 - Run drafts can choose a simulation seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact. Simulation, dataset selection/split, training and test-schedule seeds have distinct roles. Changing the simulation seed does not select a new benchmark init state or inherit the training RNG.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
-- Integrated workflow: freeze a dataset, expand its per-row configuration, and evaluate with Sparse, Stage-based, RynnValue or Robometer. Reevaluation replaces the dataset's current results only after success; no evaluation-version management is needed. Durable keyframes and cached model outputs remain reusable. Global trajectory details retain the first evaluation unless explicitly overwritten. Training takes a fixed snapshot while gamma and cumulative reward remain adjustable per run; p and κ are configured only on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#49-在-web-ui-中创建数据集标注与训练).
+- Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#49-在-web-ui-中创建数据集标注与训练).
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
-- Human stage rewards: mark positive/negative keyframes in trajectory details without cutting the recording. Stage evaluation validates every member and snapshots the latest labels; changing the exponent or formula creates a new reward version, preserving historical results and active training. Legacy labels remain readable without resaving. See [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
+- Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
 - Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
 
 ## Repository layout

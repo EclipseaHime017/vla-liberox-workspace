@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import os
 import shutil
 import tempfile
@@ -91,6 +92,25 @@ def _atomic_copy(source: Path, destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def bind_config_evaluations(config) -> dict[str, Any]:
+    """Bind original model rewards, never a Stage/fused reward as model output."""
+    from .config import LoadedConfig, reward_source
+    from .rewards import materialize_reward_manifest
+
+    work = Path(config.section("paths")["work_dir"])
+    if reward_source(config.section("reward")) == "rynnvalue":
+        return bind_reward_manifest(work / "dataset_manifest.json", work / "rewards" / "reward_manifest.json")
+    raw = copy.deepcopy(config.raw)
+    binding_work = work / "model_binding"
+    (binding_work / "annotations").mkdir(parents=True, exist_ok=True)
+    for relative in ("dataset_manifest.json", "annotations/annotation_manifest.json"):
+        shutil.copyfile(work / relative, binding_work / relative)
+    raw["paths"]["work_dir"] = str(binding_work)
+    raw["reward"].update(source="rynnvalue", rynnvalue=True, manifest_path=None, manifest_sha256=None, version_id=None)
+    reward_path = materialize_reward_manifest(LoadedConfig(config.path, raw))
+    return bind_reward_manifest(binding_work / "dataset_manifest.json", reward_path)
+
+
 def bind_reward_manifest(
     prepared_path: Path,
     reward_path: Path,
@@ -102,6 +122,8 @@ def bind_reward_manifest(
         raise ValueError(f"Prepared manifest is invalid: {prepared_path}")
     if rewards is None or rewards.get("complete") is not True:
         raise ValueError(f"Reward manifest is incomplete: {reward_path}")
+    if rewards.get("reward_config", {}).get("source", "rynnvalue") != "rynnvalue":
+        raise ValueError("Only original RynnValue rewards may be bound as RynnValue evaluation")
     if (
         rewards.get("schema_version") != REWARD_SCHEMA_VERSION
         or rewards.get("kind") != "derived_iql_reward"

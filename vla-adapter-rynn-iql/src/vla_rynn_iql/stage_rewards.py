@@ -54,8 +54,11 @@ def stage_anchors(annotation: dict[str, Any]) -> list[dict[str, Any]]:
     weight = 1.0 / denominator
     score = -1.0
     anchors = [{"step": 0, "kind": "start", "score": score}]
+    net_stages = 0
     for frame in frames:
-        score += weight if frame["kind"] == "positive" else -weight
+        net_stages += 1 if frame["kind"] == "positive" else -1
+        # The same normalization without accumulated rounding at a zero anchor.
+        score = (net_stages - denominator) / denominator
         anchors.append({**frame, "score": score})
     if success is not None:
         if not math.isclose(score + weight, 0.0, abs_tol=1e-9):

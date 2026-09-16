@@ -36,17 +36,22 @@ reward:
   # The fields above define expensive RynnValue inference and its reusable cache.
   # The fields below only derive training rewards from cached model outputs.
   # Changing them never requires another RynnValue forward pass.
-  # Independent reward sources: sparse | rynnvalue | stage.
-  # Sparse/Stage do not load or require RynnValue. Stage requires every selected
-  # trajectory to have a saved, valid stage_annotation.json (including failures).
-  source: rynnvalue
+  # Final Reward: (1-alpha)*sparse + alpha*stage + shaping_weight*PBRS.
+  # alpha=0,kappa=0: sparse; alpha=0,kappa>0: RynnValue; alpha=1,kappa=0: Stage.
+  # multiplicative uses -stage at the chunk endpoint, with no positive floor.
+  # It is always macro; accumulate_primitive_steps is ignored and saved as false.
+  fusion_mode: additive  # additive | multiplicative
+  # Divide Final Reward by -R0 from the full trajectory's first chunk; R0 must be < 0.
+  # "none" is reserved for reproducing historical unscaled results.
+  final_normalization: initial_chunk_v1
+  alpha: 0.0
   # Stage interpolation: x^p, p >= 1. Reward is the score, not its difference.
   stage_exponent: 2.0
   # One discount per action chunk (macro action), not one discount per 20 Hz action.
   gamma: 0.99
   shaping_weight: 0.1
   # false: one sparse/PBRS reward and one Bellman discount per action chunk.
-  # true: discounted primitive-step return and gamma^L Semi-MDP bootstrap.
+  # true (additive only): discounted primitive return and gamma^L bootstrap.
   accumulate_primitive_steps: false
   robot_description: Franka Emika Panda single-arm robot
   camera_description: fixed third-person agent view

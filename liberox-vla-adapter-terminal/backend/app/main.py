@@ -97,7 +97,7 @@ def create_app(
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="0.5.0",
+        version="0.6.0",
         lifespan=lifespan,
     )
     app.include_router(runs.router)

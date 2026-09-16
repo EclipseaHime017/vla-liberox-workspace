@@ -6,7 +6,7 @@ import {
   listTrainingDatasets, startTensorBoard, startTraining,
 } from "../features/run-control/api";
 import type {
-  Bootstrap, OfflineJob, TensorBoardStatus, TrainingDataset, TrainingDefaults, TrainingRewardSource,
+  Bootstrap, OfflineJob, TensorBoardStatus, TrainingDataset, TrainingDefaults,
 } from "../features/run-control/types";
 import { JobMonitor } from "../features/training/JobMonitor";
 import { Badge } from "../components/ui/Badge";
@@ -41,7 +41,7 @@ export function TrainingPage() {
   const taskId = taskScope.task_id;
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [datasetId, setDatasetId] = useState("");
-  const [rewardSource, setRewardSource] = useState<TrainingRewardSource>("rynnvalue");
+  const rewardSource = "final";
   const [rewardRevision, setRewardRevision] = useState(0);
   const [showDatasetConfig, setShowDatasetConfig] = useState(false);
   const [parameters, setParameters] = useState<Record<string, number | string | boolean | null>>({});
@@ -63,10 +63,8 @@ export function TrainingPage() {
       .then(([nextBootstrap, nextDefaults, jobs, board]) => {
         setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskScope(scopeForTask(nextBootstrap.task_catalog, nextBootstrap.task.task_id));
         const { reward_rynnvalue: legacyRynn, ...advanced } = nextDefaults.advanced;
-        const configuredSource = advanced.reward_source ?? (legacyRynn === false ? "sparse" : "rynnvalue");
-        setRewardSource(configuredSource === "stage" || configuredSource === "sparse" ? configuredSource : "rynnvalue");
         setParameters({ ...nextDefaults.basic, ...advanced, ...nextDefaults.monitoring,
-          reward_source: advanced.reward_source ?? (legacyRynn === false ? "sparse" : "rynnvalue"),
+          reward_source: rewardSource,
           reward_stage_exponent: advanced.reward_stage_exponent ?? 2, resume_checkpoint: null });
         setTensorboard(board);
         const active = jobs.find(
@@ -111,6 +109,10 @@ export function TrainingPage() {
         const pinned = Object.fromEntries(Object.entries(next.advanced)
           .filter(([key]) => key.startsWith("reward_") && key !== "reward_rynnvalue"));
         const unrelated = Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith("reward_")));
+        if (pinned.reward_fusion_mode === "multiplicative"
+          || next.reward_editable_parameters?.includes("reward_accumulate_primitive_steps") === false) {
+          pinned.reward_accumulate_primitive_steps = false;
+        }
         return { ...unrelated, ...pinned,
           reward_source: rewardSource,
           reward_version_id: next.reward_version?.id ?? null,
@@ -128,6 +130,8 @@ export function TrainingPage() {
       && defaults.reward_version.evaluator === rewardSource && !defaults.reward_version.legacy
       && ["READY", "COMPLETED"].includes(defaults.reward_version.status))
   ));
+  const cumulativeAllowed = parameters.reward_fusion_mode !== "multiplicative"
+    && defaults?.reward_editable_parameters?.includes("reward_accumulate_primitive_steps") !== false;
   useEffect(() => {
     if (defaultsLoading || !defaults?.reward_availability?.pending) return;
     const timer = window.setTimeout(() => setRewardRevision((value) => value + 1), 1000);
@@ -153,7 +157,8 @@ export function TrainingPage() {
     if (busy || datasetsLoading || defaultsLoading || !rewardReady || !availableDatasets.some((item) => item.id === datasetId)) return;
     setBusy(true); setError("");
     try {
-      const next = await startTraining(datasetId, { ...parameters, reward_source: rewardSource });
+      const next = await startTraining(datasetId, { ...parameters, reward_source: rewardSource,
+        reward_accumulate_primitive_steps: cumulativeAllowed ? Boolean(parameters.reward_accumulate_primitive_steps) : false });
       setJob(next);
       try { setTensorboard(await startTensorBoard()); } catch (reason) { setError(`训练已启动，但 TensorBoard 启动失败：${String(reason)}`); }
     } catch (reason) { setError(String(reason)); }
@@ -167,7 +172,7 @@ export function TrainingPage() {
   };
 
   return <section className="content-page training-page">
-    <div className="page-heading"><p className="eyebrow">OFFLINE RL TRAINING</p><h1>VLA-Adapter + Pixel-IQL</h1><p>选择已评价的数据集，后训练 action head 与 proprio projector。Discount ratio 与 cumulative reward 可为本次训练单独调整。</p></div>
+    <div className="page-heading"><p className="eyebrow">OFFLINE RL TRAINING</p><h1>VLA-Adapter + Pixel-IQL</h1><p>选择已评价的数据集，后训练 action head 与 proprio projector。Discount ratio 可单独调整；相乘奖励固定使用 macro，相加保留 cumulative reward。</p></div>
     {(error || defaultsError) && <div className="error-banner"><span>{error || defaultsError}</span><button onClick={() => { setError(""); setDefaultsError(""); }}>关闭</button></div>}
     <div className="training-layout">
       <section className="surface training-config">
@@ -175,11 +180,6 @@ export function TrainingPage() {
         <div className="training-form">
           <TaskFilter tasks={bootstrap?.task_catalog ?? []} value={taskScope} onChange={setTaskScope} labelPrefix="训练" />
           <label>冻结数据集<select value={datasetId} disabled={datasetsLoading} onChange={(event) => setDatasetId(event.target.value)}><option value="">{datasetsLoading ? "加载数据集…" : "请选择"}</option>{availableDatasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
-          <label>Reward 来源<select value={rewardSource} disabled={busy || datasetsLoading} onChange={(event) => {
-            const source = event.target.value as TrainingRewardSource;
-            setRewardSource(source);
-            setParameters((current) => ({ ...current, reward_source: source, reward_version_id: null }));
-          }}><option value="sparse">Sparse</option><option value="rynnvalue">RynnValue</option><option value="stage">Stage-based</option></select></label>
           {dataset && <div className="training-dataset-summary"><strong>{dataset.member_count} 条轨迹</strong><span>{dataset.action_count} actions</span><span>{dataset.chunk_count} chunks</span><Badge tone="green">完整性正常</Badge>
             <p>{defaultsLoading || defaultsKey !== requestedDefaultsKey ? "正在读取评价结果…" : rewardReady
               ? `当前训练奖励：${rewardSourceLabels[rewardSource]}${defaults?.reward_availability?.origin === "global" ? " · 使用逐轨迹全局结果" : ""}`
@@ -188,7 +188,7 @@ export function TrainingPage() {
               <p className="error-banner">{defaults.reward_availability.message}</p>}
             {!defaultsLoading && defaultsKey === requestedDefaultsKey && !rewardReady && defaults?.reward_availability?.errors?.map((item) =>
               <p key={item.run_id} className="error-banner">{item.run_id}：{item.error}</p>)}
-            <p>新数据集默认继承同类型全局评价，已有标签可直接训练，无需再次评价。只有数据集重新评价后才使用专属结果；修改 γ / cumulative reward 只影响本次训练。</p>
+            <p>新数据集默认继承全局 Final Reward；只有数据集重新评价后才使用专属结果。修改 γ 或可用的 cumulative reward 只影响本次训练。</p>
             <button aria-expanded={showDatasetConfig} onClick={() => setShowDatasetConfig((value) => !value)}>配置数据集评价</button></div>}
           {dataset && showDatasetConfig && <FrozenDatasetCard key={dataset.id} dataset={dataset} initialExpanded
             disabled={busy || Boolean(job && activeJobStates.has(job.status))}
@@ -200,8 +200,8 @@ export function TrainingPage() {
           <details><summary>高级 IQL 参数</summary><div className="parameter-grid advanced-parameters">
             <label>Discount ratio γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} disabled={defaultsLoading || !rewardReady}
               onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
-            <label>cumulative reward<select disabled={defaultsLoading || !rewardReady} value={String(Boolean(parameters.reward_accumulate_primitive_steps))}
-              onChange={(event) => patchParameter("reward_accumulate_primitive_steps", event.target.value === "true")}><option value="false">Off</option><option value="true">On</option></select></label>
+            {cumulativeAllowed && <label>cumulative reward<select disabled={defaultsLoading || !rewardReady} value={String(Boolean(parameters.reward_accumulate_primitive_steps))}
+              onChange={(event) => patchParameter("reward_accumulate_primitive_steps", event.target.value === "true")}><option value="false">Off</option><option value="true">On</option></select></label>}
             <label>Critic optimizer<select value={String(parameters.critic_optimizer ?? "adamw")} onChange={(event) => patchParameter("critic_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
             <label>Value optimizer<select value={String(parameters.value_optimizer ?? "adamw")} onChange={(event) => patchParameter("value_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
             {advancedFields.map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}

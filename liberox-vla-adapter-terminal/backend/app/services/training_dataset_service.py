@@ -657,7 +657,7 @@ class TrainingDatasetService:
         result["evaluation_version_ids"] = TrainingDatasetService.current_evaluation_ids(result)
         result["evaluation_origins"] = {
             source: "dataset" if source in result["evaluation_version_ids"] else "global"
-            for source in ("sparse", "stage", "rynnvalue", "robometer")
+            for source in ("sparse", "stage", "rynnvalue", "robometer", "final")
         }
         result["members"] = [
             {
@@ -731,30 +731,44 @@ class TrainingDatasetService:
 
     def update_version(self, dataset_id: str, version: dict[str, Any]) -> dict[str, Any]:
         """Publish a lightweight summary; successful artifacts are immutable."""
+        return self.update_versions(dataset_id, [version])
+
+    def update_versions(self, dataset_id: str, updates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Publish a composite evaluation in one atomic dataset write."""
         with self.lock:
             path, payload = self._load(dataset_id)
             versions = payload.setdefault("evaluation_versions", [])
             current = self.current_evaluation_ids(payload)
-            existing = next((item for item in versions if item["id"] == version["id"]), None)
-            if existing is not None and existing.get("status") == "READY":
+            if len(updates) > 1 and any(v["status"] == "READY" for v in updates):
+                if not all(v["status"] == "READY" and v.get("complete") for v in updates):
+                    raise ValueError("All evaluation results must be sealed before publication")
+            changed = False
+            for version in updates:
+                existing = next((item for item in versions if item["id"] == version["id"]), None)
+                if existing is not None and existing.get("status") == "READY":
+                    continue
+                summary = {key: version.get(key) for key in (
+                    "id", "evaluator", "status", "parameters", "created_at", "completed_at", "error",
+                )}
+                if existing == summary:
+                    continue
+                changed = True
+                if existing is None:
+                    versions.append(summary)
+                else:
+                    existing.update(summary)
+                if version["status"] == "READY":
+                    current[version["evaluator"]] = version["id"]
+                    payload["evaluation_version_ids"] = current
+                    key = "robometer_version_id" if version["evaluator"] == "robometer" else "reward_version_id"
+                    if key == "reward_version_id" and "final" in current and version["evaluator"] != "final":
+                        continue
+                    payload[key] = version["id"]
+                    if key == "reward_version_id":
+                        payload.update(annotation_id=version["id"], annotation_status="READY",
+                                       annotation_config=version.get("parameters"))
+            if not changed:
                 return self._public(payload)
-            summary = {key: version.get(key) for key in (
-                "id", "evaluator", "status", "parameters", "created_at", "completed_at", "error",
-            )}
-            if existing == summary:
-                return self._public(payload)
-            if existing is None:
-                versions.append(summary)
-            else:
-                existing.update(summary)
-            if version["status"] == "READY":
-                current[version["evaluator"]] = version["id"]
-                payload["evaluation_version_ids"] = current
-                key = "robometer_version_id" if version["evaluator"] == "robometer" else "reward_version_id"
-                payload[key] = version["id"]
-                if key == "reward_version_id":
-                    payload.update(annotation_id=version["id"], annotation_status="READY",
-                                   annotation_config=version.get("parameters"))
             payload["updated_at"] = _utc_now()
             atomic_write_json(path, payload)
             self.repository.upsert(payload, path)
@@ -769,8 +783,11 @@ class TrainingDatasetService:
             payload["evaluation_version_ids"] = self.current_evaluation_ids(payload)
             payload["evaluation_version_ids"][version["evaluator"]] = version_id
             key = "robometer_version_id" if version["evaluator"] == "robometer" else "reward_version_id"
-            payload[key] = version_id
-            if key == "reward_version_id":
+            train_selected = key == "reward_version_id" and (version["evaluator"] == "final"
+                or "final" not in payload["evaluation_version_ids"])
+            if key == "robometer_version_id" or train_selected:
+                payload[key] = version_id
+            if train_selected:
                 payload.update(annotation_id=version_id, annotation_status="READY",
                                annotation_config=version.get("parameters"))
             payload["updated_at"] = _utc_now()

@@ -4,11 +4,11 @@ import {
   listTrainingDatasetMembers, verifyTrainingDataset,
 } from "../run-control/api";
 import type {
-  OfflineJob, PaginatedRuns, RewardParameters, RewardSource, TrainingDataset,
+  OfflineJob, PaginatedRuns, RewardParameters, RewardSource, TrainingDataset, EvaluationOperation,
 } from "../run-control/types";
 import { Badge } from "../../components/ui/Badge";
 import { RunTable } from "./RunTable";
-import { rewardParameterLabels, rewardSourceLabels } from "./rewardVersions";
+import { evaluationOperationLabels, rewardParameterLabels, rewardSourceLabels } from "./rewardVersions";
 const successful = (status: string) => ["COMPLETED", "READY"].includes(status);
 
 export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onRemove, onDerive, initialExpanded = false,
@@ -20,9 +20,9 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
 }) {
   const [expanded, setExpanded] = useState(initialExpanded);
   const [showMembers, setShowMembers] = useState(false);
-  const [configs, setConfigs] = useState<Partial<Record<RewardSource, RewardParameters>>>({});
+  const [configs, setConfigs] = useState<Partial<Record<RewardSource | EvaluationOperation, RewardParameters>>>({});
   const [configReady, setConfigReady] = useState(false);
-  const [source, setSource] = useState<RewardSource>("rynnvalue");
+  const [source, setSource] = useState<EvaluationOperation>("final");
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(5);
@@ -41,8 +41,10 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
       : [...versions].reverse().find((item) => item.evaluator === evaluator && successful(item.status)));
   };
   const parameters = configs[source] ?? {};
-  const currentEvaluation = currentFor(source);
-  const latestAttempt = [...versions].reverse().find((item) => item.evaluator === source);
+  const currentEvaluation = currentFor(source === "all" ? "final" : source);
+  const latestAttempt = [...versions].reverse().find((item) => item.evaluator === (source === "all" ? "final" : source));
+  const finalMode = source === "final" || source === "all";
+  const multiplicative = finalMode && parameters.fusion_mode === "multiplicative";
   const taskRunning = dataset.annotation_status === "RUNNING"
     || versions.some((version) => ["STARTING", "RUNNING", "STOPPING"].includes(version.status));
   const blocked = disabled || busy || taskRunning;
@@ -56,10 +58,18 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
       const next = { ...defaults };
       for (const evaluator of Object.keys(rewardSourceLabels) as RewardSource[]) {
         const version = currentFor(evaluator);
-        next[evaluator] = { ...next[evaluator], ...version?.parameters, force_model: false, overwrite_global: false };
+        next[evaluator] = { ...next[evaluator], ...version?.parameters,
+          checkpoint: defaults[evaluator]?.checkpoint, revision: defaults[evaluator]?.revision,
+          prefix_frames: defaults[evaluator]?.prefix_frames, force_model: false, overwrite_global: false };
       }
-      setConfigs(next); setSource(currentFor("rynnvalue") ? "rynnvalue"
-        : (Object.keys(rewardSourceLabels) as RewardSource[]).find((evaluator) => currentFor(evaluator)) ?? "rynnvalue"); setConfigReady(true);
+      next.all = { ...next.all, ...next.final,
+        max_frames: next.rynnvalue.max_frames, batch_size: next.rynnvalue.batch_size,
+        sampling_hz: next.robometer.sampling_hz, robometer_batch_size: next.robometer.batch_size,
+        force_model: true };
+      for (const kind of ["final", "all"] as const) {
+        if (next[kind].fusion_mode === "multiplicative") next[kind].accumulate_primitive_steps = false;
+      }
+      setConfigs(next); setConfigReady(true);
     }).catch((error) => { if (current) onError(String(error)); })
       .finally(() => { if (current) setBusy(false); });
     return () => { current = false; };
@@ -87,21 +97,27 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
   };
   const generate = () => run(async () => {
     // Only send parameters meaningful for this evaluator; display metadata is read-only.
-    const request: RewardParameters & { source: RewardSource } = { source, overwrite_global: parameters.overwrite_global ?? false };
+    const request: RewardParameters & { source: EvaluationOperation } = { source, overwrite_global: parameters.overwrite_global ?? false };
     if (source !== "robometer") {
       request.gamma = parameters.gamma;
-      request.accumulate_primitive_steps = parameters.accumulate_primitive_steps;
+      request.accumulate_primitive_steps = multiplicative ? false : parameters.accumulate_primitive_steps;
     }
-    if (source === "stage") request.stage_exponent = parameters.stage_exponent;
-    if (source === "rynnvalue") {
+    if (finalMode) {
+      request.stage_exponent = parameters.stage_exponent;
+      request.alpha = parameters.alpha ?? 0;
+      request.fusion_mode = parameters.fusion_mode ?? "additive";
+      request.shaping_weight = parameters.shaping_weight;
+    }
+    if (source === "rynnvalue" || source === "all") {
       request.shaping_weight = parameters.shaping_weight;
       request.max_frames = parameters.max_frames;
     }
-    if (source === "rynnvalue" || source === "robometer") {
+    if (source === "rynnvalue" || source === "robometer" || source === "all") {
       request.batch_size = parameters.batch_size;
-      request.force_model = parameters.force_model ?? false;
+      request.force_model = source === "all" || (parameters.force_model ?? false);
     }
-    if (source === "robometer") request.sampling_hz = parameters.sampling_hz;
+    if (source === "robometer" || source === "all") request.sampling_hz = parameters.sampling_hz;
+    if (source === "all") request.robometer_batch_size = parameters.robometer_batch_size;
     onJob(await annotateTrainingDataset(dataset.id, request));
     await onRefresh();
   });
@@ -112,7 +128,7 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
 
   return <article className="dataset-card">
     <div className="dataset-card-description"><h2>{dataset.name}</h2><p>{dataset.member_count} 条轨迹 · {dataset.action_count} actions · {dataset.chunk_count} chunks</p>
-      <p>{(Object.keys(rewardSourceLabels) as RewardSource[]).map((evaluator) =>
+      <p>{(["final", "rynnvalue", "robometer"] as RewardSource[]).map((evaluator) =>
         `${rewardSourceLabels[evaluator]}：${currentFor(evaluator) ? "数据集专属" : "继承全局"}`).join(" · ")}</p></div>
     <div className="dataset-badges"><Badge tone={dataset.integrity_status === "HEALTHY" ? "green" : "red"}>{dataset.integrity_status}</Badge>
       <Badge tone={dataset.annotation_status === "READY" ? "green" : dataset.annotation_status === "ERROR" ? "red" : "neutral"}>{dataset.annotation_status === "NOT_STARTED" ? "全局继承" : dataset.annotation_status}</Badge></div>
@@ -128,28 +144,34 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
       {!configReady ? <p role="status">{busy ? "正在加载评价配置…" : "配置加载失败，请收起后重试。"}</p> : <>
         <div className="evaluation-config-heading"><div><h3>评价配置</h3><p>默认复用各轨迹的全局评价，无需为新数据集再次评价。重新评价只覆盖当前数据集的所选类型。</p></div>
           <Badge tone={currentEvaluation ? "green" : undefined}>{currentEvaluation ? "数据集专属评价" : "默认继承全局评价"}</Badge></div>
-        <fieldset disabled={blocked} className="parameter-grid">
-          <label>评价类型<select value={source} onChange={(event) => setSource(event.target.value as RewardSource)}>
-            {Object.entries(rewardSourceLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <fieldset disabled={blocked} className={`parameter-grid ${source === "final" ? "final-reward-parameters" : ""}`}>
+          <label>评价类型<select value={source} onChange={(event) => setSource(event.target.value as EvaluationOperation)}>
+            {Object.entries(evaluationOperationLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          {finalMode && <><label>形式<select value={parameters.fusion_mode ?? "additive"} onChange={(event) => patch({ fusion_mode: event.target.value as "additive" | "multiplicative", ...(event.target.value === "multiplicative" ? { accumulate_primitive_steps: false } : {}) })}><option value="additive">相加</option><option value="multiplicative">相乘</option></select></label>
+            {numeric("stage_exponent", "Stage 指数 p", 1, "any")}
+            {parameters.fusion_mode !== "multiplicative" && numeric("alpha", "Stage 系数 α", 0, "any", 1)}
+            {numeric("shaping_weight", "塑形系数 κ", 0, "any")}</>}
           <label>同步覆盖全局评价<select value={String(parameters.overwrite_global ?? false)} onChange={(event) => patch({ overwrite_global: event.target.value === "true" })}><option value="false">Off</option><option value="true">On</option></select></label>
           {source !== "robometer" && <>{numeric("gamma", "Discount γ", 0, "any", 1)}
-            <label>cumulative reward<select value={String(parameters.accumulate_primitive_steps ?? false)} onChange={(event) => patch({ accumulate_primitive_steps: event.target.value === "true" })}><option value="false">Off</option><option value="true">On</option></select></label></>}
-          {source === "stage" && numeric("stage_exponent", "Stage 插值指数 p", 1, "any")}
-          {source === "rynnvalue" && <>{numeric("max_frames", "max_frames", 2, 1, 64)}{numeric("shaping_weight", "Shape reward 系数 κ", 0, "any")}</>}
-          {source === "robometer" && <>{numeric("sampling_hz", "评价 fps", .01, "any", 20)}<label>前缀帧数<input value={4} disabled readOnly /></label></>}
+            {!multiplicative && <label>cumulative reward<select value={String(parameters.accumulate_primitive_steps ?? false)} onChange={(event) => patch({ accumulate_primitive_steps: event.target.value === "true" })}><option value="false">Off</option><option value="true">On</option></select></label>}</>}
+          {(source === "rynnvalue" || source === "all") && numeric("max_frames", "RynnValue max_frames", 2, 1, 64)}
+          {source === "rynnvalue" && numeric("shaping_weight", "Shape reward 系数 κ", 0, "any")}
+          {(source === "robometer" || source === "all") && <>{numeric("sampling_hz", "Robometer fps", .01, "any", 20)}<label>前缀帧数<input value={4} disabled readOnly /></label></>}
+          {source === "all" && <>{numeric("batch_size", "RynnValue batch size", 1, 1)}{numeric("robometer_batch_size", "Robometer batch size", 1, 1)}</>}
           {(source === "rynnvalue" || source === "robometer") && <>{numeric("batch_size", "评价 batch size", 1, 1)}
             <label>重新运行模型<select value={String(parameters.force_model ?? false)} onChange={(event) => patch({ force_model: event.target.value === "true" })}><option value="false">Off · 复用兼容结果</option><option value="true">On · 重新计算模型输出</option></select></label></>}
         </fieldset>
         {(source === "rynnvalue" || source === "robometer") && <div className="evaluation-model-summary"><span>评价模型</span><strong title={parameters.revision ? `固定 revision：${parameters.revision}` : undefined}>{parameters.checkpoint ?? "未配置"}</strong><Badge>已锁定</Badge></div>}
+        {source === "all" && (["rynnvalue", "robometer"] as const).map((model) => <div key={model} className="evaluation-model-summary"><span>{rewardSourceLabels[model]}</span><strong title={`固定 revision：${configs[model]?.revision ?? "未配置"}`}>{configs[model]?.checkpoint ?? "未配置"}</strong><Badge>已锁定</Badge></div>)}
         {currentEvaluation && <div className="evaluation-current-summary"><span>当前结果配置</span><div className="reward-parameter-chips">{rewardParameterLabels(currentEvaluation.parameters).map((label) => <span key={label}>{label}</span>)}</div></div>}
         <p className="field-hint">首次评价会保存该类型的全局结果；同步覆盖仅更新同类型的全局结果。数据集缺少某类型结果时，每条轨迹使用对应的全局结果。</p>
-        <p className="field-hint">{source === "stage" ? "使用最新保存的关键帧重新计算；修改 p 或奖励公式不需要重新标记。缺少标注时会列出相应轨迹并停止。"
+        <p className="field-hint">{source === "final" ? "复用已有模型输出与最新关键帧重算，不运行模型。缺少所需输入或 Stage 分数大于 0 时停止。"
           : source === "robometer" ? "仅用于诊断与对比，不改变当前训练奖励。"
-            : source === "sparse" ? "仅计算 Sparse 训练奖励，不加载模型。"
+            : source === "all" ? "顺序重新运行 RynnValue、Robometer，并生成 Final Reward；全部成功后替换对应结果。"
               : "已有兼容模型输出会复用；奖励参数变化只重新计算奖励。"}</p>
-        {source === "robometer" && robometerUnavailable && <p className="error-banner">{robometerUnavailable}</p>}
+        {(source === "robometer" || source === "all") && robometerUnavailable && <p className="error-banner">{robometerUnavailable}</p>}
         {latestAttempt?.error && <p className="error-banner">上次评价失败：{latestAttempt.error}</p>}
-        <div className="evaluation-config-actions"><button className="primary" disabled={blocked || dataset.integrity_status !== "HEALTHY" || (source === "robometer" && Boolean(robometerUnavailable))} onClick={() => void generate()}>{taskRunning ? "正在评价…" : currentEvaluation ? "重新评价" : "开始评价"}</button></div>
+        <div className="evaluation-config-actions"><button className="primary" disabled={blocked || dataset.integrity_status !== "HEALTHY" || ((source === "robometer" || source === "all") && Boolean(robometerUnavailable))} onClick={() => void generate()}>{taskRunning ? "正在评价…" : currentEvaluation ? "重新评价" : "开始评价"}</button></div>
       </>}
     </section>}
     {showMembers && <section className="dataset-member-browser" aria-label={`${dataset.name} 成员`}>

@@ -22,7 +22,7 @@ from ..storage.files import atomic_write_json
 
 
 SIDECAR = "trajectory_reward.json"
-SOURCES = ("sparse", "stage", "rynnvalue")
+SOURCES = ("sparse", "stage", "rynnvalue", "final")
 _LOCK = threading.RLock()
 _CACHE: dict[str, tuple[tuple, dict[str, Any] | None]] = {}
 _RYNN_CACHE: dict[str, tuple[tuple, bool]] = {}
@@ -219,7 +219,7 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
         raise ValueError("Reward snapshot input is incomplete or mismatched")
     recipe = rewards.get("reward_config") or {}
     source = recipe.get("source", "rynnvalue")
-    if source not in {"sparse", "stage", "rynnvalue"}:
+    if source not in SOURCES:
         raise ValueError("Unsupported trajectory reward source")
     members = {entry["run_id"]: entry for entry in prepared["episodes"]}
     selected = set(run_ids) if run_ids is not None else None
