@@ -241,20 +241,27 @@ class OfflineJobRepository:
             return dict(row)
 
     def training_queue_ids(self, *, pending_only: bool = False) -> list[str]:
+        return self.queue_ids(kind="training", pending_only=pending_only)
+
+    def queue_ids(self, *, kind: str | None = None, pending_only: bool = False) -> list[str]:
         """All pending runs plus a bounded recent history, in registration order."""
+        if kind not in {None, "training", "evaluation"}:
+            raise ValueError("Unsupported queue kind")
+        kind_filter = "kind IN ('training','evaluation')" if kind is None else "kind=?"
+        parameters = (self.project_id,) if kind is None else (self.project_id, kind)
         with connect(self.database_path) as database:
             if pending_only:
                 return [row["id"] for row in database.execute(
-                    """SELECT id FROM offline_jobs WHERE project_id=? AND kind='training'
+                    f"""SELECT id FROM offline_jobs WHERE project_id=? AND {kind_filter}
                     AND status IN ('QUEUED','STARTING','RUNNING','STOPPING') ORDER BY created_at, id""",
-                    (self.project_id,),
+                    parameters,
                 )]
             return [row["id"] for row in database.execute(
-                """SELECT id FROM offline_jobs WHERE project_id=? AND kind='training'
+                f"""SELECT id FROM offline_jobs WHERE project_id=? AND {kind_filter}
                 AND (status IN ('QUEUED','STARTING','RUNNING','STOPPING') OR id IN (
-                    SELECT id FROM offline_jobs WHERE project_id=? AND kind='training'
+                    SELECT id FROM offline_jobs WHERE project_id=? AND {kind_filter}
                     ORDER BY created_at DESC, id DESC LIMIT 20
-                )) ORDER BY created_at, id""", (self.project_id, self.project_id),
+                )) ORDER BY created_at, id""", parameters + parameters,
             )]
 
     def upsert(self, job: dict[str, Any], job_path: Path) -> None:

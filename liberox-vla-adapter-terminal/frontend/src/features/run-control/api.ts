@@ -123,6 +123,11 @@ export const enqueueTraining = (datasetId: string, parameters: Record<string, un
     method: "POST", body: JSON.stringify({ dataset_id: datasetId, parameters }),
   });
 export const getTrainingQueue = () => api<import("./types").TrainingQueueState>("/api/training-queue");
+export const getEvaluationQueue = () => api<import("./types").EvaluationQueueState>("/api/evaluations/queue");
+export const enqueueEvaluation = (config: EvaluationConfig, scheduleSha256: string) =>
+  api<OfflineJob>("/api/evaluations/queue", {
+    method: "POST", body: JSON.stringify({ ...config, schedule_sha256: scheduleSha256 }),
+  });
 export const getTensorBoard = () => api<TensorBoardStatus>("/api/tensorboard");
 export const startTensorBoard = () => api<TensorBoardStatus>(
   "/api/tensorboard/start", { method: "POST" },

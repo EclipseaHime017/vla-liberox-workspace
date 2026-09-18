@@ -42,7 +42,7 @@ async def model_detail(policy_id: str, request: Request):
 @router.patch("/{policy_id}")
 async def rename_model(policy_id: str, body: RenamePolicyRequest, request: Request):
     try:
-        return _service(request).rename(policy_id, body.label)
+        return await run_in_threadpool(_service(request).rename, policy_id, body.label)
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -58,6 +58,6 @@ async def copy_model(policy_id: str, body: CopyPolicyRequest, request: Request):
 @router.delete("/{policy_id}")
 async def delete_model(policy_id: str, body: DeletePolicyRequest, request: Request):
     try:
-        return _service(request).delete(policy_id, body.confirm_policy_id)
+        return await run_in_threadpool(_service(request).delete, policy_id, body.confirm_policy_id)
     except Exception as exc:
         raise http_error(exc) from exc

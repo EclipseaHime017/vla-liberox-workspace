@@ -39,17 +39,24 @@ export function EvaluationMonitor({ initial, onUpdate, onDismiss }: {
   const [error, setError] = useState("");
   const monitor = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  const updateCallback = useRef(onUpdate);
+  const subscription = useRef(0);
+  updateCallback.current = onUpdate;
+  useEffect(() => { setJob(initial); }, [initial]);
 
   useEffect(() => {
+    let current = true;
+    subscription.current += 1;
     setJob(initial); setText(""); setError("");
     const socket = jobWebSocket(initial.id);
     socket.onmessage = (event) => {
+      if (!current) return;
       const payload = JSON.parse(event.data) as { job?: OfflineJob; logs?: { text: string } };
-      if (payload.job) { setJob(payload.job); onUpdate?.(payload.job); }
+      if (payload.job) { setJob(payload.job); updateCallback.current?.(payload.job); }
       if (payload.logs?.text) setText((current) => current + payload.logs!.text);
     };
-    socket.onerror = () => setError("测试监视器连接中断，后台测试不会因此停止");
-    return () => socket.close();
+    socket.onerror = () => { if (current) setError("测试监视器连接中断，后台测试不会因此停止"); };
+    return () => { current = false; subscription.current += 1; socket.close(); };
   }, [initial.id]);
 
   useEffect(() => {
@@ -67,6 +74,13 @@ export function EvaluationMonitor({ initial, onUpdate, onDismiss }: {
   const elapsed = numeric(metric, "elapsed_seconds", "wall_time_seconds");
   const eta = numeric(metric, "estimated_remaining_seconds", "eta_seconds");
   const hz = numeric(metric, "measured_control_hz", "control_hz");
+  const stop = async () => {
+    const generation = subscription.current;
+    try {
+      const next = await stopEvaluation(job.id);
+      if (generation === subscription.current) { setJob(next); updateCallback.current?.(next); }
+    } catch (reason) { if (generation === subscription.current) setError(String(reason)); }
+  };
 
   return <section className="surface evaluation-monitor-card">
     <div className="panel-title"><strong>测试监视器</strong><span>{job.id}</span></div>
@@ -81,7 +95,7 @@ export function EvaluationMonitor({ initial, onUpdate, onDismiss }: {
     <div className="evaluation-progress"><div style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} /></div>
     <div className="job-status-strip evaluation-job-actions">
       <span><b>{job.stage_label}</b>{String(metric.message ?? "批量测试按冻结调度顺序执行")}</span>
-      {!terminal.has(job.status) && <button className="danger" onClick={() => void stopEvaluation(job.id).then((next) => { setJob(next); onUpdate?.(next); }).catch((reason) => setError(String(reason)))}>停止测试</button>}
+      {!terminal.has(job.status) && <button className="danger" disabled={job.status === "STOPPING"} onClick={() => void stop()}>{job.status === "QUEUED" ? "取消排队" : "停止测试"}</button>}
       {terminal.has(job.status) && onDismiss && <button onClick={onDismiss}>关闭记录</button>}
     </div>
     {error && <p className="job-warning">{error}</p>}

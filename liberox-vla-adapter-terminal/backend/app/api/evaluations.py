@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
+from starlette.concurrency import run_in_threadpool
 
 from .dependencies import http_error, offline_job_service
-from .models import DeleteEvaluationRequest, EvaluationRequest
+from .models import DeleteEvaluationRequest, EvaluationQueueRequest, EvaluationRequest
 
 
 router = APIRouter(prefix="/api/evaluations", tags=["evaluations"])
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/api/evaluations", tags=["evaluations"])
 @router.post("/preview")
 async def preview(body: EvaluationRequest, request: Request):
     try:
-        return offline_job_service(request).preview_evaluation(body.model_dump())
+        return await run_in_threadpool(offline_job_service(request).preview_evaluation, body.model_dump())
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -22,7 +23,7 @@ async def preview(body: EvaluationRequest, request: Request):
 @router.post("", status_code=201)
 async def create(body: EvaluationRequest, request: Request):
     try:
-        return offline_job_service(request).start_evaluation(body.model_dump())
+        return await run_in_threadpool(offline_job_service(request).start_evaluation, body.model_dump())
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -38,7 +39,7 @@ async def history(
     date_to: str | None = Query(default=None),
 ):
     try:
-        return offline_job_service(request).list_evaluations(
+        return await run_in_threadpool(offline_job_service(request).list_evaluations,
             task_id=task_id,
             **({"task_ids": task_ids} if task_ids is not None else {}),
             policy_id=policy_id,
@@ -50,10 +51,23 @@ async def history(
         raise http_error(exc) from exc
 
 
+@router.get("/queue")
+async def queue(request: Request):
+    return await run_in_threadpool(offline_job_service(request).evaluation_queue)
+
+
+@router.post("/queue", status_code=201)
+async def enqueue(body: EvaluationQueueRequest, request: Request):
+    try:
+        return await run_in_threadpool(offline_job_service(request).enqueue_evaluation, body.model_dump())
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
 @router.get("/{evaluation_id}")
 async def detail(evaluation_id: str, request: Request):
     try:
-        return offline_job_service(request).get_evaluation(evaluation_id)
+        return await run_in_threadpool(offline_job_service(request).get_evaluation, evaluation_id)
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -61,7 +75,7 @@ async def detail(evaluation_id: str, request: Request):
 @router.post("/{evaluation_id}/stop")
 async def stop(evaluation_id: str, request: Request):
     try:
-        return offline_job_service(request).stop_evaluation(evaluation_id)
+        return await run_in_threadpool(offline_job_service(request).stop_evaluation, evaluation_id)
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -71,7 +85,7 @@ async def delete(
     evaluation_id: str, body: DeleteEvaluationRequest, request: Request
 ):
     try:
-        return offline_job_service(request).delete_evaluation(
+        return await run_in_threadpool(offline_job_service(request).delete_evaluation,
             evaluation_id, body.confirm_evaluation_id
         )
     except Exception as exc:

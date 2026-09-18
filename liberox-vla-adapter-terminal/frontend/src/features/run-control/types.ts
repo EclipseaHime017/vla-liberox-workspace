@@ -295,9 +295,12 @@ export type OfflineJob = {
   evaluation_summary?: EvaluationAggregate & { evaluation_id?: string };
 };
 
-export type TrainingQueueItem = Pick<OfflineJob, "id" | "kind" | "status" | "dataset_id" | "created_at"
+export type OfflineQueueItem = Pick<OfflineJob, "id" | "kind" | "status" | "dataset_id" | "created_at"
   | "started_at" | "completed_at" | "stage" | "stage_label" | "error" | "parameters">;
-export type TrainingQueueState = { jobs: TrainingQueueItem[]; waiting_reason: string | null };
+export type OfflineQueueState = { jobs: OfflineQueueItem[]; waiting_reason: string | null };
+export type TrainingQueueItem = OfflineQueueItem;
+export type TrainingQueueState = OfflineQueueState;
+export type EvaluationQueueState = OfflineQueueState;
 
 export type EvaluationStatus = OfflineJob["status"];
 

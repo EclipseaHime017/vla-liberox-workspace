@@ -24,7 +24,7 @@ Franka/LIBERO-X task families, including their official LEVEL1–4 variants.
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
 - Serial training queue: register independent runs while another run is active; the form stays open with its parameters ready to edit for the next run. Each job pins its configuration and rewards; completion, failure or cancellation advances to the next job. The backend schedules without an open browser and restores pending jobs after restart. UI checkpoint resume is hidden; CLI resume remains available.
 - Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
-- Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
+- Batch testing: preview a deterministic init-state/seed schedule, then register independent policy tests in a persistent FIFO queue. Tests share the training dispatcher and GPU lock; canceling a waiting test or stopping the current test leaves subsequent tasks intact.
 
 ## Repository layout
 

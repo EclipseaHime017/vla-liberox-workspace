@@ -1,4 +1,4 @@
-"""Durable FIFO dispatch for independently configured UI training jobs."""
+"""Shared durable FIFO dispatch for UI training and policy test jobs."""
 from __future__ import annotations
 
 import fcntl
@@ -15,7 +15,7 @@ class TrainingQueue:
         self._queue_stop = threading.Event()
         self._queue_wake = threading.Event()
         self._queue_wait_reason = None
-        self._queue_thread = threading.Thread(target=self._queue_loop, name="training-queue", daemon=True)
+        self._queue_thread = threading.Thread(target=self._queue_loop, name="offline-queue", daemon=True)
         self._queue_thread.start()
 
     def _wake_training_queue(self) -> None:
@@ -44,9 +44,24 @@ class TrainingQueue:
             return job
 
     def training_queue(self) -> dict:
+        return self._job_queue("training")
+
+    def evaluation_queue(self) -> dict:
+        return self._job_queue("evaluation")
+
+    def enqueue_evaluation(self, request: dict) -> dict:
+        with self.lock:
+            preview = self.preview_evaluation(request)
+            if request.get("schedule_sha256") != preview["schedule_sha256"]:
+                raise ValueError("测试调度已变化，请重新预览后注册")
+            job = self._launch_evaluation(preview, queued=True)
+            self._wake_training_queue()
+            return job
+
+    def _job_queue(self, kind: str) -> dict:
         # Only small job manifests: no model hashes, reward arrays, metrics or log reads.
         jobs = []
-        for identifier in self.repository.training_queue_ids():
+        for identifier in self.repository.queue_ids(kind=kind):
             try:
                 _, job = self._load_job(identifier)
             except (OSError, ValueError, KeyError, TypeError):
@@ -63,7 +78,7 @@ class TrainingQueue:
             try:
                 self._dispatch_training_queue()
             except Exception:
-                logging.getLogger(__name__).exception("Training queue dispatch failed; retrying")
+                logging.getLogger(__name__).exception("Offline queue dispatch failed; retrying")
             self._queue_wake.wait(2.0)
             self._queue_wake.clear()
 
@@ -77,7 +92,7 @@ class TrainingQueue:
             if getattr(self, "_queue_stop", None) is not None and self._queue_stop.is_set():
                 return
             queued = []
-            for identifier in self.repository.training_queue_ids(pending_only=True):
+            for identifier in self.repository.queue_ids(pending_only=True):
                 try:
                     _, job = self._load_job(identifier)
                     if job["status"] != "QUEUED":
@@ -85,7 +100,7 @@ class TrainingQueue:
                     else:
                         queued.append(job)
                 except (OSError, ValueError, KeyError, TypeError):
-                    logging.getLogger(__name__).exception("Cannot read training job %s; skipping", identifier)
+                    logging.getLogger(__name__).exception("Cannot read queued job %s; skipping", identifier)
                     self.repository.fail_unreadable_job(identifier)
             if not queued:
                 self._queue_wait_reason = None
@@ -97,15 +112,33 @@ class TrainingQueue:
                 self._queue_wait_reason = str(exc)
                 return
             except Exception as exc:
-                self._queue_wait_reason = f"等待训练资源：{exc}"
+                self._queue_wait_reason = f"等待 GPU 任务资源：{exc}"
                 return
             self._queue_wait_reason = None
+            spawning = False
             try:
                 selected.update(status="STARTING", stage="starting", stage_label="准备后台任务",
                                 dispatched_at=datetime.now(timezone.utc).isoformat())
                 path = self._job_path(selected["id"])
                 atomic_write_json(path, selected)
                 self.repository.upsert(selected, path)
+                if selected["kind"] == "evaluation":
+                    result_path = self._evaluation_manifest(selected["id"])
+                    result = self._load_evaluation_manifest(result_path)
+                    result["status"] = "STARTING"
+                    atomic_write_json(result_path, result)
+                    self.evaluation_repository.upsert(result, result_path)
+                spawning = True
                 self._spawn_job(selected)
+            except Exception as exc:
+                # _spawn_job owns launch failures; once Popen succeeds, only the
+                # runner may update its manifest. Never overwrite a live child.
+                if not spawning:
+                    selected.update(status="FAILED", error=f"Cannot prepare queued job: {type(exc).__name__}: {exc}",
+                                    completed_at=datetime.now(timezone.utc).isoformat())
+                    atomic_write_json(self._job_path(selected["id"]), selected)
+                    self.repository.upsert(selected, self._job_path(selected["id"]))
+                logging.getLogger(__name__).exception("Cannot launch queued job %s", selected["id"])
+                raise
             finally:
                 self.launch_reserved = False

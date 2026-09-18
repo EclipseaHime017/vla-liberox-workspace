@@ -1,5 +1,5 @@
-import { act, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OfflineJob } from "../run-control/types";
 
 let socket: { onmessage: ((event: { data: string }) => void) | null; onerror: (() => void) | null; close: ReturnType<typeof vi.fn> } = {
@@ -13,6 +13,7 @@ vi.mock("../../api/websocket", () => ({
 }));
 vi.mock("../run-control/api", () => ({ stopEvaluation: vi.fn() }));
 import { EvaluationMonitor } from "./EvaluationMonitor";
+import { stopEvaluation } from "../run-control/api";
 
 const job: OfflineJob = {
   id: "eval-1", kind: "evaluation", status: "RUNNING", dataset_id: null,
@@ -22,6 +23,43 @@ const job: OfflineJob = {
 };
 
 describe("evaluation monitor", () => {
+  afterEach(cleanup);
+  it("ignores a stop response after switching to another monitored test", async () => {
+    let resolve!: (value: OfflineJob) => void;
+    vi.mocked(stopEvaluation).mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const onUpdate = vi.fn();
+    const view = render(<EvaluationMonitor initial={job} onUpdate={onUpdate} />);
+    fireEvent.click(screen.getByRole("button", { name: "停止测试" }));
+    view.rerender(<EvaluationMonitor initial={{ ...job, id: "next" }} onUpdate={onUpdate} />);
+    await act(async () => resolve({ ...job, status: "STOPPING" }));
+    expect(screen.getByText("RUNNING")).toBeTruthy();
+    expect(screen.getByText("next")).toBeTruthy();
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+  it("accepts polled state updates without losing logs or reconnecting", () => {
+    const view = render(<EvaluationMonitor initial={{ ...job, status: "QUEUED" }} />);
+    expect(screen.getByRole("button", { name: "取消排队" })).toBeTruthy();
+    const connected = socket;
+    act(() => connected.onmessage?.({ data: JSON.stringify({ logs: { text: "saved log\n" } }) }));
+    view.rerender(<EvaluationMonitor initial={{ ...job, status: "CANCELED" }} />);
+    expect(screen.getByText("CANCELED")).toBeTruthy();
+    expect(screen.getByText("saved log")).toBeTruthy();
+    expect(socket).toBe(connected);
+    expect(screen.queryByRole("button", { name: "取消排队" })).toBeNull();
+  });
+
+  it("ignores messages from a previous job socket and uses the current callback", () => {
+    const oldCallback = vi.fn(), newCallback = vi.fn();
+    const view = render(<EvaluationMonitor initial={job} onUpdate={oldCallback} />);
+    const previous = socket;
+    const next = { ...job, id: "next" };
+    view.rerender(<EvaluationMonitor initial={next} onUpdate={newCallback} />);
+    act(() => previous.onmessage?.({ data: JSON.stringify({ job }) }));
+    expect(oldCallback).not.toHaveBeenCalled();
+    expect(newCallback).not.toHaveBeenCalled();
+    act(() => socket.onmessage?.({ data: JSON.stringify({ job: next }) }));
+    expect(newCallback).toHaveBeenCalledWith(next);
+  });
   it("shows streamed schedule progress and live success rate", () => {
     render(<EvaluationMonitor initial={job} />);
     act(() => socket.onmessage?.({ data: JSON.stringify({

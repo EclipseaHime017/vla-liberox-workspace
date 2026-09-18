@@ -1,20 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { TaskFilter, TaskSelector } from "../features/run-config/TaskSelector";
 import { ALL_TASK_SCOPE, taskIdsForScope, type TaskScope } from "../features/run-config/taskHierarchy";
 import { Badge } from "../components/ui/Badge";
 import {
-  deleteEvaluation, getBootstrap, getEvaluation, listEvaluations, listOfflineJobs,
-  previewEvaluation, startEvaluation,
+  deleteEvaluation, getBootstrap, getEvaluation, listEvaluations, previewEvaluation,
 } from "../features/run-control/api";
 import type {
   Bootstrap, EvaluationAggregate, EvaluationBreakdown, EvaluationConfig,
-  EvaluationFilters, EvaluationPreview, EvaluationRecord, EvaluationStatus, OfflineJob,
+  EvaluationFilters, EvaluationPreview, EvaluationRecord, EvaluationStatus,
 } from "../features/run-control/types";
 import { SuccessRateChart } from "../features/metrics/SuccessRateChart";
 import { EvaluationMonitor } from "../features/evaluation/EvaluationMonitor";
+import { EvaluationQueuePanel } from "../features/evaluation/EvaluationQueuePanel";
+import { useEvaluationQueue } from "../features/evaluation/useEvaluationQueue";
 
-const activeStatuses = new Set(["STARTING", "RUNNING", "STOPPING"]);
-const terminalStatuses = new Set(["COMPLETED", "FAILED", "CANCELED"]);
+const pendingStatuses = new Set(["QUEUED", "STARTING", "RUNNING", "STOPPING"]);
 
 function duration(seconds: number | null | undefined) {
   if (seconds == null || !Number.isFinite(seconds)) return "—";
@@ -131,11 +131,17 @@ export function EvaluationPage() {
   const [preview, setPreview] = useState<EvaluationPreview | null>(null);
   const [records, setRecords] = useState<EvaluationRecord[]>([]);
   const [selected, setSelected] = useState<EvaluationRecord | null>(null);
-  const [job, setJob] = useState<OfflineJob | null>(null);
   const [filters, setFilters] = useState<EvaluationFilters>({});
   const [historyScope, setHistoryScope] = useState<TaskScope>(ALL_TASK_SCOPE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const previewRequest = useRef(0);
+  const previewInput = useRef<EvaluationConfig | null>(null);
+  const historyRequest = useRef(0);
+  const detailRequest = useRef(0);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const historyTouched = useRef(false);
 
   const task = useMemo(() => bootstrap?.task_catalog.find((item) => item.task_id === taskId) ?? null, [bootstrap, taskId]);
   const availableStates = useMemo(() => task ? Array.from({ length: task.init_state_count }, (_, index) => task.init_state_index_min + index) : [], [task]);
@@ -146,21 +152,33 @@ export function EvaluationPage() {
     base_seed: baseSeed, seed_count: randomizeSeeds ? (customSeedCount ? seedCount : null) : 1,
     schedule_seed: scheduleSeed,
   };
-  const invalidate = (change: () => void) => { change(); setPreview(null); };
-
-  const loadHistory = async (nextFilters = filters) => {
-    const next = await listEvaluations({ ...nextFilters, task_id: historyScope.task_id || undefined,
-      task_ids: historyScope.task_id ? undefined : taskIdsForScope(bootstrap?.task_catalog ?? [], historyScope) });
-    setRecords(next);
-    if (selected) {
-      const refreshed = next.find((item) => item.id === selected.id);
-      if (refreshed) setSelected(await getEvaluation(refreshed.id));
-    }
+  const invalidate = (change: () => void) => {
+    previewRequest.current += 1; previewInput.current = null;
+    change(); setPreview(null);
   };
 
+  const loadHistory = async (nextFilters = filters) => {
+    historyTouched.current = true;
+    const request = ++historyRequest.current;
+    const selection = detailRequest.current;
+    const next = await listEvaluations({ ...nextFilters, task_id: historyScope.task_id || undefined,
+      task_ids: historyScope.task_id ? undefined : taskIdsForScope(bootstrap?.task_catalog ?? [], historyScope) });
+    if (request !== historyRequest.current) return;
+    setRecords(next);
+    const selectedId = selectedRef.current?.id;
+    if (selectedId && next.some((item) => item.id === selectedId)) {
+      const refreshed = await getEvaluation(selectedId);
+      if (request === historyRequest.current && selection === detailRequest.current && selectedRef.current?.id === selectedId) setSelected(refreshed);
+    }
+  };
+  const tests = useEvaluationQueue(() => void loadHistory().catch((reason) => setError(String(reason))), setError);
+
   useEffect(() => {
-    void Promise.all([getBootstrap(), listEvaluations(), listOfflineJobs()]).then(([nextBootstrap, nextRecords, jobs]) => {
-      setBootstrap(nextBootstrap); setRecords(nextRecords);
+    let current = true;
+    void Promise.all([getBootstrap(), listEvaluations()]).then(([nextBootstrap, nextRecords]) => {
+      if (!current) return;
+      setBootstrap(nextBootstrap);
+      if (!historyTouched.current) setRecords(nextRecords);
       setTaskId(nextBootstrap.task.task_id);
       setPolicyId(nextBootstrap.model.policy_id || nextBootstrap.policy_catalog[0]?.policy_id || "base");
       setMaxSteps(nextBootstrap.config.max_steps); setOpenLoopSteps(nextBootstrap.config.open_loop_steps);
@@ -168,9 +186,10 @@ export function EvaluationPage() {
       const nextTask = nextBootstrap.task_catalog.find((item) => item.task_id === nextBootstrap.task.task_id) ?? nextBootstrap.task;
       setStateIndices(Array.from({ length: nextTask.init_state_count }, (_, index) => nextTask.init_state_index_min + index));
       setFixedInitStateIndex(nextTask.init_state_index_min);
-      const active = jobs.find((item) => item.kind === "evaluation" && activeStatuses.has(item.status));
-      if (active) setJob(active);
-    }).catch((reason) => setError(String(reason)));
+    }).catch((reason) => { if (current) setError(String(reason)); });
+    return () => {
+      current = false; previewRequest.current += 1; historyRequest.current += 1; detailRequest.current += 1;
+    };
   }, []);
 
   const changeTask = (value: string) => invalidate(() => {
@@ -181,20 +200,31 @@ export function EvaluationPage() {
   });
   const toggleState = (value: number) => invalidate(() => setStateIndices((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value].sort((a, b) => a - b)));
   const makePreview = async () => {
+    const request = ++previewRequest.current;
+    const input = config;
+    setPreview(null); previewInput.current = null;
     setBusy(true); setError("");
-    try { setPreview(await previewEvaluation(config)); }
+    try {
+      const next = await previewEvaluation(input);
+      if (request === previewRequest.current) { previewInput.current = input; setPreview(next); }
+    }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
   const begin = async () => {
+    if (busy || !preview || !previewInput.current) return;
     setBusy(true); setError("");
-    try { setJob(await startEvaluation(config)); setPreview(null); await loadHistory(); }
+    try { await tests.register(previewInput.current, preview.schedule_sha256); }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
   const inspect = async (id: string) => {
+    const request = ++detailRequest.current;
     setBusy(true); setError("");
-    try { setSelected(await getEvaluation(id)); }
+    try {
+      const detail = await getEvaluation(id);
+      if (request === detailRequest.current) setSelected(detail);
+    }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
@@ -203,13 +233,13 @@ export function EvaluationPage() {
     const confirmation = window.prompt(`二次确认：请输入测试 ID\n${record.id}`, "");
     if (confirmation !== record.id) { if (confirmation !== null) setError("测试 ID 不匹配，未执行删除"); return; }
     setBusy(true); setError("");
-    try { await deleteEvaluation(record.id, confirmation); if (selected?.id === record.id) setSelected(null); await loadHistory(); }
+    try {
+      await deleteEvaluation(record.id, confirmation);
+      if (selectedRef.current?.id === record.id) { detailRequest.current += 1; selectedRef.current = null; setSelected(null); }
+      await loadHistory();
+    }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
-  };
-  const updateJob = (next: OfflineJob) => {
-    setJob(next);
-    if (terminalStatuses.has(next.status)) void loadHistory().catch((reason) => setError(String(reason)));
   };
 
   return <section className="content-page evaluation-page">
@@ -245,7 +275,7 @@ export function EvaluationPage() {
           </div>
         </details>
       </div>
-      <div className="evaluation-builder-actions"><button onClick={() => void makePreview()} disabled={busy || !taskId || !policyId || (randomizeInitStates && customStates && !stateIndices.length)}>预览调度</button><button className="primary" onClick={() => void begin()} disabled={busy || !preview || Boolean(job && activeStatuses.has(job.status))}>开始测试</button></div>
+      <div className="evaluation-builder-actions"><button onClick={() => void makePreview()} disabled={busy || !taskId || !policyId || (randomizeInitStates && customStates && !stateIndices.length)}>预览调度</button><button className="primary" onClick={() => void begin()} disabled={busy || !preview}>注册测试任务</button></div>
       {preview && <div className="evaluation-preview">
         <div><strong>{preview.schedule.length || trials}</strong><span>回合</span></div><div><strong>{Object.keys(preview.init_state_counts ?? {}).length}</strong><span>环境数</span></div><div><strong>{Object.keys(preview.seed_counts ?? {}).length}</strong><span>Seed 数</span></div><div><strong>{duration(preview.estimated_duration_seconds)}</strong><span>预计墙钟时间</span></div>
         <p>调度哈希 <code>{preview.schedule_sha256?.slice(0, 20)}</code> · 每个状态、seed 与组合的分配次数差不超过 1。</p>
@@ -253,20 +283,22 @@ export function EvaluationPage() {
       </div>}
     </section>
 
-    {job && <EvaluationMonitor initial={job} onUpdate={updateJob} onDismiss={() => setJob(null)} />}
+    <EvaluationQueuePanel queue={tests.queue} onInspect={(id) => void tests.inspect(id)} onStop={(id) => void tests.stop(id)} busyId={tests.stoppingId} />
+    {!tests.following && <button onClick={tests.follow}>跟随当前测试</button>}
+    {tests.job && <EvaluationMonitor initial={tests.job} onUpdate={tests.update} onDismiss={tests.dismiss} />}
 
     <section className="surface evaluation-history">
       <div className="panel-title"><strong>测试历史</strong><span>{records.length}</span></div>
       <div className="evaluation-filters">
         <TaskFilter tasks={bootstrap?.task_catalog ?? []} value={historyScope} onChange={setHistoryScope} labelPrefix="测试记录" />
         <label>模型<select value={filters.policy_id ?? ""} onChange={(event) => setFilters((current) => ({ ...current, policy_id: event.target.value || undefined }))}><option value="">全部模型</option>{bootstrap?.policy_catalog.map((item) => <option key={item.policy_id} value={item.policy_id}>{item.label}</option>)}</select></label>
-        <label>状态<select value={filters.status ?? ""} onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value as EvaluationStatus || undefined }))}><option value="">全部状态</option>{["STARTING", "RUNNING", "STOPPING", "COMPLETED", "FAILED", "CANCELED"].map((status) => <option key={status}>{status}</option>)}</select></label>
+        <label>状态<select value={filters.status ?? ""} onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value as EvaluationStatus || undefined }))}><option value="">全部状态</option>{["QUEUED", "STARTING", "RUNNING", "STOPPING", "COMPLETED", "FAILED", "CANCELED"].map((status) => <option key={status}>{status}</option>)}</select></label>
         <label>开始日期<input type="date" value={filters.date_from ?? ""} onChange={(event) => setFilters((current) => ({ ...current, date_from: event.target.value || undefined }))} /></label><label>结束日期<input type="date" value={filters.date_to ?? ""} onChange={(event) => setFilters((current) => ({ ...current, date_to: event.target.value || undefined }))} /></label>
         <button onClick={() => void loadHistory().catch((reason) => setError(String(reason)))} disabled={busy}>检索</button>
       </div>
       <div className="table-wrap"><table><thead><tr><th>时间 / ID</th><th>任务</th><th>策略</th><th>规模</th><th>成功率</th><th>覆盖率</th><th>状态 / 耗时</th><th>操作</th></tr></thead><tbody>{records.map((record) => <tr key={record.id} className={selected?.id === record.id ? "selected-row" : ""}>
         <td>{record.created_at ? new Date(record.created_at).toLocaleString() : "—"}<small className="cell-note">{record.id}</small></td><td>{record.task_prompt || record.task_name}</td><td>{record.policy_label}</td><td>{record.aggregate?.attempted_trials ?? 0}/{record.config?.trials ?? record.aggregate?.total_trials ?? 0}</td><td><strong>{percentage(record.aggregate?.success_rate)}</strong><small className="cell-note">{record.aggregate?.successes ?? 0} 成功 · {record.aggregate?.errors ?? 0} error</small></td><td>{percentage(record.aggregate?.completion_rate)}</td><td><Badge tone={badgeTone(record.status)}>{record.status}</Badge><small className="cell-note">{duration(record.wall_time_seconds)}</small></td>
-        <td><div className="history-actions"><button onClick={() => void inspect(record.id)}>查看详情</button><button className="danger" disabled={busy || activeStatuses.has(record.status)} onClick={() => void remove(record)}>删除</button></div></td>
+        <td><div className="history-actions"><button onClick={() => void inspect(record.id)}>查看详情</button><button className="danger" disabled={busy || pendingStatuses.has(record.status)} onClick={() => void remove(record)}>删除</button></div></td>
       </tr>)}</tbody></table>{!records.length && <div className="empty-table">尚无符合条件的策略测试。</div>}</div>
     </section>
     {selected && <EvaluationDetail record={selected} />}

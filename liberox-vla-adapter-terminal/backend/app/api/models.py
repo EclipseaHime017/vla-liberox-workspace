@@ -244,5 +244,9 @@ class EvaluationRequest(StrictModel):
         return self
 
 
+class EvaluationQueueRequest(EvaluationRequest):
+    schedule_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class DeleteEvaluationRequest(StrictModel):
     confirm_evaluation_id: str = Field(min_length=1)

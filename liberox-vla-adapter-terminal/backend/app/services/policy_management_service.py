@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -106,12 +107,18 @@ class PolicyManagementService:
             raise ConflictError("Policy is selected by the simulation draft", code="POLICY_DRAFT_ACTIVE")
         if self.jobs is not None:
             for job in self.jobs.list():
-                if job.get("status") not in {"STARTING", "RUNNING", "STOPPING"}:
+                if job.get("status") not in {"QUEUED", "STARTING", "RUNNING", "STOPPING"}:
                     continue
                 if job.get("parameters", {}).get("policy_id") == policy_id:
                     raise ConflictError("Policy is used by an active job", code="POLICY_JOB_ACTIVE")
 
     def rename(self, policy_id: str, label: str) -> dict[str, Any]:
+        # Registration and model mutation must not race between snapshot and
+        # publication of the queued job that protects this model.
+        with getattr(self.jobs, "lock", nullcontext()):
+            return self._rename(policy_id, label)
+
+    def _rename(self, policy_id: str, label: str) -> dict[str, Any]:
         clean = label.strip()
         if not clean or len(clean) > 100:
             raise ValueError("Model name must contain 1..100 characters")
@@ -160,6 +167,10 @@ class PolicyManagementService:
         return self.detail(target_id)
 
     def delete(self, policy_id: str, confirmation: str) -> dict[str, Any]:
+        with getattr(self.jobs, "lock", nullcontext()):
+            return self._delete(policy_id, confirmation)
+
+    def _delete(self, policy_id: str, confirmation: str) -> dict[str, Any]:
         if confirmation != policy_id:
             raise ValueError("confirm_policy_id must exactly match policy_id")
         _, directory = self._assert_mutable(policy_id)

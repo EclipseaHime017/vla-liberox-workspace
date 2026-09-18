@@ -142,3 +142,36 @@ def test_policy_management_renames_copies_and_deletes_overlay(tmp_path: Path):
     assert [item["policy_id"] for item in current.list()] == ["base", "trained"]
     with pytest.raises(Exception, match="read-only"):
         current.delete("base", "base")
+
+
+def test_queued_overlay_mutations_are_locked_and_rejected(tmp_path: Path):
+    from contextlib import contextmanager
+
+    manifest = _overlay(tmp_path)
+    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    manager = SimpleNamespace(policy_catalog=catalog, active_session_id=None, draft=None)
+    held = False
+
+    @contextmanager
+    def lock():
+        nonlocal held
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    def jobs_list():
+        assert held
+        return [{"status": "QUEUED", "parameters": {"policy_id": "trained"}}]
+
+    jobs = SimpleNamespace(list=jobs_list)
+    current = PolicyManagementService(manager, jobs)
+    before = manifest.read_bytes()
+    jobs.lock = lock()
+    with pytest.raises(Exception, match="active job"):
+        current.rename("trained", "changed")
+    jobs.lock = lock()
+    with pytest.raises(Exception, match="active job"):
+        current.delete("trained", "trained")
+    assert manifest.read_bytes() == before

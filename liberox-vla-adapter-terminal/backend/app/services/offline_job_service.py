@@ -661,7 +661,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             "pid": None,
             "process_group_id": None,
             "stage": "queued" if queued else "starting",
-            "stage_label": "等待前序训练完成" if queued else "准备后台任务",
+            "stage_label": "等待前序任务完成" if queued else "准备后台任务",
             "error": None,
             "config_path": str(config_path.resolve()),
             "output_path": str(output_path.resolve()),
@@ -1446,7 +1446,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             finally:
                 self.launch_reserved = False
 
-    def _launch_evaluation(self, preview: dict[str, Any]) -> dict[str, Any]:
+    def _launch_evaluation(self, preview: dict[str, Any], *, queued: bool = False) -> dict[str, Any]:
         evaluation_id = (
             f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
             f"{uuid.uuid4().hex[:8]}"
@@ -1499,7 +1499,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             "schema_version": 1,
             "id": evaluation_id,
             "job_id": evaluation_id,
-            "status": "STARTING",
+            "status": "QUEUED" if queued else "STARTING",
             "created_at": now,
             "started_at": None,
             "completed_at": None,
@@ -1540,6 +1540,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         try:
             job = self._new_job(
                 kind="evaluation",
+                queued=queued,
                 dataset_id=None,
                 stages=stages,
                 config_path=config_path,
@@ -1548,6 +1549,8 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
                     "evaluation_id": evaluation_id,
                     "task_id": task["task_id"],
                     "policy_id": policy["policy_id"],
+                    "policy_label": policy["label"],
+                    "task_prompt": task["prompt"],
                     **runtime_config,
                     "schedule_sha256": preview["schedule_sha256"],
                 },
@@ -1627,22 +1630,27 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
     def _synchronize_evaluation(
         self, path: Path, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        if payload.get("status") not in ACTIVE_JOB_STATES:
+        if payload.get("status") not in ACTIVE_JOB_STATES | {"QUEUED"}:
             self.evaluation_repository.upsert(payload, path)
             return payload
         try:
             self._load_job(payload["id"])
             public_job = self._reconcile(payload["id"])
         except Exception:
-            self.evaluation_repository.upsert(payload, path)
-            return payload
+            # The dispatcher may have marked an unreadable job FAILED in the index.
+            try:
+                public_job = self.repository.indexed_job(payload["id"])
+            except KeyError:
+                self.evaluation_repository.upsert(payload, path)
+                return payload
         if public_job["status"] in TERMINAL_JOB_STATES:
             # Normally the child writes the terminal result first. This fallback
             # covers launch failures or a child killed before it could persist.
             latest = self._load_evaluation_manifest(path)
-            if latest.get("status") in ACTIVE_JOB_STATES:
+            if latest.get("status") in ACTIVE_JOB_STATES | {"QUEUED"}:
                 latest["status"] = public_job["status"]
-                latest["completed_at"] = public_job.get("completed_at") or _utc_now()
+                if public_job["status"] in TERMINAL_JOB_STATES:
+                    latest["completed_at"] = public_job.get("completed_at") or _utc_now()
                 latest["error"] = public_job.get("error")
                 atomic_write_json(path, latest)
             payload = latest
@@ -1858,11 +1866,11 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         current_job = self.get(evaluation_id)
         if current_job["kind"] != "evaluation":
             raise ValueError("Evaluation/job identity mismatch")
-        if current_job["status"] not in ACTIVE_JOB_STATES:
+        if current_job["status"] not in ACTIVE_JOB_STATES | {"QUEUED"}:
             return current_job
         job = self.stop(evaluation_id)
         latest = self._load_evaluation_manifest(path)
-        if latest.get("status") in ACTIVE_JOB_STATES:
+        if latest.get("status") in ACTIVE_JOB_STATES | {"QUEUED"}:
             latest["status"] = (
                 job["status"] if job["status"] in TERMINAL_JOB_STATES else "STOPPING"
             )
@@ -1886,7 +1894,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             payload = self._synchronize_evaluation(
                 path, self._load_evaluation_manifest(path)
             )
-            if payload.get("status") in ACTIVE_JOB_STATES:
+            if payload.get("status") in ACTIVE_JOB_STATES | {"QUEUED"}:
                 raise ConflictError(
                     "Active evaluation must be stopped before deletion",
                     code="EVALUATION_ACTIVE",
@@ -1904,7 +1912,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
                     job = json.loads(job_path.read_text(encoding="utf-8"))
                     if job.get("id") != evaluation_id or job.get("kind") != "evaluation":
                         raise ValueError("Evaluation job identity mismatch")
-                    if job.get("status") in ACTIVE_JOB_STATES:
+                    if job.get("status") in ACTIVE_JOB_STATES | {"QUEUED"}:
                         raise ConflictError(
                             "Active evaluation must be stopped before deletion",
                             code="EVALUATION_ACTIVE",
