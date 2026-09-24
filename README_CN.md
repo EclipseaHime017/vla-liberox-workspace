@@ -930,7 +930,7 @@ conda run -n vla-liberox python \
 
 #### 4.4.2 annotate 与 reward materialize 的边界
 
-新配置统一生成 **Final Reward**，不再选择 Sparse / RynnValue / Stage 训练类型。相加形式中，α 控制 Stage 与 sparse 的混合比例，κ 控制 RynnValue 塑形强度；缩放前，α=0、κ=0 对应 Sparse，α=0、κ>0 对应原 RynnValue 奖励，α=1、κ=0 对应 Stage。κ=0 时不需要模型评价，执行 `prepare_dataset.py → materialize_rewards.py → train_iql.py` 即可；终端流水线据此选择阶段。
+新配置默认生成 **Final Reward**；UI 训练也可直接选择独立保存的 **RynnValue** 奖励，见 §4.9。Final Reward 相加形式中，α 控制 Stage 与 sparse 的混合比例，κ 控制 RynnValue 塑形强度；缩放前，α=0、κ=0 对应 Sparse，α=0、κ>0 对应原 RynnValue 奖励，α=1、κ=0 对应 Stage。κ=0 时不需要模型评价，执行 `prepare_dataset.py → materialize_rewards.py → train_iql.py` 即可；终端流水线据此选择阶段。
 
 **Stage 标注：**进入数据集的单条数据详情，点击“切片 / 标记关键帧”，拖动主视角录像或逐帧定位，选择 Positive/Negative 后保存。关键帧是持久标注，p 和奖励数组不写入标注身份；已有旧格式标注无需重新保存。不裁剪源数据；success 按数据集连续 done 阈值自动添加。失败轨迹无关键事件时也需要显式保存空标注。Stage 公式结果不裁剪。
 
@@ -1026,6 +1026,40 @@ conda run -n vla-liberox python \
 奖励缓存是第二层，记录数据集、评价与关键帧哈希、有效融合参数及奖励实现代码指纹。输入或公式变化只重算派生数组，不改模型输出。γ / cumulative 在数据集和训练页都可配置；训练覆盖时由固定输出与标注快照生成本次训练的私有奖励，不覆盖数据集结果。p、α、κ、形式在数据集配置，训练页不另行覆盖。旧 YAML 的显式 `source` / `rynnvalue` 字段仍按旧语义兼容；使用新融合配置时移除这些旧选择字段。
 
 #### 4.4.3 配置并运行 IQL 后训练
+
+平台支持 **IQL / BC** 两种训练方法，默认仍为 IQL。BC 是等权 masked L1 行为克隆：
+使用所选数据集训练划分中的全部有效动作 chunk（包括失败动作和成功后的记录），
+沿用分支前缀去重、归一化和 action mask；不在训练层筛选成功示教。
+任务、来源、成功/失败及规模均在数据集层选择。BC 不读取奖励，不运行 RynnValue、
+Robometer、Stage 或 Q/V，因此未评价的数据集也可以训练。
+
+GUI：在「训练配置 → 训练方法」选择 **BC · 等权行为克隆**，其他公共训练参数和
+TensorBoard/W&B 监控继续可用；BC 不显示奖励及 critic 参数。仍只更新 action head
+和 proprio projector，导出的 BC overlay 可直接用于原仿真推理。
+
+CLI（workspace 根目录）：
+
+```bash
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
+  --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train.py \
+  --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
+```
+
+`liberox_bc.yaml` 提供无奖励配置的示例。公共参数可写在 `training` 中；同名字段优先于
+旧 `iql` 字段，原有 IQL YAML 和 `train_iql.py` 命令继续兼容。终端流水线仅需设置
+`overrides.training.method: bc`，数据选择不变，自动跳过 annotate、reward 和 bind 阶段。
+
+BC/IQL 对照应保持相同初始化、样本、micro batch、梯度累积、actor 学习率及更新预算。
+`train_steps` 仍表示 micro-batch 次数，不是 epoch；完整累积组的 actor batch 是
+`micro_batch_size × gradient_accumulation_steps`。新增 `training.actor_lr_warmup_steps`
+单独控制 actor 学习率预热，设为 `null` 时沿用旧 `iql.critic_warmup_steps` 的数值；
+IQL 后者还决定何时启用 advantage 权重，BC 则始终等权。不要通过扩大 critic warmup
+模拟 BC。断点恢复必须使用相同训练方法；界面队列仍从头启动，CLI 支持 BC 断点恢复。
+
+实现分层：`methods.py` 声明方法能力，`algorithms.py` 实现辅助更新、actor objective
+和算法状态接口，`training.py` 共用优化、监控、取消和保存；`ActionDataset` 读取动作样本，
+`ReplayDataset` 额外提供 IQL transition/reward。新增方法无需复制 UI 或整套训练循环。
 
 训练始终冻结 VLA 的视觉/语言 backbone，只更新 continuous action head 和 proprio projector；Pixel-IQL 的双 Q、value 和 target 网络也会从头训练。默认配置如下：
 
@@ -1374,7 +1408,7 @@ y_t         = R_final(t) + γ^L m_t V(s_{t+L})
 
 轨迹评价 schema v6 只保存原始 absolute/relative distance、entropy、logits 和 Analysis，不固化任何训练奖励语义。奖励派生 schema v1 另行保存 `sparse_reward`、未乘 `κ` 的 `pbrs_shaping_reward`、已乘 `κ` 的 `dense_reward` 和 Final Reward `pbrs_chunk_reward`。已有 hash 与模型推理契约匹配的 schema-v4/v5 轨迹评价会复用全部模型输出；即使旧文件带有由不同 `gamma`、`κ` 或累计模式产生的 Final Reward，也只丢弃旧派生数组并在 CPU 上重算，不再运行 RynnValue。
 
-实际训练统一读取融合并缩放后的 **Final Reward**，公式见 §4.4.2。缩放前，相加 α=0、κ=0 对应 sparse-only；α=0、κ>0 对应上述原始 RynnValue 奖励；α=1、κ=0 对应 Stage。随后按完整轨迹首个 chunk 的原始融合值缩放，使首值为 −1。仅改变 reward 数值，不改变 IQL 网络、更新顺序和 macro/cumulative 对应的 Bellman discount。保存结果包含 `original_final_reward`、`final_reward`，后者也保留 `pbrs_chunk_reward` 兼容别名；不要把这个旧字段名理解为融合结果仍是纯 PBRS。
+选择 **Final Reward** 训练时读取融合并缩放后的奖励，公式见 §4.4.2；选择 **RynnValue** 则读取独立保存的原始 sparse + κ·Shape Reward，不使用 Stage 融合和 Final Reward 首值缩放。Final Reward 缩放前，相加 α=0、κ=0 对应 sparse-only；α=0、κ>0 对应上述原始 RynnValue 奖励；α=1、κ=0 对应 Stage。随后按完整轨迹首个 chunk 的原始融合值缩放，使首值为 −1。仅改变 reward 数值，不改变 IQL 网络、更新顺序和 macro/cumulative 对应的 Bellman discount。保存结果包含 `original_final_reward`、`final_reward`，后者也保留 `pbrs_chunk_reward` 兼容别名；不要把这个旧字段名理解为融合结果仍是纯 PBRS。
 
 主要中间结果：
 
@@ -1444,8 +1478,8 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 轨迹评价、奖励派生和 
    - **All**：配置融合与两个模型的参数，强制按 RynnValue → Robometer → Final Reward 顺序运行；全部成功才切换三个当前结果，中途失败保留旧结果。模型名称及固定 revision 只读。
    任务窗口关闭或页面刷新不会停止后台任务。
 5. 每个数据集分别保存 Final Reward、RynnValue、Robometer，关键帧仍保存在原轨迹。重新评价仅替换所选结果，不覆盖另一个模型的原始输出；All 同时更新三者。详情按数据集同类型结果优先、缺少时继承全局；全局保存首次结果，只有显式“同步覆盖全局评价”才替换。**Original Final Reward** 折线图保留 sparse、Shape、original final 三条曲线；**Final Reward** 独立显示融合结果。两图在有融合结果时使用同一组 γ/cumulative/κ 以便对照。RynnValue 原始距离、entropy 和 Robometer 曲线保持独立，不因融合而改写。
-6. 侧栏“训练”只选择数据集，不再选择奖励类型。已有完整全局 Final Reward 的成员可直接继承；仅有 RynnValue/Robometer 或仅保存关键帧时，先在数据集配置生成 Final Reward，**无需重新跑已有模型评价或重新标记**。缺少、损坏或不匹配的输入会列出成员并停止，不回退到其他奖励。
-   p、α、κ、形式在数据集配置；γ 在数据集与训练页都能调整，cumulative 仅相加时可用。继承的全局结果只要包含相乘成员，整次 UI 训练统一 macro；独立 CLI 若混合结果与 cumulative=On 冲突则明确报错。训练使用固定语义快照，修改 γ/cumulative 只在该训练目录重算私有数组，不覆盖数据集当前结果或历史训练。页面只读轻量摘要，不反复解压 observations；训练启动前完整校验源文件。旧显式来源 YAML 仍兼容，成功后轨迹保留及 IQL 更新公式不变。
+6. 侧栏“训练”选择数据集后，IQL 的“训练奖励”可选择 **Final Reward**（默认，融合并缩放后的奖励）或 **RynnValue**（原始 sparse + κ·Shape Reward，不加入 Stage 融合）。两种结果独立保留；按所选类型优先使用数据集评价，没有专属结果时继承同类型全局评价。切换来源会加载对应参数并绑定对应结果，不改变数据集默认评价，也不重新运行模型。仅有 RynnValue 时可直接选择它训练，无需先生成 Final Reward；Robometer 仍只用于诊断。缺少、损坏或不匹配的所选奖励会阻止训练，不回退到另一种。
+   p、α、κ、形式在数据集配置；γ 在数据集与训练页都能调整，cumulative 对 RynnValue 和相加 Final Reward 可用。选择 Final Reward 且继承的全局结果包含相乘成员时，整次 UI 训练统一 macro；独立 CLI 若混合结果与 cumulative=On 冲突则明确报错。训练使用固定语义快照，修改 γ/cumulative 只在该训练目录重算私有数组，不覆盖数据集当前结果或历史训练。页面只读轻量摘要，不反复解压 observations；训练启动前完整校验源文件。旧显式来源 YAML 仍兼容，成功后轨迹保留及 IQL 更新公式不变。
 7. “训练配置”表单始终显示，任务／难度／提示词筛选在桌面端压缩为一行。配置数据集、batch、训练步数及高级 IQL 参数后点击“注册训练任务”；注册后保留当前参数，直接修改并注册下一批，无需另外新增任务或展开表单。运行中也可以继续注册，不需要等待上一轮完成。每项在注册时固定有效配置和奖励引用，之后修改草稿或重新评价数据集不会改变已注册任务。UI 暂不提供断点恢复；各批次从配置的基础模型独立训练，不继承上一批权重，CLI 的显式恢复功能保留。
 8. “批量训练”按注册顺序串行执行。当前任务完成、失败或手动停止后自动运行下一项；“停止本轮”只影响当前任务，“取消排队”只移除选中的等待项。仿真、控制器或其他 GPU 任务占用资源时等待，不抢占正在运行的任务。排队任务引用的数据集不能删除。列表展示待完成任务和最近 20 条训练记录，展开可检查已注册参数；详细日志仍由单个任务监视器展示。
 9. 任务监视器实时显示阶段、step、速度、已用时间、滚动 ETA/预计完成时间、Q/value/actor loss、Q/V/advantage、advantage weight、学习率、梯度范数和峰值显存。默认跟随当前训练；手动查看其他任务后可点击“跟随当前训练”恢复。安全停止沿用现有 checkpoint 保存逻辑。调度由后端执行，关闭网页不影响队列；后端关闭时已启动的独立训练进程继续运行，等待任务在后端重新启动后恢复调度（不是恢复失败任务的 checkpoint）。夜间连续训练需保持设备和后端服务运行。完成后可回到仿真平台选择发布的 policy overlay。

@@ -24,14 +24,15 @@ from torch.utils.data import default_collate
 from .config import LoadedConfig, reward_source
 from .data import REPLAY_POLICY, load_manifest
 from .io import atomic_json, sha256_file, stable_hash
-from .iql import PixelIQL, advantage_weights, weighted_masked_l1
+from .algorithms import TrainingAlgorithm, build_algorithm
+from .methods import actor_lr_warmup, training_method
 from .monitoring import (
     ACTION_NAMES,
     TrainingProgressReporter,
     log_tensorboard_metric,
     log_wandb_metric,
 )
-from .replay import ReplayDataset
+from .replay import ActionDataset, ReplayDataset
 from .rewards import load_reward_index, reward_manifest_digest
 from .vla_adapter import (
     ACTION_DIM, ACTION_HORIZON, PROPRIO_DIM, extract_action_hidden_states,
@@ -164,7 +165,7 @@ def _initialize_wandb(
     return run
 
 
-def _sample_batch(dataset: ReplayDataset, batch_size: int, generator: torch.Generator):
+def _sample_batch(dataset: ActionDataset, batch_size: int, generator: torch.Generator):
     indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
     return default_collate([dataset[index] for index in indices])
 
@@ -226,19 +227,20 @@ def _save_checkpoint(
     directory: Path,
     step: int,
     components: Any,
-    iql: PixelIQL,
+    algorithm: TrainingAlgorithm,
     actor_optimizer: torch.optim.Optimizer,
     data_generator: torch.Generator,
     config: LoadedConfig,
     manifest: dict[str, Any],
-    reward_index: dict[str, Any],
+    reward_index: dict[str, Any] | None,
 ) -> Path:
     target = directory / f"step_{step:08d}"
     target.mkdir(parents=True, exist_ok=True)
     torch.save(_state_dict_cpu(components.action_head), target / "action_head.pt")
     torch.save(_state_dict_cpu(components.proprio_projector), target / "proprio_projector.pt")
     torch.save({
-        "schema_version": 1, "step": step, "iql": iql.checkpoint(),
+        "schema_version": 2, "step": step, "algorithm": training_method(config.raw).name,
+        "algorithm_state": algorithm.checkpoint(),
         "actor_optimizer": actor_optimizer.state_dict(),
         "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -246,10 +248,11 @@ def _save_checkpoint(
         "data_rng": data_generator.get_state(),
     }, target / "trainer.pt")
     checkpoint_metadata = {
-        "schema_version": 1, "step": step, "config_sha256": config.digest,
+        "schema_version": 2, "step": step, "config_sha256": config.digest,
+        "algorithm": training_method(config.raw).name,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": reward_manifest_digest(reward_index),
-        "reward_version_id": config.section("reward").get("version_id"),
+        "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
+        "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
         "replay_policy": REPLAY_POLICY,
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
@@ -269,9 +272,11 @@ def _publish_overlay(
     config: LoadedConfig,
     components: Any,
     manifest: dict[str, Any],
-    reward_index: dict[str, Any],
+    reward_index: dict[str, Any] | None,
 ) -> Path:
-    policy_id = f"rynn-iql-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    method = training_method(config.raw).name
+    prefix = "rynn-iql" if method == "iql" else method
+    policy_id = f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     target = registry / policy_id
     target.mkdir(parents=True, exist_ok=False)
     shutil.copy2(checkpoint / "action_head.pt", target / "action_head.pt")
@@ -287,9 +292,10 @@ def _publish_overlay(
         reward_source(config.section("reward"))
     ]
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "algorithm": method,
         "policy_id": policy_id,
-        "label": f"{reward_label} IQL · step {step}",
+        "label": f"{reward_label} IQL · step {step}" if method == "iql" else f"BC · step {step}",
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
         "action_head": "action_head.pt",
@@ -298,7 +304,7 @@ def _publish_overlay(
         "action_dim": ACTION_DIM,
         "proprio_dim": PROPRIO_DIM,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": reward_manifest_digest(reward_index),
+        "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "training_step": step,
         "component_sha256": {
             "action_head": sha256_file(target / "action_head.pt"),
@@ -319,16 +325,19 @@ def _publish_overlay(
 def _restore_checkpoint(
     checkpoint: Path,
     components: Any,
-    agent: PixelIQL,
+    agent: TrainingAlgorithm,
     actor_optimizer: torch.optim.Optimizer,
     data_generator: torch.Generator,
     device: torch.device,
     config: LoadedConfig,
     manifest: dict[str, Any],
-    reward_index: dict[str, Any],
+    reward_index: dict[str, Any] | None,
 ) -> int:
     checkpoint = checkpoint.expanduser().resolve()
     metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
+    method = training_method(config.raw).name
+    if metadata.get("algorithm", "iql") != method:
+        raise ValueError("Resume checkpoint uses a different training method")
     has_success_tail = any(
         episode.get("split") == "train" and episode.get("terminal_step") is not None
         and int(episode["recorded_action_count"]) > int(episode["terminal_step"]) + 1
@@ -342,7 +351,7 @@ def _restore_checkpoint(
         )
     expected = {
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": reward_manifest_digest(reward_index),
+        "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "base_checkpoint": config.section("vla")["base_checkpoint"],
         "stats_key": components.stats_key,
     }
@@ -365,7 +374,7 @@ def _restore_checkpoint(
     trainer = torch.load(
         checkpoint / "trainer.pt", map_location=device, weights_only=False
     )
-    agent.restore(trainer["iql"])
+    agent.restore(trainer["algorithm_state"] if "algorithm_state" in trainer else trainer["iql"])
     actor_optimizer.load_state_dict(trainer["actor_optimizer"])
     torch.set_rng_state(trainer["torch_rng"].cpu())
     if torch.cuda.is_available() and trainer.get("cuda_rng") is not None:
@@ -379,6 +388,7 @@ def _restore_checkpoint(
 def train(config: LoadedConfig) -> Path:
     _STOP_REQUESTED.clear()
     iql_cfg = config.section("iql")
+    method = training_method(config.raw)
     logging_cfg = config.section("logging")
     seed = int(iql_cfg["seed"])
     random.seed(seed)
@@ -389,34 +399,24 @@ def train(config: LoadedConfig) -> Path:
     device = _device(iql_cfg["device"])
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    LOG.info("Loading prepared replay manifest and selected IQL reward cache")
+    LOG.info("Loading prepared replay for %s", method.name.upper())
     manifest = load_manifest(config)
-    reward_index = load_reward_index(config)
+    reward_index = load_reward_index(config) if method.requires_rewards else None
+    reward_hash = reward_manifest_digest(reward_index) if reward_index is not None else None
+    reward_mode = ("cumulative_primitive_steps" if config.section("reward")["accumulate_primitive_steps"]
+                   else "macro_action") if method.requires_rewards else "not_applicable"
     micro_batch_size = int(iql_cfg["micro_batch_size"])
     _validate_single_task_micro_batch(manifest, micro_batch_size)
     LOG.info("Loading frozen VLA backbone and trainable action components")
     component_load_started = time.monotonic()
     components = load_components(config)
     LOG.info("VLA components loaded in %.2f s", time.monotonic() - component_load_started)
-    dataset = ReplayDataset(config, components.action_stats, components.proprio_stats, "train",
-                            reward_index=reward_index)
+    dataset = (ReplayDataset(config, components.action_stats, components.proprio_stats, "train",
+                             reward_index=reward_index) if method.requires_transitions else
+               ActionDataset(config, components.action_stats, components.proprio_stats, "train"))
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
-    agent = PixelIQL(
-        horizon=ACTION_HORIZON, action_dim=ACTION_DIM, proprio_dim=PROPRIO_DIM,
-        discount=float(config.section("reward")["gamma"]),
-        expectile=float(iql_cfg["expectile"]), tau=float(iql_cfg["target_tau"]),
-        critic_lr=float(iql_cfg["critic_lr"]), value_lr=float(iql_cfg["value_lr"]),
-        critic_optimizer=str(iql_cfg["critic_optimizer"]),
-        critic_weight_decay=float(iql_cfg["critic_weight_decay"]),
-        value_optimizer=str(iql_cfg["value_optimizer"]),
-        value_weight_decay=float(iql_cfg["value_weight_decay"]),
-        critic_max_grad_norm=float(iql_cfg["critic_max_grad_norm"]),
-        value_max_grad_norm=float(iql_cfg["value_max_grad_norm"]),
-        accumulate_primitive_steps=bool(
-            config.section("reward")["accumulate_primitive_steps"]
-        ),
-    ).to(device)
+    agent = build_algorithm(config, device)
     actor_parameters = list(components.action_head.parameters()) + list(components.proprio_projector.parameters())
     # Paper Table 9 / official pi-rl policy optimizer.  In particular, do not
     # inherit AdamW's default 0.01 weight decay.
@@ -429,7 +429,8 @@ def train(config: LoadedConfig) -> Path:
     )
     accumulation = int(iql_cfg["gradient_accumulation_steps"])
     total_steps = int(iql_cfg["train_steps"])
-    warmup = int(iql_cfg["critic_warmup_steps"])
+    warmup = int(iql_cfg["critic_warmup_steps"]) if method.name == "iql" else 0
+    lr_warmup = actor_lr_warmup(config.raw)
     start_step = 0
     if iql_cfg["resume_checkpoint"] is not None:
         start_step = _restore_checkpoint(
@@ -446,8 +447,9 @@ def train(config: LoadedConfig) -> Path:
     run_dir = Path(config.section("paths")["output_dir"]) / run_id
     checkpoint_root = run_dir / "checkpoints"
     checkpoint_root.mkdir(parents=True, exist_ok=False)
-    atomic_json(run_dir / "reward_manifest.json", reward_index)
-    if reward_index.get("stage_annotations_path"):
+    if reward_index is not None:
+        atomic_json(run_dir / "reward_manifest.json", reward_index)
+    if reward_index is not None and reward_index.get("stage_annotations_path"):
         atomic_json(run_dir / "stage_annotations.json", json.loads(
             Path(reward_index["stage_annotations_path"]).read_text(encoding="utf-8")
         ))
@@ -456,11 +458,12 @@ def train(config: LoadedConfig) -> Path:
     )
     atomic_json(run_dir / "provenance.json", {
         "schema_version": 1,
+        "algorithm": method.name,
         "code_version": _code_version(),
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": reward_manifest_digest(reward_index),
-        "reward_version_id": config.section("reward").get("version_id"),
+        "reward_sha256": reward_hash,
+        "reward_version_id": config.section("reward").get("version_id") if method.requires_rewards else None,
         "replay_policy": REPLAY_POLICY,
         "base_checkpoint": config.section("vla")["base_checkpoint"],
     })
@@ -487,11 +490,7 @@ def train(config: LoadedConfig) -> Path:
         micro_batch_size,
         micro_batch_size * accumulation,
         int(iql_cfg["checkpoint_interval"]),
-        (
-            "cumulative_primitive_steps"
-            if config.section("reward")["accumulate_primitive_steps"]
-            else "macro_action"
-        ),
+        reward_mode,
         device,
     )
     with ExitStack() as stack:
@@ -526,11 +525,11 @@ def train(config: LoadedConfig) -> Path:
         # an explicitly flushed stream instead of relying on LOG.info.
         print(
             "TRAIN ready | "
-            f"run={run_id} | steps={start_step}->{total_steps} | "
+            f"method={method.name} | run={run_id} | steps={start_step}->{total_steps} | "
             f"micro_batch={micro_batch_size} | "
             f"actor_batch={micro_batch_size * accumulation} | "
             "reward_mode="
-            f"{'cumulative_primitive_steps' if config.section('reward')['accumulate_primitive_steps'] else 'macro_action'} "
+            f"{reward_mode} "
             f"| device={device}",
             flush=True,
         )
@@ -544,22 +543,7 @@ def train(config: LoadedConfig) -> Path:
                 and key in {"pixels", "next_pixels", "proprio", "next_proprio", "actions",
                                "action_mask", "reward", "bootstrap_mask", "chunk_length"}
             }
-            critic_metrics = agent.update(critic_batch)
-            actor_loss_value = None
-            weight_mean = None
-            # Use ordinary behavior cloning while the critics warm up.  Only
-            # the learned advantage weights are delayed; the action head still
-            # receives gradients from the first optimization step.
-            if step < warmup:
-                weights = torch.ones(
-                    critic_batch["actions"].shape[0], device=device, dtype=torch.float32
-                )
-            else:
-                with torch.no_grad():
-                    advantage = agent.advantage(critic_batch)
-                    weights = advantage_weights(
-                        advantage, float(iql_cfg["beta"]), float(iql_cfg["max_advantage_weight"])
-                    )
+            context, algorithm_metrics = agent.update(critic_batch, step)
             agent_image = batch["agent_image"].cpu().numpy()
             wrist_image = batch["wrist_image"].cpu().numpy()
             inputs = processor_inputs(
@@ -568,9 +552,7 @@ def train(config: LoadedConfig) -> Path:
             hidden = extract_action_hidden_states(components, inputs)
             proprio = critic_batch["proprio"].to(dtype=torch.bfloat16)
             prediction = predict_normalized(components, hidden, proprio)
-            actor_loss = weighted_masked_l1(
-                prediction, critic_batch["actions"], critic_batch["action_mask"], weights
-            )
+            actor_loss = agent.actor_loss(prediction, critic_batch, context)
             action_metrics = _action_diagnostics(
                 prediction,
                 critic_batch["actions"],
@@ -578,7 +560,6 @@ def train(config: LoadedConfig) -> Path:
             )
             (actor_loss / accumulation).backward()
             actor_loss_value = float(actor_loss.detach())
-            weight_mean = float(weights.mean())
             actor_grad_norm = None
             action_head_parameter_norm = None
             proprio_projector_parameter_norm = None
@@ -588,7 +569,7 @@ def train(config: LoadedConfig) -> Path:
                 )
                 current_actor_lr = _actor_lr(
                     step, total_steps, float(iql_cfg["policy_peak_lr"]),
-                    float(iql_cfg["policy_final_lr"]), warmup,
+                    float(iql_cfg["policy_final_lr"]), lr_warmup,
                 )
                 for group in actor_optimizer.param_groups:
                     group["lr"] = current_actor_lr
@@ -601,11 +582,9 @@ def train(config: LoadedConfig) -> Path:
                     components.proprio_projector
                 )
             metric = {
-                "step": step + 1, "q_loss": critic_metrics.q_loss,
-                "value_loss": critic_metrics.value_loss, "q_mean": critic_metrics.q_mean,
-                "value_mean": critic_metrics.value_mean,
-                "advantage_mean": critic_metrics.advantage_mean,
-                "actor_loss": actor_loss_value, "advantage_weight_mean": weight_mean,
+                "step": step + 1, "algorithm": method.name,
+                **algorithm_metrics,
+                "actor_loss": actor_loss_value,
                 "actor_learning_rate": current_actor_lr,
                 "actor_grad_norm": actor_grad_norm,
                 "action_head_parameter_norm": action_head_parameter_norm,
@@ -642,7 +621,7 @@ def train(config: LoadedConfig) -> Path:
                     config, manifest, reward_index,
                 )
                 LOG.info("Saved checkpoint %s", latest_checkpoint)
-            if _STOP_REQUESTED.is_set():
+            if _STOP_REQUESTED.is_set() and ((step + 1) % accumulation == 0 or step == total_steps - 1):
                 if latest_checkpoint is None or (step + 1) % int(iql_cfg["checkpoint_interval"]) != 0:
                     latest_checkpoint = _save_checkpoint(
                         checkpoint_root, step + 1, components, agent, actor_optimizer,
@@ -652,7 +631,7 @@ def train(config: LoadedConfig) -> Path:
                     "schema_version": 1, "status": "canceled", "steps": step + 1,
                     "elapsed_seconds": time.monotonic() - start_time,
                     "dataset_sha256": manifest["dataset_sha256"],
-                    "reward_sha256": reward_manifest_digest(reward_index),
+                    "reward_sha256": reward_hash, "algorithm": method.name,
                     "cancel_checkpoint": str(latest_checkpoint),
                     "resumed_from_step": start_step,
                     "micro_batch_size": micro_batch_size,
@@ -679,7 +658,7 @@ def train(config: LoadedConfig) -> Path:
         "schema_version": 1, "status": "completed", "steps": total_steps,
         "elapsed_seconds": time.monotonic() - start_time,
         "dataset_sha256": manifest["dataset_sha256"],
-        "reward_sha256": reward_manifest_digest(reward_index), "policy_overlay": str(policy),
+        "reward_sha256": reward_hash, "algorithm": method.name, "policy_overlay": str(policy),
         "resumed_from_step": start_step,
         "micro_batch_size": micro_batch_size,
         "transitions_processed": (total_steps - start_step) * micro_batch_size,

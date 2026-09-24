@@ -15,6 +15,7 @@ export type TaskInfo = {
 };
 
 export type PolicyInfo = {
+  algorithm?: "iql" | "bc" | null;
   policy_id: string;
   label: string;
   base_checkpoint: string;
@@ -422,12 +423,13 @@ export type EvaluationFilters = {
 };
 
 export type TrainingDefaults = {
+  algorithm?: "iql" | "bc";
   reward_availability?: {
     message?: string;
     pending?: boolean;
     ready: boolean; origin?: "dataset" | "global" | null;
     missing_run_ids?: string[]; errors?: { run_id: string; error: string }[];
-  };
+  } | null;
   reward_version?: RewardVersion | null;
   reward_parameters_locked?: boolean;
   reward_locked_parameters?: string[];

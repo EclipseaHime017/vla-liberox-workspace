@@ -36,7 +36,7 @@ class TrainingQueue:
             if parameters.get("resume_checkpoint"):
                 raise ValueError("Queued training starts independently; checkpoint resume is not supported")
             dataset = self.datasets.require_ready_for_training(dataset_id)
-            version, normalized = self.pinned_reward(dataset, parameters)
+            version, normalized = self.training_inputs(dataset, parameters)
             # Reuse the normal config builder, but reserve no GPU and start no process.
             job = self._launch_training(dataset_id, dataset, {**normalized, "resume_checkpoint": None},
                                         reward_version=version, queued=True)

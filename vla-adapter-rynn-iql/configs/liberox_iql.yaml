@@ -1,4 +1,7 @@
 schema_version: 1
+training:
+  method: iql  # bc uses the same selected data, without rewards or Q/V
+  actor_lr_warmup_steps: null  # null preserves legacy critic_warmup_steps schedule
 paths:
   dataset_sources:
     - ../../dataset-root

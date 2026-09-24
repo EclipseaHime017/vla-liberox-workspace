@@ -24,6 +24,7 @@ from vla_rynn_iql.evaluation_store import bind_reward_manifest
 from vla_rynn_iql.config import LoadedConfig, reward_source, needs_rynnvalue, needs_stage
 from vla_rynn_iql.data import REPLAY_POLICY, iter_unique_replay_chunks
 from vla_rynn_iql.io import atomic_json
+from vla_rynn_iql.methods import training_method, actor_lr_warmup
 from vla_rynn_iql.rewards import load_stage_annotations
 from vla_rynn_iql.terminal_pipeline import (
     annotation_cache_valid,
@@ -92,7 +93,8 @@ def _print_preflight(
     validation_roots = {
         member["root_run_id"] for member in members if member["split"] == "validation"
     }
-    print("\n=== VLA-Adapter RynnValue + IQL terminal pipeline ===")
+    method = training_method(raw)
+    print(f"\n=== VLA-Adapter {method.name.upper()} terminal pipeline ===")
     print(f"Task              : {task_id}")
     print(f"Eligible          : {len(task_candidates)} ({_category_counts(task_candidates)})")
     print(f"Selected          : {len(selected)} ({_category_counts(selected)})")
@@ -102,16 +104,15 @@ def _print_preflight(
     print(f"Root split        : {len(roots) - len(validation_roots)} train / "
           f"{len(validation_roots)} validation")
     print(f"Bound evaluations : {evaluated_count}/{len(selected)}")
-    source = reward_source(reward)
+    source = reward_source(reward) if method.requires_rewards else "not applicable (BC)"
     print(f"Reward source     : {source}")
-    if needs_rynnvalue(reward):
+    if method.requires_rewards and needs_rynnvalue(reward):
         print(f"RynnValue         : {reward['model']} @ {reward['revision']}")
-    if needs_stage(reward):
+    if method.requires_rewards and needs_stage(reward):
         print(f"Stage exponent    : {reward['stage_exponent']}")
     print(
-        f"IQL               : steps={iql['train_steps']}, "
-        f"warmup={iql['critic_warmup_steps']}, beta={iql['beta']}, "
-        f"max_weight={iql['max_advantage_weight']}, "
+        f"{method.name.upper():18}: steps={iql['train_steps']}, "
+        f"actor_lr_warmup={actor_lr_warmup(raw)}, "
         f"micro_batch={iql['micro_batch_size']}, "
         f"actor_batch={iql['micro_batch_size'] * iql['gradient_accumulation_steps']}, "
         f"sample_budget={iql['train_steps'] * iql['micro_batch_size']}"
@@ -127,11 +128,11 @@ def _print_preflight(
     print(f"Success threshold : {data['success_consecutive_steps']} consecutive steps")
     print("Stages            :")
     print(f"  [1/5] prepare   : {'RUN' if force_prepare or not prepare_skip else 'SKIP (hash match)'}")
-    print(f"  [2/5] annotate  : " + ("SKIP (κ=0 / independent reward)" if not needs_rynnvalue(reward) else
+    print(f"  [2/5] annotate  : " + ("SKIP (not required)" if not method.requires_rewards or not needs_rynnvalue(reward) else
           "RUN (forced)" if force_annotate else "SKIP (official-output cache)" if annotation_skip
           else "RUN missing/incompatible VLM output"))
-    print(f"  [3/5] rewards   : {'SKIP (derivation cache)' if reward_skip else 'RUN fast deterministic reduction'}")
-    print("  [4/5] bind      : " + ("RUN (atomic sidecars)" if needs_rynnvalue(reward) else "SKIP"))
+    print(f"  [3/5] rewards   : {'SKIP (BC)' if not method.requires_rewards else 'SKIP (derivation cache)' if reward_skip else 'RUN fast deterministic reduction'}")
+    print("  [4/5] bind      : " + ("RUN (atomic sidecars)" if method.requires_rewards and needs_rynnvalue(reward) else "SKIP"))
     print("  [5/5] train     : RUN (new output; resume only when configured)")
     print()
 
@@ -225,7 +226,7 @@ class StageRunner:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run a resumable terminal-only RynnValue + IQL training pipeline"
+        description="Run a resumable terminal-only VLA training pipeline (IQL/BC)"
     )
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "terminal_pipeline.yaml")
     parser.add_argument("--yes", action="store_true", help="Skip the interactive confirmation")
@@ -236,6 +237,7 @@ def main() -> int:
 
     config = load_terminal_config(args.config)
     raw = merged_training_config(config)
+    method = training_method(raw)
     roots = dataset_roots(raw, config.pipeline_root / "imports")
     candidates, rejected = discover_candidates(
         roots, raw["data"]["project_id"],
@@ -257,7 +259,7 @@ def main() -> int:
     validate_effective_config(raw)
     source = reward_source(raw["reward"])
     stage_snapshot = None
-    if needs_stage(raw["reward"]):
+    if method.requires_rewards and needs_stage(raw["reward"]):
         stage_snapshot = load_stage_annotations(LoadedConfig(config.path, raw), {
             "episodes": [{"run_id": member["run_id"],
                           "trajectory_path": member["artifacts"]["trajectory"]["path"],
@@ -267,13 +269,13 @@ def main() -> int:
 
     prepare_skip = prepare_cache_valid(work_dir, fingerprint)
     annotation_skip = (
-        needs_rynnvalue(raw["reward"]) and prepare_skip and annotation_cache_valid(work_dir, raw["reward"])
+        method.requires_rewards and needs_rynnvalue(raw["reward"]) and prepare_skip and annotation_cache_valid(work_dir, raw["reward"])
         and not args.force_annotate
     )
     reward_skip = (
         annotation_skip and reward_cache_valid(work_dir, raw["reward"])
     )
-    evaluated_count = bound_evaluation_count(selection_manifest) if source == "rynnvalue" else 0
+    evaluated_count = bound_evaluation_count(selection_manifest) if method.requires_rewards and source == "rynnvalue" else 0
     _print_preflight(
         task_id=canonical_task, candidates=candidates, selected=selected,
         rejected_count=len(rejected), selection_manifest=selection_manifest, raw=raw,
@@ -287,7 +289,7 @@ def main() -> int:
         return 0
     _confirm(args.yes)
     needed_environments = {config.environments["prepare"], config.environments["train"]}
-    if needs_rynnvalue(raw["reward"]):
+    if method.requires_rewards and needs_rynnvalue(raw["reward"]):
         needed_environments.add(config.environments["annotate"])
     _verify_conda_environments(needed_environments)
 
@@ -311,6 +313,7 @@ def main() -> int:
     state_path = run_dir / "pipeline.json"
     state: dict[str, Any] = {
         "schema_version": 1,
+        "algorithm": method.name,
         "id": run_id,
         "status": "READY",
         "created_at": _utc_now(),
@@ -364,8 +367,8 @@ def main() -> int:
         }
         atomic_json(state_path, state)
 
-        if not needs_rynnvalue(raw["reward"]):
-            runner.skip("annotate", f"{source} rewards do not use RynnValue")
+        if not method.requires_rewards or not needs_rynnvalue(raw["reward"]):
+            runner.skip("annotate", "Selected training method/reward does not use RynnValue")
         elif annotation_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
             runner.skip("annotate", "complete official-output annotation cache matches")
         else:
@@ -375,7 +378,9 @@ def main() -> int:
                 ["--overwrite"] if args.force_annotate else None,
             )
 
-        if reward_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
+        if not method.requires_rewards:
+            runner.skip("rewards", "BC does not consume rewards")
+        elif reward_cache_valid(work_dir, raw["reward"]) and not args.force_annotate:
             runner.skip("rewards", "deterministic reward derivation cache matches")
         else:
             runner.stage(
@@ -384,7 +389,7 @@ def main() -> int:
                 ["--force"] if args.force_annotate else None,
             )
 
-        if needs_rynnvalue(raw["reward"]):
+        if method.requires_rewards and needs_rynnvalue(raw["reward"]):
             bind_started = time.monotonic()
             state["stages"]["bind"].update(status="RUNNING", started_at=_utc_now())
             state.update(current_stage="bind", updated_at=_utc_now())
@@ -406,8 +411,8 @@ def main() -> int:
 
         train_result = run_dir / "train_result.json"
         runner.stage(
-            "train", "VLA-Adapter IQL post-training", config.environments["train"],
-            "train_iql.py", effective_path,
+            "train", f"VLA-Adapter {method.name.upper()} post-training", config.environments["train"],
+            "train.py", effective_path,
             ["--result-file", str(train_result)],
         )
         result = json.loads(train_result.read_text(encoding="utf-8"))

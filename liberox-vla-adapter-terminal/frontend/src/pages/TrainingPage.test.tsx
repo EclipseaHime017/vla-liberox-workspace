@@ -28,6 +28,13 @@ const defaults: TrainingDefaults = {
   reward_editable_parameters: ["reward_gamma", "reward_accumulate_primitive_steps"],
   monitoring: {}, fixed: {}, environments: { training: "vla-liberox" }, checkpoints: [],
 };
+const rynnDefaults: TrainingDefaults = {
+  ...defaults,
+  advanced: { ...defaults.advanced, reward_source: "rynnvalue", reward_gamma: .87,
+    reward_shaping_weight: .2, reward_accumulate_primitive_steps: true },
+  reward_version: { id: "rynn-v1", evaluator: "rynnvalue", status: "COMPLETED",
+    parameters: { gamma: .87, shaping_weight: .2 }, created_at: "" },
+};
 const datasets = [
   { id: "ready", name: "Ready dataset", member_count: 5, integrity_status: "HEALTHY", annotation_status: "READY", reward_version_id: "version-p4" },
   { id: "unready", name: "Unready dataset", member_count: 3, integrity_status: "HEALTHY", annotation_status: "NOT_STARTED" },
@@ -53,6 +60,109 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("dataset-pinned training reward", () => {
+  it("switches between coexisting Final Reward and RynnValue without changing other training edits", async () => {
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (_id, source) =>
+      source === "rynnvalue" ? rynnDefaults : defaults);
+    render(<TrainingPage />);
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    const reward = screen.getByLabelText("训练奖励") as HTMLSelectElement;
+    expect(Array.from(reward.options, (option) => option.text)).toEqual(["Final Reward", "RynnValue"]);
+    fireEvent.change(screen.getByLabelText("训练步数"), { target: { value: "77" } });
+    fireEvent.change(reward, { target: { value: "rynnvalue" } });
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue"));
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByLabelText("Discount ratio γ") as HTMLInputElement).value).toBe("0.87");
+    fireEvent.click(start);
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+      reward_source: "rynnvalue", reward_version_id: "rynn-v1", reward_gamma: .87,
+      reward_shaping_weight: .2, reward_accumulate_primitive_steps: true, train_steps: 77,
+    })));
+    await waitFor(() => expect(reward.disabled).toBe(false));
+    fireEvent.change(reward, { target: { value: "final" } });
+    await waitFor(() => expect((screen.getByLabelText("Discount ratio γ") as HTMLInputElement).value).toBe("0.92"));
+    fireEvent.click(start);
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenLastCalledWith("ready", expect.objectContaining({
+      reward_source: "final", reward_version_id: "version-p4", reward_gamma: .92,
+      reward_shaping_weight: .1, reward_accumulate_primitive_steps: false, train_steps: 77,
+    })));
+  });
+
+  it("does not use available Final Reward when the selected RynnValue result is missing", async () => {
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (_id, source) => source === "rynnvalue"
+      ? { ...rynnDefaults, reward_version: null, reward_availability: { ready: false, origin: "global" } } : defaults);
+    render(<TrainingPage />);
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "rynnvalue" } });
+    await screen.findByText(/请先完成 RynnValue 评价/);
+    expect((start as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(start);
+    expect(api.enqueueTraining).not.toHaveBeenCalled();
+  });
+
+  it("ignores late reward defaults and never submits the previously selected version", async () => {
+    let resolveRynn: (value: TrainingDefaults) => void = () => {};
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (_id, source) => source === "rynnvalue"
+      ? new Promise((resolve) => { resolveRynn = resolve; }) : defaults);
+    render(<TrainingPage />);
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "rynnvalue" } });
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue"));
+    expect((start as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(start);
+    expect(api.enqueueTraining).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "final" } });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    resolveRynn(rynnDefaults);
+    await waitFor(() => expect((screen.getByLabelText("Discount ratio γ") as HTMLInputElement).value).toBe("0.92"));
+    fireEvent.click(start);
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+      reward_source: "final", reward_version_id: "version-p4",
+    })));
+  });
+
+  it("keeps RynnValue cumulative editable when unused fusion settings are multiplicative", async () => {
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (_id, source) => source === "rynnvalue"
+      ? { ...rynnDefaults, advanced: { ...rynnDefaults.advanced, reward_fusion_mode: "multiplicative" } }
+      : { ...defaults, advanced: { ...defaults.advanced, reward_fusion_mode: "multiplicative" },
+          reward_editable_parameters: ["reward_gamma"] });
+    render(<TrainingPage />);
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByLabelText("cumulative reward")).toBeNull();
+    fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "rynnvalue" } });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByLabelText("cumulative reward") as HTMLSelectElement).value).toBe("true");
+    fireEvent.click(start);
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+      reward_source: "rynnvalue", reward_accumulate_primitive_steps: true,
+    })));
+  });
+
+  it("trains BC on an unannotated dataset without sending reward or critic settings", async () => {
+    render(<TrainingPage />);
+    await screen.findByRole("option", { name: /Unready dataset/ });
+    fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "注册训练任务" }).hasAttribute("disabled")).toBe(true));
+    fireEvent.change(screen.getByLabelText("训练方法"), { target: { value: "bc" } });
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenCalledWith("unready", undefined, "bc"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "注册训练任务" }).hasAttribute("disabled")).toBe(false));
+    expect(screen.queryByLabelText("Discount ratio γ")).toBeNull();
+    expect(screen.queryByLabelText("训练奖励")).toBeNull();
+    expect(screen.queryByLabelText("Critic warmup")).toBeNull();
+    expect(screen.getByLabelText("Policy LR warmup")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalled());
+    const [datasetId, parameters] = vi.mocked(api.enqueueTraining).mock.calls[0];
+    expect(datasetId).toBe("unready");
+    expect(parameters.algorithm).toBe("bc");
+    expect(Object.keys(parameters).some((key) => key.startsWith("reward_") || key.startsWith("critic_"))).toBe(false);
+    fireEvent.change(screen.getByLabelText("训练方法"), { target: { value: "iql" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "注册训练任务" }).hasAttribute("disabled")).toBe(true));
+  });
+
   it("registers independent tasks while training and preserves the active monitor", async () => {
     vi.mocked(api.listOfflineJobs).mockResolvedValue([runningJob]);
     vi.mocked(api.getTrainingQueue).mockResolvedValue({ jobs: [runningJob], waiting_reason: null });
@@ -188,12 +298,12 @@ describe("dataset-pinned training reward", () => {
     const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     expect(screen.getByText(/使用逐轨迹全局结果/)).toBeTruthy();
-    expect(screen.queryByLabelText("Reward 来源")).toBeNull();
-    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "final"));
+    fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "rynnvalue" } });
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue"));
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(start);
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
-      reward_source: "final", reward_version_id: null,
+      reward_source: "rynnvalue", reward_version_id: null,
     })));
     expect(screen.queryByRole("option", { name: "Robometer" })).toBeNull();
   });
@@ -233,7 +343,7 @@ describe("dataset-pinned training reward", () => {
       advanced: { ...defaults.advanced, reward_accumulate_primitive_steps: cumulative } });
     render(<TrainingPage />);
     await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
-    expect(screen.queryByLabelText("Reward 来源")).toBeNull();
+    expect((screen.getByLabelText("训练奖励") as HTMLSelectElement).value).toBe("final");
     expect(screen.queryByLabelText("Shape reward 系数 κ")).toBeNull();
     expect(screen.queryByLabelText("Stage 插值指数 p")).toBeNull();
     expect(screen.queryByText(/version-p4/)).toBeNull();
@@ -275,7 +385,7 @@ describe("dataset-pinned training reward", () => {
     fireEvent.change(screen.getByLabelText("训练步数"), { target: { value: "77" } });
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
     await waitFor(() => expect((screen.getByLabelText("Discount ratio γ") as HTMLInputElement).value).toBe("0.95"));
-    expect(screen.queryByLabelText("Reward 来源")).toBeNull();
+    expect((screen.getByLabelText("训练奖励") as HTMLSelectElement).value).toBe("final");
     expect((screen.getByLabelText("训练步数") as HTMLInputElement).value).toBe("77");
     fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("unready", expect.objectContaining({ reward_version_id: "sparse-v1", reward_gamma: .95, train_steps: 77 })));

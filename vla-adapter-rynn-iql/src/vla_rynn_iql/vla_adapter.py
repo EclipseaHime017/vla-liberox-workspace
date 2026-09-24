@@ -257,7 +257,7 @@ class PolicyOverlay:
     action_dim: int
     proprio_dim: int
     dataset_sha256: str
-    reward_sha256: str
+    reward_sha256: str | None
     training_step: int
     component_sha256: dict[str, str]
     compatibility_sha256: str
@@ -270,8 +270,14 @@ def load_overlay(path: Path) -> PolicyOverlay:
                 "action_head", "proprio_projector", "action_horizon", "action_dim",
                 "proprio_dim", "dataset_sha256", "reward_sha256", "training_step",
                 "component_sha256", "compatibility_sha256"}
-    if not isinstance(raw, dict) or set(raw) != required or raw["schema_version"] != 1:
+    if isinstance(raw, dict) and raw.get("schema_version") == 2:
+        required.add("algorithm")
+    if not isinstance(raw, dict) or set(raw) != required or raw["schema_version"] not in (1, 2):
         raise ValueError(f"Invalid policy overlay manifest: {path}")
+    if raw.get("algorithm", "iql") not in ("iql", "bc"):
+        raise ValueError("Unknown policy overlay algorithm")
+    if raw.get("algorithm") == "bc" and raw["reward_sha256"] is not None:
+        raise ValueError("BC overlays must not reference rewards")
     for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
         if not isinstance(raw[key], str) or not raw[key].strip():
             raise ValueError(f"Invalid policy overlay field {key}: {path}")
@@ -293,7 +299,7 @@ def load_overlay(path: Path) -> PolicyOverlay:
         path, str(raw["policy_id"]), str(raw["label"]), str(raw["base_checkpoint"]),
         str(raw["stats_key"]), component("action_head"), component("proprio_projector"),
         int(raw["action_horizon"]), int(raw["action_dim"]), int(raw["proprio_dim"]),
-        str(raw["dataset_sha256"]), str(raw["reward_sha256"]), int(raw["training_step"]),
+        str(raw["dataset_sha256"]), raw["reward_sha256"], int(raw["training_step"]),
         dict(hashes), str(raw["compatibility_sha256"]),
     )
 

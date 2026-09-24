@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from .methods import COMMON_TRAINING_KEYS, training_method
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRAIN_CONFIG = PROJECT_ROOT / "configs" / "liberox_iql.yaml"
@@ -38,6 +40,7 @@ UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, 
 
 TRAIN_SCHEMA = {
     "schema_version": None,
+    "training": None,
     "paths": {"dataset_sources": None, "work_dir": None, "output_dir": None,
               "annotation_cache": None,
               "vla_adapter_root": None, "libero_x_root": None,
@@ -190,6 +193,28 @@ def effective_cumulative(reward: dict[str, Any]) -> bool:
 def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
     path = path.expanduser().resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+    if isinstance(raw, dict):
+        raw.setdefault("training", {})
+        training = raw["training"]
+        if not isinstance(training, dict):
+            raise TypeError("training must be a mapping")
+        unknown = set(training) - COMMON_TRAINING_KEYS - {"method", "actor_lr_warmup_steps"}
+        if unknown:
+            raise ValueError(f"Unknown training keys: {sorted(unknown)}")
+        training.setdefault("method", "iql")
+        training.setdefault("actor_lr_warmup_steps", None)
+        method = training_method(raw)
+        if not method.requires_rewards:
+            # BC accepts a minimal config without reward/critic settings. These
+            # compatibility defaults are never evaluated or loaded by BC.
+            defaults = yaml.load(DEFAULT_TRAIN_CONFIG.read_text(), Loader=UniqueKeyLoader)
+            raw.setdefault("reward", defaults["reward"])
+            raw["iql"] = {**defaults["iql"], **raw.get("iql", {})}
+        if isinstance(raw.get("iql"), dict):
+            for key in COMMON_TRAINING_KEYS & training.keys():
+                raw["iql"][key] = training[key]
+        if training["actor_lr_warmup_steps"] is not None:
+            _number(training, "actor_lr_warmup_steps", low=0, integer=True)
     # Canonicalize old boolean configs. Explicit contradictory choices fail fast.
     if isinstance(raw, dict) and isinstance(raw.get("reward"), dict):
         reward = raw["reward"]
@@ -306,6 +331,8 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG) -> LoadedConfig:
         iql["resume_checkpoint"] = str(
             (path_value if path_value.is_absolute() else path.parent / path_value).resolve()
         )
+        if "resume_checkpoint" in raw["training"]:
+            raw["training"]["resume_checkpoint"] = iql["resume_checkpoint"]
     if iql["checkpoint_interval"] % iql["gradient_accumulation_steps"] != 0:
         raise ValueError(
             "iql.checkpoint_interval must be divisible by gradient_accumulation_steps "

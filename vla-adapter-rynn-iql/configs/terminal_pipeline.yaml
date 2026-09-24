@@ -30,6 +30,8 @@ selection:
 # These are partial overrides of liberox_iql.yaml. Unknown and pipeline-managed
 # keys fail validation instead of being silently ignored.
 overrides:
+  training:
+    method: iql  # bc skips evaluation, reward derivation and sidecar binding
   paths: {}
   data:
     validation_fraction: 0.2

@@ -2,7 +2,41 @@
 
 Standalone offline post-training for the Franka VLA-Adapter policy. RynnValue
 is a frozen offline reward annotator; the deployed policy remains
-`VLA-Adapter/LIBERO-Object-Pro` with an IQL-trained action-head overlay.
+`VLA-Adapter/LIBERO-Object-Pro` with a trained action-head/proprio overlay.
+
+## Training methods: IQL and BC
+
+The default remains IQL. Set `training.method: bc` for equal-weight masked-L1
+behavior cloning on **all selected training replay chunks**. Dataset selection
+belongs to the data layer: BC does not filter successful demonstrations, alter
+branch deduplication, or drop post-success actions. It never loads rewards, Q/V,
+RynnValue, Robometer or Stage annotations.
+
+From the workspace root:
+
+```bash
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train.py --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
+```
+
+The UI training-method selector accepts unannotated datasets for BC. For terminal
+orchestration, set `overrides.training.method: bc`; prepare and training run as
+usual, while annotation, reward materialization and binding are skipped. The
+existing selection is unchanged.
+
+Common runtime/actor settings can be placed under `training`; explicit values
+override the legacy `iql` aliases. Existing YAML and `train_iql.py` remain valid.
+`training.actor_lr_warmup_steps` separates the actor LR schedule from IQL's
+advantage warmup; `null` inherits the legacy `critic_warmup_steps` value. For a
+matched comparison, keep actor initialization, samples, batch, accumulation,
+optimizer and LR schedule identical. Steps still count micro-batches, not epochs.
+
+`methods.py` declares capabilities; `algorithms.py` owns method-specific auxiliary
+updates, actor objectives and state. The shared runner owns actor optimization,
+monitoring, checkpointing and overlay export. `ActionDataset` supplies reward-free
+actor samples, and `ReplayDataset` adds RL transitions. BC checkpoints cannot
+resume IQL (or vice versa); old IQL checkpoints and schema-1 overlays remain
+readable. New schema-2 overlays record the method; BC has no reward hash.
 
 ## Environments
 

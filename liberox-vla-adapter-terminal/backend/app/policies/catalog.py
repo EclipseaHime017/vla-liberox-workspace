@@ -64,6 +64,7 @@ class PolicyEntry:
     proprio_projector: Path | None
     training_step: int | None
     compatibility_sha256: str | None
+    algorithm: str = "iql"
 
     @property
     def is_base(self) -> bool:
@@ -76,6 +77,7 @@ class PolicyEntry:
             "base_checkpoint": self.base_checkpoint,
             "stats_key": self.stats_key,
             "kind": "base" if self.is_base else "rynn_iql_overlay",
+            "algorithm": None if self.is_base else self.algorithm,
             "training_step": self.training_step,
             "compatibility_sha256": self.compatibility_sha256,
         }
@@ -147,10 +149,14 @@ class PolicyCatalog:
 
     def _load(self, manifest: Path) -> PolicyEntry:
         raw = yaml.load(manifest.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
-        if not isinstance(raw, dict) or set(raw) != self.REQUIRED:
+        required = self.REQUIRED | ({"algorithm"} if isinstance(raw, dict) and raw.get("schema_version") == 2 else set())
+        if not isinstance(raw, dict) or set(raw) != required:
             raise ValueError(f"Invalid policy overlay keys: {manifest}")
-        if raw["schema_version"] != 1:
+        if raw["schema_version"] not in (1, 2):
             raise ValueError(f"Unsupported policy overlay schema: {manifest}")
+        algorithm = raw.get("algorithm", "iql")
+        if algorithm not in ("iql", "bc"):
+            raise ValueError("Unknown policy overlay algorithm")
         policy_id = raw["policy_id"]
         label = raw["label"]
         if not isinstance(policy_id, str) or not policy_id or Path(policy_id).name != policy_id:
@@ -183,6 +189,10 @@ class PolicyCatalog:
         if not isinstance(hashes, dict) or set(hashes) != {"action_head", "proprio_projector"}:
             raise ValueError(f"Overlay {policy_id} has invalid component hashes")
         for key in ("dataset_sha256", "reward_sha256", "compatibility_sha256"):
+            if key == "reward_sha256" and algorithm == "bc":
+                if raw[key] is not None:
+                    raise ValueError("BC overlays must not reference rewards")
+                continue
             if not isinstance(raw[key], str) or re.fullmatch(r"[0-9a-f]{64}", raw[key]) is None:
                 raise ValueError(f"Overlay {policy_id} has invalid {key}")
         if type(raw["training_step"]) is not int or raw["training_step"] < 1:
@@ -220,6 +230,7 @@ class PolicyCatalog:
             proprio_projector=component("proprio_projector"),
             training_step=int(raw["training_step"]),
             compatibility_sha256=str(raw["compatibility_sha256"]),
+            algorithm=algorithm,
         )
 
     def entry(self, policy_id: str) -> PolicyEntry:

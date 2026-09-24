@@ -37,6 +37,8 @@ python liberox-vla-adapter-terminal/scripts/test_factr.py
 
 配置文件：`vla-adapter-rynn-iql/configs/terminal_pipeline.yaml`
 
+`overrides.training.method` 选择 `iql` 或 `bc`；BC 跳过所有奖励评价，数据筛选仍使用 `selection`。
+
 ```bash
 python vla-adapter-rynn-iql/scripts/train_terminal.py \
   --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml

@@ -75,7 +75,7 @@ class PolicyManagementService:
         result.update(
             manifest={
                 key: manifest.get(key) for key in (
-                    "dataset_sha256", "reward_sha256", "training_step",
+                    "dataset_sha256", "reward_sha256", "training_step", "algorithm",
                     "action_horizon", "action_dim", "proprio_dim",
                     "compatibility_sha256",
                 )

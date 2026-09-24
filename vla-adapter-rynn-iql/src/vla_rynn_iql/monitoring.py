@@ -111,7 +111,16 @@ class TrainingProgressReporter:
         width = 20
         complete = min(width, int(fraction * width))
         bar = "#" * complete + "-" * (width - complete)
-        phase = "BC-warmup" if step <= self.warmup_steps else "IQL"
+        method = metric.get("algorithm", "iql")
+        phase = "BC" if method == "bc" else "BC-warmup" if step <= self.warmup_steps else "IQL"
+        objective = (
+            f"loss(actor)={_metric_number(metric, 'actor_loss')} | " if method == "bc" else
+            f"loss(q/v/actor)={_metric_number(metric, 'q_loss')}/"
+            f"{_metric_number(metric, 'value_loss')}/{_metric_number(metric, 'actor_loss')} | "
+            f"Q/V/A={_metric_number(metric, 'q_mean')}/{_metric_number(metric, 'value_mean')}/"
+            f"{_metric_number(metric, 'advantage_mean')} | "
+            f"weight={_metric_number(metric, 'advantage_weight_mean')} | "
+        )
         finish = metric.get("estimated_completion_time") or "unknown"
         return (
             f"TRAIN [{bar}] {step}/{self.total_steps} "
@@ -120,13 +129,7 @@ class TrainingProgressReporter:
             f"ETA={format_duration(metric.get('estimated_remaining_seconds'))} "
             f"(finish {finish}) | {metric['steps_per_second']:.3f} step/s | "
             f"{metric['samples_per_second']:.2f} sample/s | "
-            f"loss(q/v/actor)={_metric_number(metric, 'q_loss')}/"
-            f"{_metric_number(metric, 'value_loss')}/"
-            f"{_metric_number(metric, 'actor_loss')} | "
-            f"Q/V/A={_metric_number(metric, 'q_mean')}/"
-            f"{_metric_number(metric, 'value_mean')}/"
-            f"{_metric_number(metric, 'advantage_mean')} | "
-            f"weight={_metric_number(metric, 'advantage_weight_mean')} | "
+            f"{objective}"
             f"lr={_metric_number(metric, 'actor_learning_rate', 3)} | "
             f"VRAM={_metric_number(metric, 'cuda_peak_memory_gib', 3)} GiB"
         )

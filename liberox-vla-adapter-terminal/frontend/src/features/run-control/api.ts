@@ -108,10 +108,11 @@ export const stopOfflineJob = (id: string) => api<OfflineJob>(
 export const getJobLogs = (id: string, offset = 0) => api<{
   offset: number; next_offset: number; text: string;
 }>(`/api/jobs/${encodeURIComponent(id)}/logs?offset=${offset}`);
-export const getTrainingDefaults = (datasetId?: string, rewardSource?: TrainingRewardSource) => {
+export const getTrainingDefaults = (datasetId?: string, rewardSource?: TrainingRewardSource, algorithm?: "iql" | "bc") => {
   const query = new URLSearchParams();
   if (datasetId) query.set("dataset_id", datasetId);
   if (rewardSource) query.set("reward_source", rewardSource);
+  if (algorithm) query.set("algorithm", algorithm);
   return api<TrainingDefaults>(`/api/training/defaults${query.size ? `?${query}` : ""}`);
 };
 export const startTraining = (datasetId: string, parameters: Record<string, unknown>) =>

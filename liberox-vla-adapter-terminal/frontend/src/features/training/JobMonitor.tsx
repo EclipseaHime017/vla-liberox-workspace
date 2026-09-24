@@ -55,9 +55,10 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
   const lines = useMemo(() => text.split(/\r?\n/).filter(Boolean).map(displayLine), [text]);
   const metric = job.metrics;
   const warmup = Number(job.parameters.critic_warmup_steps ?? 0);
+  const isBC = job.parameters.algorithm === "bc";
   const phase = job.kind === "annotation" || !metric
     ? job.stage_label
-    : Number(metric.step ?? 0) <= warmup ? "Critic warmup / BC" : "IQL";
+    : isBC ? "BC" : Number(metric.step ?? 0) <= warmup ? "Critic warmup / BC" : "IQL";
   return <section className="surface job-monitor-card">
     <div className="panel-title"><strong>任务监视器</strong><span>{job.id}</span></div>
     <div className="job-status-strip">
@@ -70,11 +71,11 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
       {terminal.has(job.status) && onDismiss && <button onClick={onDismiss}>关闭记录</button>}
     </div>
     {metric && <div className="job-metric-grid">
-      <span><small>Q loss</small><b>{metricNumber(metric.q_loss)}</b></span>
-      <span><small>Value loss</small><b>{metricNumber(metric.value_loss)}</b></span>
+      {!isBC && <><span><small>Q loss</small><b>{metricNumber(metric.q_loss)}</b></span>
+      <span><small>Value loss</small><b>{metricNumber(metric.value_loss)}</b></span></>}
       <span><small>Actor loss</small><b>{metricNumber(metric.actor_loss)}</b></span>
-      <span><small>Q / V / Advantage</small><b>{metricNumber(metric.q_mean)} / {metricNumber(metric.value_mean)} / {metricNumber(metric.advantage_mean)}</b></span>
-      <span><small>Advantage weight</small><b>{metricNumber(metric.advantage_weight_mean)}</b></span>
+      {!isBC && <><span><small>Q / V / Advantage</small><b>{metricNumber(metric.q_mean)} / {metricNumber(metric.value_mean)} / {metricNumber(metric.advantage_mean)}</b></span>
+      <span><small>Advantage weight</small><b>{metricNumber(metric.advantage_weight_mean)}</b></span></>}
       <span><small>Policy LR</small><b>{metricNumber(metric.actor_learning_rate, 3)}</b></span>
       <span><small>梯度范数</small><b>{metricNumber(metric.actor_grad_norm)}</b></span>
       <span><small>峰值显存</small><b>{metricNumber(metric.cuda_peak_memory_gib, 3)} GiB</b></span>

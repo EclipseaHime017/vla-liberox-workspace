@@ -71,6 +71,31 @@ def test_each_dataset_source_remains_selectable_after_other_evaluations(tmp_path
         **current["evaluation_version_ids"], "stage": newer["id"]}
 
 
+@pytest.mark.parametrize("queued", [False, True])
+def test_rynnvalue_and_final_training_pin_the_selected_source(tmp_path, queued):
+    jobs, dataset = setup_jobs(tmp_path)
+    rynn = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="rynnvalue",
+                  gamma=.87, shaping_weight=.2, accumulate_primitive_steps=True))
+    final = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="final",
+                   alpha=.5, shaping_weight=0., gamma=.92))
+    train = jobs.enqueue_training if queued else jobs.start_training
+    for source, version in (("rynnvalue", rynn), ("final", final)):
+        defaults = jobs.defaults(dataset["id"], source)
+        assert defaults["reward_availability"]["ready"]
+        assert defaults["reward_version"]["id"] == version["id"]
+        parameters = {key: value for key, value in defaults["advanced"].items()
+                      if key.startswith("reward_") and key != "reward_rynnvalue"}
+        job = train(dataset["id"], {**parameters, "reward_version_id": version["id"], "reward_gamma": .95})
+        effective = yaml.safe_load(job["config_path"].read_text())["reward"]
+        assert effective["source"] == source
+        assert effective["version_id"] == version["id"]
+        assert effective["manifest_path"] == version["reward_manifest_path"]
+        assert effective["gamma"] == .95
+        assert effective["shaping_weight"] == (.2 if source == "rynnvalue" else 0.)
+        assert effective["accumulate_primitive_steps"] == (source == "rynnvalue")
+        assert jobs.datasets.get(dataset["id"])["reward_version_id"] == final["id"]
+
+
 def test_global_pin_is_independent_of_dataset_evaluation_and_copies_exact_arrays(tmp_path):
     from vla_rynn_iql.config import load_train_config as load_config
     from vla_rynn_iql.rewards import load_pinned_reward_index, reward_manifest_digest

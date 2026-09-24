@@ -74,6 +74,22 @@ def test_policy_catalog_validates_and_lists_overlay(tmp_path: Path):
         catalog.entry("missing")
 
 
+def test_bc_overlay_and_legacy_iql_are_both_discoverable(tmp_path: Path):
+    _overlay(tmp_path, "legacy-iql")
+    path = _overlay(tmp_path, "bc-test")
+    raw = yaml.safe_load(path.read_text())
+    raw.update(schema_version=2, algorithm="bc", reward_sha256=None)
+    path.write_text(yaml.safe_dump(raw))
+    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    assert catalog.entry("bc-test").public()["algorithm"] == "bc"
+    assert catalog.entry("legacy-iql").public()["algorithm"] == "iql"
+    raw["reward_sha256"] = "e" * 64
+    path.write_text(yaml.safe_dump(raw))
+    catalog.refresh()
+    with pytest.raises(ValueError, match="must not reference rewards"):
+        catalog.entry("bc-test")
+
+
 def test_policy_catalog_rejects_component_tampering(tmp_path: Path):
     manifest = _overlay(tmp_path)
     (manifest.parent / "action_head.pt").write_bytes(b"tampered")

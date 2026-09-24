@@ -20,6 +20,7 @@ from .config import TRAIN_SCHEMA, UniqueKeyLoader, effective_cumulative, load_tr
 from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step, replay_chunks
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
+from .methods import COMMON_TRAINING_KEYS
 from .rewards import (
     ANNOTATION_SCHEMA_VERSION,
     REWARD_SCHEMA_VERSION,
@@ -85,12 +86,15 @@ def _resolve(path: str, base: Path, context: str) -> Path:
 
 
 def _validate_overrides(overrides: Any) -> dict[str, dict[str, Any]]:
+    if isinstance(overrides, dict):
+        overrides.setdefault("training", {})
     sections = set(TRAIN_SCHEMA) - {"schema_version"}
     result = _strict_keys(overrides, sections, "overrides")
     for section, values in result.items():
         if not isinstance(values, dict):
             raise TypeError(f"overrides.{section} must be a mapping")
-        allowed = set(TRAIN_SCHEMA[section])
+        allowed = (COMMON_TRAINING_KEYS | {"method", "actor_lr_warmup_steps"}
+                   if section == "training" else set(TRAIN_SCHEMA[section]))
         unknown = sorted(set(values) - allowed)
         if unknown:
             raise ValueError(f"Unknown overrides.{section} keys: {unknown}")
@@ -187,13 +191,20 @@ def merged_training_config(config: TerminalPipelineConfig) -> dict[str, Any]:
                     ]
                 else:
                     value = str(_resolve(value, config.path.parent, f"overrides.paths.{key}"))
-            elif section == "iql" and key == "resume_checkpoint" and value is not None:
-                value = str(_resolve(value, config.path.parent, "overrides.iql.resume_checkpoint"))
+            elif section in ("iql", "training") and key == "resume_checkpoint" and value is not None:
+                value = str(_resolve(value, config.path.parent, f"overrides.{section}.resume_checkpoint"))
             elif section == "data" and key == "stage_annotations_manifest" and value is not None:
                 value = str(_resolve(value, config.path.parent, "overrides.data.stage_annotations_manifest"))
             elif section == "reward" and key == "manifest_path" and value is not None:
                 value = str(_resolve(value, config.path.parent, "overrides.reward.manifest_path"))
             raw[section][key] = value
+    # An explicit legacy override also overrides a canonical value inherited
+    # from the base config. Explicit training.* wins if both are supplied.
+    for key in COMMON_TRAINING_KEYS & config.overrides["iql"].keys():
+        if key in raw["training"] and key not in config.overrides["training"]:
+            raw["training"][key] = raw["iql"][key]
+    for key in COMMON_TRAINING_KEYS & raw["training"].keys():
+        raw["iql"][key] = raw["training"][key]
     reward_overrides = config.overrides.get("reward", {})
     if ("alpha" in reward_overrides or "fusion_mode" in reward_overrides) and "source" not in reward_overrides:
         raw["reward"]["source"] = "final"

@@ -13,14 +13,14 @@ export function TrainingQueuePanel({ queue, onInspect, onStop, busyId }: {
   const history = queue.jobs.filter((job) => !pending.has(job.status)).slice().reverse();
   const row = (job: TrainingQueueItem) => <article className="training-queue-item" key={job.id}>
     <details>
-      <summary><strong>{String(job.parameters.dataset_name ?? job.dataset_id)}</strong>
+      <summary><strong>{String(job.parameters.dataset_name ?? job.dataset_id)} · {String(job.parameters.algorithm ?? "iql").toUpperCase()}</strong>
         <span>Batch {String(job.parameters.micro_batch_size ?? "—")} · {String(job.parameters.train_steps ?? "—")} steps · Seed {String(job.parameters.seed ?? "—")}</span>
         <Badge tone={job.status === "COMPLETED" ? "green" : job.status === "FAILED" ? "red" : "neutral"}>{labels[job.status]}</Badge>
       </summary>
       <div className="queue-parameters"><span>{job.id}</span>
         <span>梯度累积：{String(job.parameters.gradient_accumulation_steps ?? "—")}</span>
         <span>注册时间：{new Date(job.created_at).toLocaleString()}</span>
-        <span>Discount γ：{String((job.parameters.reward as Record<string, unknown> | undefined)?.gamma ?? "—")}</span>
+        {job.parameters.algorithm !== "bc" && <span>Discount γ：{String((job.parameters.reward as Record<string, unknown> | undefined)?.gamma ?? "—")}</span>}
       </div>
       {job.error && <p className="job-error">{job.error}</p>}
     </details>

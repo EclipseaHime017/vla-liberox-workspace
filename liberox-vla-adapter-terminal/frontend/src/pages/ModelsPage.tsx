@@ -46,10 +46,10 @@ export function ModelsPage() {
     catch (reason) { setError(String(reason)); } finally { setBusy(false); }
   };
   return <section className="content-page">
-    <div className="page-heading"><p className="eyebrow">MODEL REGISTRY</p><h1>模型</h1><p>浏览基础模型与 IQL overlay，管理显示名称、副本和训练来源。</p></div>
+    <div className="page-heading"><p className="eyebrow">MODEL REGISTRY</p><h1>模型</h1><p>浏览基础模型与训练 overlay，管理显示名称、副本和训练来源。</p></div>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     <div className="models-layout">
-      <aside className="surface model-list"><div className="panel-title"><strong>模型库</strong><span>{models.length}</span></div>{models.map((model) => <button key={model.policy_id} className={selected === model.policy_id ? "active" : ""} onClick={() => void choose(model.policy_id)}><span><strong>{model.label}</strong><code>{model.policy_id}</code></span><Badge tone={model.kind === "base" ? "neutral" : "green"}>{model.kind === "base" ? "BASE" : "IQL"}</Badge></button>)}</aside>
+      <aside className="surface model-list"><div className="panel-title"><strong>模型库</strong><span>{models.length}</span></div>{models.map((model) => <button key={model.policy_id} className={selected === model.policy_id ? "active" : ""} onClick={() => void choose(model.policy_id)}><span><strong>{model.label}</strong><code>{model.policy_id}</code></span><Badge tone={model.kind === "base" ? "neutral" : "green"}>{model.kind === "base" ? "BASE" : (model.algorithm ?? "iql").toUpperCase()}</Badge></button>)}</aside>
       <main className="surface model-detail">{busy && !detail ? <div className="empty-table">加载模型信息…</div> : detail ? <>
         <div className="model-detail-head"><div><p className="eyebrow">{detail.kind}</p><h2>{detail.label}</h2><code>{detail.policy_id}</code></div><div>{detail.kind !== "base" && <><button disabled={busy} onClick={() => void rename()}>重命名</button><button disabled={busy} onClick={() => void duplicate()}>复制模型</button><button className="danger" disabled={busy} onClick={() => void remove()}>删除</button></>}</div></div>
         <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd><dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
