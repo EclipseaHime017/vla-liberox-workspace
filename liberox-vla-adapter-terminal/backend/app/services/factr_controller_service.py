@@ -11,6 +11,7 @@ from ..devices.factr import probe_factr
 from ..devices.factr_client import FactrClient
 from ..devices.factr_calibration import save_profile
 from .controller_service import latency_level
+from .factr_usb_authorization import ensure_factr_usb_latency
 
 LOGGER = logging.getLogger(__name__)
 
@@ -19,9 +20,11 @@ class FactrControllerService:
     controller_id = "factr"
 
     def __init__(self, config, *, input_factory=FactrClient, probe=probe_factr,
-                 monitor_interval_seconds=.05, start_monitor=True):
+                 monitor_interval_seconds=.05, start_monitor=True,
+                 usb_preflight=ensure_factr_usb_latency):
         self.config = config
         self._factory, self._probe = input_factory, probe
+        self._usb_preflight = usb_preflight
         self._lock = threading.RLock()
         self._operation = threading.RLock()
         self._stop = threading.Event()
@@ -32,6 +35,7 @@ class FactrControllerService:
         self._state, self._error = "DISCONNECTED", None
         self._message = "FACTR 未连接"
         self._connected = False
+        self._discovery = {}
         self._calibration = None
         self._armed_session_id = None
         self._alignment_session_id = None
@@ -68,34 +72,47 @@ class FactrControllerService:
             probe = self._probe(self.config)
             with self._lock:
                 if self._input is None and self._state == state:
+                    self._discovery = probe
                     self._connected = bool(probe.get("connected"))
                     self._state = "UNCALIBRATED" if self._connected else "DISCONNECTED"
                     self._error = probe.get("error")
-                    self._message = "FACTR 已连接·待校准" if self._connected else self._error or "FACTR 未连接"
+                    self._message = self._error or ("FACTR 已连接·待校准" if self._connected else "FACTR 未连接")
 
-    def start_calibration(self):
+    def start_calibration(self, *, allow_usb_authorization=False):
         with self._lock:
             if self._stop.is_set() or self._armed_session_id or self._alignment_session_id or self._gravity_busy or self._calibration_thread is not None:
                 raise RuntimeError("Cannot calibrate while armed, closing or already calibrating")
             if self._input is not None and self._input.status().get("gravity_enabled"):
                 raise RuntimeError("Support the arm and disable compensation before calibration")
             self._state, self._error = "CALIBRATING", None
-            self._message = "正在调用官方整臂校准；保持参考构型并松开触发器"
-            self._calibration_thread = threading.Thread(target=self._calibrate, name="factr-calibration", daemon=True)
+            self._message = "正在调用官方整臂校准；保持 Figure 1 参考构型并松开触发器"
+            self._calibration_thread = threading.Thread(target=self._calibrate, args=(allow_usb_authorization,),
+                                                        name="factr-calibration", daemon=True)
             self._calibration_thread.start()
         return self.status()
 
-    def _calibrate(self):
+    def _calibration_message(self, message):
+        with self._lock:
+            self._message = message
+
+    def _calibrate(self, allow_usb_authorization=False):
         try:
             with self._operation:
                 if self._stop.is_set():
                     return
                 if self._input is None:
+                    self._usb_preflight(self.config, allow_authorization=allow_usb_authorization,
+                                        stop_event=self._stop, on_message=self._calibration_message)
+                    if self._stop.is_set():
+                        return
                     client = self._factory(self.config)
                     with self._lock:
                         self._input = client
                 else:
                     client = self._input
+                if self._stop.is_set():
+                    client.close()
+                    return  # Closing while the worker started must not capture calibration.
                 profile = client.calibrate()
                 if self._stop.is_set():
                     client.close()
@@ -232,6 +249,8 @@ class FactrControllerService:
                 "gravity_supported": True, "gravity_enabled": bool(raw.get("gravity_enabled")),
                 "gravity_state": "unknown" if self._shutdown_error else "on" if raw.get("gravity_enabled") else "off",
                 "cycle_ms": raw.get("cycle_ms"), "official_commit": raw.get("official_commit"),
+                "serial_device": raw.get("serial_device", self._discovery.get("serial_device")),
+                "runtime_available": True if client is not None else self._discovery.get("runtime_available"),
                 "serial_read": raw.get("serial_read"),
                 "alignment": raw.get("alignment"),
                 "reference_joint_positions": list(self.config.reference_joint_positions)}

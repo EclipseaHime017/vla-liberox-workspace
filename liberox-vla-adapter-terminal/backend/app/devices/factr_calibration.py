@@ -112,6 +112,9 @@ def load_profile(path: Path, config: FactrConfig,
         raise ValueError("Old calibration method; run the whole-arm reference calibration (c) again")
     if payload["config_hash"] != config_hash(config):
         raise ValueError("FACTR kinematic configuration changed; recalibrate")
+    usb_device = device_fingerprint.get("usb_device")
+    if isinstance(usb_device, Mapping) and not usb_device.get("serial_number"):
+        raise ValueError("FACTR has no USB serial number; saved calibration cannot identify this arm. Recalibrate")
     if _json_bytes(payload["device_fingerprint"]) != _json_bytes(dict(device_fingerprint)):
         raise ValueError("FACTR device fingerprint changed (model/ID/Homing Offset/Drive Mode); recalibrate")
     validated = make_profile(config, payload["offsets"], payload["gripper_open"],

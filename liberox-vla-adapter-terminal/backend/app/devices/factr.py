@@ -24,7 +24,9 @@ MODEL_NUMBERS = {"XC330_T288_T": 1220, "XM430_W210_T": 1030}
 class FactrConfig:
     mode: str
     device_name: str
-    device_path: str | None
+    vendor_id: int
+    product_id: int
+    serial_number: str | None
     baudrate: int
     motor_ids: tuple[int, ...]
     motor_models: tuple[str, ...]
@@ -66,6 +68,7 @@ def parse_factr_config(raw, path=DEFAULT_FACTR_CONFIG) -> FactrConfig:
         raise TypeError("FACTR config must be a string-keyed mapping")
     expected = {field.name for field in fields(FactrConfig)}
     raw.setdefault("runtime", None)
+    raw.setdefault("serial_number", None)
     if set(raw) != expected:
         raise ValueError(f"FACTR keys: missing={sorted(expected-set(raw))}, unknown={sorted(set(raw)-expected)}")
     raw = dict(raw)
@@ -74,11 +77,13 @@ def parse_factr_config(raw, path=DEFAULT_FACTR_CONFIG) -> FactrConfig:
             raise TypeError(f"{key} must be a non-empty string")
     if raw["mode"] not in {"device", "simulation"}:
         raise ValueError("mode must be device or simulation")
-    port = raw["device_path"]
-    if port is not None:
-        if not isinstance(port, str) or not port.strip() or not Path(port).expanduser().is_absolute():
-            raise ValueError("device_path must be an explicit absolute serial path or null")
-        raw["device_path"] = str(Path(port).expanduser())
+    for key in ("vendor_id", "product_id"):
+        if type(raw[key]) is not int or not 0 <= raw[key] <= 0xffff:
+            raise ValueError(f"{key} must be an integer USB ID in [0, 65535] (e.g. 0x0403)")
+    if raw["serial_number"] is not None:
+        if not isinstance(raw["serial_number"], str) or not raw["serial_number"].strip():
+            raise ValueError("serial_number must be a non-empty string or null")
+        raw["serial_number"] = raw["serial_number"].strip()
     for key in ("baudrate", "stale_timeout_ms", "max_steps", "countdown_seconds"):
         if type(raw[key]) is not int:
             raise TypeError(f"{key} must be an integer")
@@ -156,7 +161,7 @@ def serial_owners(device_path: str, *, proc_root: Path = Path("/proc"),
     """
     target = Path(device_path).stat()
     if not stat.S_ISCHR(target.st_mode):
-        raise RuntimeError("FACTR device_path is not a serial character device")
+        raise RuntimeError("FACTR resolved path is not a serial character device")
     busy, unreadable = set(), 0
     for process in proc_root.iterdir():
         if not process.name.isdecimal():
@@ -189,18 +194,20 @@ class FactrStartupProbe:
     START_ADDRESS, DATA_LENGTH = 64, 72
 
     def __init__(self, config: FactrConfig, *, sdk: Any = None,
-                 owners_probe: Callable[..., dict[str, Any]] = serial_owners) -> None:
+                 owners_probe: Callable[..., dict[str, Any]] = serial_owners,
+                 device=None) -> None:
         self.config = config
         self.sdk = sdk
         self.port = None
         self.packet = None
         self._exclusive_acquired = False
         self._owners_probe = owners_probe
+        self.device = device
 
     def open(self) -> dict[str, Any]:
-        if self.config.device_path is None:
-            raise RuntimeError("Set FACTR device_path to your explicit /dev/serial/by-id/... path")
-        occupancy = self._owners_probe(self.config.device_path)
+        from .factr_discovery import discover_factr_device
+        device = self.device or discover_factr_device(self.config)
+        occupancy = self._owners_probe(device.path)
         if occupancy["busy_pids"]:
             raise RuntimeError(f"FACTR serial port is occupied by PID(s) {occupancy['busy_pids']}; close that controller manually")
         if self.sdk is None:
@@ -208,7 +215,7 @@ class FactrStartupProbe:
                 self.sdk = importlib.import_module("dynamixel_sdk")
             except ImportError as exc:
                 raise RuntimeError("Missing dynamixel-sdk; install requirements-factr.txt") from exc
-        self.port = self.sdk.PortHandler(self.config.device_path)
+        self.port = self.sdk.PortHandler(device.path)
         self.packet = self.sdk.PacketHandler(2.0)
         try:
             # setBaudRate configures the HOST serial port, not a motor register.
@@ -222,7 +229,7 @@ class FactrStartupProbe:
                 fcntl.ioctl(serial_port.fileno(), termios.TIOCEXCL)
                 self._exclusive_acquired = True
                 # Recheck after obtaining host-side exclusion, before pinging.
-                occupancy = self._owners_probe(self.config.device_path, ignore_fd=serial_port.fileno())
+                occupancy = self._owners_probe(device.path, ignore_fd=serial_port.fileno())
                 if occupancy["busy_pids"]:
                     raise RuntimeError(f"FACTR serial port was already open in PID(s) {occupancy['busy_pids']}")
             models = []
@@ -234,7 +241,7 @@ class FactrStartupProbe:
                 models.append({"id": motor_id, "model": model, "name": model_name})
             self.check_status()  # Verify torque OFF before official driver construction.
             return {"motors": models, "baudrate": self.config.baudrate, "passive_only": True,
-                    "occupancy_check": occupancy}
+                    "occupancy_check": occupancy, "serial_device": device.as_dict()}
         except BaseException:
             self.close()
             raise
@@ -276,16 +283,20 @@ class FactrStartupProbe:
 
 def probe_factr(config: FactrConfig) -> dict[str, Any]:
     """Read-only idle discovery; SDK and ROS live in the official environment."""
-    if not config.device_path:
-        return {"connected": False, "error": "请配置 FACTR device_path"}
-    if not Path(config.runtime["runtime_python"]).is_file():
-        return {"connected": False, "error": "官方运行环境缺失，请运行 setup_factr.py"}
-    port = Path(config.device_path)
+    from .factr_discovery import discover_factr_device
     try:
+        device = discover_factr_device(config)
+        port = Path(device.path)
         if not stat.S_ISCHR(port.stat().st_mode):
             raise ValueError("FACTR path is not a serial character device")
-        if not os.access(port, os.R_OK | os.W_OK):
-            raise ValueError("Serial permission denied; check dialout/udev")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         return {"connected": False, "error": str(exc)}
-    return {"connected": True, "verified": False, "error": None}
+    # USB presence and readiness for calibration are distinct. Never hide a
+    # connected port merely because the isolated runtime is not provisioned.
+    error = None
+    if not os.access(port, os.R_OK | os.W_OK):
+        error = "Serial permission denied; check dialout/udev"
+    elif not Path(config.runtime["runtime_python"]).is_file():
+        error = "官方运行环境缺失，请运行 setup_factr.py"
+    return {"connected": True, "verified": False, "error": error,
+            "serial_device": device.as_dict(), "runtime_available": Path(config.runtime["runtime_python"]).is_file()}

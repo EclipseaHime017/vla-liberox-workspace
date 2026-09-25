@@ -354,15 +354,52 @@ def test_raw_current_hardware_clamp_and_passive_trigger(official_node):
     assert currents == [10, -20, 30, -40, 50, -60, 70, 0]
 
 
-def test_configuration_mismatch_is_rejected_before_port_access(official_node):
+@pytest.mark.parametrize("change", [
+    {"baudrate": 1000000},
+    {"reference_joint_positions": (0., .3, 0., -1.5, 0., .3, 0.)},
+])
+def test_configuration_mismatch_is_rejected_before_port_access(official_node, change):
     node, _, writes, _, _ = official_node
     from dataclasses import replace
     from backend.app.devices.factr_official_runtime import build_node_class
     UnmodifiedBridge = build_node_class(WORKSPACE/"third_party/FACTR_Teleop")
-    node.settings = replace(node.settings, baudrate=1000000)
+    node.settings = replace(node.settings, **change)
     with pytest.raises(ValueError, match="pinned official"):
         UnmodifiedBridge._prepare_dynamixel(node)
     assert writes == []
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_driver_rechecks_usb_identity_before_first_motor_packet(official_node, monkeypatch, changed):
+    import fcntl
+    from dataclasses import replace
+    from backend.app.devices import factr, factr_discovery
+    node, _, writes, _, _ = official_node
+    expected = factr_discovery.FactrSerialDevice("/dev/null", 0x0403, 0x6014, "test-arm")
+    discovered = replace(expected, serial_number="another-arm") if changed else expected
+    monkeypatch.setattr(factr_discovery, "discover_factr_device", lambda _: discovered)
+    monkeypatch.setattr(factr, "serial_owners", lambda *a, **k: {"busy_pids": []})
+    monkeypatch.setattr(fcntl, "flock", lambda *a: None)
+    monkeypatch.setattr(fcntl, "ioctl", lambda *a: None)
+    node.driver._claimed = False
+    node.driver._selector = node.settings
+    node.driver._expected_device = expected
+    reads = []
+    def read(*args):
+        reads.append(args)
+        return 0, 0, 0
+    monkeypatch.setattr(node.driver._packetHandler, "read1ByteTxRx", read)
+    # Ordinary /dev/null FD stands in for the serial FD; no real serial IO.
+    with open("/dev/null", "rb") as fd:
+        node.driver._portHandler.ser = SimpleNamespace(port="/dev/null", fileno=fd.fileno)
+        if changed:
+            with pytest.raises(RuntimeError, match="USB device changed"):
+                node.driver.set_torque_mode(False)
+            assert not reads and not writes and not node.driver._claimed
+        else:
+            node.driver.set_torque_mode(False)
+            assert len(reads) == 8 and node.driver._claimed
+            assert writes == [(i, 64, 0) for i in range(1, 8)]
 
 
 def test_one_click_calibration_uses_official_trigger_zero_and_range(official_node):

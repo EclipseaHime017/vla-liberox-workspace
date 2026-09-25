@@ -29,6 +29,7 @@ export const getController = (id: ControllerId) => api<ControllerStatus>(
 export const calibrateController = (id: ControllerId) => (
   api<ControllerStatus>(`/api/controller/calibrate?controller_id=${id}`, {
     method: "POST",
+    ...(id === "factr" ? { headers: { "X-FACTR-USB-Repair": "1" } } : {}),
   })
 );
 

@@ -2,3 +2,4 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.1
 websockets==16.1.1
+pyserial==3.5

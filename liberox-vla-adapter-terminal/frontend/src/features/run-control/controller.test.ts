@@ -33,7 +33,9 @@ describe("controller transport", () => {
     expect(api).toHaveBeenNthCalledWith(1, "/api/controllers");
     expect(api).toHaveBeenNthCalledWith(2, "/api/controller?controller_id=factr");
     expect(api).toHaveBeenNthCalledWith(3, "/api/controller/calibrate?controller_id=spacemouse", { method: "POST" });
-    expect(api).toHaveBeenNthCalledWith(4, "/api/controller/calibrate?controller_id=factr", { method: "POST" });
+    expect(api).toHaveBeenNthCalledWith(4, "/api/controller/calibrate?controller_id=factr", {
+      method: "POST", headers: { "X-FACTR-USB-Repair": "1" },
+    });
     setControllerGravity(true);
     expect(api).toHaveBeenLastCalledWith("/api/controller/gravity?controller_id=factr", {method: "POST", body: '{"enabled":true}'});
   });

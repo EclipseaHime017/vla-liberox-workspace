@@ -80,7 +80,14 @@ def build_node_class(root):
                 import fcntl
                 import termios
                 from .factr import serial_owners
+                from .factr_discovery import discover_factr_device
                 serial = self._portHandler.ser
+                # Verify identity after the SDK has opened the port but before
+                # its constructor's first motor read/write. tty paths can be
+                # reused between the read-only probe and driver construction.
+                if (discover_factr_device(self._selector) != self._expected_device or
+                    os.fstat(serial.fileno()).st_rdev != os.stat(self._expected_device.path).st_rdev):
+                    raise RuntimeError("FACTR USB device changed while opening the official driver")
                 fcntl.flock(serial.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.ioctl(serial.fileno(), termios.TIOCEXCL)
                 self._exclusive = True
@@ -145,6 +152,7 @@ def build_node_class(root):
 
         def _prepare_dynamixel(self):
             from .factr import FactrStartupProbe
+            from .factr_discovery import discover_factr_device
             cfg = self.config
             reference = cfg["arm_teleop"]["initialization"]["calibration_joint_pos"]
             if (list(self.settings.motor_ids) != list(range(1, 9)) or
@@ -154,17 +162,21 @@ def build_node_class(root):
                 not np.allclose(self.settings.joint_limits_min, cfg["arm_teleop"]["arm_joint_limits_min"]) or
                 not np.allclose(self.settings.joint_limits_max, cfg["arm_teleop"]["arm_joint_limits_max"]) or
                 self.settings.baudrate != 4000000):
-                raise ValueError("Device/model/signs/reference must match the pinned official Franka configuration")
-            if not self.settings.device_path:
-                raise ValueError("Set an explicit FACTR device_path first")
-            port = Path(self.settings.device_path).resolve()
+                raise ValueError("Device/model/signs/reference must match the pinned official Franka configuration (Figure 1)")
+            # Resolve again inside the serial-owning process, never reuse an
+            # idle GUI probe's path after a hotplug / ttyUSB renumbering.
+            serial_device = discover_factr_device(self.settings)
+            port = Path(serial_device.path)
             latency = Path("/sys/bus/usb-serial/devices")/port.name/"latency_timer"
             latency_ms = int(latency.read_text().strip())
             if latency_ms != 1:
-                raise RuntimeError(f"FACTR startup blocked: USB latency_timer={latency_ms} ms, requires 1 ms: {latency}. Replugging can reset this value; no setting changed")
+                raise RuntimeError(
+                    f"FACTR startup blocked: USB latency_timer={latency_ms} ms, requires 1 ms: {latency}. "
+                    "For persistence, run python liberox-vla-adapter-terminal/scripts/setup_factr.py "
+                    "--install-usb-rule, then stop the controller and replug USB. No setting changed")
             # Read-only probe rejects torque owned by another program, wrong
             # firmware/mode/watchdog before official constructor writes torque OFF.
-            probe = FactrStartupProbe(self.settings)
+            probe = FactrStartupProbe(self.settings, device=serial_device)
             try:
                 self.device = probe.open()
                 limits, fingerprint = [], []
@@ -185,13 +197,17 @@ def build_node_class(root):
             finally:
                 probe.close()
             self.fingerprint = {"official_commit": verify_upstream(root)["commit"],
-                                "device_path": self.settings.device_path, "motors": fingerprint}
+                                "usb_device": serial_device.identity(), "motors": fingerprint}
             self.device.update(passive_only=False, backend="official_factr", startup_torque_off=True)
             self.servo_types = cfg["dynamixel"]["servo_types"]
             self.num_motors = 8
             self.joint_signs = np.asarray(cfg["dynamixel"]["joint_signs"], dtype=float)
-            self.dynamixel_port = self.settings.device_path
+            if discover_factr_device(self.settings) != serial_device:
+                raise RuntimeError("FACTR USB device changed during startup; reconnect and calibrate again")
+            self.dynamixel_port = serial_device.path
             self.driver = self.driver_class.__new__(self.driver_class)
+            self.driver._selector = self.settings
+            self.driver._expected_device = serial_device
             self.driver.__init__(np.arange(1, 9), self.servo_types, self.dynamixel_port)
             if not getattr(self.driver, "_claimed", False):
                 raise RuntimeError("Official driver could not establish exclusive OFF ownership")
@@ -413,6 +429,7 @@ def build_node_class(root):
                     },
                     "controller": self.config["controller"], "last_torque_nm": self.last_torque.tolist(),
                     "fingerprint": self.fingerprint, "device": self.device, "sample": self.latest,
+                    "serial_device": self.device.get("serial_device"),
                     "alignment": None if self.alignment is None else self.alignment.status()}
 
     return Bridge

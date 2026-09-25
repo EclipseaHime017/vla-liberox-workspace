@@ -44,9 +44,11 @@ class RunService:
     def controller_catalog(self): return self.worker.controller_catalog()
     def set_controller_gravity(self, controller_id, enabled):
         return self.worker.set_controller_gravity(controller_id, enabled)
-    def calibrate_controller(self, controller_id="spacemouse", phase="reference"):
+    def calibrate_controller(self, controller_id="spacemouse", phase="reference", *, allow_usb_authorization=False):
         if controller_id == "spacemouse" and phase == "reference":
             return self.worker.calibrate_controller()
+        if allow_usb_authorization and controller_id == "factr":
+            return self.worker.calibrate_controller(controller_id, phase, allow_usb_authorization=True)
         return self.worker.calibrate_controller(controller_id, phase)
     def manual_connect(self, run_id): return self.worker.manual_connect(run_id)
     def manual_disconnect(self, run_id): return self.worker.manual_disconnect(run_id)

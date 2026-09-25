@@ -84,7 +84,7 @@ def _read_terminal_input(prompt, service, *, stream=None, select_fn=None):
 def calibrate_interactively(service, config, *, input_fn=input, **_kwargs):
     if service.status().get("gravity_enabled"):
         raise RuntimeError("Support the arm and disable gravity before calibrating")
-    if input_fn("Place the WHOLE ARM in the official resting reference and RELEASE the trigger. "
+    if input_fn("Place the WHOLE ARM in the official Figure 1 reference and RELEASE the trigger. "
                 "Enter=calibrate once, q=cancel: ").strip().lower() not in {"", "y", "yes"}:
         raise CalibrationCancelled("Calibration cancelled")
     return service.calibrate()

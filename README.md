@@ -78,15 +78,69 @@ python liberox-vla-adapter-terminal/scripts/test_factr.py
 
 Setup/check do not open hardware. System ROS 2/Pinocchio dependencies must be
 installed first; SDK packages go into an isolated system-Python runtime, not the
-VLA Python environment. Configure the explicit serial path in
-[configs/factr_test_config.yaml](configs/factr_test_config.yaml).
-The former `standalone` section is now `runtime`.
+VLA Python environment. GUI and CLI discover the USB serial port using these
+top-level selectors in [configs/factr_test_config.yaml](configs/factr_test_config.yaml):
 
-In GUI, select FACTR, support the complete arm in the official approximate resting
+```yaml
+vendor_id: 0x0403
+product_id: 0x6014
+serial_number: null
+```
+
+Discovery is read-only: it enumerates USB port metadata without opening a port,
+starting the official worker, arming the controller or enabling torque. Exactly
+one device must match; if several share these IDs, set `serial_number` to the
+intended device's USB serial number. No match or an ambiguous match is reported
+in the selected FACTR settings. The port is resolved again when the worker starts,
+so no fixed `/dev/ttyUSB*` or `/dev/serial/by-id/...` path is configured.
+Remove the old `device_path` setting; the former `standalone` section is now `runtime`.
+
+USB connection detection is independent of the official runtime's availability;
+a connected device can still report missing runtime dependencies. The isolated
+FACTR environment above remains required for calibration and control. Install the
+updated `requirements-ui.txt` in the VLA environment for `pyserial==3.5` enumeration.
+GUI reconnection requires calibration again and never restores compensation
+automatically. CLI can reuse a matching saved calibration only with a USB serial
+number. Old path-based calibration fingerprints require one new calibration.
+
+The existing GUI **Calibrate** button checks the selected port's USB latency
+first. At 1 ms, calibration proceeds without elevated privileges. Otherwise,
+the local UI requests a system polkit authorization dialog: enter the password
+there, never in the webpage. Authorization installs the persistent VID/PID udev
+rule and applies 1 ms to the currently matched device, then continues calibration
+without enabling torque or requiring a replug. Cancellation, denial or timeout
+does not start calibration. There is no separate repair button.
+
+This authorization flow requires a local desktop session with `pkexec` and a
+polkit authentication agent; it is not available through SSH/headless operation
+or a remote browser. The terminal fallback remains available on each PC:
+
+```bash
+python liberox-vla-adapter-terminal/scripts/setup_factr.py --install-usb-rule
+```
+
+This does not install the runtime, open the port or control motors. It reads the
+YAML USB selectors: with `serial_number: null`, the rule applies to **all devices
+with that VID/PID**, including other FTDI adapters; set a serial number explicitly
+only when you want to restrict it. The rule handles `add|bind` events and does
+not depend on `/dev/ttyUSB*` numbering. The terminal command does not apply the
+setting to a currently connected device: stop controller programs, support the
+physical arm and reconnect USB. The GUI authorization flow instead applies the
+setting immediately to the uniquely matched device.
+Repeat the command after changing USB selectors. A manual `echo 1 | sudo tee ...`
+is only a temporary workaround and can be lost on reconnect.
+
+In GUI, select FACTR, place the complete arm in the official Figure 1 reference
 configuration and release the trigger, click Calibrate once, then Enable gravity
 compensation. Calibration calls the official offset method and captures trigger
 zero using the official 0.8 rad travel. No individual-motor or separate endpoint
 calibration, and no arbitrary-pose physical-zero assumption.
+
+The only supported calibration reference is official **Figure 1**:
+`[0, -0.7854, 0, -2.356, 0, 1.57, 0]` rad. The YAML
+`reference_joint_positions` must match this fixed reference; a folded or arbitrary
+pose is not a substitute. Calibration does not modify motor Homing Offset,
+controller gains or upstream source files.
 
 Compensation is explicitly enabled, never enabled by calibration or takeover.
 It persists through movement, normal simulation completion, countdown and rewind.
@@ -105,7 +159,8 @@ Official gravity/friction/null-space/limit-barrier control uses a 500 Hz target
 and gain 0.85. USB latency 1 ms, 4 Mbps and correct current-mode configuration
 are required. No custom speed cutoff or support time limit; encoder integrity,
 hardware current limits, watchdog and shutdown handling remain. Trigger torque
-stays OFF. No automatic permissions, USB or EEPROM changes.
+stays OFF. Port permissions, motor modes and EEPROM are not changed; USB latency
+is changed only after the explicit system authorization above or terminal setup.
 
 FACTR mirrors calibrated seven-joint targets through a Panda joint-position
 controller (physics still runs; no qpos teleport). Before takeover, the simulation

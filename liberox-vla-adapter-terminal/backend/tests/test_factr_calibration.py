@@ -18,7 +18,8 @@ def config():
 
 @pytest.fixture
 def fingerprint():
-    return {"device_path": "/dev/serial/by-id/test", "model_numbers": [1220, 1030, 1220, 1030, 1220, 1220, 1220, 1220],
+    return {"usb_device": {"vendor_id": 0x0403, "product_id": 0x6014, "serial_number": "test-arm"},
+            "model_numbers": [1220, 1030, 1220, 1030, 1220, 1220, 1220, 1220],
             "motor_ids": list(range(1, 9)), "homing_offsets": [0]*8, "drive_modes": [0]*8}
 
 
@@ -44,6 +45,19 @@ def test_profile_gains_do_not_invalidate_calibration(tmp_path, config, fingerpri
     path = tmp_path/"calibration.json"
     save_profile(path, profile)
     assert load_profile(path, replace(config, translation_gain=.15), fingerprint) == profile
+
+
+def test_usb_identity_prevents_loading_another_arm_calibration(tmp_path, config, fingerprint):
+    path = tmp_path/"calibration.json"
+    save_profile(path, make_profile(config, [0.]*7, 0., .5, fingerprint))
+    other = {**fingerprint, "usb_device": {**fingerprint["usb_device"], "serial_number": "other-arm"}}
+    with pytest.raises(ValueError, match="fingerprint changed"):
+        load_profile(path, config, other)
+    anonymous = {**fingerprint, "usb_device": {**fingerprint["usb_device"], "serial_number": None}}
+    # Even the same USB location cannot identify a device without a serial number.
+    save_profile(path, make_profile(config, [0.]*7, 0., .5, anonymous))
+    with pytest.raises(ValueError, match="no USB serial number"):
+        load_profile(path, config, anonymous)
 
 
 def test_gripper_endpoints_wrap_and_validation(config, fingerprint):

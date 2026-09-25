@@ -47,10 +47,45 @@ describe("shared controller settings", () => {
     expect(screen.getByRole("alert").textContent).toContain("bus fault");
     expect(p.onGravity).not.toHaveBeenCalled();
   });
+  it.each([
+    {state: "DISCONNECTED" as const, connected: false, error: "Multiple FACTR USB devices match; set serial_number"},
+    {state: "UNCALIBRATED" as const, connected: true, error: "FACTR runtime Python is unavailable"},
+  ])("shows selected FACTR probe diagnostics while $state", (probe) => {
+    const p = props(); render(<ControllerSettings {...p} controller={{...status, ...probe}} />);
+    expect(screen.getByRole("alert").textContent).toBe(probe.error);
+    expect((screen.getByRole("button", {name: "开启重力补偿"}) as HTMLButtonElement).disabled).toBe(true);
+    expect(p.onCalibrate).not.toHaveBeenCalled();
+    expect(p.onGravity).not.toHaveBeenCalled();
+  });
+  it("keeps an absent SpaceMouse probe quiet but displays runtime faults", () => {
+    const p = props();
+    const mouse: ControllerStatus = {...status, controller_id: "spacemouse", state: "DISCONNECTED", connected: false,
+      error: "No SpaceMouse HID device found"};
+    const view = render(<ControllerSettings {...p} controllerId="spacemouse" controller={mouse} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+    view.rerender(<ControllerSettings {...p} controllerId="spacemouse" controller={{...mouse, state: "ERROR", error: "HID read failed"}} />);
+    expect(screen.getByRole("alert").textContent).toBe("HID read failed");
+  });
   it("locks setup while calibrating and displays progress", () => {
     render(<ControllerSettings {...props()} controller={{...status, state: "CALIBRATING"}} />);
     expect((screen.getByRole("button", {name: "校准控制器"}) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByLabelText("校准进度")).toBeTruthy();
+  });
+  it("shows system authorization instructions during calibration without collecting a password", () => {
+    const message = "请在系统授权窗口输入密码以修复 USB 延迟";
+    const p = props();
+    const view = render(<ControllerSettings {...p} controller={{...status, state: "CALIBRATING", message}} />);
+    expect(screen.getByText(message)).toBeTruthy();
+    expect((screen.getByLabelText("人工控制器") as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByRole("button", {name: "校准控制器"}) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", {name: "开启重力补偿"}) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", {name: /修复 USB/})).toBeNull();
+    expect(view.container.querySelector('input[type="password"]')).toBeNull();
+    fireEvent.click(screen.getByRole("button", {name: "校准控制器"}));
+    expect(p.onCalibrate).not.toHaveBeenCalled();
+    view.rerender(<ControllerSettings {...p} controller={{...status, state: "READY", calibrated: true, message: "校准完成"}} />);
+    expect(screen.queryByText(message)).toBeNull();
+    expect((screen.getByRole("button", {name: "重新校准控制器"}) as HTMLButtonElement).disabled).toBe(false);
   });
   it("does not offer Cartesian gains for exact joint following", () => {
     const p = props(); render(<ControllerSettings {...p} active manualActive controller={{...status, calibrated: true, state: "ARMED"}} />);

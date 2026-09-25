@@ -29,9 +29,17 @@ python liberox-vla-adapter-terminal/scripts/setup_factr.py --check  # 不触碰�
 python liberox-vla-adapter-terminal/scripts/test_factr.py
 ```
 
-输入 `c` 按官方文档摆整臂近似参考构型，松开触发器后一次采集七轴与触发器零点（官方行程 0.8 rad，不再分步采集端点）；只保留这一套校准，不再逐电机标定或任意姿态置零。已有有效校准可复用，然后 `s` 开始测试。重力补偿使用同一校准，`g` 直接请求出力，无 `ENABLE` 二次确认，但保留安全检查；`d` 直接关闭补偿；`q`/`Ctrl+C` 先关闭电机输出再退出整个测试程序，均无二次确认。`i` 查看状态。`Ctrl+C` 会立即撤力，请准备支撑。详见 [FACTR 使用说明](README_CN.md#361-factr-franka-校准手动重力补偿与无-vla-测试)。
+GUI 直接点击原“校准控制器”：latency 已为 1 ms 时不提权；否则在本机系统授权窗口输入密码，自动安装永久规则并应用当前设备，然后继续校准，不自动上力、不需重插。没有新增修复按钮或网页密码框；拒绝/取消/超时不校准。需本机桌面及 `pkexec`/polkit 认证代理；SSH/headless、远程浏览器或 CLI 使用终端备用：
 
-`mode: simulation`：先 `c` 校准、`g` 开补偿，再 `s` 启动。实体主臂会缓慢对齐静止的仿真机械臂，请留出空间；倒计时后七关节按 1:1 跟随。GUI 走同一关节路径且仅控制、不记录；正常完成保留补偿。SpaceMouse 采集不受影响。
+```bash
+python liberox-vla-adapter-terminal/scripts/setup_factr.py --install-usb-rule
+```
+
+终端安装后先退出控制程序、支撑主臂并重插 USB，再测试。规则匹配 YAML VID/PID，`serial_number: null` 时覆盖所有同 ID 设备（包括其他 FTDI 转接器）；只在配置序列号时限定单台。`add|bind` 时自动设为 1 ms，不固定端口号；手动 `echo ... | sudo tee .../latency_timer` 仅临时应急。
+
+先将整臂摆到官方 Figure 1 参考构型（固定七轴角 `[0, -0.7854, 0, -2.356, 0, 1.57, 0]` rad）并松开触发器，再输入 `c` 一次采集七轴与触发器零点（官方行程 0.8 rad，不再分步采集端点）；只保留这一套校准，不再逐电机标定或任意姿态置零。已有有效校准可复用，然后 `s` 开始测试。重力补偿使用同一校准，`g` 直接请求出力，无 `ENABLE` 二次确认，但保留安全检查；`d` 直接关闭补偿；`q`/`Ctrl+C` 先关闭电机输出再退出整个测试程序，均无二次确认。`i` 查看状态。`Ctrl+C` 会立即撤力，请准备支撑。详见 [FACTR 使用说明](README_CN.md#361-factr-franka-校准手动重力补偿与无-vla-测试)。
+
+`mode: simulation`：先 `c` 校准、`g` 开补偿，再 `s` 启动。实体主臂会缓慢对齐静止的仿真机械臂，请留出空间；倒计时后七关节按 1:1 跟随。独立测试不记录；GUI 走同一关节路径并保存标准人工轨迹，正常完成保留补偿。SpaceMouse 采集不受影响。
 
 ## 服务器端：启动终端训练
 

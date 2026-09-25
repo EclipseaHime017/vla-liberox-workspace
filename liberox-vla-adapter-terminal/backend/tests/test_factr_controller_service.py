@@ -34,7 +34,8 @@ class Client:
 def service(tmp_path):
     config = load_factr_config()
     config = replace(config, runtime={**config.runtime, "calibration_file": str(tmp_path/"calibration.json")})
-    service = FactrControllerService(config, input_factory=Client, probe=lambda _: {"connected": True}, start_monitor=False)
+    service = FactrControllerService(config, input_factory=Client, probe=lambda _: {"connected": True},
+                                    usb_preflight=lambda *a, **k: None, start_monitor=False)
     yield service
     service.close()
 
@@ -45,6 +46,78 @@ def calibrate(service):
     while service.status()["state"] == "CALIBRATING" and time.monotonic() < deadline:
         time.sleep(.001)
     assert service.status()["state"] == "READY"
+
+
+def test_usb_repair_precedes_client_construction_and_never_enables(service):
+    calls = []
+    original_factory = service._factory
+    def preflight(config, *, allow_authorization, stop_event, on_message):
+        assert allow_authorization
+        assert service._input is None
+        on_message("请在系统授权窗口输入密码")
+        assert service.status()["message"] == "请在系统授权窗口输入密码"
+        assert service.status()["state"] == "CALIBRATING"
+        with pytest.raises(RuntimeError): service.start_calibration()
+        with pytest.raises(RuntimeError): service.set_gravity(True)
+        calls.append("repair")
+    def factory(config):
+        calls.append("client")
+        return original_factory(config)
+    service._usb_preflight, service._factory = preflight, factory
+    service.start_calibration(allow_usb_authorization=True)
+    thread = service._calibration_thread
+    if thread is not None: thread.join(timeout=2)
+    assert calls == ["repair", "client"]
+    assert service.status()["state"] == "READY" and not service.status()["gravity_enabled"]
+    assert service._input.calls == ["calibrate"]
+
+
+def test_cancelled_usb_authorization_never_opens_runtime(service):
+    def preflight(*args, **kwargs):
+        raise RuntimeError("已取消系统授权")
+    service._usb_preflight = preflight
+    service.start_calibration(allow_usb_authorization=True)
+    thread = service._calibration_thread
+    if thread is not None: thread.join(timeout=2)
+    assert service._input is None and service.status()["state"] == "ERROR"
+    assert "已取消系统授权" in service.status()["error"]
+    assert not service.status()["gravity_enabled"]
+
+
+def test_close_during_authorization_never_continues_into_calibration(service):
+    import threading
+    started = threading.Event()
+    def preflight(config, *, stop_event, **kwargs):
+        started.set()
+        assert stop_event.wait(2)
+    service._usb_preflight = preflight
+    service.start_calibration(allow_usb_authorization=True)
+    assert started.wait(2)
+    service.close()
+    assert service._input is None
+
+
+def test_close_during_worker_start_never_captures_calibration(service):
+    import threading
+    started, finish_start = threading.Event(), threading.Event()
+    created = []
+    def factory(config):
+        started.set()
+        assert finish_start.wait(2)
+        client = Client(config)
+        created.append(client)
+        return client
+    service._factory = factory
+    service.start_calibration()
+    assert started.wait(2)
+    close_thread = threading.Thread(target=service.close)
+    close_thread.start()
+    assert service._stop.wait(2)
+    finish_start.set()
+    close_thread.join(timeout=2)
+    assert not close_thread.is_alive()
+    assert created[0].closed and "calibrate" not in created[0].calls
+    assert service._input is None
 
 
 def test_one_capture_no_automatic_output_and_persistent_support(service):

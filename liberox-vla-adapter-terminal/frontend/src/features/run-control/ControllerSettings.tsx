@@ -46,6 +46,7 @@ export function ControllerSettings(props: Props) {
         {retry ? "重新连接并校准" : controller?.calibrated ? "重新校准控制器" : "校准控制器"}
       </button>
       {calibrating && <progress aria-label="校准进度" max={1} value={controller?.calibration_progress ?? 0} />}
+      {calibrating && controller?.message && <span>{controller.message}</span>}
     </div>
     {factr && <div className="calibration-row" aria-live="polite">
       <button className={gravity ? "danger" : "primary"}
@@ -55,6 +56,6 @@ export function ControllerSettings(props: Props) {
       </button>
       <span>{controller?.gravity_state === "unknown" ? "补偿状态未确认" : gravity ? "补偿已开启" : "补偿已关闭"}</span>
     </div>}
-    {controller?.state === "ERROR" && controller.error && <p className="hint controller-error" role="alert">{controller.error}</p>}
+    {(factr || controller?.state === "ERROR") && controller?.error && <p className="hint controller-error" role="alert">{controller.error}</p>}
   </section>;
 }

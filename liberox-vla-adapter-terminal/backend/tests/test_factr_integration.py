@@ -58,7 +58,7 @@ def test_controller_api_default_and_factr_calibration_conflicts():
     app = FastAPI()
     app.include_router(api.router)
     app.state.run_service = RunService(worker)
-    request = Request({"type": "http", "app": app})
+    request = Request({"type": "http", "app": app, "headers": []})
 
     async def check():
         assert (await api.status(request))["controller_id"] == "spacemouse"
@@ -75,6 +75,27 @@ def test_controller_api_default_and_factr_calibration_conflicts():
 
     asyncio.run(check())
     assert {r.path for r in api.router.routes} >= {"/api/controller", "/api/controllers", "/api/controller/calibrate"}
+
+
+def test_local_factr_api_passes_authorization_through_service_and_worker():
+    worker = manager()
+    calls = []
+    def calibrate(*, allow_usb_authorization=False):
+        calls.append(allow_usb_authorization)
+        return {"state": "CALIBRATING"}
+    worker.factr_controller.start_calibration = calibrate
+    app = FastAPI()
+    app.state.run_service = RunService(worker)
+    request = Request({"type": "http", "app": app, "method": "POST", "scheme": "http",
+                       "path": "/api/controller/calibrate", "client": ("127.0.0.1", 1234),
+                       "headers": [(b"host", b"localhost:8000"), (b"origin", b"http://localhost:8000"),
+                                   (b"x-factr-usb-repair", b"1")]})
+    assert asyncio.run(api.calibrate(request, None, "factr"))["state"] == "CALIBRATING"
+    assert calls == [True]
+    worker.active_session_id = "running"
+    with pytest.raises(Exception) as exc:
+        asyncio.run(api.calibrate(request, None, "factr"))
+    assert exc.value.status_code == 409 and calls == [True]
 
 
 def test_gravity_api_works_during_takeover_and_rejects_invalid_inputs():

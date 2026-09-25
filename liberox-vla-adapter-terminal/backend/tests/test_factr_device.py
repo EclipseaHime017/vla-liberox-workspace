@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from dataclasses import replace
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,17 +10,21 @@ import yaml
 
 from backend.app.devices import factr
 from backend.app.devices.factr import (
-    FactrStartupProbe, probe_factr, MODEL_NUMBERS, load_factr_config,
+    FactrStartupProbe, MODEL_NUMBERS, load_factr_config, parse_factr_config,
 )
+from backend.app.devices.factr_discovery import FactrSerialDevice
 
 
-def test_default_config_is_explicit_passive_and_does_not_select_port():
-    config = replace(load_factr_config(), device_path=None)
-    assert config.device_path is None  # Missing configuration must not auto-select a serial port.
+def test_default_config_selects_usb_identity_not_fixed_port():
+    config = load_factr_config()
+    assert (config.vendor_id, config.product_id) == (0x0403, 0x6014)
+    assert config.serial_number is None
+    assert "device_path" not in config.metadata()
     assert config.motor_ids == tuple(range(1, 9))
     assert config.stale_timeout_ms == 250
     assert config.translation_gain == config.rotation_gain == 0.25
-    assert probe_factr(config)["connected"] is False
+    assert config.reference_joint_positions == (0., -.7854, 0., -2.356, 0., 1.57, 0.)
+    assert parse_factr_config(json.loads(json.dumps(config.metadata()))) == config
 
 
 @pytest.mark.parametrize("change", [
@@ -31,6 +35,9 @@ def test_default_config_is_explicit_passive_and_does_not_select_port():
     {"translation_gain": 0.01}, {"gripper_open_threshold": 0.8},
     {"gripper_min_travel_rad": 2}, {"reference_joint_positions": [10]*7},
     {"save_video": "yes"}, {"max_steps": True},
+    {"vendor_id": "0403"}, {"vendor_id": True}, {"vendor_id": -1},
+    {"product_id": 65536}, {"product_id": None},
+    {"serial_number": " "}, {"serial_number": 123},
 ])
 def test_strict_config_rejects_invalid_fields(tmp_path, change):
     raw = yaml.safe_load(factr.DEFAULT_FACTR_CONFIG.read_text())
@@ -95,16 +102,20 @@ class FakePacket:
 
 
 def transport_fixture():
-    config = replace(load_factr_config(), device_path="/dev/fake")
+    config = load_factr_config()
     packet = FakePacket(config)
     sdk = SimpleNamespace(PortHandler=FakePort, PacketHandler=lambda _: packet, COMM_SUCCESS=0)
-    return FactrStartupProbe(config, sdk=sdk, owners_probe=lambda *a, **k: {"busy_pids": []}), packet
+    device = FactrSerialDevice("/dev/fake", config.vendor_id, config.product_id, "fake-serial")
+    return FactrStartupProbe(config, device=device, sdk=sdk,
+                             owners_probe=lambda *a, **k: {"busy_pids": []}), packet
 
 
 def test_startup_probe_checks_status_without_motor_write_operations():
     transport, packet = transport_fixture()
     details = transport.open()
     assert details["passive_only"]
+    assert transport.port.path == "/dev/fake"
+    assert details["serial_device"]["serial_number"] == "fake-serial"
     assert transport.check_status() is None
     assert set(call[0] for call in packet.calls) == {"ping", "syncReadTx", "readRx"}
     # Refuse future accidental expansion to SDK write/current/torque APIs.

@@ -1,15 +1,20 @@
 # Shared official FACTR runtime for GUI and the terminal test.
-# Never run two controllers on this serial port at the same time.
+# Never run two controllers against the same device at the same time.
 mode: device
 device_name: FACTR Franka
-device_path: /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTB9B3GO-if00-port0
+# Discover the current serial port without opening it. No fixed /dev path.
+vendor_id: 0x0403
+product_id: 0x6014
+serial_number: null  # Specify USB serial number if multiple devices match.
 baudrate: 4000000
 motor_ids: [1, 2, 3, 4, 5, 6, 7, 8]
 motor_models: [XC330_T288_T, XM430_W210_T, XC330_T288_T, XM430_W210_T, XC330_T288_T, XC330_T288_T, XC330_T288_T, XC330_T288_T]
 joint_signs: [1, 1, 1, -1, 1, -1, 1]
+# Fixed official Figure 1 reference (rad), not the Figure 2 resting pose.
+# Must match the pinned upstream calibration_joint_pos; no custom pose override.
 reference_joint_positions: [0.0, -0.7854, 0.0, -2.356, 0.0, 1.57, 0.0]
 # One whole-arm reference capture for both FK and gravity, as in official FACTR.
-# Match the documented resting/reference configuration, not each motor separately.
+# Place the whole arm in Figure 1 and release the trigger before calibration.
 joint_limits_min: [-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973]
 joint_limits_max: [2.8973, 1.7628, 2.8973, -0.8698, 2.8973, 3.7525, 2.8973]
 stale_timeout_ms: 250
@@ -30,4 +35,4 @@ countdown_seconds: 3
 runtime:
   upstream_root: ../third_party/FACTR_Teleop
   runtime_python: ../third_party/factr-runtime/bin/python
-  calibration_file: ../runs/factr_calibration/FTB9B3GO.json
+  calibration_file: ../runs/factr_calibration/calibration.json

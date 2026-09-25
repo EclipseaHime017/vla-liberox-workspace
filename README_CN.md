@@ -429,26 +429,47 @@ python liberox-vla-adapter-terminal/scripts/setup_factr.py --check
 
 系统 Python 需先具备 ROS 2、Pinocchio、NumPy、PyYAML、pyzmq，本机为 ROS 2 Jazzy。其他机器参考[官方安装说明](https://github.com/JasonJZLiu/FACTR_Teleop#installation)并 source ROS 环境。脚本只在隔离环境安装固定 SDK/pyserial，不把系统 Python 3.12 的 ROS 库装入 Python 3.10 的 VLA 环境；通过本地父子进程通信。检查失败不会回退自写后端。
 
-固定配置为 `configs/factr_test_config.yaml`，GUI/CLI 共用设备参数，串口必须填写实际 `/dev/serial/by-id/...`。以下路径相对 YAML：
+固定配置为 `configs/factr_test_config.yaml`，GUI/CLI 共用设备参数，按顶层 USB VID/PID 与可选序列号发现串口；`runtime` 中的路径相对 YAML：
 
 ```yaml
+vendor_id: 0x0403
+product_id: 0x6014
+serial_number: null
 runtime:
   upstream_root: ../third_party/FACTR_Teleop
   runtime_python: ../third_party/factr-runtime/bin/python
-  calibration_file: ../runs/factr_calibration/FTB9B3GO.json
+  calibration_file: ../runs/factr_calibration/calibration.json
 ```
 
-旧 `standalone` 段改名为 `runtime`；删除旧被动采样 `poll_hz`、多阶段校准和测试录制参数。部署时同步配置，保留实际串口。SpaceMouse 是环境安装的 `pyspacemouse==2.0.0`，无需复制到 `third_party`。
+发现过程只读枚举 USB 串口元数据，不打开串口、不启动官方工作进程、不自动接管或上力。必须恰好匹配一个设备；相同 VID/PID 下有多个设备时，将 `serial_number` 设为目标设备的 USB 序列号。无匹配或匹配不唯一时，选择 FACTR 后可在设置区看到具体诊断。工作进程启动时重新解析当前串口，不再配置固定 `/dev/ttyUSB*` 或 `/dev/serial/by-id/...` 路径。
 
-**GUI 流程：**选择 FACTR → 整臂置于[官方有支撑的近似参考构型](https://github.com/JasonJZLiu/FACTR_Teleop/blob/7a07ab3629af03a91c0198df7c44a0082dca77ab/src/factr_teleop/README.md#initialization-settings)并松开触发器 → 点击一次“校准控制器” → 点击“开启重力补偿” → 回溯接管。
+USB 连接检测独立于官方运行环境检查：即使隔离环境缺失，也能显示实体设备已连接及运行环境诊断；校准和控制仍需先完成上述 FACTR 隔离环境安装。VLA 环境中的串口枚举依赖 `requirements-ui.txt` 的 `pyserial==3.5`；更新部署时需同步安装该文件。GUI 设备重连后需重新校准，重力补偿不会自动恢复。CLI 可加载身份匹配的有效校准；没有 USB 序列号时不复用持久校准。旧路径指纹的校准文件需要重新采集一次。
+
+旧 `standalone` 段改名为 `runtime`；删除旧 `device_path`、被动采样 `poll_hz`、多阶段校准和测试录制参数。部署时同步 USB 选择器配置。SpaceMouse 是环境安装的 `pyspacemouse==2.0.0`，无需复制到 `third_party`。
+
+**GUI 流程：**选择 FACTR → 整臂置于[官方 Figure 1](https://github.com/JasonJZLiu/FACTR_Teleop/blob/7a07ab3629af03a91c0198df7c44a0082dca77ab/src/factr_teleop/README.md#initialization-settings)参考构型并松开触发器 → 点击一次“校准控制器” → 点击“开启重力补偿” → 回溯接管。
+
+原“校准控制器”按钮会先检查 USB latency：已经是 1 ms 时直接校准，不提权；否则在本机桌面弹出 **polkit 系统授权窗口**，密码仅由系统认证代理收集，不经过网页或 API。授权成功后安装按 VID/PID 匹配的永久规则，并立即应用到当前唯一匹配设备，无需重插，然后继续校准；不会自动上力。拒绝、取消或超时都不启动校准，没有额外的“修复”按钮。此流程需要本机桌面会话、`pkexec` 和 polkit 认证代理；SSH/headless 或远程浏览器请使用下方终端备用命令，不在网页输入 sudo 密码。
 
 校准直接调用官方 `_get_dynamixel_offsets`（预热十包，按 π/2 候选选偏置），同时捕获松开触发器零点，使用官方 0.8 rad 行程；不再分别采集开/闭端点。这仍需要近似参考构型，**不是将任意姿态当成 Panda 物理零位**，也不逐电机标定。只保存主机文件，不写舵机 Homing Offset；旧后端校准需重新采集。GUI 启动需显式校准，不自动上力。
+
+当前仅支持官方 **Figure 1** 作为校准参考，七轴角度固定为 `[0, -0.7854, 0, -2.356, 0, 1.57, 0]` rad。`configs/factr_test_config.yaml` 的 `reference_joint_positions` 必须保持该值；不能用折叠或任意摆放姿态代替。校准不修改电机 Homing Offset、控制参数或 `third_party/FACTR_Teleop/` 源码。
 
 开启补偿后，运动、倒计时、正常完成/停止仿真和回溯之间持续保持，可在接管中手动关闭。补偿开启时锁定控制器选择与重新校准，避免隐藏仍上力的设备。**仿真异常、设备故障、后端关闭时先停止实体输出，再做数据后处理或等待仿真线程。**重连不自动恢复。关闭浏览器不等于关闭后端；离开前请手动关闭补偿或退出后端。通信损坏导致无法确认 OFF 时显示“撤力未确认”，操作者需支撑主臂并检查实体电源，不能假定已经撤力。
 
 控制参数来自上游 `grav_comp_demo.yaml`：目标 500 Hz、增益 0.85，以及官方摩擦补偿、零空间调节、关节限位屏障。无额外 2 rad/s 速度阈值、渐入/软电流限制或 120 秒时限；保留设备电流上限、编码器不连续检测、七轴 RAM watchdog 与故障撤力。触发器电机始终 torque OFF。这些不是第二套动力学公式，也不能保证断电后悬停。关闭补偿前请支撑主臂。
 
-**硬件准备：**核对结构、型号、ID 1–8、方向、4 Mbps 与官方一致，current mode、Return Delay Time=0，官方 USB latency=1 ms。脚本不自动修改权限、模式、EEPROM、USB 参数或杀占用进程。关闭所有控制程序、确认真实设备名后由操作者检查/设置：
+**硬件准备：**核对结构、型号、ID 1–8、方向、4 Mbps 与官方一致，current mode、Return Delay Time=0，官方 USB latency=1 ms。不会自动修改端口权限、舵机模式、EEPROM 或杀占用进程；USB latency 仅经上述系统授权或下方终端命令修改。
+
+**终端备用：永久设置 USB latency（每台 PC 执行一次，CLI 流程不变）：**
+
+```bash
+python liberox-vla-adapter-terminal/scripts/setup_factr.py --install-usb-rule
+```
+
+命令只根据 YAML 的 USB 选择器安装 udev 规则并重新加载规则，安装时会请求 sudo；不安装运行环境、不打开串口、不校准或上力，也不自动触发设备事件。`serial_number: null` 时规则对**所有相同 VID/PID 的设备**生效，因此其他 `0403:6014` FTDI 转接器也会设置为 1 ms；只有在 YAML 明确填写序列号时才限定单台设备，不自动绑定当前设备序列号。规则处理 `add|bind` 事件，无需固定 `ttyUSB0`，重插或重启后自动应用。终端命令默认不应用当前连接，安装后先退出控制程序、支撑实体主臂，再重新插拔 USB；GUI 授权则同时应用当前唯一匹配设备，无需重插。更改 USB 选择器后需更新规则。
+
+临时应急才使用下面的手动写入，重插后可能失效。关闭所有控制程序，确认真实设备名后检查/设置：
 
 ```bash
 cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
@@ -483,7 +504,7 @@ conda run --no-capture-output -n vla-liberox python liberox-vla-adapter-terminal
 
 退出诊断将“运行故障”和“电机 OFF 校验”分开：非零退出码不代表撤力失败。子进程显式传回关闭寄存器读回结果，只有关闭校验失败或没有收到确认才显示关闭未确认；重复的 RuntimeError 前缀不再层层叠加。
 
-如果校准时立即出现连接重置，先查看具体的子进程启动错误。父进程会优先读取退出消息，并从内存中的有界 stderr 尾部提取启动异常，不额外保存测试日志。USB 拔插后 `latency_timer` 可能恢复为 16 ms；当前启动检查要求 1 ms。关闭 FACTR 程序后重新执行前述 USB 配置并读回确认，再重新校准。只看到 USB 枚举成功不代表子进程启动检查已经通过。
+如果校准时立即出现连接重置，先查看具体的子进程启动错误。父进程会优先读取退出消息，并从内存中的有界 stderr 尾部提取启动异常，不额外保存测试日志。未安装上述 udev 规则时，USB 拔插后 `latency_timer` 可能恢复为 16 ms；当前启动检查要求 1 ms。本机 GUI 校准可通过系统授权修复；CLI 则安装规则、关闭 FACTR 程序并支撑主臂，重插后读回确认，再重新校准。只看到 USB 枚举成功不代表子进程启动检查已经通过。
 
 运行中 `communication failed: -3001` 表示 DYNAMIXEL 状态包接收超时（`-3002` 为坏包），不等同于整条 USB 设备被拔出。接入层允许一次完整同步重读，丢弃残留接收数据；成功后才发布新关节包，不复用旧反馈。与官方默认最多十次重试不同，这里总读取预算为 75 ms，首读已用掉半数预算时不再重试；连续失败、完整包缺失或超时仍停机。硬件 100 ms watchdog 不变，发送电流前也检查循环是否已超时。`GET /api/controller?controller_id=factr` 的 `serial_read` 提供失败/恢复累计次数和最近读取耗时。偶发恢复会提示 `sync read recovered`；若频繁发生，需要排查线缆、接口、供电和系统负载，不能仅靠不断增加重试掩盖。
 

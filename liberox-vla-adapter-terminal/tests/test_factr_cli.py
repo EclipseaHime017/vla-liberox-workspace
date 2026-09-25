@@ -156,6 +156,7 @@ def test_calibration_is_one_shared_official_call(tmp_path):
     result = cli.calibrate_interactively(service, settings, input_fn=lambda p: prompts.append(p) or "")
     assert result is profile and calls == ["official"] and len(prompts) == 1
     assert "RELEASE" in prompts[0]
+    assert "Figure 1" in prompts[0]
 
 def test_calibration_cannot_run_while_gravity_is_on(tmp_path):
     service = FakeService(config(tmp_path))

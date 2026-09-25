@@ -414,7 +414,8 @@ class SimulationManager:
             }
         return {"controller_id": controller_id, **controller.status()}
 
-    def calibrate_controller(self, controller_id: str = "spacemouse", phase: str = "reference") -> dict[str, Any]:
+    def calibrate_controller(self, controller_id: str = "spacemouse", phase: str = "reference", *,
+                             allow_usb_authorization: bool = False) -> dict[str, Any]:
         with self.lock:
             if self.active_session_id is not None:
                 raise RuntimeError("Cannot calibrate while a simulation is active")
@@ -426,6 +427,8 @@ class SimulationManager:
                     raise RuntimeError("Another controller is calibrating or armed")
             if phase != "reference":
                 raise ValueError("Only single-capture reference calibration is supported")
+            if controller_id == "factr" and allow_usb_authorization:
+                return controller.start_calibration(allow_usb_authorization=True)
             return controller.start_calibration()
 
     def set_controller_gravity(self, controller_id: str, enabled: bool):
