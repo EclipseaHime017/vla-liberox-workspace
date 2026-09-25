@@ -1,0 +1,27 @@
+extends: ../runtime.yaml
+presets:
+  model: ../models/vla_adapter.yaml
+  reward: ../reward.yaml
+
+training:
+  method: iql
+  actor_lr_warmup_steps: 1000
+iql:
+  critic_image_size: 128
+  critic_lr: 0.0003
+  value_lr: 0.0003
+  # Q/V optimizers are independent of the actor optimizer and each other.
+  critic_optimizer: adamw
+  critic_weight_decay: 0.01
+  value_optimizer: adamw
+  value_weight_decay: 0.01
+  critic_max_grad_norm: 10.0
+  value_max_grad_norm: 10.0
+  expectile: 0.8
+  beta: 3.0
+  max_advantage_weight: 20.0
+  target_tau: 0.005
+  critic_warmup_steps: 1000
+logging:
+  wandb:
+    tags: [liberox, rynnvalue, iql]

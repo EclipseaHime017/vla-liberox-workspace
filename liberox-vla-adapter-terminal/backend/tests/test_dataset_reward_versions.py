@@ -215,8 +215,8 @@ def test_hidden_recipe_parameters_are_pinned_not_taken_from_new_base(tmp_path):
     jobs, dataset = setup_jobs(tmp_path)
     finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="stage"))
     old_load = jobs._load_base_config
-    def changed_base():
-        raw = old_load()
+    def changed_base(*args, **kwargs):
+        raw = old_load(*args, **kwargs)
         raw["reward"]["shaping_weight"] = 99
         return raw
     jobs._load_base_config = changed_base

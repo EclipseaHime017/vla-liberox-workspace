@@ -37,8 +37,8 @@ def setup_recording(tmp_path, monkeypatch):
     monkeypatch.setattr(fixture, "make_run", lambda *_: run)
     jobs, dataset = fixture.setup_jobs(tmp_path)
     load_base = jobs._load_base_config
-    def test_config():
-        raw = load_base()
+    def test_config(*args, **kwargs):
+        raw = load_base(*args, **kwargs)
         raw["data"]["project_id"] = "test"
         return raw
     jobs._load_base_config = test_config
@@ -60,7 +60,7 @@ def native_rynn(jobs, dataset, run):
         relative_temporal_distance_seconds=np.zeros(n), relative_value_logits=np.zeros((n, 256)),
         pbrs_shaping_reward=np.ones(n-1), pbrs_chunk_reward=np.arange(n-1, dtype=np.float32))
     raw = jobs._load_base_config()["reward"]
-    raw["rynnvalue"] = True
+    raw.update(source="rynnvalue", rynnvalue=True)
     payload = {"schema_version": 6, "run_id": "run", "values_sha256": digest(path),
         "trajectory_sha256": digest(Path(run["trajectory"])),
         "observations_sha256": frozen["members"][0]["artifacts"]["observations"]["sha256"],

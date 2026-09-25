@@ -1,7 +1,7 @@
 schema_version: 1
 
 # Paths in this file are resolved relative to this YAML file.
-base_config: ./liberox_iql.yaml
+base_config: ./training/iql.yaml  # BC: ./training/bc.yaml; no other method selector needed
 pipeline_root: ../outputs/terminal-pipelines
 
 environments:
@@ -27,11 +27,13 @@ selection:
       count: 50
       order: random
 
-# These are partial overrides of liberox_iql.yaml. Unknown and pipeline-managed
+# These are partial overrides of the selected training entry. Unknown and pipeline-managed
 # keys fail validation instead of being silently ignored.
 overrides:
   training:
-    method: iql  # bc skips evaluation, reward derivation and sidecar binding
+    train_steps: 20000
+    micro_batch_size: 8
+    gradient_accumulation_steps: 4
   paths: {}
   data:
     validation_fraction: 0.2
@@ -44,15 +46,11 @@ overrides:
     shaping_weight: 0.1  # kappa; zero disables RynnValue dependency
     stage_exponent: 2.0
     accumulate_primitive_steps: false
-  vla: {}
+  model: {}  # e.g. {backbone: lora, lora: {rank: 32, alpha: 64, dropout: 0.0}}
   iql:
-    train_steps: 20000
     critic_warmup_steps: 1000
     beta: 3.0
     max_advantage_weight: 20.0
-    # A100 server profile: keep the actor effective batch at 8 * 4 = 32.
-    micro_batch_size: 8
-    gradient_accumulation_steps: 4
   logging:
     tensorboard: true
     wandb:

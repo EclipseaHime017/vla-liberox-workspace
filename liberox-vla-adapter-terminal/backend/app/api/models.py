@@ -143,6 +143,7 @@ class CreateTrainingDatasetRequest(DatasetPreviewRequest):
     validation_fraction: float = Field(default=0.2, ge=0, le=0.9)
     split_seed: int = Field(default=7, ge=0, le=2147483647)
     success_consecutive_steps: int = Field(default=5, ge=1, le=100)
+    include_post_success: StrictBool = True
 
 
 class DeriveTrainingDatasetRequest(StrictModel):
@@ -151,6 +152,11 @@ class DeriveTrainingDatasetRequest(StrictModel):
     validation_fraction: float = Field(default=0.2, ge=0, le=0.9)
     split_seed: int = Field(default=7, ge=0, le=2147483647)
     success_consecutive_steps: int = Field(default=5, ge=1, le=100)
+    include_post_success: StrictBool | None = None
+
+
+class DatasetTrainingOptionsRequest(StrictModel):
+    include_post_success: StrictBool
 
 
 class DeleteTrainingDatasetRequest(StrictModel):

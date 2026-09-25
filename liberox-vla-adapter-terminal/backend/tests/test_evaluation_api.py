@@ -50,9 +50,10 @@ class FakePolicyCatalog:
         pass
 
     def entry(self, policy_id: str):
+        from backend.app.policies.catalog import PolicyEntry
         if policy_id != "base":
             raise ValueError("unknown policy")
-        return SimpleNamespace(
+        return PolicyEntry(
             policy_id="base",
             label="Base policy",
             base_checkpoint="VLA-Adapter/LIBERO-Object-Pro",

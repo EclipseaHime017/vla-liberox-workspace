@@ -10,6 +10,7 @@ from .models import (
     DatasetPreviewRequest,
     DeleteTrainingDatasetRequest,
     DeriveTrainingDatasetRequest,
+    DatasetTrainingOptionsRequest,
 )
 
 
@@ -49,6 +50,7 @@ async def create(body: CreateTrainingDatasetRequest, request: Request):
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
             success_consecutive_steps=body.success_consecutive_steps,
+            include_post_success=body.include_post_success,
         )
         return dataset
     except Exception as exc:
@@ -63,6 +65,7 @@ async def derive(dataset_id: str, body: DeriveTrainingDatasetRequest, request: R
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
             success_consecutive_steps=body.success_consecutive_steps,
+            **({} if body.include_post_success is None else {"include_post_success": body.include_post_success}),
         )
         return dataset
     except Exception as exc:
@@ -77,6 +80,15 @@ async def delete_dataset(
         return offline_job_service(request).delete_dataset(
             dataset_id, body.confirm_dataset_id, force=body.force
         )
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.patch("/{dataset_id}/training-options")
+async def training_options(dataset_id: str, body: DatasetTrainingOptionsRequest, request: Request):
+    try:
+        return await run_in_threadpool(training_dataset_service(request).update_training_options,
+                                      dataset_id, include_post_success=body.include_post_success)
     except Exception as exc:
         raise http_error(exc) from exc
 

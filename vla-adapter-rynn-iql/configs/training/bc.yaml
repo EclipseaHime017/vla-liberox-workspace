@@ -1,0 +1,13 @@
+extends: ../runtime.yaml
+presets:
+  model: ../models/vla_adapter.yaml
+
+training:
+  method: bc
+  actor_lr_warmup_steps: 1000
+bc: {}
+paths:
+  work_dir: ../../outputs/bc-work
+logging:
+  wandb:
+    tags: [liberox, bc]

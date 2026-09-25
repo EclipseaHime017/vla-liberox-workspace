@@ -50,7 +50,7 @@ async def rename_model(policy_id: str, body: RenamePolicyRequest, request: Reque
 @router.post("/{policy_id}/copy", status_code=201)
 async def copy_model(policy_id: str, body: CopyPolicyRequest, request: Request):
     try:
-        return _service(request).copy(policy_id, body.label)
+        return await run_in_threadpool(_service(request).copy, policy_id, body.label)
     except Exception as exc:
         raise http_error(exc) from exc
 

@@ -115,8 +115,8 @@ def make_jobs(tmp_path: Path):
         offline_rl_root=WORKSPACE / "vla-adapter-rynn-iql",
         train_environment="vla-liberox", reward_environment="rynnvalue-reward",
     )
-    base = yaml.safe_load(jobs.base_config_path.read_text(encoding="utf-8"))
-    jobs._load_base_config = lambda: copy.deepcopy(base)
+    base = jobs._load_base_config()
+    jobs._load_base_config = lambda *args, **kwargs: copy.deepcopy(base)
     jobs.available_checkpoints = lambda _: []
     frozen = tmp_path / "datasets" / "ds" / "dataset.json"
     frozen.parent.mkdir(parents=True)

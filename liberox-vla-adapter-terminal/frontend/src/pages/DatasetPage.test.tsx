@@ -12,6 +12,7 @@ vi.mock("../features/run-control/api", () => ({
   listDatasetRuns: vi.fn(), listOfflineJobs: vi.fn(), listTrainingDatasets: vi.fn(),
   previewTrainingDataset: vi.fn(), verifyTrainingDataset: vi.fn(), setTrajectoryTestLabel: vi.fn(),
   getDatasetRewardConfig: vi.fn(), listTrainingDatasetMembers: vi.fn(),
+  updateDatasetTrainingOptions: vi.fn(),
 }));
 vi.mock("../features/training/JobMonitor", () => ({ JobMonitor: () => null }));
 vi.mock("../features/dataset/TrajectoryDetail", () => ({ TrajectoryDetail: () => null }));
@@ -45,6 +46,44 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("dataset evaluation configuration", () => {
+  it("updates post-success sampling on the same dataset without evaluation or derivation", async () => {
+    const dataset = { id: "dataset", name: "Dataset", success_consecutive_steps: 5,
+      integrity_status: "HEALTHY", annotation_status: "NOT_STARTED" } as TrainingDataset;
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(api.updateDatasetTrainingOptions).mockResolvedValue({ ...dataset, include_post_success: false });
+    render(<FrozenDatasetCard dataset={dataset} initialExpanded disabled={false} onRefresh={refresh}
+      onJob={() => {}} onError={() => {}} />);
+    await screen.findByLabelText("评价类型");
+    const samplingControls = screen.getByRole("group", { name: "训练取样配置" });
+    expect(within(samplingControls).getAllByRole("combobox")).toHaveLength(1);
+    expect((within(samplingControls).getByRole("button", { name: "保存" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("成功后动作") as HTMLSelectElement).value).toBe("true");
+    fireEvent.change(screen.getByLabelText("成功后动作"), { target: { value: "false" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(api.updateDatasetTrainingOptions).toHaveBeenCalledExactlyOnceWith("dataset", false));
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    expect(api.annotateTrainingDataset).not.toHaveBeenCalled();
+    expect(api.createTrainingDataset).not.toHaveBeenCalled();
+    expect(api.deriveTrainingDataset).not.toHaveBeenCalled();
+    expect(screen.queryByText(/连续 5 次 done=True/)).toBeNull();
+    expect(screen.queryByRole("heading", { name: "训练取样配置" })).toBeNull();
+  });
+
+  it("allows restoring full replay and reports saving errors", async () => {
+    const dataset = { id: "dataset", name: "Dataset", include_post_success: false,
+      integrity_status: "HEALTHY", annotation_status: "READY" } as TrainingDataset;
+    const error = vi.fn();
+    vi.mocked(api.updateDatasetTrainingOptions).mockRejectedValue(new Error("save failed"));
+    render(<FrozenDatasetCard dataset={dataset} initialExpanded disabled={false} onRefresh={async () => {}}
+      onJob={() => {}} onError={error} />);
+    await screen.findByLabelText("评价类型");
+    expect((screen.getByLabelText("成功后动作") as HTMLSelectElement).value).toBe("false");
+    fireEvent.change(screen.getByLabelText("成功后动作"), { target: { value: "true" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(error).toHaveBeenCalledWith("Error: save failed"));
+    expect(api.updateDatasetTrainingOptions).toHaveBeenCalledWith("dataset", true);
+  });
+
   it.each(["NOT_STARTED", "READY"])("uses the same delete label and confirmation for %s datasets", async (status) => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([{
       id: "dataset", name: "Dataset", integrity_status: "HEALTHY", annotation_status: status,

@@ -16,11 +16,12 @@ from typing import Any, Iterable
 import numpy as np
 import yaml
 
-from .config import TRAIN_SCHEMA, UniqueKeyLoader, effective_cumulative, load_train_config, reward_source, needs_rynnvalue
+from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config, reward_source
 from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step, replay_chunks
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
 from .methods import COMMON_TRAINING_KEYS
+from .models import DEFAULT_MODEL
 from .rewards import (
     ANNOTATION_SCHEMA_VERSION,
     REWARD_SCHEMA_VERSION,
@@ -88,13 +89,20 @@ def _resolve(path: str, base: Path, context: str) -> Path:
 def _validate_overrides(overrides: Any) -> dict[str, dict[str, Any]]:
     if isinstance(overrides, dict):
         overrides.setdefault("training", {})
-    sections = set(TRAIN_SCHEMA) - {"schema_version"}
+        overrides.setdefault("model", {})
+        for section in TRAIN_SCHEMA:
+            if section != "schema_version":
+                overrides.setdefault(section, {})
+        overrides.setdefault("vla", {})
+    sections = (set(TRAIN_SCHEMA) - {"schema_version"}) | {"vla"}
     result = _strict_keys(overrides, sections, "overrides")
     for section, values in result.items():
         if not isinstance(values, dict):
             raise TypeError(f"overrides.{section} must be a mapping")
         allowed = (COMMON_TRAINING_KEYS | {"method", "actor_lr_warmup_steps"}
-                   if section == "training" else set(TRAIN_SCHEMA[section]))
+                   if section == "training" else set(DEFAULT_MODEL) if section == "model"
+                   else {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"} if section == "vla"
+                   else set(TRAIN_SCHEMA[section]) | (COMMON_TRAINING_KEYS if section == "iql" else set()))
         unknown = sorted(set(values) - allowed)
         if unknown:
             raise ValueError(f"Unknown overrides.{section} keys: {unknown}")
@@ -178,45 +186,8 @@ def load_terminal_config(path: Path) -> TerminalPipelineConfig:
 
 
 def merged_training_config(config: TerminalPipelineConfig) -> dict[str, Any]:
-    raw = copy.deepcopy(load_train_config(config.base_config).raw)
-    for section, values in config.overrides.items():
-        for key, value in values.items():
-            if section == "paths":
-                if key == "dataset_sources":
-                    if not isinstance(value, list) or not value:
-                        raise TypeError("overrides.paths.dataset_sources must be a non-empty list")
-                    value = [
-                        str(_resolve(item, config.path.parent, f"overrides.paths.dataset_sources[{index}]"))
-                        for index, item in enumerate(value)
-                    ]
-                else:
-                    value = str(_resolve(value, config.path.parent, f"overrides.paths.{key}"))
-            elif section in ("iql", "training") and key == "resume_checkpoint" and value is not None:
-                value = str(_resolve(value, config.path.parent, f"overrides.{section}.resume_checkpoint"))
-            elif section == "data" and key == "stage_annotations_manifest" and value is not None:
-                value = str(_resolve(value, config.path.parent, "overrides.data.stage_annotations_manifest"))
-            elif section == "reward" and key == "manifest_path" and value is not None:
-                value = str(_resolve(value, config.path.parent, "overrides.reward.manifest_path"))
-            raw[section][key] = value
-    # An explicit legacy override also overrides a canonical value inherited
-    # from the base config. Explicit training.* wins if both are supplied.
-    for key in COMMON_TRAINING_KEYS & config.overrides["iql"].keys():
-        if key in raw["training"] and key not in config.overrides["training"]:
-            raw["training"][key] = raw["iql"][key]
-    for key in COMMON_TRAINING_KEYS & raw["training"].keys():
-        raw["iql"][key] = raw["training"][key]
-    reward_overrides = config.overrides.get("reward", {})
-    if ("alpha" in reward_overrides or "fusion_mode" in reward_overrides) and "source" not in reward_overrides:
-        raw["reward"]["source"] = "final"
-    if "source" in reward_overrides and "rynnvalue" not in reward_overrides:
-        raw["reward"]["rynnvalue"] = raw["reward"]["source"] == "rynnvalue"
-    elif "rynnvalue" in reward_overrides and "source" not in reward_overrides:
-        raw["reward"]["source"] = "rynnvalue" if raw["reward"]["rynnvalue"] else "sparse"
-    if raw["reward"]["source"] == "final":
-        raw["reward"]["rynnvalue"] = needs_rynnvalue(raw["reward"])
-    if type(raw["reward"]["accumulate_primitive_steps"]) is not bool:
-        raise TypeError("reward.accumulate_primitive_steps must be boolean")
-    raw["reward"]["accumulate_primitive_steps"] = effective_cumulative(raw["reward"])
+    raw = load_train_config(config.base_config, overrides=config.overrides,
+                            overrides_path=config.path).raw
     raw["data"]["task_ids"] = [config.selection["task_id"]]
     raw["data"]["selection_manifest"] = None
     return raw

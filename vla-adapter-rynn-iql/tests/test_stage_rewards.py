@@ -257,7 +257,7 @@ def test_missing_stage_labels_stop_before_vla_components_load(configured, monkey
     _select(configured, "stage")
     monkeypatch.setattr(training, "_device", lambda _: training.torch.device("cpu"))
     monkeypatch.setattr(training.torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(training, "load_components", lambda _: pytest.fail("VLA loaded before validation"))
+    monkeypatch.setattr("vla_rynn_iql.vla_adapter.load_components", lambda _: pytest.fail("VLA loaded before validation"))
     with pytest.raises(ValueError, match="Stage annotations missing"):
         training.train(configured)
     assert not Path(configured.raw["paths"]["output_dir"]).exists()

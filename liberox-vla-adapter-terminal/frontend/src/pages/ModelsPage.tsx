@@ -53,7 +53,15 @@ export function ModelsPage() {
       <main className="surface model-detail">{busy && !detail ? <div className="empty-table">加载模型信息…</div> : detail ? <>
         <div className="model-detail-head"><div><p className="eyebrow">{detail.kind}</p><h2>{detail.label}</h2><code>{detail.policy_id}</code></div><div>{detail.kind !== "base" && <><button disabled={busy} onClick={() => void rename()}>重命名</button><button disabled={busy} onClick={() => void duplicate()}>复制模型</button><button className="danger" disabled={busy} onClick={() => void remove()}>删除</button></>}</div></div>
         <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd><dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
-        {detail.components.length > 0 && <section><h3>可训练组件</h3><div className="component-list">{detail.components.map((component) => <div key={component.name}><strong>{component.name}</strong><span>{(component.size_bytes / 1024 / 1024).toFixed(2)} MiB</span><code>{component.sha256.slice(0, 16)}…</code></div>)}</div></section>}
+        {detail.model_config && <dl className="model-properties">
+          <dt>Backbone</dt><dd>{{ frozen: "冻结", lora: "LoRA", full: "全量微调" }[detail.model_config.backbone]}</dd>
+          <dt>Action head</dt><dd>{detail.model_config.action_head === "train" ? "训练" : "冻结"}</dd>
+          <dt>Proprio projector</dt><dd>{detail.model_config.proprio_projector === "train" ? "训练" : "冻结"}</dd>
+          {detail.model_config.backbone === "lora" && detail.model_config.lora && <>
+            <dt>LoRA 参数</dt><dd>rank {detail.model_config.lora.rank} · alpha {detail.model_config.lora.alpha} · dropout {detail.model_config.lora.dropout}</dd>
+          </>}
+        </dl>}
+        {detail.components.length > 0 && <section><h3>模型组件</h3><div className="component-list">{detail.components.map((component) => <div key={component.name}><strong>{component.name}</strong><span>{(component.size_bytes / 1024 / 1024).toFixed(2)} MiB</span><code>{component.sha256.slice(0, 16)}…</code></div>)}</div></section>}
         <section><h3>训练记录</h3>{detail.training_records.length ? <div className="model-training-records">{detail.training_records.map((job) => <article key={job.id}><div><strong>{job.id}</strong><Badge tone={job.status === "COMPLETED" ? "green" : job.status === "FAILED" ? "red" : "neutral"}>{job.status}</Badge></div><p>数据集 {job.dataset_id ?? "—"} · {job.created_at ? new Date(job.created_at).toLocaleString() : "—"}</p><code>{String(job.output_path ?? "")}</code></article>)}</div> : <div className="empty-table">没有匹配的本机训练记录；从其他设备复制的 overlay 仍可正常推理。</div>}</section>
       </> : <div className="empty-table">模型库为空</div>}</main>
     </div>

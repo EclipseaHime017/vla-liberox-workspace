@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   annotateTrainingDataset, getDatasetRewardConfig,
-  listTrainingDatasetMembers, verifyTrainingDataset,
+  listTrainingDatasetMembers, verifyTrainingDataset, updateDatasetTrainingOptions,
 } from "../run-control/api";
 import type {
   OfflineJob, PaginatedRuns, RewardParameters, RewardSource, TrainingDataset, EvaluationOperation,
@@ -24,6 +24,9 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
   const [configReady, setConfigReady] = useState(false);
   const [source, setSource] = useState<EvaluationOperation>("final");
   const [busy, setBusy] = useState(false);
+  const [includePostSuccess, setIncludePostSuccess] = useState(dataset.include_post_success ?? true);
+  useEffect(() => { setIncludePostSuccess(dataset.include_post_success ?? true); },
+    [dataset.id, dataset.include_post_success]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(5);
   const [members, setMembers] = useState<PaginatedRuns | null>(null);
@@ -128,6 +131,7 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
 
   return <article className="dataset-card">
     <div className="dataset-card-description"><h2>{dataset.name}</h2><p>{dataset.member_count} 条轨迹 · {dataset.action_count} actions · {dataset.chunk_count} chunks</p>
+      <p>成功后动作：{dataset.include_post_success === false ? "截断" : "保留"}</p>
       <p>{(["final", "rynnvalue", "robometer"] as RewardSource[]).map((evaluator) =>
         `${rewardSourceLabels[evaluator]}：${currentFor(evaluator) ? "数据集专属" : "继承全局"}`).join(" · ")}</p></div>
     <div className="dataset-badges"><Badge tone={dataset.integrity_status === "HEALTHY" ? "green" : "red"}>{dataset.integrity_status}</Badge>
@@ -141,6 +145,13 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
     </div>
     {dataset.integrity_error && <p className="dataset-integrity-error">{dataset.integrity_error}</p>}
     {expanded && <section id={`reward-config-${dataset.id}`} className="dataset-reward-config" aria-label={`${dataset.name} 评价配置`}>
+      <fieldset className="dataset-sampling-controls" aria-label="训练取样配置" disabled={disabled || busy}>
+        <label>成功后动作<select value={String(includePostSuccess)} onChange={(event) => setIncludePostSuccess(event.target.value === "true")}>
+          <option value="true">保留</option><option value="false">截断</option>
+        </select></label>
+        <button disabled={includePostSuccess === (dataset.include_post_success ?? true)}
+          onClick={() => void run(async () => { await updateDatasetTrainingOptions(dataset.id, includePostSuccess); await onRefresh(); })}>保存</button>
+      </fieldset>
       {!configReady ? <p role="status">{busy ? "正在加载评价配置…" : "配置加载失败，请收起后重试。"}</p> : <>
         <div className="evaluation-config-heading"><div><h3>评价配置</h3><p>默认复用各轨迹的全局评价，无需为新数据集再次评价。重新评价只覆盖当前数据集的所选类型。</p></div>
           <Badge tone={currentEvaluation ? "green" : undefined}>{currentEvaluation ? "数据集专属评价" : "默认继承全局评价"}</Badge></div>

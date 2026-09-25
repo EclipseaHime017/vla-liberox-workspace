@@ -16,6 +16,11 @@ export type TaskInfo = {
 
 export type PolicyInfo = {
   algorithm?: "iql" | "bc" | null;
+  model_config?: {
+    family: string; backbone: "frozen" | "lora" | "full";
+    action_head: "train" | "frozen"; proprio_projector: "train" | "frozen";
+    lora?: { rank: number; alpha: number; dropout: number };
+  } | null;
   policy_id: string;
   label: string;
   base_checkpoint: string;
@@ -275,6 +280,7 @@ export type TrainingDataset = {
   created_at: string; updated_at: string; member_count: number;
   action_count: number; chunk_count: number; categories: Record<string, number>;
   validation_fraction: number; split_seed: number; success_consecutive_steps: number;
+  include_post_success?: boolean;
   dataset_sha256: string; members: Array<{
     run_id: string; root_run_id: string; parent_run_id: string | null;
     source_type: string; outcome: string; resume_step: number; end_step: number;
@@ -424,6 +430,8 @@ export type EvaluationFilters = {
 
 export type TrainingDefaults = {
   algorithm?: "iql" | "bc";
+  models?: Array<{ id: string; label: string; backbone_modes: string[] }>;
+  model?: Record<string, number | string | boolean | null>;
   reward_availability?: {
     message?: string;
     pending?: boolean;

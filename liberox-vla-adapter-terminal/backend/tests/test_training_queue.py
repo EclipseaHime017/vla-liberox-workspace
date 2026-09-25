@@ -77,8 +77,8 @@ def test_enqueue_during_training_pins_config_and_never_unloads_gpu(queued_jobs):
     saved = yaml.safe_load(before)
     assert saved["reward"]["version_id"] == version["id"]
     assert saved["reward"]["gamma"] == .92
-    assert saved["iql"]["micro_batch_size"] == 4
-    assert saved["iql"]["resume_checkpoint"] is None
+    assert saved["training"]["micro_batch_size"] == 4
+    assert saved["training"]["resume_checkpoint"] is None
     # Change the current dataset reward; the pending task must keep its pin.
     new_job = jobs._new_job
     jobs._new_job = lambda **kwargs: kwargs

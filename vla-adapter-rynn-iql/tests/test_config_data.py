@@ -134,10 +134,10 @@ def test_tensorboard_logging_configuration_is_strict(configured, tmp_path: Path)
 
 def test_positive_micro_batch_is_not_artificially_limited_to_one(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
-    raw["iql"]["micro_batch_size"] = 8
+    raw["training"]["micro_batch_size"] = 8
     path = tmp_path / "batched.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    assert load_train_config(path).section("iql")["micro_batch_size"] == 8
+    assert load_train_config(path).section("training")["micro_batch_size"] == 8
 
 
 def test_default_iql_stability_profile(configured):

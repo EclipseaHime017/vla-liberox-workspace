@@ -10,6 +10,7 @@ import type {
 } from "../features/run-control/types";
 import { JobMonitor } from "../features/training/JobMonitor";
 import { TrainingQueuePanel } from "../features/training/TrainingQueuePanel";
+import { ModelConfigPanel, modelConfigurationError } from "../features/training/ModelConfigPanel";
 import { Badge } from "../components/ui/Badge";
 import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
 import { rewardSourceLabels } from "../features/dataset/rewardVersions";
@@ -45,6 +46,8 @@ export function TrainingPage() {
   const [datasetId, setDatasetId] = useState("");
   const [algorithm, setAlgorithm] = useState<"iql" | "bc">("iql");
   const isBC = algorithm === "bc";
+  const [modelFamily, setModelFamily] = useState("vla_adapter");
+  const appliedSelection = useRef({ family: "vla_adapter", algorithm: "iql" });
   const [rewardSource, setRewardSource] = useState<"final" | "rynnvalue">("final");
   const [rewardRevision, setRewardRevision] = useState(0);
   const [showDatasetConfig, setShowDatasetConfig] = useState(false);
@@ -67,14 +70,14 @@ export function TrainingPage() {
   const taskIdRef = useRef(JSON.stringify(taskScope));
   const refreshRequest = useRef(0);
   taskIdRef.current = JSON.stringify(taskScope);
-  const requestedDefaultsKey = JSON.stringify([datasetId, rewardSource, rewardRevision, algorithm]);
+  const requestedDefaultsKey = JSON.stringify([datasetId, rewardSource, rewardRevision, algorithm, modelFamily]);
 
   useEffect(() => {
     void Promise.all([getBootstrap(), getTrainingDefaults(), listOfflineJobs(), getTensorBoard()])
       .then(([nextBootstrap, nextDefaults, jobs, board]) => {
         setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskScope(scopeForTask(nextBootstrap.task_catalog, nextBootstrap.task.task_id));
         const { reward_rynnvalue: legacyRynn, ...advanced } = nextDefaults.advanced;
-        setParameters({ ...nextDefaults.basic, ...advanced, ...nextDefaults.monitoring,
+        setParameters({ ...nextDefaults.basic, ...advanced, ...nextDefaults.monitoring, ...nextDefaults.model,
           reward_source: rewardSource,
           reward_stage_exponent: advanced.reward_stage_exponent ?? 2, resume_checkpoint: null });
         setTensorboard(board);
@@ -134,17 +137,24 @@ export function TrainingPage() {
   useEffect(() => {
     setDefaultsError("");
     setDefaultsKey("");
-    if (!datasetId) { setDefaultsLoading(false); return; }
+    if (!bootstrap) { setDefaultsLoading(false); return; }
     let current = true;
     setDefaultsLoading(true);
-    void (isBC ? getTrainingDefaults(datasetId, undefined, "bc") : getTrainingDefaults(datasetId, rewardSource)).then((next) => {
+    void getTrainingDefaults(datasetId || undefined, isBC ? undefined : rewardSource, algorithm, modelFamily).then((next) => {
       if (!current) return;
       setDefaults(next);
       setDefaultsKey(requestedDefaultsKey);
+      const selectionChanged = appliedSelection.current.family !== modelFamily || appliedSelection.current.algorithm !== algorithm;
+      const sameModel = appliedSelection.current.family === modelFamily;
+      appliedSelection.current = { family: modelFamily, algorithm };
       setParameters((current) => {
+        if (selectionChanged) {
+          const modelEdits = sameModel ? Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith("model_"))) : {};
+          current = { ...next.basic, ...next.advanced, ...next.monitoring, ...next.model, ...modelEdits, model_family: modelFamily };
+        }
         const pinned = Object.fromEntries(Object.entries(next.advanced)
           .filter(([key]) => key.startsWith("reward_") && key !== "reward_rynnvalue"));
-        const unrelated = Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith("reward_")));
+        const unrelated = { ...next.model, ...Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith("reward_"))) };
         if (isBC) return { ...unrelated, actor_lr_warmup_steps: unrelated.actor_lr_warmup_steps
           ?? next.basic.actor_lr_warmup_steps ?? next.basic.critic_warmup_steps ?? 0, resume_checkpoint: null };
         if ((rewardSource === "final" && pinned.reward_fusion_mode === "multiplicative")
@@ -160,7 +170,7 @@ export function TrainingPage() {
     }).catch((reason) => { if (current) setDefaultsError(String(reason)); })
       .finally(() => { if (current) setDefaultsLoading(false); });
     return () => { current = false; };
-  }, [datasetId, rewardSource, rewardRevision, algorithm]);
+  }, [datasetId, rewardSource, rewardRevision, algorithm, modelFamily, bootstrap]);
   const rewardReady = Boolean(datasetId && defaultsKey === requestedDefaultsKey && (
     defaults?.reward_availability?.ready ?? (defaults?.reward_version
       && defaults.reward_version.evaluator === rewardSource && !defaults.reward_version.legacy
@@ -173,7 +183,8 @@ export function TrainingPage() {
     const timer = window.setTimeout(() => setRewardRevision((value) => value + 1), 1000);
     return () => window.clearTimeout(timer);
   }, [defaultsLoading, defaults, isBC]);
-  const trainingReady = Boolean(datasetId && !defaultsError && defaultsKey === requestedDefaultsKey && (isBC || rewardReady));
+  const trainingReady = Boolean(datasetId && !defaultsError && !modelConfigurationError(parameters)
+    && defaultsKey === requestedDefaultsKey && (isBC || rewardReady));
   const patchParameter = (name: string, value: number | string | boolean | null) => setParameters((current) => ({ ...current, [name]: value }));
   const refreshDataset = async () => {
     const request = ++refreshRequest.current;
@@ -234,15 +245,19 @@ export function TrainingPage() {
   };
 
   return <section className="content-page training-page">
-    <div className="page-heading"><p className="eyebrow">POLICY TRAINING</p><h1>VLA-Adapter 后训练</h1><p>选择训练方法与数据集，更新 action head 和 proprio projector；数据筛选在数据集页面完成。</p></div>
+    <div className="page-heading"><p className="eyebrow">POLICY TRAINING</p><h1>策略后训练</h1><p>按模型、训练方法、参数配置的顺序设置；数据筛选在数据集页面完成。</p></div>
     {(error || defaultsError) && <div className="error-banner"><span>{error || defaultsError}</span><button onClick={() => { setError(""); setDefaultsError(""); }}>关闭</button></div>}
     <div className="training-layout">
       <section className="surface training-config">
         <div className="panel-title"><strong>训练配置</strong><span>{defaults?.environments.training ?? "vla-liberox"}</span></div>
         <div className="training-form">
+          <label>基础模型<select value={modelFamily} onChange={(event) => setModelFamily(event.target.value)}>
+            {(defaults?.models ?? []).map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+          </select></label>
           <label>训练方法<select value={algorithm} onChange={(event) => { setAlgorithm(event.target.value as "iql" | "bc"); setShowDatasetConfig(false); }}>
             <option value="iql">IQL · 奖励加权后训练</option><option value="bc">BC · 等权行为克隆</option>
           </select></label>
+          <ModelConfigPanel models={defaults?.models} parameters={parameters} onChange={patchParameter} />
           <TaskFilter tasks={bootstrap?.task_catalog ?? []} value={taskScope} onChange={setTaskScope} labelPrefix="训练" />
           <label>冻结数据集<select value={datasetId} disabled={datasetsLoading} onChange={(event) => setDatasetId(event.target.value)}><option value="">{datasetsLoading ? "加载数据集…" : "请选择"}</option>{availableDatasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.member_count} 条</option>)}</select></label>
           {!isBC && <label>训练奖励<select value={rewardSource} disabled={busy || datasetsLoading || !datasetId}

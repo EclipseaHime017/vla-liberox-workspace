@@ -462,6 +462,7 @@ class TrainingDatasetService:
         validation_fraction: float = 0.2,
         split_seed: int = 7,
         success_consecutive_steps: int = 5,
+        include_post_success: bool = True,
         parent_dataset_id: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
@@ -472,6 +473,8 @@ class TrainingDatasetService:
             raise ValueError("split_seed must be an integer")
         if type(success_consecutive_steps) is not int or not 1 <= success_consecutive_steps <= 100:
             raise ValueError("success_consecutive_steps must be in [1, 100]")
+        if type(include_post_success) is not bool:
+            raise TypeError("include_post_success must be boolean")
         if parent_dataset_id is not None:
             self.get(parent_dataset_id)
         resolved = self.preview(task_id, selection)
@@ -522,6 +525,7 @@ class TrainingDatasetService:
                     "split_seed": split_seed,
                     "success_consecutive_steps": success_consecutive_steps,
                     "member_count": len(members),
+                    "include_post_success": include_post_success,
                     "action_count": sum(member["action_count"] for member in members),
                     "chunk_count": sum(member["chunk_count"] for member in members),
                     "categories": resolved["categories"],
@@ -538,10 +542,25 @@ class TrainingDatasetService:
 
     def derive(self, dataset_id: str, **kwargs: Any) -> dict[str, Any]:
         parent = self.get(dataset_id)
+        kwargs.setdefault("include_post_success", parent.get("include_post_success", True))
         task_id = kwargs.pop("task_id", parent["task_id"])
         if task_id != parent["task_id"]:
             raise ValueError("A derived dataset must keep the parent task")
         return self.create(task_id=task_id, parent_dataset_id=dataset_id, **kwargs)
+
+    def update_training_options(self, dataset_id: str, *, include_post_success: bool) -> dict[str, Any]:
+        """Update future training's replay view, never frozen members or evaluation arrays."""
+        if type(include_post_success) is not bool:
+            raise TypeError("include_post_success must be boolean")
+        return self._update_metadata(dataset_id, {"include_post_success": include_post_success})
+
+    def _update_metadata(self, dataset_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            path, payload = self._load(dataset_id)
+            payload.update(changes, updated_at=_utc_now())
+            atomic_write_json(path, payload)
+            self.repository.upsert(payload, path)
+            return self._public(payload)
 
     def delete_unannotated(
         self, dataset_id: str, confirm_dataset_id: str
@@ -642,6 +661,7 @@ class TrainingDatasetService:
     @staticmethod
     def _public(payload: dict[str, Any]) -> dict[str, Any]:
         result = dict(payload)
+        result.setdefault("include_post_success", True)
         result["evaluation_versions"] = list(payload.get("evaluation_versions", []))
         known = {item["id"] for item in result["evaluation_versions"]}
         for previous in payload.get("annotation_history", []):
@@ -830,11 +850,10 @@ class TrainingDatasetService:
                     if not Path(artifact["path"]).is_file():
                         missing.append(artifact["path"])
             if immutable_error or missing:
-                payload["integrity_status"] = "BROKEN"
-                payload["integrity_error"] = immutable_error or f"Missing artifacts: {missing[:3]}"
-                payload["updated_at"] = _utc_now()
-                atomic_write_json(path, payload)
-                self.repository.upsert(payload, path)
+                return self._update_metadata(dataset_id, {
+                    "integrity_status": "BROKEN",
+                    "integrity_error": immutable_error or f"Missing artifacts: {missing[:3]}",
+                })
         return self._public(payload)
 
     def list(self, task_id: str | None = None, *, task_ids: list[str] | None = None) -> list[dict[str, Any]]:
@@ -866,57 +885,55 @@ class TrainingDatasetService:
                         raise ValueError(f"SHA256 changed: {member['run_id']}:{name}")
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
-        payload["integrity_status"] = "HEALTHY" if error is None else "BROKEN"
-        payload["integrity_error"] = error
-        payload["last_verified_at"] = _utc_now()
-        payload["updated_at"] = _utc_now()
-        atomic_write_json(path, payload)
-        self.repository.upsert(payload, path)
-        return self._public(payload)
+        return self._update_metadata(dataset_id, {
+            "integrity_status": "HEALTHY" if error is None else "BROKEN",
+            "integrity_error": error, "last_verified_at": _utc_now(),
+        })
 
     def update_annotation(
         self, dataset_id: str, status: str, *, annotation_id: str | None = None,
         annotation_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        path, payload = self._load(dataset_id)
-        history = payload.setdefault("annotation_history", [])
-        active_id = payload.get("annotation_id")
-        pending_id = annotation_id or payload.get("pending_annotation_id")
-        if status == "RUNNING":
-            payload["annotation_status"] = "RUNNING"
-            payload["pending_annotation_id"] = annotation_id
-            payload["pending_annotation_config"] = annotation_config
-        elif status == "READY":
-            payload["annotation_status"] = "READY"
-            payload["annotation_id"] = pending_id
-            payload["annotation_config"] = (
-                annotation_config or payload.get("pending_annotation_config")
-            )
-            payload["pending_annotation_id"] = None
-            payload["pending_annotation_config"] = None
-        else:
-            # Preserve the last successful reward version if a later
-            # re-annotation is canceled or fails.
-            payload["annotation_status"] = "READY" if active_id else status
-            payload["pending_annotation_id"] = None
-            payload["pending_annotation_config"] = None
-        if pending_id and status != "RUNNING" and not any(
-            item.get("annotation_id") == pending_id and item.get("status") == status
-            for item in history
-        ):
-            history.append({
-                "annotation_id": pending_id,
-                "status": status,
-                "config": annotation_config,
-                "completed_at": _utc_now(),
-            })
-        if status != "RUNNING":
-            payload["last_annotation_id"] = pending_id
-            payload["last_annotation_status"] = status
-        payload["updated_at"] = _utc_now()
-        atomic_write_json(path, payload)
-        self.repository.upsert(payload, path)
-        return self._public(payload)
+        with self.lock:
+            path, payload = self._load(dataset_id)
+            history = payload.setdefault("annotation_history", [])
+            active_id = payload.get("annotation_id")
+            pending_id = annotation_id or payload.get("pending_annotation_id")
+            if status == "RUNNING":
+                payload["annotation_status"] = "RUNNING"
+                payload["pending_annotation_id"] = annotation_id
+                payload["pending_annotation_config"] = annotation_config
+            elif status == "READY":
+                payload["annotation_status"] = "READY"
+                payload["annotation_id"] = pending_id
+                payload["annotation_config"] = (
+                    annotation_config or payload.get("pending_annotation_config")
+                )
+                payload["pending_annotation_id"] = None
+                payload["pending_annotation_config"] = None
+            else:
+                # Preserve the last successful reward version if a later
+                # re-annotation is canceled or fails.
+                payload["annotation_status"] = "READY" if active_id else status
+                payload["pending_annotation_id"] = None
+                payload["pending_annotation_config"] = None
+            if pending_id and status != "RUNNING" and not any(
+                item.get("annotation_id") == pending_id and item.get("status") == status
+                for item in history
+            ):
+                history.append({
+                    "annotation_id": pending_id,
+                    "status": status,
+                    "config": annotation_config,
+                    "completed_at": _utc_now(),
+                })
+            if status != "RUNNING":
+                payload["last_annotation_id"] = pending_id
+                payload["last_annotation_status"] = status
+            payload["updated_at"] = _utc_now()
+            atomic_write_json(path, payload)
+            self.repository.upsert(payload, path)
+            return self._public(payload)
 
     def references_for_run(self, run_id: str) -> list[dict[str, Any]]:
         return self.repository.references_for_run(run_id)
@@ -925,12 +942,10 @@ class TrainingDatasetService:
         changed = []
         for reference in self.references_for_run(run_id):
             try:
-                path, payload = self._load(reference["id"])
-                payload["integrity_status"] = "BROKEN"
-                payload["integrity_error"] = f"Referenced run was deleted: {run_id}"
-                payload["updated_at"] = _utc_now()
-                atomic_write_json(path, payload)
-                self.repository.upsert(payload, path)
+                self._update_metadata(reference["id"], {
+                    "integrity_status": "BROKEN",
+                    "integrity_error": f"Referenced run was deleted: {run_id}",
+                })
                 changed.append(reference["id"])
             except Exception:
                 # The source deletion has already happened. Keep the API

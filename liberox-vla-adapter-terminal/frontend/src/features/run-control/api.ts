@@ -60,6 +60,7 @@ export const previewTrainingDataset = (taskId: string, selection: DatasetSelecti
 export const createTrainingDataset = (body: {
   name: string; task_id: string; selection: DatasetSelection;
   validation_fraction: number; split_seed: number; success_consecutive_steps: number;
+  include_post_success?: boolean;
 }) => api<TrainingDataset>("/api/training-datasets", {
   method: "POST", body: JSON.stringify(body),
 });
@@ -67,6 +68,7 @@ export const createTrainingDataset = (body: {
 export const deriveTrainingDataset = (parentId: string, body: {
   name: string; selection: DatasetSelection; validation_fraction: number;
   split_seed: number; success_consecutive_steps: number;
+  include_post_success?: boolean;
 }) => api<TrainingDataset>(`/api/training-datasets/${encodeURIComponent(parentId)}/derive`, {
   method: "POST", body: JSON.stringify(body),
 });
@@ -86,6 +88,11 @@ export const listTrainingDatasets = (taskId?: string, taskIds?: string[]) => {
 export const verifyTrainingDataset = (id: string) => api<TrainingDataset>(
   `/api/training-datasets/${encodeURIComponent(id)}/verify`, { method: "POST" },
 );
+
+export const updateDatasetTrainingOptions = (id: string, includePostSuccess: boolean) =>
+  api<TrainingDataset>(`/api/training-datasets/${encodeURIComponent(id)}/training-options`, {
+    method: "PATCH", body: JSON.stringify({ include_post_success: includePostSuccess }),
+  });
 export const annotateTrainingDataset = (
   id: string, parameters: RewardParameters & { source: RewardSource | EvaluationOperation },
 ) => api<OfflineJob>(
@@ -108,11 +115,12 @@ export const stopOfflineJob = (id: string) => api<OfflineJob>(
 export const getJobLogs = (id: string, offset = 0) => api<{
   offset: number; next_offset: number; text: string;
 }>(`/api/jobs/${encodeURIComponent(id)}/logs?offset=${offset}`);
-export const getTrainingDefaults = (datasetId?: string, rewardSource?: TrainingRewardSource, algorithm?: "iql" | "bc") => {
+export const getTrainingDefaults = (datasetId?: string, rewardSource?: TrainingRewardSource, algorithm?: "iql" | "bc", modelFamily?: string) => {
   const query = new URLSearchParams();
   if (datasetId) query.set("dataset_id", datasetId);
   if (rewardSource) query.set("reward_source", rewardSource);
   if (algorithm) query.set("algorithm", algorithm);
+  if (modelFamily) query.set("model_family", modelFamily);
   return api<TrainingDefaults>(`/api/training/defaults${query.size ? `?${query}` : ""}`);
 };
 export const startTraining = (datasetId: string, parameters: Record<string, unknown>) =>

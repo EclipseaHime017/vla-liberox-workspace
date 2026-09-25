@@ -191,3 +191,112 @@ def test_queued_overlay_mutations_are_locked_and_rejected(tmp_path: Path):
     with pytest.raises(Exception, match="active job"):
         current.delete("trained", "trained")
     assert manifest.read_bytes() == before
+
+
+def _adapted_overlay(root, policy_id="adapted"):
+    path = _overlay(root, policy_id)
+    payload = yaml.safe_load(path.read_text())
+    backbone = torch.nn.Linear(2, 2)
+    torch.save(backbone.state_dict(), path.parent / "backbone.pt")
+    payload.update(schema_version=3, algorithm="bc", reward_sha256=None, backbone="backbone.pt",
+        model_config={"family": "vla_adapter", "backbone": "lora", "action_head": "train",
+                      "proprio_projector": "frozen", "lora": {"rank": 32, "alpha": 64, "dropout": 0}})
+    payload["component_sha256"]["backbone"] = _sha(path.parent / "backbone.pt")
+    path.write_text(yaml.safe_dump(payload))
+    return path
+
+
+def test_adapted_policy_copy_contains_backbone_and_validates_hash(tmp_path):
+    path = _adapted_overlay(tmp_path)
+    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    manager = SimpleNamespace(policy_catalog=catalog, active_session_id=None, draft=None)
+    service = PolicyManagementService(manager)
+    detail = service.detail("adapted")
+    assert {item["name"] for item in detail["components"]} == {"backbone", "action_head", "proprio_projector"}
+    copied = service.copy("adapted", "LoRA copy")
+    assert catalog.entry(copied["policy_id"]).backbone.read_bytes() == (path.parent / "backbone.pt").read_bytes()
+    (path.parent / "backbone.pt").write_bytes(b"corrupt")
+    catalog.refresh()
+    with pytest.raises(ValueError, match="backbone hash mismatch"):
+        catalog.entry("adapted")
+
+
+def test_switching_adapted_backbones_reloads_base_but_frozen_overlays_reuse_it(tmp_path, monkeypatch):
+    import copy
+    from backend.app.policies import vla_adapter
+    path = _adapted_overlay(tmp_path)
+    _overlay(tmp_path, "head-only")
+    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    initial = SimpleNamespace(model=torch.nn.Linear(2, 2), action_head=torch.nn.Linear(2, 2),
+                              proprio_projector=torch.nn.Linear(2, 2))
+    loads = []
+
+    def build(*_):
+        loads.append(True)
+        return SimpleNamespace(num_open_loop_steps=8), copy.deepcopy(initial)
+
+    monkeypatch.setattr(vla_adapter.direct, "load_policy_runtime", lambda *_: None)
+    monkeypatch.setattr(vla_adapter.direct, "build_model", build)
+    monkeypatch.setattr(vla_adapter, "replace", lambda cfg, **kwargs: cfg)
+    provider = VLAAdapterPolicyProvider(SimpleNamespace(torch=torch), SimpleNamespace(), catalog)
+    provider.load(8, "base")
+    provider.load(8, "head-only")
+    assert len(loads) == 1
+    provider.load(8, "adapted")
+    assert len(loads) == 2
+    expected = torch.load(path.parent / "backbone.pt", weights_only=True)
+    assert torch.equal(provider.components.model.weight, expected["weight"])
+    provider.load(8, "adapted")
+    assert len(loads) == 2
+    provider.load(8, "base")
+    assert len(loads) == 3
+    assert torch.equal(provider.components.model.weight, initial.model.weight)
+    provider.load(8, "head-only")
+    assert len(loads) == 3
+
+
+@pytest.mark.parametrize("invalid", ["", False, 0, None])
+def test_adapted_overlay_cannot_silently_omit_backbone(tmp_path, invalid):
+    path = _adapted_overlay(tmp_path)
+    payload = yaml.safe_load(path.read_text())
+    payload["backbone"] = invalid
+    payload["component_sha256"].pop("backbone")
+    path.write_text(yaml.safe_dump(payload))
+    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    with pytest.raises(ValueError, match="backbone"):
+        catalog.entry("adapted")
+
+
+def test_large_model_copy_and_bootstrap_use_threadpool(monkeypatch):
+    import asyncio
+    from backend.app.api import policies, runs
+    from backend.app.api.models import CopyPolicyRequest
+    calls = []
+
+    async def offload(function, *args):
+        calls.append(function.__name__)
+        return function(*args)
+
+    class Service:
+        def copy(self, policy_id, label):
+            return {"policy_id": policy_id, "label": label}
+
+        def bootstrap(self):
+            return {"policies": []}
+
+        def evaluator_capabilities(self):
+            return {}
+
+    service = Service()
+    monkeypatch.setattr(policies, "run_in_threadpool", offload)
+    monkeypatch.setattr(runs, "run_in_threadpool", offload)
+    monkeypatch.setattr(policies, "_service", lambda _: service)
+    monkeypatch.setattr(runs, "service", lambda _: service)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(offline_job_service=service)))
+
+    async def exercise():
+        assert (await policies.copy_model("adapted", CopyPolicyRequest(label="copy"), request))["label"] == "copy"
+        assert (await runs.bootstrap(request))["policies"] == []
+
+    asyncio.run(exercise())
+    assert calls == ["copy", "bootstrap", "evaluator_capabilities"]

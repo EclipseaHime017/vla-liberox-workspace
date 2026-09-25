@@ -5,6 +5,7 @@ import mimetypes
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..domain.run import TERMINAL_STATES
 from .dependencies import http_error, service
@@ -14,10 +15,10 @@ router = APIRouter(prefix="/api", tags=["runs"])
 
 @router.get("/bootstrap")
 async def bootstrap(request: Request):
-    payload = service(request).bootstrap()
+    payload = await run_in_threadpool(service(request).bootstrap)
     offline = getattr(request.app.state, "offline_job_service", None)
     if offline is not None:
-        payload["evaluation_capabilities"] = offline.evaluator_capabilities()
+        payload["evaluation_capabilities"] = await run_in_threadpool(offline.evaluator_capabilities)
     return payload
 
 @router.get("/sessions")

@@ -446,9 +446,8 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     if Path(evaluation_id).name != evaluation_id or ".." in evaluation_id:
         raise ValueError("evaluation_id is unsafe")
     task = _validate_exact_mapping(root["task_snapshot"], TASK_KEYS, "task_snapshot")
-    policy = _validate_exact_mapping(
-        root["policy_snapshot"], POLICY_KEYS, "policy_snapshot"
-    )
+    policy_keys = POLICY_KEYS | ({"backbone"} if "backbone" in root["policy_snapshot"] else set())
+    policy = _validate_exact_mapping(root["policy_snapshot"], policy_keys, "policy_snapshot")
     config = _validate_exact_mapping(root["config"], CONFIG_KEYS, "config")
     _strict_string(task["task_id"], "task_snapshot.task_id")
     _strict_string(task["level"], "task_snapshot.level")
@@ -504,6 +503,8 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     if set(cameras) - allowed_cameras or len(cameras) >= len(allowed_cameras):
         raise ValueError("config.disabled_policy_cameras must leave one VLA camera enabled")
     if policy_id == "base":
+        if policy.get("backbone") is not None:
+            raise ValueError("Base policy cannot contain a backbone overlay")
         for key in (
             "manifest", "action_head", "proprio_projector", "training_step",
             "compatibility_sha256",
@@ -511,7 +512,7 @@ def load_effective_config(path: Path) -> dict[str, Any]:
             if policy[key] is not None:
                 raise ValueError(f"Base policy snapshot must set {key} to null")
     else:
-        for key in ("manifest", "action_head", "proprio_projector"):
+        for key in ("manifest", "action_head", "proprio_projector") + (("backbone",) if "backbone" in policy else ()):
             component = Path(
                 _strict_string(policy[key], f"policy_snapshot.{key}")
             ).expanduser()
@@ -765,6 +766,7 @@ def run_evaluation(
                 Path(policy["proprio_projector"]).resolve(),
                 policy["training_step"],
                 policy["compatibility_sha256"],
+                Path(policy["backbone"]).resolve() if policy.get("backbone") else None,
             )
             actual_components = (
                 entry.manifest,
@@ -772,6 +774,7 @@ def run_evaluation(
                 entry.proprio_projector,
                 entry.training_step,
                 entry.compatibility_sha256,
+                entry.backbone,
             )
             if actual_components != expected_components:
                 raise ValueError("Policy snapshot does not match the validated registry entry")

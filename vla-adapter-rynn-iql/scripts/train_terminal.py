@@ -22,9 +22,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from vla_rynn_iql.evaluation_store import bind_reward_manifest
 from vla_rynn_iql.config import LoadedConfig, reward_source, needs_rynnvalue, needs_stage
-from vla_rynn_iql.data import REPLAY_POLICY, iter_unique_replay_chunks
+from vla_rynn_iql.data import training_replay_policy, iter_unique_replay_chunks
 from vla_rynn_iql.io import atomic_json
 from vla_rynn_iql.methods import training_method, actor_lr_warmup
+from vla_rynn_iql.models import model_signature
 from vla_rynn_iql.rewards import load_stage_annotations
 from vla_rynn_iql.terminal_pipeline import (
     annotation_cache_valid,
@@ -85,7 +86,7 @@ def _print_preflight(
     force_prepare: bool,
     force_annotate: bool,
 ) -> None:
-    data, reward, iql = raw["data"], raw["reward"], raw["iql"]
+    data, reward, training = raw["data"], raw["reward"], raw["training"]
     wandb = raw["logging"]["wandb"]
     task_candidates = [item for item in candidates if item.task_id == task_id]
     members = selection_manifest["members"]
@@ -106,16 +107,17 @@ def _print_preflight(
     print(f"Bound evaluations : {evaluated_count}/{len(selected)}")
     source = reward_source(reward) if method.requires_rewards else "not applicable (BC)"
     print(f"Reward source     : {source}")
+    print(f"Policy model      : {model_signature(raw)}")
     if method.requires_rewards and needs_rynnvalue(reward):
         print(f"RynnValue         : {reward['model']} @ {reward['revision']}")
     if method.requires_rewards and needs_stage(reward):
         print(f"Stage exponent    : {reward['stage_exponent']}")
     print(
-        f"{method.name.upper():18}: steps={iql['train_steps']}, "
+        f"{method.name.upper():18}: steps={training['train_steps']}, "
         f"actor_lr_warmup={actor_lr_warmup(raw)}, "
-        f"micro_batch={iql['micro_batch_size']}, "
-        f"actor_batch={iql['micro_batch_size'] * iql['gradient_accumulation_steps']}, "
-        f"sample_budget={iql['train_steps'] * iql['micro_batch_size']}"
+        f"micro_batch={training['micro_batch_size']}, "
+        f"actor_batch={training['micro_batch_size'] * training['gradient_accumulation_steps']}, "
+        f"sample_budget={training['train_steps'] * training['micro_batch_size']}"
     )
     print(
         "W&B               : "
@@ -126,6 +128,7 @@ def _print_preflight(
         )
     )
     print(f"Success threshold : {data['success_consecutive_steps']} consecutive steps")
+    print(f"Post-success      : {'include' if data.get('include_post_success', True) else 'truncate at confirmation'}")
     print("Stages            :")
     print(f"  [1/5] prepare   : {'RUN' if force_prepare or not prepare_skip else 'SKIP (hash match)'}")
     print(f"  [2/5] annotate  : " + ("SKIP (not required)" if not method.requires_rewards or not needs_rynnvalue(reward) else
@@ -257,7 +260,7 @@ def main() -> int:
     raw["paths"]["work_dir"] = str(work_dir.resolve())
     raw["data"]["selection_manifest"] = str(selection_path.resolve())
     validate_effective_config(raw)
-    source = reward_source(raw["reward"])
+    source = reward_source(raw["reward"]) if method.requires_rewards else "none"
     stage_snapshot = None
     if method.requires_rewards and needs_stage(raw["reward"]):
         stage_snapshot = load_stage_annotations(LoadedConfig(config.path, raw), {
@@ -314,6 +317,7 @@ def main() -> int:
     state: dict[str, Any] = {
         "schema_version": 1,
         "algorithm": method.name,
+        "model": model_signature(raw),
         "id": run_id,
         "status": "READY",
         "created_at": _utc_now(),
@@ -362,8 +366,9 @@ def main() -> int:
             "dataset_sha256": prepared["dataset_sha256"],
             "episode_count": prepared["episode_count"],
             "success_count": prepared["success_count"],
-            "chunk_count": sum(1 for _ in iter_unique_replay_chunks(prepared["episodes"])),
-            "replay_policy": REPLAY_POLICY,
+            "chunk_count": sum(1 for _ in iter_unique_replay_chunks(prepared["episodes"],
+                include_post_success=raw["data"].get("include_post_success", True))),
+            "replay_policy": training_replay_policy(raw["data"].get("include_post_success", True)),
         }
         atomic_json(state_path, state)
 

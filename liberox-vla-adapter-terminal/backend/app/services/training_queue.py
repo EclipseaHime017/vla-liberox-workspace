@@ -32,7 +32,7 @@ class TrainingQueue:
 
     def enqueue_training(self, dataset_id: str, parameters: dict) -> dict:
         with self.lock:
-            self._validate_training_parameters(parameters)
+            self._validate_training_parameters(parameters, self.training_models)
             if parameters.get("resume_checkpoint"):
                 raise ValueError("Queued training starts independently; checkpoint resume is not supported")
             dataset = self.datasets.require_ready_for_training(dataset_id)

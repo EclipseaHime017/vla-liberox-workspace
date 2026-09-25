@@ -65,6 +65,8 @@ class PolicyEntry:
     training_step: int | None
     compatibility_sha256: str | None
     algorithm: str = "iql"
+    backbone: Path | None = None
+    model_config: dict[str, Any] | None = None
 
     @property
     def is_base(self) -> bool:
@@ -78,6 +80,7 @@ class PolicyEntry:
             "stats_key": self.stats_key,
             "kind": "base" if self.is_base else "rynn_iql_overlay",
             "algorithm": None if self.is_base else self.algorithm,
+            "model_config": self.model_config,
             "training_step": self.training_step,
             "compatibility_sha256": self.compatibility_sha256,
         }
@@ -149,11 +152,22 @@ class PolicyCatalog:
 
     def _load(self, manifest: Path) -> PolicyEntry:
         raw = yaml.load(manifest.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
-        required = self.REQUIRED | ({"algorithm"} if isinstance(raw, dict) and raw.get("schema_version") == 2 else set())
+        required = self.REQUIRED | ({"algorithm"} if isinstance(raw, dict) and raw.get("schema_version") in (2, 3) else set())
+        if isinstance(raw, dict) and raw.get("schema_version") == 3:
+            required |= {"backbone", "model_config"}
         if not isinstance(raw, dict) or set(raw) != required:
             raise ValueError(f"Invalid policy overlay keys: {manifest}")
-        if raw["schema_version"] not in (1, 2):
+        if raw["schema_version"] not in (1, 2, 3):
             raise ValueError(f"Unsupported policy overlay schema: {manifest}")
+        if raw["schema_version"] == 3:
+            config = raw["model_config"]
+            if (not isinstance(config, dict) or config.get("family") != "vla_adapter"
+                    or config.get("backbone") not in ("frozen", "full", "lora")):
+                raise ValueError("Unsupported overlay model configuration")
+            if (config["backbone"] == "frozen") != (raw["backbone"] is None):
+                raise ValueError("Overlay backbone artifact does not match its model configuration")
+            if config["backbone"] != "frozen" and (not isinstance(raw["backbone"], str) or not raw["backbone"].strip()):
+                raise ValueError("Adapted overlay backbone must be a non-empty path")
         algorithm = raw.get("algorithm", "iql")
         if algorithm not in ("iql", "bc"):
             raise ValueError("Unknown policy overlay algorithm")
@@ -186,7 +200,8 @@ class PolicyCatalog:
         if raw["compatibility_sha256"] != _stable_hash(compatibility):
             raise ValueError(f"Overlay {policy_id} compatibility hash mismatch")
         hashes = raw["component_sha256"]
-        if not isinstance(hashes, dict) or set(hashes) != {"action_head", "proprio_projector"}:
+        names = {"action_head", "proprio_projector"} | ({"backbone"} if raw.get("backbone") else set())
+        if not isinstance(hashes, dict) or set(hashes) != names:
             raise ValueError(f"Overlay {policy_id} has invalid component hashes")
         for key in ("dataset_sha256", "reward_sha256", "compatibility_sha256"):
             if key == "reward_sha256" and algorithm == "bc":
@@ -231,6 +246,8 @@ class PolicyCatalog:
             training_step=int(raw["training_step"]),
             compatibility_sha256=str(raw["compatibility_sha256"]),
             algorithm=algorithm,
+            backbone=component("backbone") if raw.get("backbone") else None,
+            model_config=raw.get("model_config"),
         )
 
     def entry(self, policy_id: str) -> PolicyEntry:

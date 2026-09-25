@@ -60,6 +60,7 @@ export function DatasetPage() {
   const [validationFraction, setValidationFraction] = useState(0.2);
   const [splitSeed, setSplitSeed] = useState(7);
   const [successSteps, setSuccessSteps] = useState(5);
+  const [includePostSuccess, setIncludePostSuccess] = useState(true);
   const [annotationJob, setAnnotationJob] = useState<OfflineJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [runsLoading, setRunsLoading] = useState(false);
@@ -162,9 +163,11 @@ export function DatasetPage() {
       setParentId(parent.id); setName(`${parent.name} · 派生`);
       setValidationFraction(parent.validation_fraction ?? 0.2);
       setSplitSeed(parent.split_seed ?? 7); setSuccessSteps(parent.success_consecutive_steps ?? 5);
+      setIncludePostSuccess(parent.include_post_success ?? true);
       setSelection({ ...initialSelection(), mode: "manual", run_ids: parent.members.map((item) => item.run_id) });
     } else {
       setParentId(null); setName(`训练数据集 ${new Date().toLocaleString()}`);
+      setIncludePostSuccess(true);
       setSelection(initialSelection());
     }
   };
@@ -180,6 +183,7 @@ export function DatasetPage() {
     const body = {
       name, selection, validation_fraction: validationFraction,
       split_seed: splitSeed, success_consecutive_steps: successSteps,
+      include_post_success: includePostSuccess,
     };
     try {
       if (parentId) await deriveTrainingDataset(parentId, body);
@@ -291,6 +295,7 @@ export function DatasetPage() {
         <div className="panel-title"><strong>{parentId ? "调整成员并另存数据集" : "创建训练数据集"}</strong><button onClick={() => setBuilder(false)}>取消</button></div>
         <div className="builder-grid">
           <label>名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <label>成功后动作<select value={String(includePostSuccess)} onChange={(event) => setIncludePostSuccess(event.target.value === "true")}><option value="true">保留</option><option value="false">截断</option></select></label>
           <label>选择方式<select value={selection.mode} onChange={(event) => patchSelection({ mode: event.target.value as DatasetSelection["mode"] })}><option value="random">随机选择</option><option value="sequential">顺序选择</option><option value="rule">分类配额</option><option value="manual">手动选择</option></select></label>
           {selection.mode !== "manual" && selection.mode !== "rule" && <label>轨迹数量 M<input type="number" min={1} max={eligibleCount} value={selection.size ?? 1} onChange={(event) => patchSelection({ size: Number(event.target.value) })} /></label>}
           {(selection.mode === "random" || selection.mode === "rule") && <label>随机种子<input type="number" min={0} value={selection.seed} onChange={(event) => patchSelection({ seed: Number(event.target.value) })} /></label>}

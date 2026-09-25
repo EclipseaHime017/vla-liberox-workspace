@@ -22,6 +22,17 @@ MANIFEST_SCHEMA_VERSION = 4
 REPLAY_POLICY = "full_recording_v1"
 
 
+def training_replay_policy(include_post_success: bool = True) -> str:
+    return REPLAY_POLICY if include_post_success else "confirmed_success_v1"
+
+
+def replay_end_step(episode: dict[str, Any], include_post_success: bool = True) -> int:
+    """Exclusive training endpoint; physical recordings and reward indices stay intact."""
+    terminal = episode.get("terminal_step")
+    return (int(episode["recorded_action_count"]) if include_post_success or terminal is None
+            else int(terminal) + 1)
+
+
 @dataclass(frozen=True)
 class PreparedPaths:
     manifest: Path
@@ -155,9 +166,14 @@ def replay_chunks(episode: dict[str, Any]) -> list[dict[str, Any]]:
 
 def iter_unique_replay_chunks(
     episodes: list[dict[str, Any]], *, split: str | None = None,
+    include_post_success: bool = True,
 ) -> Iterator[tuple[dict[str, Any], int]]:
-    """Yield replay chunks while counting physically copied prefixes once."""
+    """Select the training interval, retaining full reward indices and de-duplicating prefixes."""
     full_chunks = {str(episode["run_id"]): replay_chunks(episode) for episode in episodes}
+    for episode in episodes:
+        end = replay_end_step(episode, include_post_success)
+        if not any(int(chunk["end"]) == end for chunk in full_chunks[str(episode["run_id"])]):
+            raise ValueError(f"Run {episode['run_id']} lacks a chunk at the confirmed success boundary; rerun Prepare")
     copied_prefix_keys = {
         (
             str(episode["root_run_id"]), int(chunk["start"]),
@@ -176,6 +192,8 @@ def iter_unique_replay_chunks(
         if split is not None and episode["split"] != split:
             continue
         for chunk_index, chunk in enumerate(full_chunks[str(episode["run_id"])]):
+            if int(chunk["end"]) > replay_end_step(episode, include_post_success):
+                continue
             key = (
                 str(episode["root_run_id"]), int(chunk["start"]),
                 int(chunk["end"]), str(chunk["action_source"]),
@@ -453,7 +471,7 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
         raise ValueError(f"Branch suffix contains unexpected action_source values: {run_json}")
     if trailing_action_count:
         LOG.info(
-            "Run %s confirmed success at action %d; retaining %d post-success actions for replay "
+            "Run %s confirmed success at action %d; retaining %d post-success actions in Prepare "
             "(%d later done=False)",
             run["id"], terminal_step, trailing_action_count, post_terminal_false_count,
         )

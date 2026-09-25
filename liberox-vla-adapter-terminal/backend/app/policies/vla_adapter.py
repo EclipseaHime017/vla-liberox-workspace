@@ -57,6 +57,10 @@ class VLAAdapterPolicyProvider:
             proprio_state = self._base_proprio_projector
         else:
             assert entry.action_head is not None and entry.proprio_projector is not None
+            if entry.backbone is not None:
+                self.components.model.load_state_dict(
+                    torch.load(entry.backbone, map_location="cpu", weights_only=True), strict=True
+                )
             action_state = torch.load(
                 entry.action_head, map_location="cpu", weights_only=True
             )
@@ -67,6 +71,8 @@ class VLAAdapterPolicyProvider:
         self.components.proprio_projector.load_state_dict(proprio_state, strict=True)
         self.components.action_head.eval()
         self.components.proprio_projector.eval()
+        if hasattr(self.components, "model"):
+            self.components.model.eval()
         self.current_policy_id = entry.policy_id
         self.current_policy_entry = entry
 
@@ -78,12 +84,24 @@ class VLAAdapterPolicyProvider:
             if hasattr(self, "catalog"):
                 self.catalog.refresh()
             entry = self.catalog.entry(policy_id) if hasattr(self, "catalog") else None
+            previous = getattr(self, "current_policy_entry", None)
+            if self.loaded and policy_id != getattr(self, "current_policy_id", "base") and (
+                (previous is not None and previous.backbone is not None)
+                or (entry is not None and entry.backbone is not None)
+            ):
+                # No full base snapshot on GPU/CPU: reload across adapted backbones.
+                # Frozen-backbone overlays keep the existing lightweight switch.
+                self.unload()
             if self.loaded:
                 self.cfg.num_open_loop_steps = open_loop_steps
                 if policy_id != getattr(self, "current_policy_id", "base"):
                     if entry is None:
                         raise ValueError(f"Unknown policy_id: {policy_id}")
-                    self._apply_policy(entry)
+                    try:
+                        self._apply_policy(entry)
+                    except Exception:
+                        self.unload()
+                        raise
                 return
             direct.load_policy_runtime(self.runtime)
             load_config = replace(
@@ -102,7 +120,11 @@ class VLAAdapterPolicyProvider:
             if policy_id != "base":
                 if entry is None:
                     raise ValueError(f"Unknown policy_id: {policy_id}")
-                self._apply_policy(entry)
+                try:
+                    self._apply_policy(entry)
+                except Exception:
+                    self.unload()
+                    raise
 
     def unload(self) -> None:
         with self._lock:

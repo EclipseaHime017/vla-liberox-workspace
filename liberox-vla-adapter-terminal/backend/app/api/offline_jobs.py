@@ -45,10 +45,10 @@ async def stop(job_id: str, request: Request):
 @router.get("/training/defaults")
 async def defaults(
     request: Request, dataset_id: str | None = Query(default=None), reward_source: str | None = Query(default=None),
-    algorithm: str = "iql",
+    algorithm: str = "iql", model_family: str | None = Query(default=None),
 ):
     try:
-        return await run_in_threadpool(offline_job_service(request).defaults, dataset_id, reward_source, algorithm)
+        return await run_in_threadpool(offline_job_service(request).defaults, dataset_id, reward_source, algorithm, model_family)
     except Exception as exc:
         raise http_error(exc, key_error_context="Training configuration could not be loaded") from exc
 

@@ -15,8 +15,8 @@ import numpy as np
 _IMPORT_LOCK = threading.Lock()
 
 
-def reward_core(root: Path):
-    """Load only local, pure data/reward modules; no sys.path or GPU changes."""
+def offline_module(root: Path, part: str):
+    """Load a lightweight local definition without sys.path or GPU changes."""
     package = (root / "src/vla_rynn_iql").resolve()
     name = "_inherited_rewards_" + hashlib.sha256(str(package).encode()).hexdigest()[:12]
     with _IMPORT_LOCK:
@@ -28,8 +28,11 @@ def reward_core(root: Path):
             module = importlib.util.module_from_spec(spec)
             sys.modules[name] = module
             spec.loader.exec_module(module)
-        return tuple(importlib.import_module(f"{name}.{part}")
-                     for part in ("config", "data", "rewards", "stage_rewards"))
+        return importlib.import_module(f"{name}.{part}")
+
+
+def reward_core(root: Path):
+    return tuple(offline_module(root, part) for part in ("config", "data", "rewards", "stage_rewards"))
 
 
 def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:

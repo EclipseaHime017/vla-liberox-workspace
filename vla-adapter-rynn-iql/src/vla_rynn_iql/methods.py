@@ -32,5 +32,4 @@ def training_method(raw: dict[str, Any]) -> TrainingMethod:
 
 
 def actor_lr_warmup(raw: dict[str, Any]) -> int:
-    value = raw.get("training", {}).get("actor_lr_warmup_steps")
-    return int(raw["iql"]["critic_warmup_steps"] if value is None else value)
+    return int(raw["training"]["actor_lr_warmup_steps"])

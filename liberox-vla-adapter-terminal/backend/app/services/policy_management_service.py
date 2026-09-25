@@ -53,6 +53,7 @@ class PolicyManagementService:
             for name, path in (
                 ("action_head", entry.action_head),
                 ("proprio_projector", entry.proprio_projector),
+                ("backbone", entry.backbone),
             )
             if path is not None
         ]
@@ -151,8 +152,9 @@ class PolicyManagementService:
             suffix += 1
         temporary = Path(tempfile.mkdtemp(prefix=".policy-copy-", dir=root))
         try:
-            for component in (entry.action_head, entry.proprio_projector):
-                assert component is not None
+            for component in (entry.action_head, entry.proprio_projector, entry.backbone):
+                if component is None:
+                    continue
                 shutil.copy2(component, temporary / component.name)
             assert entry.manifest is not None
             payload = self._load_manifest(entry.manifest)

@@ -2,21 +2,21 @@
 
 Standalone offline post-training for the Franka VLA-Adapter policy. RynnValue
 is a frozen offline reward annotator; the deployed policy remains
-`VLA-Adapter/LIBERO-Object-Pro` with a trained action-head/proprio overlay.
+`VLA-Adapter/LIBERO-Object-Pro` with configurable model adaptation.
 
 ## Training methods: IQL and BC
 
 The default remains IQL. Set `training.method: bc` for equal-weight masked-L1
 behavior cloning on **all selected training replay chunks**. Dataset selection
 belongs to the data layer: BC does not filter successful demonstrations, alter
-branch deduplication, or drop post-success actions. It never loads rewards, Q/V,
+branch deduplication, or independently filter post-success actions. It never loads rewards, Q/V,
 RynnValue, Robometer or Stage annotations.
 
 From the workspace root:
 
 ```bash
-conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
-conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train.py --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py --config vla-adapter-rynn-iql/configs/training/bc.yaml
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train.py --config vla-adapter-rynn-iql/configs/training/bc.yaml
 ```
 
 The UI training-method selector accepts unannotated datasets for BC. For terminal
@@ -27,7 +27,8 @@ existing selection is unchanged.
 Common runtime/actor settings can be placed under `training`; explicit values
 override the legacy `iql` aliases. Existing YAML and `train_iql.py` remain valid.
 `training.actor_lr_warmup_steps` separates the actor LR schedule from IQL's
-advantage warmup; `null` inherits the legacy `critic_warmup_steps` value. For a
+advantage warmup. Each method preset declares its own actor warmup; only legacy IQL
+configs with an absent/null warmup retain the old critic-warmup fallback. For a
 matched comparison, keep actor initialization, samples, batch, accumulation,
 optimizer and LR schedule identical. Steps still count micro-batches, not epochs.
 
@@ -36,7 +37,82 @@ updates, actor objectives and state. The shared runner owns actor optimization,
 monitoring, checkpointing and overlay export. `ActionDataset` supplies reward-free
 actor samples, and `ReplayDataset` adds RL transitions. BC checkpoints cannot
 resume IQL (or vice versa); old IQL checkpoints and schema-1 overlays remain
-readable. New schema-2 overlays record the method; BC has no reward hash.
+readable. Overlays record the method; BC has no reward hash.
+
+## Configuration: model → method → run
+
+- `configs/models/vla_adapter.yaml`: checkpoint, component adaptation, LoRA and action/proprio dimensions.
+- `configs/training/iql.yaml` / `bc.yaml`: symmetric experiment entries with independent method settings and run overrides. BC never reads IQL or reward defaults.
+- `configs/runtime.yaml`: common run/actor defaults, datasets, paths and logging.
+- `configs/reward.yaml`: independent RynnValue evaluation and Final Reward settings, referenced only when rewards are needed. Robometer diagnostics retain their separate `vla-adapter-robometer/configs/robometer_evaluation.yaml` configuration.
+
+```yaml
+extends: ../runtime.yaml
+presets:
+  model: ../models/vla_adapter.yaml
+  reward: ../reward.yaml
+training:
+  method: iql
+  train_steps: 10000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+```
+
+The shared UI/CLI loader applies runtime defaults, model/reward defaults, run overrides,
+then explicit terminal/UI overrides. Paths are anchored to the file declaring them.
+Actor LR and warmup never share storage with critic/value LR or advantage warmup.
+Changing a method reloads its defaults while retaining model-adaptation choices.
+Canonical snapshots (schema 2) are fully expanded and do not reread live presets.
+Legacy schema 1, `vla.*`, and common `iql.*` keys migrate once at the loading boundary;
+new snapshots store model identity under `model` and common settings under `training`.
+The old `liberox_iql.yaml` / `liberox_bc.yaml` paths have moved to `training/iql.yaml`
+and `training/bc.yaml`; the redundant `train.yaml` and method-preset layer are removed.
+Edit a training entry to tune only that method; edits to runtime affect all entries
+that do not override the changed fields. Gamma and cumulative mode remain one shared
+effective reward configuration for both reward reduction and Bellman discounting.
+In `terminal_pipeline.yaml`, set `base_config: ./training/bc.yaml` for BC or
+`./training/iql.yaml` for IQL. The example no longer repeats the method in overrides;
+an explicit legacy `overrides.training.method` still takes precedence when present.
+
+## Model configuration (shared by IQL and BC)
+
+The UI offers a foundation-model selector and an expandable model-training panel,
+separate from the algorithm controls. Currently only VLA-Adapter Object-Pro is
+registered; unsupported model families fail validation rather than using a fallback.
+
+```yaml
+model:
+  family: vla_adapter
+  backbone: frozen  # frozen | lora | full
+  action_head: train  # train | frozen
+  proprio_projector: train  # train | frozen
+  lora: {rank: 32, alpha: 64, dropout: 0.0}
+```
+
+Use `overrides.model` with the terminal pipeline. The default preserves the previous
+frozen-backbone behavior. The legacy `vla.freeze_backbone` boolean remains readable;
+an explicit canonical `model.backbone` takes precedence. All-frozen actors are rejected.
+Model selection does not change BC/IQL objectives, rewards, update order or sampling.
+
+LoRA follows [VLA-Adapter's fine-tuning setup](https://github.com/OpenHelix-Team/VLA-Adapter/blob/main/vla-scripts/finetune.py):
+all linear layers, Gaussian initialization, plus trainable action queries. It uses
+`peft==0.11.1` from `requirements-train.txt`. The backbone includes vision, language,
+multimodal projection and action queries; the proprio projector is separate. Frozen
+heads still propagate gradients to trainable upstream components. Full/LoRA modes
+retain the backward graph and need more memory than the frozen profile; no CPU fallback.
+
+`models.py` owns model capabilities, configuration and backend dispatch;
+`model_adaptation.py` owns trainability and backbone state. Both training methods use
+the same runner. Effective configuration, parameter counts and resume metadata record
+the active model settings; changing trainability or LoRA settings requires a new run.
+
+Schema-3 overlays remain ordinary VLA inference artifacts. Frozen-backbone overlays
+contain the two action components; adapted ones also contain full `backbone.pt` weights.
+LoRA is merged only at final export, after saving an unmerged resumable checkpoint
+including action queries. This costs disk space but keeps inference independent of
+PEFT/training code. CLI and UI accept schemas 1/2/3; old loaders cannot read schema 3.
+Switching an adapted backbone reloads the base model to avoid cross-policy contamination;
+frozen-backbone overlays retain lightweight switching.
 
 ## Environments
 
@@ -65,10 +141,10 @@ conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/verify_reward_
 
 Do not run `pip install -e ./RynnValue`: the pinned upstream project declares
 `tool.uv.package = false` and is intentionally not an editable setuptools
-distribution. `paths.rynnvalue_root` in `liberox_iql.yaml` points the annotator
+distribution. `paths.rynnvalue_root` in `runtime.yaml` points the annotator
 at this audited source checkout directly; no persistent `PYTHONPATH` is needed.
 
-`liberox_iql.yaml` pins the 4B Hugging Face snapshot to
+`reward.yaml` pins the 4B Hugging Face snapshot to
 `3f73b5d2b5e53b21f248c8791004dde6a8cf2b92`. The annotator imports the audited
 local model classes, loads the immutable snapshot with
 `trust_remote_code=False`, and records the code commit, resolved snapshot and
@@ -80,13 +156,13 @@ Run from `vla-liberox-workspace/`:
 
 ```bash
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/materialize_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
   --config vla-adapter-rynn-iql/configs/inference.yaml
 ```
@@ -108,7 +184,7 @@ python vla-adapter-rynn-iql/scripts/train_terminal.py \
 
 The terminal YAML selects exactly one task and supports quota, random-size, and
 all-eligible membership. It can override data, reward, VLA, IQL, logging, and
-non-managed path settings from `liberox_iql.yaml`. Before execution it prints a
+non-managed path settings from `training/iql.yaml` (or `training/bc.yaml`). Before execution it prints a
 reproducible selection and stage plan and asks for confirmation; pass `--yes`
 for SSH batch jobs or `--dry-run` to validate without creating pipeline output.
 Its A100-oriented default uses `micro_batch_size: 8` and
@@ -320,9 +396,9 @@ For a fast CPU test without model downloads:
 conda run -n vla-liberox pytest -q vla-adapter-rynn-iql/tests
 ```
 
-The UI scans `policy-registry/` for exported `policy.yaml` overlays. An overlay
-contains only the action head and proprio projector; it never copies the base
-VLA checkpoint.
+The UI scans `policy-registry/` for exported `policy.yaml` overlays. Frozen-backbone
+overlays contain only the action head and proprio projector. Adapted backbones are
+exported as described in Model configuration above.
 
 ## Data and reward semantics
 
@@ -337,10 +413,10 @@ from the same state without treating padding as executed time. If a fixed-durati
 latched or fluctuate as the object moves out of and back into the goal region.
 `data.success_consecutive_steps` debounces this signal (default 5 steps, or
 250 ms at 20 Hz). A false sample resets the streak; the action that reaches the
-threshold confirms success but does not terminate replay. Unconfirmed pulses
-are treated as a failed trajectory. All later recorded actions remain eligible
-for Q/V and actor training; bootstrap stops only at the final recorded
-observation. Source NPZ files remain unchanged. The manifest retains raw and
+threshold confirms success. Unconfirmed pulses are treated as a failed trajectory.
+By default all later recorded actions remain eligible for Q/V and actor training;
+bootstrap stops at the final recorded observation. With `include_post_success: false`,
+replay and bootstrap stop at the confirmation action instead. Source NPZ files remain unchanged. The manifest retains raw and
 debounced success diagnostics and the confirmation action as `terminal_step`,
 while new manifests set `action_count == recorded_action_count` and declare
 `replay_policy: full_recording_v1`. The importer groups
@@ -381,12 +457,20 @@ parameters. Changing the reward recipe recomputes only inexpensive arrays.
 Hash-valid schema-v4/v5
 sidecars reuse their complete official model heads during migration, regardless
 of the reward reduction stored beside them, so RynnValue is not run again.
-Post-success chunks retain the same reward formulas and participate in replay.
+Post-success chunks retain the same reward formulas and participate in replay by default.
+Set `data.include_post_success: false` (terminal: `overrides.data.include_post_success`)
+to train only through the action confirming the first consecutive success streak.
+The confirmation action is included, its transition stops bootstrapping, and failed
+or unconfirmed trajectories remain complete. This applies identically to BC and IQL.
+The UI dataset configuration saves this option directly on the existing dataset;
+queued/running jobs keep their own frozen setting. Source files, videos, keyframes,
+full reward arrays and frozen membership hashes stay unchanged. No model re-evaluation
+is required. UI dataset counts continue to describe the complete recordings.
 Existing prepared schema-v4 files with complete `evaluation_chunks` and reward
 arrays are reused in memory without modifying their snapshots or rerunning
 the reward model; missing full-tail data is rejected. For a training split with
 post-success actions, start a new run rather than resume a checkpoint from the
-old truncated replay policy.
+other replay policy. Checkpoints record `full_recording_v1` or `confirmed_success_v1`.
 
 The training default uses four uniformly sampled prefix frames, matching the
 offline reward-relabeling protocol in paper Appendix B.3. Upstream's standalone
@@ -424,7 +508,7 @@ the **complete** loaded model (backbone and value heads) to the configured BF16
 dtype and verifies every floating parameter before annotation. Value-bin
 decoding and entropy softmax still run in FP32 for numerical stability.
 
-Set `iql.resume_checkpoint` to a saved `step_XXXXXXXX` directory to resume Q/V,
+Set `training.resume_checkpoint` to a saved `step_XXXXXXXX` directory to resume Q/V,
 targets, actor components, optimizers, replay sampler and RNG state. Checkpoint
 intervals must be divisible by gradient accumulation so no partial actor
 gradient is lost. Every checkpoint also stores the resolved effective YAML,

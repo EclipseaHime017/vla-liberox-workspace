@@ -22,7 +22,7 @@ def run(environment: str, script: str, config: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the two-environment offline IQL pipeline")
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "liberox_iql.yaml")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "training" / "iql.yaml")
     parser.add_argument("--inference-config", type=Path, default=ROOT / "configs" / "inference.yaml")
     parser.add_argument("--reward-env", default="rynnvalue-reward")
     parser.add_argument("--train-env", default="vla-liberox")

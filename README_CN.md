@@ -704,7 +704,7 @@ npm run build
 
 ### 4.1 适用范围与处理流程
 
-离线后训练位于独立目录 `vla-adapter-rynn-iql/`，不修改 `liberox-vla-adapter-terminal/` 的采集数据，也不修改上游 `VLA-Adapter/` 源码。处理链被明确拆成：只读导入数据、冻结 RynnValue 轨迹评价、确定性奖励派生、Pixel-IQL 后训练和独立 LIBERO-X 推理。其中只有轨迹评价需要运行 4B VLM；奖励派生只使用已缓存的评价输出。训练只更新 Object-Pro 的连续 action head 和 proprio projector，视觉/语言 backbone 始终冻结。
+离线后训练位于独立目录 `vla-adapter-rynn-iql/`，不修改 `liberox-vla-adapter-terminal/` 的采集数据，也不修改上游 `VLA-Adapter/` 源码。处理链被明确拆成：只读导入数据、冻结 RynnValue 轨迹评价、确定性奖励派生、Pixel-IQL 后训练和独立 LIBERO-X 推理。其中只有轨迹评价需要运行 4B VLM；奖励派生只使用已缓存的评价输出。默认训练 Object-Pro 的连续 action head 和 proprio projector、冻结 backbone；BC/IQL 均可通过独立模型配置选择冻结、LoRA 或全量 Backbone 微调，并分别控制两个动作组件是否训练（见 4.4.3）。下图展示默认 IQL 路径。
 
 ```text
 采集数据 dataset-root（只读）
@@ -754,10 +754,10 @@ Pixel-IQL                         冻结的 VLA backbone
 
 四个主要处理环节分别负责：
 
-1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始rollout与接管/重新推理分支都从第0步开始保留完整物理轨迹；接管前自然rollout、接管后新后缀及成功后的采集尾段均用于评价和训练，训练transition只在实际记录末尾结束。transition 不跨越 `policy`、`policy_requery`、`human` 来源边界；若接管发生在 8 步 chunk 中间，接管前最后一个 policy transition 以实际长度结束。固定 8 步只作为最大 horizon，实际长度写入 `chunk_length`。组成训练 replay 时，再按 `(root_run_id,start,end,action_source)` 去重父轨迹与 sibling 分支物理复制的相同前缀，既不丢失整轨迹评价，也不把相同自然 rollout 重复放大。训练集与验证集仍按 root trajectory 划分。该阶段不运行模型、不计算奖励，也不修改源动作，输出schema-v4 `outputs/work/dataset_manifest.json`，以 `replay_policy: full_recording_v1` 标明完整记录采样方式。
+1. **Prepare（数据准备）**：递归读取 `paths.dataset_sources` 中的已完成轨迹，按照 `data.task_ids` 筛选任务，校验 20 Hz、N+1 状态/图像、动作维度、成功状态和父子分支关系。原始rollout与接管/重新推理分支都从第0步开始保留完整物理轨迹；接管前自然rollout、接管后新后缀及成功后的采集尾段始终完整用于评价，默认也全部用于训练；数据集可选择只训练到连续成功确认动作，详见 §4.9。transition 不跨越 `policy`、`policy_requery`、`human` 来源边界；若接管发生在 8 步 chunk 中间，接管前最后一个 policy transition 以实际长度结束。固定 8 步只作为最大 horizon，实际长度写入 `chunk_length`。组成训练 replay 时，再按 `(root_run_id,start,end,action_source)` 去重父轨迹与 sibling 分支物理复制的相同前缀，既不丢失整轨迹评价，也不把相同自然 rollout 重复放大。训练集与验证集仍按 root trajectory 划分。该阶段不运行模型、不计算奖励，也不修改源动作，输出schema-v4 `outputs/work/dataset_manifest.json`，以 `replay_policy: full_recording_v1` 标明完整记录采样方式。
 2. **Annotate（RynnValue 轨迹评价）**：读取 prepare 生成的 manifest，在每个 chunk 边界取第三人称 `agentview` 和任务提示词，使用冻结的 RynnValue-4B 生成 absolute/relative remaining time、entropy、logits 和 Analysis。该阶段不训练 RynnValue、不更新 VLA，也不计算 sparse/Shape/Final Reward。输出位于 `outputs/work/annotations/` 和全局 `annotation-cache/`；已有 schema-v4/v5 评价会复用其完整模型输出并迁移，不会再跑 RynnValue forward。
 3. **Materialize Rewards（奖励派生）**：在 `vla-liberox` 环境中，按 α、κ 和融合形式组合环境稀疏奖励、人工 Stage 分数与缓存的 RynnValue 塑形奖励。结合 `gamma` 和 macro/cumulative 模式生成 Final Reward；参数、关键帧或公式变化时只用 NumPy 重算，不加载奖励模型。参数与输入要求见 §4.4.2。
-4. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已派生 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；VLA 视觉/语言 backbone 只做冻结的特征提取，反向传播仅更新 continuous action head 与 proprio projector。训练 checkpoint 会保留 Q/V、optimizer 和随机状态以便恢复，最终部署 overlay 只发布 action head、proprio projector 和兼容性清单。
+4. **Train（IQL 后训练）**：`ReplayDataset` 将轨迹、双视角图像、proprio、action chunk、mask 和已派生 reward 组合成离线 transition。Pixel-IQL 每个 step 更新双 Q、expectile value 和 target Q，并把 advantage 转成行为克隆权重；actor 按模型配置更新对应组件，默认仅更新 continuous action head 与 proprio projector。训练 checkpoint 保留 Q/V、actor、optimizer 和随机状态以便恢复；部署 overlay 不包含 critic，Backbone 经过适配时另包含其完整推理权重。
 
 RynnValue 不是执行动作的策略，也不会在这里被训练；它只离线读取轨迹并提供时间价值。执行策略始终是 `VLA-Adapter/LIBERO-Object-Pro` 及其 IQL overlay。本训练系统不使用 Robometer、在线 RL、奖励模型微调或真机控制；Robometer 仅作为后述独立诊断评价器，不进入 IQL reward。
 
@@ -798,18 +798,41 @@ conda run -n vla-liberox pip install -e ./vla-adapter-rynn-iql
 
 基础配置固定 RynnValue-4B snapshot revision、Franka 的 `8×7` action chunk、8维proprio、20 Hz数据、IQL超参数和兼容16 GB显存的 `1×32` profile；远程服务器配置覆盖为单任务 `8×4` profile。所有YAML内相对路径以该YAML所在目录为基准，重复键、未知键、维度错误和非20 Hz轨迹会立即拒绝。分阶段执行：
 
-- `configs/liberox_iql.yaml`：数据源、工作目录、RynnValue、PBRS、VLA、IQL、训练和 overlay registry。
+- `configs/training/iql.yaml` / `configs/training/bc.yaml`：同级的训练入口，各自设置方法参数和实验覆盖值；BC 不读取 IQL 或奖励配置。
+- `configs/models/vla_adapter.yaml`：模型 checkpoint、输入输出约定、组件训练范围和 LoRA 配置；不包含 IQL/BC 参数。
+- `configs/reward.yaml`：独立的 RynnValue 评价与 Final Reward 构造配置；训练入口按需引用，不将评价配置绑定到某种训练方法。Robometer 仅用于诊断，继续由 `vla-adapter-robometer/configs/robometer_evaluation.yaml` 独立配置。
+- `configs/runtime.yaml`：公共运行默认值，包括数据源、batch、步数、actor 学习率、设备、日志和输出路径。
 - `configs/inference.yaml`：基础策略/overlay 对比、LIBERO-X 任务、回合数、总步数、开环执行步数和评测输出。
 - `configs/dependency-lock.yaml`：RynnValue Git commit 与模型 snapshot，不作为实验超参数修改。
 
-常用配置项：
+UI 和 CLI 使用同一个配置加载器。优先级为「公共运行默认值 → 模型/奖励配置 → 训练入口的覆盖值 → 终端/UI 显式参数」；每个相对路径始终以声明它的文件为基准。有效配置保存为展开后的 schema 2 快照，恢复时不再引用实时配置。旧 schema 1 和旧 `vla.*` / `iql.*` 公共字段仍可读取，但只在加载入口转换一次。旧 `liberox_iql.yaml` / `liberox_bc.yaml` 命令路径改为 `training/iql.yaml` / `training/bc.yaml`；不再保留 `train.yaml` 中间层。
+
+例如 `configs/training/iql.yaml` 按需引用模型和奖励配置；BC 使用同级的 `bc.yaml`，不引用 reward：
+
+```yaml
+extends: ../runtime.yaml
+presets:
+  model: ../models/vla_adapter.yaml
+  reward: ../reward.yaml
+training:
+  method: iql
+  train_steps: 10000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+```
+
+actor 学习率与 Q/V 学习率、actor LR warmup 与 critic warmup 是独立参数；数值相同不代表绑定。公共 batch 和步数来自 runtime，可在两个训练入口中分别覆盖。修改 runtime 会影响没有覆盖该字段的实验；只调整一种方法时，应修改对应入口。γ 和 cumulative 统一保存在有效配置的 `reward` 中，同时供奖励归约与 Bellman target 使用。
+
+CLI 在训练入口的 `data.include_post_success` 配置布尔值（默认 `true`）；终端流水线使用 `overrides.data.include_post_success`。这一字段只选择 replay 样本，不改变 Prepare 的完整轨迹或奖励缓存，切换时可继续复用已有评价。
+
+以下常用配置示例位于 `configs/training/`，路径相对该目录；runtime 中声明的路径仍相对 `configs/`：
 
 ```yaml
 paths:
   dataset_sources:
-    - ../../dataset-root
-  rynnvalue_root: ../../RynnValue
-  policy_registry: ../../policy-registry
+    - ../../../dataset-root
+  rynnvalue_root: ../../../RynnValue
+  policy_registry: ../../../policy-registry
 
 data:
   action_horizon: 8
@@ -832,16 +855,18 @@ reward:
   # false=chunk宏动作奖励；true=chunk内20Hz逐步累计奖励
   accumulate_primitive_steps: false
 
-vla:
+model:
   base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
   stats_key: libero_object
-  freeze_backbone: true
+  backbone: frozen
 
 iql:
   expectile: 0.8
   beta: 3.0
   max_advantage_weight: 20.0
   target_tau: 0.005
+
+training:
   micro_batch_size: 1
   gradient_accumulation_steps: 32
 
@@ -864,7 +889,7 @@ logging:
 
 ### 4.4 数据选择、轨迹评价、奖励派生、训练与评测
 
-这些阶段使用两个 YAML：prepare、annotate、materialize rewards 和 train 共同读取 `configs/liberox_iql.yaml`；evaluate 单独读取 `configs/inference.yaml`。以下命令都从 `~/eclipseaws/vla-liberox-workspace` 执行。
+这些阶段使用两个 YAML：prepare、annotate、materialize rewards 和 train 共同读取 `configs/training/iql.yaml`；evaluate 单独读取 `configs/inference.yaml`。以下命令都从 `~/eclipseaws/vla-liberox-workspace` 执行。
 
 #### 4.4.1 指定 prepare 的数据范围
 
@@ -913,7 +938,7 @@ data:
 ```bash
 conda run -n vla-liberox python \
   vla-adapter-rynn-iql/scripts/prepare_dataset.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 ```
 
 结果写入 `paths.work_dir/dataset_manifest.json`，其中最值得先检查的是：
@@ -991,7 +1016,7 @@ reward:
 ```bash
 conda run -n rynnvalue-reward python \
   vla-adapter-rynn-iql/scripts/annotate_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 ```
 
 快速奖励派生由下列配置决定：
@@ -1018,7 +1043,7 @@ reward:
 ```bash
 conda run -n vla-liberox python \
   vla-adapter-rynn-iql/scripts/materialize_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 ```
 
 评价缓存键按单条轨迹内容寻址，包含轨迹/图像 hash、提示词、chunk 边界、RynnValue 模型与 `max_frames`，但不包含融合形式、α、p、γ、κ、cumulative 或整个数据集 hash。因此同一轨迹进入不同数据集可复用；已有 schema-v4/v5 sidecar 也会先迁移原始 head 输出，不重新执行 RynnValue。修改源数据、所需边界、提示词、`max_frames` 或模型版本才使模型评价失效。UI 的 Final Reward 使用当前数据集或全局已保存输出的实际推理配置，不会因基础 YAML 的默认 `max_frames` 不同而要求重跑。
@@ -1028,32 +1053,32 @@ conda run -n vla-liberox python \
 #### 4.4.3 配置并运行 IQL 后训练
 
 平台支持 **IQL / BC** 两种训练方法，默认仍为 IQL。BC 是等权 masked L1 行为克隆：
-使用所选数据集训练划分中的全部有效动作 chunk（包括失败动作和成功后的记录），
+使用所选数据集训练划分中的全部有效动作 chunk（包括失败动作；成功后记录是否参与由数据集设置决定），
 沿用分支前缀去重、归一化和 action mask；不在训练层筛选成功示教。
 任务、来源、成功/失败及规模均在数据集层选择。BC 不读取奖励，不运行 RynnValue、
 Robometer、Stage 或 Q/V，因此未评价的数据集也可以训练。
 
 GUI：在「训练配置 → 训练方法」选择 **BC · 等权行为克隆**，其他公共训练参数和
-TensorBoard/W&B 监控继续可用；BC 不显示奖励及 critic 参数。仍只更新 action head
-和 proprio projector，导出的 BC overlay 可直接用于原仿真推理。
+TensorBoard/W&B 监控继续可用；BC 不显示奖励及 critic 参数。模型训练范围由独立配置决定，
+默认只更新 action head 和 proprio projector，导出的 BC overlay 可直接用于原仿真推理。
 
 CLI（workspace 根目录）：
 
 ```bash
 conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
-  --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
+  --config vla-adapter-rynn-iql/configs/training/bc.yaml
 conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train.py \
-  --config vla-adapter-rynn-iql/configs/liberox_bc.yaml
+  --config vla-adapter-rynn-iql/configs/training/bc.yaml
 ```
 
-`liberox_bc.yaml` 提供无奖励配置的示例。公共参数可写在 `training` 中；同名字段优先于
+`configs/training/bc.yaml` 提供无奖励配置的示例。公共参数可写在 `training` 中；同名字段优先于
 旧 `iql` 字段，原有 IQL YAML 和 `train_iql.py` 命令继续兼容。终端流水线仅需设置
 `overrides.training.method: bc`，数据选择不变，自动跳过 annotate、reward 和 bind 阶段。
 
 BC/IQL 对照应保持相同初始化、样本、micro batch、梯度累积、actor 学习率及更新预算。
 `train_steps` 仍表示 micro-batch 次数，不是 epoch；完整累积组的 actor batch 是
 `micro_batch_size × gradient_accumulation_steps`。新增 `training.actor_lr_warmup_steps`
-单独控制 actor 学习率预热，设为 `null` 时沿用旧 `iql.critic_warmup_steps` 的数值；
+单独控制 actor 学习率预热，BC/IQL 预设各自显式配置；仅旧 IQL 的缺省或 `null` 设置在迁移时沿用原 critic warmup，BC 不依赖它。
 IQL 后者还决定何时启用 advantage 权重，BC 则始终等权。不要通过扩大 critic warmup
 模拟 BC。断点恢复必须使用相同训练方法；界面队列仍从头启动，CLI 支持 BC 断点恢复。
 
@@ -1061,14 +1086,29 @@ IQL 后者还决定何时启用 advantage 权重，BC 则始终等权。不要�
 和算法状态接口，`training.py` 共用优化、监控、取消和保存；`ActionDataset` 读取动作样本，
 `ReplayDataset` 额外提供 IQL transition/reward。新增方法无需复制 UI 或整套训练循环。
 
-训练始终冻结 VLA 的视觉/语言 backbone，只更新 continuous action head 和 proprio projector；Pixel-IQL 的双 Q、value 和 target 网络也会从头训练。默认配置如下：
+模型配置独立于 BC/IQL。在训练页依次选择「基础模型 → 训练方法」，再展开「模型训练配置」及对应方法的高级参数：
+
+- **Backbone 适配方式**：冻结 / LoRA / 全量微调，三选一，避免“冻结但又开启 LoRA”的歧义。
+- **Action head / Proprio projector**：分别选择训练或冻结；全部冻结会拒绝开始训练。
+- **LoRA**：仅选择该方式时显示 rank、alpha、dropout。参照 [VLA-Adapter 官方 finetune](https://github.com/OpenHelix-Team/VLA-Adapter/blob/main/vla-scripts/finetune.py)，默认 rank=32、alpha=64、dropout=0、Gaussian 初始化、`all-linear`，同时训练 action queries。这里的 Backbone 包含视觉塔、多模态投影、语言模型和 action queries，不仅是 Qwen；Proprio projector 是独立组件。
+
+目前模型目录只注册已支持的 `vla_adapter`（Object-Pro），不会把尚未适配的 foundation model 显示成可用模型。`models.py` 管理轻量能力注册与配置、按模型选择前向后端；`model_adaptation.py` 管理冻结、LoRA、参数范围与 Backbone 保存。前端配置请求不加载 Torch 或模型，模型设置不会改变 reward、BC loss 或 IQL 更新顺序。
+
+YAML 使用顶层 `model`，同时适用于 `training/iql.yaml` 与 `training/bc.yaml`；终端流水线使用 `overrides.model`。旧 `vla.freeze_backbone` 仍兼容，无新配置时 true 对应 frozen、false 对应 full；新 `model.backbone` 优先。默认配置如下，IQL 的双 Q、value 和 target 仍独立训练：
 
 ```yaml
-vla:
+model:
+  family: vla_adapter
+  backbone: frozen  # frozen | lora | full
+  action_head: train  # train | frozen
+  proprio_projector: train  # train | frozen
+  lora:
+    rank: 32
+    alpha: 64
+    dropout: 0.0
   base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
   stats_key: libero_object
   use_pro_version: true
-  freeze_backbone: true
 
 iql:
   critic_image_size: 128
@@ -1080,13 +1120,16 @@ iql:
   value_weight_decay: 0.01
   critic_max_grad_norm: 10.0
   value_max_grad_norm: 10.0
-  policy_peak_lr: 0.00003
-  policy_final_lr: 0.000003
   expectile: 0.8
   beta: 3.0
   max_advantage_weight: 20.0
   target_tau: 0.005
   critic_warmup_steps: 1000
+
+training:
+  actor_lr_warmup_steps: 1000
+  policy_peak_lr: 0.00003
+  policy_final_lr: 0.000003
   train_steps: 10000
   micro_batch_size: 1
   gradient_accumulation_steps: 32
@@ -1103,10 +1146,10 @@ logging:
   console_interval_steps: 10
 ```
 
-参数语义分为四组：
+参数语义如下：
 
 - 数据与显存：`critic_image_size`只控制Q/V使用的双视角缩放尺寸；VLA actor仍走自身processor。`micro_batch_size`是每次同时送入Q/V和VLA actor的transition数量，不再被人为限制为1；`gradient_accumulation_steps`决定多少个micro-step后更新actor。基础16 GB profile采用 `1×32`，单任务A100服务器profile采用 `8×4`，两者等效actor batch均为32。批处理只允许prepared training split包含唯一 `task_id + prompt`；旧多任务manifest仍可用 `micro_batch_size=1`训练。
-- 训练长度：`train_steps`表示critic/value优化次数，不是epoch。实际抽样transition数为 `train_steps × micro_batch_size`，actor optimizer更新次数约为 `ceil(train_steps / gradient_accumulation_steps)`。因此将 `1×32` 改为 `8×4`并保持相同 `train_steps`会增加数据吞吐和actor更新次数，不应直接与旧run按step数视为相同训练预算。每个变长transition仍被均匀采样，`action_source`和`transition_type`语义没有改变。
+- 训练长度：`training.train_steps`表示 micro-batch 次数，不是 epoch；IQL 每次同时更新 critic/value，BC 没有 critic/value。实际抽样transition数为 `train_steps × micro_batch_size`，actor optimizer更新次数约为 `ceil(train_steps / gradient_accumulation_steps)`。因此将 `1×32` 改为 `8×4`并保持相同 `train_steps`会增加数据吞吐和actor更新次数，不应直接与旧run按step数视为相同训练预算。每个变长transition仍被均匀采样，`action_source`和`transition_type`语义没有改变。
 - critic/value：`critic_lr` 与 `value_lr` 分别控制双 Q 和 expectile value 的 optimizer；`critic_optimizer`、`value_optimizer` 可选 `adam` 或 `adamw`，对应的 `*_weight_decay` 必须显式配置。默认恢复历史参数 `adamw + 0.01`，即使用 PyTorch AdamW 默认 `β=(0.9,0.999)、ε=1e-8`；切换到官方 Adam 时应同时明确设置 weight decay。`critic_max_grad_norm`、`value_max_grad_norm` 分别限制 Q/V 的总梯度范数，默认均为 `10.0`。每步先以冻结 target Q 更新 V，再用更新后的 V 更新 online Q，最后 Polyak 更新 target Q。`expectile` 越高，value 越偏向高 Q 动作；actor 权重使用 online `min(Q1,Q2)-V`，计算 `exp(beta × advantage)` 后由 `max_advantage_weight` 截断。当前默认 `beta=3`、权重上限 `20`。
 - actor 优化：`policy_peak_lr` 到 `policy_final_lr` 使用 warmup 加余弦衰减。默认前 `1000` 个 `critic_warmup_steps` 中 Q/V 正常学习，同时 actor 以权重 `1` 做普通行为克隆；warmup 结束后才切换到 advantage-weighted L1，actor 在 warmup 期间并未冻结。
 - 保存与复现：`checkpoint_interval` 是训练 step 间隔，必须整除梯度累积步数；`seed` 控制网络初始化、replay 抽样及相关随机状态。当前 profile 要求单个 `cuda:N` 设备和 `bfloat16` actor，不会在显存不足时静默回退 CPU。
@@ -1117,23 +1160,27 @@ logging:
 ```bash
 conda run -n vla-liberox python \
   vla-adapter-rynn-iql/scripts/train_iql.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 ```
 
 每次训练创建新的 `outputs/training/<run>/`，不会覆盖旧实验。`checkpoint_interval` 必须能被 `gradient_accumulation_steps` 整除。断点恢复时把配置改为：
 
 ```yaml
-iql:
+training:
   # 其余字段保持与目标实验兼容；train_steps 是恢复后的总目标步数。
   train_steps: 20000
   resume_checkpoint: ../outputs/training/<run>/checkpoints/step_00010000
 ```
 
-恢复会校验 dataset hash、reward hash、基础 checkpoint 和 stats key，并恢复 Q/V/target、两个 actor 组件、optimizer、随机数状态和 replay sampler。`train_steps` 是绝对终点，例如从 step 10000 恢复到 `train_steps=20000` 只再执行 10000 步。
+恢复会校验 dataset hash、reward hash、基础 checkpoint、stats key 和模型训练范围（含有效 LoRA 参数），并恢复算法状态、actor、optimizer、随机数状态和 replay sampler。改变冻结范围、LoRA 参数或 BC/IQL 方法需新建训练；旧 checkpoint 仅能按原冻结配置恢复。`train_steps` 是绝对终点，例如从 step 10000 恢复到 `train_steps=20000` 只再执行 10000 步。
+
+LoRA 依赖训练环境中的 `peft==0.11.1`（已加入 `requirements-train.txt`；已有该版本无需重装）。训练开始会输出各组件总参数与可训练参数数目。Backbone 不冻结时需要保留反向传播图，显存和耗时会增加；并不保证原 `1×32` / 16 GB profile 能用于全量微调，不会自动切 CPU 或悄悄冻结。
+
+新导出清单为 schema 3，兼容读取 schema 1/2：冻结 Backbone 时仍只保存两个动作组件；LoRA/full 额外保存完整 `backbone.pt`，LoRA 在最终导出前合并，但训练 checkpoint 保留未合并的 LoRA 增量和 action queries 以便恢复。导出因此比小型 LoRA adapter 大，优势是 CLI/GUI 推理不依赖 PEFT 或训练代码。切换涉及适配后 Backbone 的策略时重新加载基础模型，避免权重残留；两个旧式冻结 Backbone overlay 仍可轻量切换。新版 overlay 需要本次更新后的加载器。
 
 #### 4.4.4 评测 base 与训练后的 overlay
 
-评测不读取 `liberox_iql.yaml` 的数据筛选范围，而是由 `configs/inference.yaml` 独立指定任务和 rollout：
+评测不读取训练入口的数据筛选范围，而是由 `configs/inference.yaml` 独立指定任务和 rollout：
 
 ```yaml
 policy:
@@ -1173,7 +1220,7 @@ conda run -n vla-liberox python \
 
 ```bash
 python vla-adapter-rynn-iql/scripts/run_pipeline.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml \
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml \
   --inference-config vla-adapter-rynn-iql/configs/inference.yaml
 ```
 
@@ -1188,7 +1235,7 @@ python vla-adapter-rynn-iql/scripts/train_terminal.py \
   --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml
 ```
 
-`configs/terminal_pipeline.yaml` 引用 `liberox_iql.yaml` 作为基础配置。任务、数据规模和训练参数都在一个文件中覆盖，不会修改基础YAML。默认示例按类别选择5条基础策略失败轨迹和50条人工接管成功轨迹：
+`configs/terminal_pipeline.yaml` 的 `base_config` 引用 `./training/iql.yaml`，BC 只需改为 `./training/bc.yaml`，默认不重复指定方法。旧的 `overrides.training.method` 仍可显式覆盖选择；使用内置入口时会先选择对应方法文件，再读取公共配置，BC 不加载 IQL/reward 默认值。任务、数据规模和训练参数均可在此覆盖，不会修改基础 YAML。默认示例按类别选择5条基础策略失败轨迹和50条人工接管成功轨迹：
 
 ```yaml
 selection:
@@ -1209,15 +1256,15 @@ overrides:
     split_seed: 7
     success_consecutive_steps: 5
   reward: {}
-  vla: {}
-  iql:
+  model: {}
+  training:
     train_steps: 20000
+    micro_batch_size: 8
+    gradient_accumulation_steps: 4
+  iql:
     critic_warmup_steps: 1000
     beta: 3.0
     max_advantage_weight: 20.0
-    # 单任务A100服务器默认；等效actor batch仍为32。
-    micro_batch_size: 8
-    gradient_accumulation_steps: 4
   logging:
     tensorboard: true
     wandb:
@@ -1260,7 +1307,7 @@ python vla-adapter-rynn-iql/scripts/train_terminal.py \
 3. 即使新工作目录还没有 annotation manifest，脚本也会按轨迹检查 `rynnvalue_evaluation.json/.npz`、schema-v4/v5 旧缓存和全局 content cache。只要轨迹/图像/提示词/边界/模型契约匹配，就迁移原始 head 输出，不再运行 RynnValue forward。
 4. 当前 prepared dataset 已有完整、奖励参数相同的 reward manifest 时直接复用；`rynnvalue` / `gamma` / `shaping_weight` / `accumulate_primitive_steps` 不一致时只执行快速 reward materialize。
 5. 评价结束后结果会原子绑定回各轨迹目录，因此删除终端流水线缓存后仍可复用，也能在现有数据详情页查看。
-6. IQL训练默认每次创建新的输出和overlay；只有 `overrides.iql.resume_checkpoint` 明确指定checkpoint时才恢复。
+6. IQL训练默认每次创建新的输出和overlay；只有 `overrides.training.resume_checkpoint` 明确指定checkpoint时才恢复。
 
 每次执行的状态写入：
 
@@ -1326,7 +1373,7 @@ conda run -n vla-liberox pip install -r \
 conda run -n vla-liberox wandb login
 ```
 
-然后在 `liberox_iql.yaml` 或 `terminal_pipeline.yaml` 的 `logging`/`overrides.logging` 中启用：
+然后在 `training/iql.yaml` / `training/bc.yaml` 或 `terminal_pipeline.yaml` 的 `logging`/`overrides.logging` 中启用：
 
 ```yaml
 logging:
@@ -1355,7 +1402,7 @@ conda run -n vla-liberox wandb sync \
 
 #### 4.4.9 8×A100 资源配置
 
-当前实现是**单进程、单GPU训练器**。`reward.device`和`iql.device`各接受一个`cuda:N`；没有DDP/FSDP，设置8张可见卡不会让单次训练自动使用8卡。单卡内已支持同一任务prompt的批量双视角VLA输入，远程终端默认使用 `micro_batch_size=8`、`gradient_accumulation_steps=4`提高A100显存利用率；Q/V、actor梯度、随机采样和checkpoint尚未做多rank同步。
+当前实现是**单进程、单GPU训练器**。`reward.device`和`training.device`各接受一个`cuda:N`；没有DDP/FSDP，设置8张可见卡不会让单次训练自动使用8卡。单卡内已支持同一任务prompt的批量双视角VLA输入，远程终端默认使用 `micro_batch_size=8`、`gradient_accumulation_steps=4`提高A100显存利用率；Q/V、actor梯度、随机采样和checkpoint尚未做多rank同步。
 
 在共享服务器上，推荐由调度器为每条流水线分配一张A100。用物理GPU 3时：
 
@@ -1366,23 +1413,23 @@ CUDA_VISIBLE_DEVICES=3 python \
   --yes
 ```
 
-此时YAML中的 `reward.device: cuda:0` 和 `iql.device: cuda:0` **保持不变**：进程内的 `cuda:0` 已映射到物理GPU 3。不要在只暴露一张卡时写 `cuda:3`。
+此时YAML中的 `reward.device: cuda:0` 和 `training.device: cuda:0` **保持不变**：进程内的 `cuda:0` 已映射到物理GPU 3。不要在只暴露一张卡时写 `cuda:3`。
 
-要利用8张A100，当前最有效的方式是并行运行8个独立实验，而不是让一个实验占8卡：先用一条流水线完成Prepare和RynnValue评价绑定；确认第二次 `--dry-run` 显示这两个阶段可跳过后，再准备8份配置，分别修改 `iql.seed`、待比较的超参数、`wandb.run_name`，并保持相同 `wandb.group`。每个进程绑定不同物理GPU。这样缓存评价只计算一次，8张卡用于8组IQL实验，W&B可在同一group中直接比较。
+要利用8张A100，当前最有效的方式是并行运行8个独立实验，而不是让一个实验占8卡：先用一条流水线完成Prepare和RynnValue评价绑定；确认第二次 `--dry-run` 显示这两个阶段可跳过后，再准备8份配置，分别修改 `training.seed`、待比较的超参数、`wandb.run_name`，并保持相同 `wandb.group`。每个进程绑定不同物理GPU。这样缓存评价只计算一次，8张卡用于8组IQL实验，W&B可在同一group中直接比较。
 
 Slurm环境建议每个array job申请一张卡（例如 `--gres=gpu:a100:1`），并继续在YAML内使用 `cuda:0`；Slurm会完成可见设备映射。若目标是用8卡缩短**同一个**训练run，需要另行实现DDP/FSDP，不能只改YAML或启动命令。
 
 ### 4.5 数据与奖励语义
 
-RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个 action-chunk 边界都使用截至该点均匀采样的完整因果前缀并读取最后 value slot，不对长轨迹做重叠窗口平均。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。原始轨迹与分支都完整评价；`ReplayDataset` 单独去重父轨迹和 sibling 分支复制的相同自然 rollout 前缀，接管后的 `human` 或 `policy_requery` 后缀始终保留。
+RynnValue 只读取正常方向的 `agentview` 和 BDDL 提示词；每个 action-chunk 边界都使用截至该点均匀采样的完整因果前缀并读取最后 value slot，不对长轨迹做重叠窗口平均。环境 `done` 是唯一成功依据，RynnValue 生成的 Success 文本只作诊断。原始轨迹与分支都完整评价；`ReplayDataset` 单独去重父轨迹和 sibling 分支复制的相同自然 rollout 前缀，接管后的 `human` 或 `policy_requery` 后缀完整保存，其训练取样受成功后动作选项控制。
 
 这里的 `float32` 与 `bfloat16` 是浮点计算精度，不是 INT8/4-bit 权重量化。固定的 RynnValue-4B checkpoint 使用 BF16：Qwen 文本隐藏维度为 2560，连续 8 个 `<value>` token 的隐藏状态拼接后形成 value head 的 20480 维输入。官方自定义 value-head 构造函数默认以 FP32 建层，因此适配器在加载后显式把**整个模型**（Qwen backbone、普通 value head 和 relative value head）统一转换为 YAML 固定的 BF16，并在标注前检查所有浮点参数；如果仍混有 FP32 参数会立即报出具体参数名。value bin 解码和 entropy softmax 则按官方实现转为 FP32，以避免低精度概率计算不稳定。第一版 16 GB profile 不接受把 `reward.dtype` 改为 `float32` 或 `float16`。
 
-固定总时长的采集可能在任务成功后继续记录；此时 `done` 既可能一直保持 `True`，也可能因为物体继续移动、短暂离开成功区域而出现 `True → False → True`。`data.success_consecutive_steps` 是成功去抖阈值，默认要求连续 5 个控制步为 `True`（20 Hz 下为 250 ms；改为 10 即 500 ms）。确认成功前出现一次 `False` 会清空计数，必须重新连续满足阈值。第 5 个确认 action 标记成功边界，但不结束训练轨迹；若整条轨迹都没有达到连续阈值，则按失败轨迹处理，即使源会话曾记录过瞬时 `success=true`。
+固定总时长的采集可能在任务成功后继续记录；此时 `done` 既可能一直保持 `True`，也可能因为物体继续移动、短暂离开成功区域而出现 `True → False → True`。`data.success_consecutive_steps` 是成功去抖阈值，默认要求连续 5 个控制步为 `True`（20 Hz 下为 250 ms；改为 10 即 500 ms）。确认成功前出现一次 `False` 会清空计数，必须重新连续满足阈值。第 5 个确认 action 标记成功边界，默认不结束训练轨迹；若整条轨迹都没有达到连续阈值，则按失败轨迹处理，即使源会话曾记录过瞬时 `success=true`。
 
-**确认成功后的实际动作也进入 replay，参与 Q/V 和 action head、proprio projector 的训练。** 确认成功与结束记录是两个独立边界：`terminal_step` 沿用旧字段名，仅表示成功确认 action；`bootstrap_mask` 只在实际记录末尾为 0，中途成功仍为 1。新 manifest 的 `action_count` 等于 `recorded_action_count`；`trailing_action_count` 继续统计确认成功后的步数，不再表示排除数量。成功阈值与奖励公式不变：Sparse 在确认成功后保持 0，Stage 成功后保持 0，RynnValue 继续使用原有 sparse＋PBRS；成功后再次出现 `done=False` 不会重新启用 `-1` step cost。源 `trajectory.npz`、全部同步 observation 和完整评价曲线均不裁剪。
+**默认保留确认成功后的实际动作；可通过数据集“配置 → 训练取样配置 → 成功后动作”选择截断。** 确认成功与结束记录是两个独立边界：`terminal_step` 沿用旧字段名，仅表示连续成功确认 action。保留模式下 `bootstrap_mask` 只在实际记录末尾为 0；截断模式保留到确认动作（含该动作），此处停止 bootstrap，后续 chunk 不进入 BC/IQL 训练。未达到连续成功阈值的轨迹始终完整保留。新 manifest 的 `action_count` 等于 `recorded_action_count`；`trailing_action_count` 继续统计确认成功后的步数，不再表示排除数量。成功阈值与奖励公式不变：Sparse 在确认成功后保持 0，Stage 成功后保持 0，RynnValue 继续使用原有 sparse＋PBRS；成功后再次出现 `done=False` 不会重新启用 `-1` step cost。源 `trajectory.npz`、全部同步 observation 和完整评价曲线均不裁剪。
 
-已有 schema-v4 数据集若保存了完整 `evaluation_chunks` 和奖励数组，新训练可直接将尾段作为训练样本读取，无须重新评价或重标关键帧，也不改写历史 manifest 和奖励。为兼容旧评价缓存，`evaluation_chunks` 中的 `post_terminal_evaluation` 只是历史描述，不能再据此判断该 chunk 是否参与训练；实际采样来源仍为 `policy`、`policy_requery` 或 `human`。缺少完整尾段信息或奖励数组时明确报错，需要重新 Prepare／生成完整评价，不能静默省略。历史训练结果不变；含成功尾段的数据应新建训练 run，不从旧截断采样的 checkpoint 恢复，新 checkpoint 与 provenance 记录 `replay_policy`。
+已有 schema-v4 数据集若保存了完整 `evaluation_chunks` 和奖励数组，新训练可直接将尾段作为训练样本读取，无须重新评价或重标关键帧，也不改写历史 manifest 和奖励。为兼容旧评价缓存，`evaluation_chunks` 中的 `post_terminal_evaluation` 只是历史描述，不能再据此判断该 chunk 是否参与训练；实际采样来源仍为 `policy`、`policy_requery` 或 `human`。缺少完整尾段信息或奖励数组时明确报错，需要重新 Prepare／生成完整评价，不能静默省略。历史训练结果不变；切换成功后取样规则时应新建训练 run，不能从另一种规则的 checkpoint 恢复（训练集不存在成功尾段时两种规则等价）。新 checkpoint 与 provenance 记录 `replay_policy: full_recording_v1 | confirmed_success_v1`。
 
 下面先说明 **Original Final Reward**（融合前的 RynnValue 奖励）。设预测剩余秒数为 `v_t`，势函数为 `Φ_t=-v_t`。默认 `reward.accumulate_primitive_steps: false` 时，长度为 `L` 的 chunk 被视作一条宏动作 transition：
 
@@ -1471,7 +1518,7 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 轨迹评价、奖励派生和 
 1. 打开侧栏“数据集”，先选择一个任务。轨迹表将来源明确分为“原始推理”“人工接管”“二次推理”和不可训练的“错误/未完成”；人工/二次推理分支会显示策略前缀、`resume_step` 以及实际进入训练的后缀长度。详情页可把轨迹标记为“测试数据”。测试数据仍可浏览和显式单条评价，但会被新的训练数据集打包、任务批量评价和 offline-RL 导出自动跳过。
 2. 点击“创建训练数据集”，选择随机、按时间顺序、分类配额或手动勾选。预览会先排除测试数据，再给出 M、预计 action/chunk 数和分类构成；确认后生成不可变、单任务数据集。修改成员必须使用“派生版本”，不会覆盖旧版本。未标注版本可“取消冻结”，已结束标注的版本可“删除数据集”；存在活动任务或派生子版本时会拒绝删除。若已有训练历史，页面会要求第二次确认；强制删除仍保留训练输出、checkpoint 和 policy overlay，只在训练记录中标记源数据集已删除。删除不会移除源轨迹或全局共享奖励缓存。
 3. 点击“验证完整性”会重新计算 `run.json`、trajectory 和双视角 observation 的大小及 SHA-256。普通删除被引用轨迹时返回冲突并列出数据集；确认强制删除后关联数据集立即变为 `BROKEN`，不能继续标注或训练。
-4. 创建/派生数据集只冻结成员，**不自动评价**。点击每行右侧“配置”，原地展开圆角表单，评价类型有四种：
+4. 创建/派生数据集只冻结成员，**不自动评价**。点击每行右侧“配置”，原地展开圆角表单。选择“成功后动作：保留／截断”，点击旁边的“保存”即可更新当前数据集的训练取样配置。默认保留；截断到连续 N 次 `done=True` 的第 N 个动作（默认 N=5），而不是第一次 True。完整视频、关键帧、评价数组及成员哈希不变，无需重新评价；页面数量仍指完整记录。设置只影响之后创建的任务，已注册、排队和运行的训练使用各自快照。创建/派生数据集时也能选择此项。评价类型有四种：
    - **Final Reward**：一行配置相加/相乘、p、α（仅相加）、κ、γ 和 cumulative reward（仅相加）；只复用已保存模型输出与最新关键帧做 CPU 重算。κ=0 不读取 RynnValue；相加 α=0 不读取 Stage。缺少所需输入或 Stage>0 时明确报错。
    - **RynnValue**：配置 max_frames、评价 batch size、γ、κ 和 cumulative，默认复用兼容模型输出，可显式开启重新运行模型。
    - **Robometer**：配置 fps 和 batch size，前缀固定 4 帧；只用于诊断。
@@ -1479,7 +1526,7 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 轨迹评价、奖励派生和 
    任务窗口关闭或页面刷新不会停止后台任务。
 5. 每个数据集分别保存 Final Reward、RynnValue、Robometer，关键帧仍保存在原轨迹。重新评价仅替换所选结果，不覆盖另一个模型的原始输出；All 同时更新三者。详情按数据集同类型结果优先、缺少时继承全局；全局保存首次结果，只有显式“同步覆盖全局评价”才替换。**Original Final Reward** 折线图保留 sparse、Shape、original final 三条曲线；**Final Reward** 独立显示融合结果。两图在有融合结果时使用同一组 γ/cumulative/κ 以便对照。RynnValue 原始距离、entropy 和 Robometer 曲线保持独立，不因融合而改写。
 6. 侧栏“训练”选择数据集后，IQL 的“训练奖励”可选择 **Final Reward**（默认，融合并缩放后的奖励）或 **RynnValue**（原始 sparse + κ·Shape Reward，不加入 Stage 融合）。两种结果独立保留；按所选类型优先使用数据集评价，没有专属结果时继承同类型全局评价。切换来源会加载对应参数并绑定对应结果，不改变数据集默认评价，也不重新运行模型。仅有 RynnValue 时可直接选择它训练，无需先生成 Final Reward；Robometer 仍只用于诊断。缺少、损坏或不匹配的所选奖励会阻止训练，不回退到另一种。
-   p、α、κ、形式在数据集配置；γ 在数据集与训练页都能调整，cumulative 对 RynnValue 和相加 Final Reward 可用。选择 Final Reward 且继承的全局结果包含相乘成员时，整次 UI 训练统一 macro；独立 CLI 若混合结果与 cumulative=On 冲突则明确报错。训练使用固定语义快照，修改 γ/cumulative 只在该训练目录重算私有数组，不覆盖数据集当前结果或历史训练。页面只读轻量摘要，不反复解压 observations；训练启动前完整校验源文件。旧显式来源 YAML 仍兼容，成功后轨迹保留及 IQL 更新公式不变。
+   p、α、κ、形式在数据集配置；γ 在数据集与训练页都能调整，cumulative 对 RynnValue 和相加 Final Reward 可用。选择 Final Reward 且继承的全局结果包含相乘成员时，整次 UI 训练统一 macro；独立 CLI 若混合结果与 cumulative=On 冲突则明确报错。训练使用固定语义快照，修改 γ/cumulative 只在该训练目录重算私有数组，不覆盖数据集当前结果或历史训练。页面只读轻量摘要，不反复解压 observations；训练启动前完整校验源文件。旧显式来源 YAML 仍兼容，原始完整轨迹与 IQL 更新公式不变。
 7. “训练配置”表单始终显示，任务／难度／提示词筛选在桌面端压缩为一行。配置数据集、batch、训练步数及高级 IQL 参数后点击“注册训练任务”；注册后保留当前参数，直接修改并注册下一批，无需另外新增任务或展开表单。运行中也可以继续注册，不需要等待上一轮完成。每项在注册时固定有效配置和奖励引用，之后修改草稿或重新评价数据集不会改变已注册任务。UI 暂不提供断点恢复；各批次从配置的基础模型独立训练，不继承上一批权重，CLI 的显式恢复功能保留。
 8. “批量训练”按注册顺序串行执行。当前任务完成、失败或手动停止后自动运行下一项；“停止本轮”只影响当前任务，“取消排队”只移除选中的等待项。仿真、控制器或其他 GPU 任务占用资源时等待，不抢占正在运行的任务。排队任务引用的数据集不能删除。列表展示待完成任务和最近 20 条训练记录，展开可检查已注册参数；详细日志仍由单个任务监视器展示。
 9. 任务监视器实时显示阶段、step、速度、已用时间、滚动 ETA/预计完成时间、Q/value/actor loss、Q/V/advantage、advantage weight、学习率、梯度范数和峰值显存。默认跟随当前训练；手动查看其他任务后可点击“跟随当前训练”恢复。安全停止沿用现有 checkpoint 保存逻辑。调度由后端执行，关闭网页不影响队列；后端关闭时已启动的独立训练进程继续运行，等待任务在后端重新启动后恢复调度（不是恢复失败任务的 checkpoint）。夜间连续训练需保持设备和后端服务运行。完成后可回到仿真平台选择发布的 policy overlay。

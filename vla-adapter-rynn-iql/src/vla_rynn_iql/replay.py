@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from .config import LoadedConfig
-from .data import iter_unique_replay_chunks, load_manifest, replay_chunks
+from .data import iter_unique_replay_chunks, load_manifest, replay_chunks, replay_end_step
 from .rewards import load_reward_index, policy_view
 from .vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_from_trajectory
 
@@ -20,15 +20,16 @@ class ActionDataset(Dataset):
     def __init__(self, config: LoadedConfig, action_stats: dict[str, Any],
                  proprio_stats: dict[str, Any], split: str = "train"):
         self.config = config
+        self.include_post_success = config.section("data").get("include_post_success", True)
         self.manifest = load_manifest(config)
         self.action_stats, self.proprio_stats = action_stats, proprio_stats
-        self.image_size = int(config.section("iql")["critic_image_size"])
         self.chunks = {
             episode["run_id"]: replay_chunks(episode)
             for episode in self.manifest["episodes"]
         }
         self.items = [(episode, index, None) for episode, index in
-                      iter_unique_replay_chunks(self.manifest["episodes"], split=split)]
+                      iter_unique_replay_chunks(self.manifest["episodes"], split=split,
+                                               include_post_success=self.include_post_success)]
         if split == "train" and not self.items:
             raise RuntimeError("Training replay is empty")
 
@@ -61,9 +62,9 @@ class ActionDataset(Dataset):
         action_mask = np.zeros(self.manifest["action_horizon"], dtype=bool)
         actions[:length] = env_to_dataset_actions(trajectory["env_action"][start:end], self.action_stats)
         action_mask[:length] = True
-        # Success confirmation affects rewards but replay continues through the
-        # recorded tail. Only the final recorded observation ends bootstrapping.
-        terminal = end == episode["recorded_action_count"]
+        # The selected replay endpoint is terminal in either mode. Reward arrays
+        # retain full-recording indices and never need a model re-evaluation.
+        terminal = end == replay_end_step(episode, self.include_post_success)
         sample = {
             "proprio": torch.from_numpy(proprio[start]),
             "actions": torch.from_numpy(actions),
@@ -93,6 +94,7 @@ class ReplayDataset(ActionDataset):
                  proprio_stats: dict[str, Any], split: str = "train",
                  reward_index: dict[str, Any] | None = None):
         super().__init__(config, action_stats, proprio_stats, split)
+        self.image_size = int(config.section("iql")["critic_image_size"])
         index = load_reward_index(config) if reward_index is None else reward_index
         if index.get("complete") is False:
             raise ValueError("Reward annotation manifest is incomplete")

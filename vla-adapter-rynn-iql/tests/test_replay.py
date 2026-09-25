@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from vla_rynn_iql.data import load_manifest, prepare_dataset
-from vla_rynn_iql.replay import ReplayDataset
+from vla_rynn_iql.replay import ActionDataset, ReplayDataset
 from vla_rynn_iql.rewards import annotate_manifest, load_reward_index
 from vla_rynn_iql.vla_adapter import env_to_dataset_actions
 
@@ -95,6 +95,55 @@ def test_post_success_actions_images_and_masks_are_sampled(configured):
     assert item["next_pixels"][3:].unique().tolist() == [72]
     assert item["transition_type"] == "human"
     assert item["bootstrap_mask"].item() == 0.0
+
+
+def test_post_success_setting_filters_samples_without_changing_data_or_rewards(configured):
+    prepared = prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    index = load_reward_index(configured)
+    files = [prepared.manifest, *(Path(ep["annotation_path"]) for ep in index["episodes"])]
+    files += [Path(ep[key]) for ep in load_manifest(configured)["episodes"]
+              for key in ("trajectory_path", "observations_path")]
+    before = {path: path.read_bytes() for path in files}
+    full = ReplayDataset(configured, _stats(7), _stats(8))
+    configured.raw["data"]["include_post_success"] = False
+    truncated = ReplayDataset(configured, _stats(7), _stats(8))
+    bc = ActionDataset(configured, _stats(7), _stats(8))
+    assert len(truncated) == len(bc) == len(full) - 1
+    assert [(ep["run_id"], i) for ep, i, _ in bc.items] == [
+        (ep["run_id"], i) for ep, i, _ in truncated.items]
+    branch = [truncated[i] for i, (ep, _, _) in enumerate(truncated.items) if ep["run_id"] == "branch"]
+    assert [item["start"] for item in branch] == [0, 5, 13]
+    assert branch[-1]["chunk_length"].item() == 5  # Includes the fifth done=True action (17).
+    assert branch[-1]["action_mask"].tolist() == [True] * 5 + [False] * 3
+    assert branch[-1]["bootstrap_mask"].item() == 0
+    old = next(full[i] for i, (ep, n, _) in enumerate(full.items)
+               if ep["run_id"] == "branch" and full.chunks["branch"][n]["start"] == 13)
+    assert old["bootstrap_mask"].item() == 1
+    assert old["reward"].item() == branch[-1]["reward"].item()
+    # The failed parent is unaffected, including its final partial chunk.
+    assert [(ep["run_id"], i) for ep, i, _ in full.items if ep["run_id"] == "root"] == [
+        (ep["run_id"], i) for ep, i, _ in truncated.items if ep["run_id"] == "root"]
+    assert {path: path.read_bytes() for path in files} == before
+    configured.raw["data"]["include_post_success"] = True
+    assert len(ReplayDataset(configured, _stats(7), _stats(8))) == len(full)
+
+
+def test_truncation_ignores_unconfirmed_success(configured):
+    root = Path(configured.section("paths")["dataset_sources"][0])
+    path = next(root.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(path, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["done"][:] = False
+    arrays["done"][3:7] = True  # Four consecutive, not five.
+    np.savez_compressed(path, **arrays)
+    configured.raw["data"]["include_post_success"] = False
+    prepare_dataset(configured)
+    bc = ActionDataset(configured, _stats(7), _stats(8))
+    branch = next(ep for ep in bc.manifest["episodes"] if ep["run_id"] == "branch")
+    assert branch["terminal_step"] is None
+    indices = [index for ep, index, _ in bc.items if ep["run_id"] == "branch"]
+    assert bc.chunks["branch"][indices[-1]]["end"] == 22
 
 
 def test_replay_rejects_legacy_manifest_missing_full_tail(configured):

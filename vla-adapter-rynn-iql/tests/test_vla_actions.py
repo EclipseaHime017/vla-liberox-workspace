@@ -60,8 +60,9 @@ class FakeLanguageModel:
         return SimpleNamespace(hidden_states=(inputs_embeds, inputs_embeds + 1))
 
 
-class FakePrismaticModel:
+class FakePrismaticModel(torch.nn.Module):
     def __init__(self):
+        super().__init__()
         self.device = torch.device("cpu")
         self.dtype = torch.float32
         self.vision_backbone = FakeVisionBackbone()
@@ -172,7 +173,8 @@ def test_processor_inputs_keeps_legacy_single_sample_and_rejects_mixed_prompts()
         )
 
 
-def test_frozen_hidden_and_action_helpers_preserve_batch_dimension(monkeypatch):
+@pytest.mark.parametrize("trainable", [False, True])
+def test_frozen_hidden_and_action_helpers_preserve_batch_dimension(monkeypatch, trainable):
     constants = types.ModuleType("prismatic.vla.constants")
     constants.IGNORE_INDEX = -100
     constants.NUM_TOKENS = 2
@@ -187,7 +189,7 @@ def test_frozen_hidden_and_action_helpers_preserve_batch_dimension(monkeypatch):
 
     components = SimpleNamespace(
         processor=FakeProcessor(),
-        model=FakePrismaticModel(),
+        model=FakePrismaticModel().requires_grad_(trainable),
         action_head=FakeActionHead(),
         proprio_projector=object(),
     )
@@ -207,3 +209,7 @@ def test_frozen_hidden_and_action_helpers_preserve_batch_dimension(monkeypatch):
     assert hidden.shape == (3, 2, 6, 6)
     assert output.shape == (3, 8, 7)
     torch.testing.assert_close(hidden, individual_hidden)
+    assert hidden.requires_grad is trainable
+    if trainable:
+        hidden.sum().backward()
+        assert components.model.action_queries.weight.grad.abs().sum() > 0

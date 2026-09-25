@@ -174,6 +174,9 @@ def test_prepare_fingerprint_cache_and_bound_evaluation(configured, tmp_path: Pa
     selection_path.parent.mkdir(parents=True)
     selection_path.write_text(json.dumps(selection), encoding="utf-8")
     fingerprint = prepare_fingerprint(selection, raw)
+    raw["data"]["include_post_success"] = False
+    assert prepare_fingerprint(selection, raw) == fingerprint  # Replay-only selection; full Prepare is reusable.
+    raw["data"]["include_post_success"] = True
     work = terminal.pipeline_root / "cache" / fingerprint / "work"
     raw["paths"]["work_dir"] = str(work)
     raw["data"]["task_ids"] = [selection["task_id"]]
@@ -216,7 +219,7 @@ def test_prepare_fingerprint_cache_and_bound_evaluation(configured, tmp_path: Pa
 def test_training_only_override_does_not_change_prepare_fingerprint(configured, tmp_path: Path):
     _, raw, _, selection = _selection(configured, tmp_path)
     before = prepare_fingerprint(selection, raw)
-    raw["iql"]["train_steps"] += 1000
+    raw["training"]["train_steps"] += 1000
     assert prepare_fingerprint(selection, raw) == before
     raw["data"]["success_consecutive_steps"] += 1
     assert prepare_fingerprint(selection, raw) != before

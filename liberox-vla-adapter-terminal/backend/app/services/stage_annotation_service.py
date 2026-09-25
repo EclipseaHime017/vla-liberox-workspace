@@ -40,7 +40,9 @@ class StageAnnotationService:
         return self._math
 
     def _defaults(self) -> tuple[int, float]:
-        raw = yaml.safe_load((self.offline_root / "configs/liberox_iql.yaml").read_text())
+        from .inherited_reward_inputs import offline_module
+        config = offline_module(self.offline_root, "config")
+        raw = config.load_train_config(self.offline_root / "configs/training/iql.yaml", method="iql").raw
         return int(raw["data"]["success_consecutive_steps"]), float(raw["reward"].get("stage_exponent", 2))
 
     @staticmethod

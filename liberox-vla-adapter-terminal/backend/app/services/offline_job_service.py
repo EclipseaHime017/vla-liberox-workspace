@@ -29,6 +29,7 @@ from ..storage.files import atomic_write_json, atomic_write_yaml
 from ..storage.repositories import EvaluationRepository, OfflineJobRepository
 from .dataset_reward_versions import DatasetRewardVersions, macro_only_reward
 from .training_queue import TrainingQueue
+from .inherited_reward_inputs import offline_module
 
 
 ACTIVE_JOB_STATES = frozenset({"STARTING", "RUNNING", "STOPPING"})
@@ -53,8 +54,8 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _training_replay_counts(prepared: dict[str, Any]) -> dict[str, int]:
-    """Count the train split's full replay without rewriting the job's pin.
+def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool = True) -> dict[str, int]:
+    """Count the selected training interval without rewriting the job's reward pin.
 
     Older schema-4 manifests keep post-confirmation actions in evaluation_chunks.
     Count those complete boundaries, including their actual controller breaks,
@@ -68,6 +69,11 @@ def _training_replay_counts(prepared: dict[str, Any]) -> dict[str, int]:
             chunks = episode.get("evaluation_chunks", [])
         if not chunks or int(chunks[-1]["end"]) != recorded_end:
             raise ValueError(f"Run {episode['run_id']} lacks full-recording replay chunks")
+        if not include_post_success and episode.get("terminal_step") is not None:
+            end = int(episode["terminal_step"]) + 1
+            if not any(int(chunk["end"]) == end for chunk in chunks):
+                raise ValueError(f"Run {episode['run_id']} lacks a confirmed success chunk boundary; rerun Prepare")
+            chunks = [chunk for chunk in chunks if int(chunk["end"]) <= end]
         episodes.append((episode, chunks))
 
     def key(episode: dict[str, Any], chunk: dict[str, Any]) -> tuple[str, int, int, str]:
@@ -137,7 +143,11 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
 
     @property
     def base_config_path(self) -> Path:
-        return self.ui_config.offline_rl_root / "configs" / "liberox_iql.yaml"
+        return self.ui_config.offline_rl_root / "configs" / "training" / "iql.yaml"
+
+    @property
+    def training_models(self):
+        return offline_module(self.ui_config.offline_rl_root, "models")
 
     def evaluator_capabilities(self) -> dict[str, dict[str, Any]]:
         checkout = self.ui_config.robometer_root.parent / "Robometer"
@@ -165,44 +175,19 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             "robometer": {"available": configured, "reason": reason},
         }
 
-    def _load_base_config(self) -> dict[str, Any]:
-        if not self.base_config_path.is_file():
-            raise FileNotFoundError(f"Offline RL config not found: {self.base_config_path}")
-        raw = yaml.safe_load(self.base_config_path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("Offline RL config root must be an object")
-        for key, value in raw.get("training", {}).items():
-            if key in raw["iql"]:
-                raw["iql"][key] = value
-        base = self.base_config_path.parent
-        paths = raw["paths"]
-        for name, value in list(paths.items()):
-            if name == "dataset_sources":
-                paths[name] = [
-                    str((Path(item) if Path(item).is_absolute() else base / item).resolve())
-                    for item in value
-                ]
-            elif isinstance(value, str):
-                path = Path(value).expanduser()
-                paths[name] = str((path if path.is_absolute() else base / path).resolve())
-        return raw
+    def _load_base_config(self, algorithm: str | None = None, model_family: str | None = None) -> dict[str, Any]:
+        config = offline_module(self.ui_config.offline_rl_root, "config")
+        return config.load_train_config(self.base_config_path, method=algorithm or "iql", family=model_family).raw
 
     def defaults(self, dataset_id: str | None = None, reward_source: str | None = None,
-                 algorithm: str = "iql") -> dict[str, Any]:
-        self._validate_training_parameters({"algorithm": algorithm})
+                 algorithm: str = "iql", model_family: str | None = None) -> dict[str, Any]:
+        self._validate_training_parameters({"algorithm": algorithm, **({"model_family": model_family} if model_family else {})}, self.training_models)
+        raw = self._load_base_config(algorithm, model_family)
         if algorithm == "bc":
             # No reward lookup or lazy global-evaluation job may run for BC.
             if dataset_id:
                 self.datasets.get(dataset_id, quick_verify=False)
-            result = self.defaults()
-            result.update(algorithm="bc", reward_version=None, reward_availability=None,
-                          reward_locked_parameters=[], reward_editable_parameters=[], checkpoints=[])
-            result["basic"].pop("critic_warmup_steps", None)
-            result["advanced"] = {key: value for key, value in result["advanced"].items()
-                                  if key in {"policy_peak_lr", "policy_final_lr", "console_interval_steps", "flush_seconds"}}
-            result["fixed"].pop("critic_image_size", None)
-            return result
-        raw = self._load_base_config()
+            return self._training_defaults(raw, dataset_id=dataset_id)
         version = None
         availability = None
         macro_only = False
@@ -273,30 +258,36 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         macro_only = macro_only or macro_only_reward({**raw["reward"], "source": reward_source})
         if macro_only:
             raw["reward"]["accumulate_primitive_steps"] = False
+        return self._training_defaults(raw, dataset_id=dataset_id, version=version,
+                                       availability=availability, reward_source=reward_source,
+                                       macro_only=macro_only)
+
+    def _training_defaults(self, raw: dict, *, dataset_id: str | None = None,
+                           version=None, availability=None, reward_source=None,
+                           macro_only=False) -> dict[str, Any]:
+        training, iql = raw["training"], raw["iql"]
+        algorithm = training["method"]
+        common_advanced = {name: training[name] for name in ("policy_peak_lr", "policy_final_lr")}
         return {
             "algorithm": algorithm,
+            "models": self.training_models.model_catalog(),
+            "model": self.training_models.model_parameters(raw),
             "reward_version": version,
             "reward_availability": availability,
             "reward_parameters_locked": False,
             "reward_locked_parameters": [
                 "reward_stage_exponent", "reward_shaping_weight", "reward_alpha", "reward_fusion_mode",
-            ] if dataset_id else [],
-            "reward_editable_parameters": ["reward_gamma"] + ([] if macro_only else ["reward_accumulate_primitive_steps"]),
-            "basic": {
-                name: raw["iql"][name] for name in (
-                    "train_steps", "critic_warmup_steps",
-                    "micro_batch_size", "gradient_accumulation_steps",
-                    "checkpoint_interval", "seed",
-                )
-            } | {"actor_lr_warmup_steps": raw.get("training", {}).get("actor_lr_warmup_steps")
-                 if raw.get("training", {}).get("actor_lr_warmup_steps") is not None
-                 else raw["iql"]["critic_warmup_steps"]},
-            "advanced": {
-                name: raw["iql"][name] for name in (
+            ] if dataset_id and algorithm == "iql" else [],
+            "reward_editable_parameters": (["reward_gamma"] + ([] if macro_only else ["reward_accumulate_primitive_steps"])) if algorithm == "iql" else [],
+            "basic": {name: training[name] for name in (
+                "train_steps", "micro_batch_size", "gradient_accumulation_steps",
+                "checkpoint_interval", "seed", "actor_lr_warmup_steps",
+            )} | ({"critic_warmup_steps": iql["critic_warmup_steps"]} if algorithm == "iql" else {}),
+            "advanced": common_advanced | ({
+                name: iql[name] for name in (
                     "critic_optimizer", "critic_lr", "critic_weight_decay",
                     "critic_max_grad_norm", "value_optimizer", "value_lr",
                     "value_weight_decay", "value_max_grad_norm",
-                    "policy_peak_lr", "policy_final_lr",
                     "expectile", "beta", "max_advantage_weight", "target_tau",
                 )
             } | {
@@ -311,7 +302,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
                 "reward_accumulate_primitive_steps": raw["reward"][
                     "accumulate_primitive_steps"
                 ],
-            } | {
+            } if algorithm == "iql" else {}) | {
                 "console_interval_steps": raw["logging"]["console_interval_steps"],
                 "flush_seconds": raw["logging"]["flush_seconds"],
             },
@@ -327,14 +318,13 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
                 "wandb_log_interval_steps": raw["logging"]["wandb"]["log_interval_steps"],
             },
             "fixed": {
-                "dtype": raw["iql"]["dtype"],
-                "critic_image_size": raw["iql"]["critic_image_size"],
+                "dtype": training["dtype"],
+                **({"critic_image_size": iql["critic_image_size"]} if algorithm == "iql" else {}),
                 "action_horizon": raw["data"]["action_horizon"],
                 "action_dim": raw["data"]["action_dim"],
                 "proprio_dim": raw["data"]["proprio_dim"],
-                "base_checkpoint": raw["vla"]["base_checkpoint"],
-                "stats_key": raw["vla"]["stats_key"],
-                "freeze_backbone": raw["vla"]["freeze_backbone"],
+                "base_checkpoint": raw["model"]["base_checkpoint"],
+                "stats_key": raw["model"]["stats_key"],
             },
             "environments": {
                 "prepare": self.ui_config.train_environment,
@@ -723,8 +713,9 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         atomic_write_json(job_dir / "launcher.json", {"pid": process.pid})
         return self._public_job(payload)
 
-    def _effective_config(self, dataset: dict[str, Any]) -> dict[str, Any]:
-        raw = copy.deepcopy(self._load_base_config())
+    def _effective_config(self, dataset: dict[str, Any], *, algorithm: str | None = None,
+                          model_family: str | None = None) -> dict[str, Any]:
+        raw = self._load_base_config(algorithm, model_family)
         raw["data"]["task_ids"] = [dataset["task_id"]]
         raw["data"]["selection_manifest"] = str(
             (self.datasets.root / dataset["id"] / "dataset.json").resolve()
@@ -732,6 +723,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         raw["data"]["validation_fraction"] = dataset["validation_fraction"]
         raw["data"]["split_seed"] = dataset["split_seed"]
         raw["data"]["success_consecutive_steps"] = dataset["success_consecutive_steps"]
+        raw["data"]["include_post_success"] = dataset.get("include_post_success", True)
         raw["paths"]["annotation_cache"] = str(self.cache_root.resolve())
         return raw
 
@@ -951,7 +943,9 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
 
 
     @staticmethod
-    def _validate_training_parameters(parameters: dict[str, Any]) -> None:
+    def _validate_training_parameters(parameters: dict[str, Any], models=None) -> None:
+        if models is None:
+            models = offline_module(Path(__file__).resolve().parents[4] / "vla-adapter-rynn-iql", "models")
         allowed = {
             "algorithm", "actor_lr_warmup_steps",
             "train_steps", "critic_warmup_steps", "gradient_accumulation_steps",
@@ -968,15 +962,24 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             "reward_accumulate_primitive_steps", "reward_source", "reward_stage_exponent",
             "reward_version_id", "reward_alpha", "reward_fusion_mode",
         }
+        allowed.update(models.MODEL_PARAMETER_PATHS)
         unknown = sorted(set(parameters) - allowed)
         if unknown:
             raise ValueError(f"Unknown training parameters: {unknown}")
+        # Validate individual fields here; actual defaults and all-frozen checks
+        # are resolved together in _launch_training, before creating job files.
+        models.apply_model_parameters({}, {"model_backbone": "full", **parameters})
         if parameters.get("algorithm", "iql") not in ("iql", "bc"):
             raise ValueError("algorithm must be iql or bc")
         if parameters.get("algorithm") == "bc" and any(
             key.startswith("reward_") and value is not None for key, value in parameters.items()
         ):
             raise ValueError("BC does not accept reward parameters or reward versions")
+        if parameters.get("algorithm") == "bc" and any(
+            key.startswith(("critic_", "value_")) or key in {"expectile", "beta", "max_advantage_weight", "target_tau"}
+            for key in parameters
+        ):
+            raise ValueError("BC does not accept IQL parameters")
         integer_positive = (
             "train_steps", "micro_batch_size", "gradient_accumulation_steps",
             "checkpoint_interval", "console_interval_steps", "wandb_log_interval_steps",
@@ -1177,7 +1180,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
 
     def start_training(self, dataset_id: str, parameters: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
-            self._validate_training_parameters(parameters)
+            self._validate_training_parameters(parameters, self.training_models)
             dataset = self.datasets.require_ready_for_training(dataset_id)
             version, normalized = self.training_inputs(dataset, parameters)
             self._prepare_launch()
@@ -1202,35 +1205,42 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         algorithm = parameters.get("algorithm", "iql")
         job_id = f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         job_dir = self.jobs_root / job_id
-        raw = self._effective_config(dataset)
+        raw = self._effective_config(dataset, algorithm=algorithm, model_family=parameters.get("model_family"))
         if reward_version is not None:
             # IQL keeps the existing sealed reward/data identity.
             sealed = yaml.safe_load(Path(reward_version["config_path"]).read_text(encoding="utf-8"))
-            for section in ("data", "reward", "paths", "vla"):
+            for section in ("data", "reward"):
                 raw[section] = copy.deepcopy(sealed[section])
-        raw["reward"].setdefault("final_normalization", "none")
-        source = self._reward_source(raw, parameters)
-        raw["reward"].update(source=source, rynnvalue=source == "rynnvalue" or (
-            source == "final" and raw["reward"]["shaping_weight"] > 0))
+        # Replay selection is a dataset setting, not a frozen evaluator parameter.
+        include_post_success = dataset.get("include_post_success", True)
+        raw["data"]["include_post_success"] = include_post_success
+        raw["model"] = self.training_models.apply_model_parameters(raw, parameters)
+        source = None
+        if algorithm == "iql":
+            raw["reward"].setdefault("final_normalization", "none")
+            source = self._reward_source(raw, parameters)
+            raw["reward"].update(source=source, rynnvalue=source == "rynnvalue" or (
+                source == "final" and raw["reward"]["shaping_weight"] > 0))
         annotation_id = reward_version["id"] if reward_version else None
         work_dir = Path(reward_version["work_dir"]) if reward_version else job_dir / "work"
         replay_counts = {}
         if reward_version is not None:
             prepared = json.loads(Path(reward_version["prepared_manifest_path"]).read_text(encoding="utf-8"))
-            replay_counts = _training_replay_counts(prepared)
-        raw["reward"].update(
-            manifest_path=reward_version["reward_manifest_path"] if reward_version else None,
-            manifest_sha256=reward_version["reward_manifest_sha256"] if reward_version else None,
-            version_id=annotation_id,
-        )
+            replay_counts = _training_replay_counts(prepared, include_post_success)
+        if algorithm == "iql":
+            raw["reward"].update(
+                manifest_path=reward_version["reward_manifest_path"] if reward_version else None,
+                manifest_sha256=reward_version["reward_manifest_sha256"] if reward_version else None,
+                version_id=annotation_id,
+            )
         raw.setdefault("training", {})["method"] = algorithm
         if "actor_lr_warmup_steps" in parameters:
             raw["training"]["actor_lr_warmup_steps"] = parameters["actor_lr_warmup_steps"]
         for key, value in parameters.items():
-            if key in raw["iql"]:
+            if key in raw["training"]:
+                raw["training"][key] = value
+            elif key in raw["iql"]:
                 raw["iql"][key] = value
-                if key in raw["training"]:
-                    raw["training"][key] = value
             elif key in raw["logging"]:
                 raw["logging"][key] = value
         for parameter_name, config_name in {
@@ -1256,15 +1266,15 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
                 tag.strip() for tag in str(parameters["wandb_tags"] or "").split(",")
                 if tag.strip()
             ]
-        raw["iql"]["resume_checkpoint"] = self._resolve_resume(
+        raw["training"]["resume_checkpoint"] = self._resolve_resume(
             parameters.get("resume_checkpoint")
         )
-        if "resume_checkpoint" in raw["training"]:
-            raw["training"]["resume_checkpoint"] = raw["iql"]["resume_checkpoint"]
-        if raw["iql"]["checkpoint_interval"] % raw["iql"]["gradient_accumulation_steps"]:
+        if raw["training"]["checkpoint_interval"] % raw["training"]["gradient_accumulation_steps"]:
             raise ValueError(
                 "checkpoint_interval must be divisible by gradient_accumulation_steps"
             )
+        config = offline_module(self.ui_config.offline_rl_root, "config")
+        raw = config.validate_train_config(raw, job_dir / "effective_config.yaml").raw
         job_dir.mkdir(parents=True, exist_ok=False)
         if algorithm == "bc":
             # Pin the frozen selection for queued jobs without evaluating it.
@@ -1300,12 +1310,13 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             queued=queued,
             parameters={
                 "algorithm": algorithm,
-                "actor_lr_warmup_steps": raw["training"].get("actor_lr_warmup_steps")
-                    if raw["training"].get("actor_lr_warmup_steps") is not None else raw["iql"]["critic_warmup_steps"],
+                "model": copy.deepcopy(raw["model"]),
+                **raw["training"],
                 "dataset_name": dataset["name"],
                 "task_id": dataset["task_id"], "member_count": dataset["member_count"],
                 **replay_counts,
-                "replay_policy": "full_recording_v1",
+                "include_post_success": include_post_success,
+                "replay_policy": "full_recording_v1" if include_post_success else "confirmed_success_v1",
                 "annotation_id": annotation_id,
                 "reward_version_id": annotation_id,
                 "reward_manifest_sha256": reward_version["reward_manifest_sha256"] if reward_version else None,
@@ -1322,7 +1333,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
                         "accumulate_primitive_steps"
                     ],
                 } if reward_version else None,
-                **{name: raw["iql"][name] for name in (
+                **{name: value for name, value in raw["iql"].items() if name in (
                     "train_steps", "critic_warmup_steps", "micro_batch_size",
                     "gradient_accumulation_steps", "checkpoint_interval", "seed",
                     "critic_optimizer", "critic_lr", "critic_weight_decay",
@@ -1413,6 +1424,8 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             "training_step": policy.training_step,
             "compatibility_sha256": policy.compatibility_sha256,
         }
+        if policy.backbone is not None:
+            policy_snapshot["backbone"] = str(policy.backbone)
         return task_snapshot, policy_snapshot
 
     def preview_evaluation(self, request: dict[str, Any]) -> dict[str, Any]:

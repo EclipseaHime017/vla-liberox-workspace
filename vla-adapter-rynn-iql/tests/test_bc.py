@@ -12,13 +12,14 @@ import torch
 import yaml
 
 from vla_rynn_iql.algorithms import BehaviorCloning, ImplicitQLearning
-from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, load_train_config
+from vla_rynn_iql.config import PROJECT_ROOT, load_train_config
 from vla_rynn_iql.data import prepare_dataset
 from vla_rynn_iql.iql import weighted_masked_l1
 from vla_rynn_iql.methods import actor_lr_warmup, training_method
 from vla_rynn_iql.replay import ActionDataset, ReplayDataset
 from vla_rynn_iql.rewards import annotate_manifest
 from vla_rynn_iql import training
+from vla_rynn_iql import vla_adapter
 from vla_rynn_iql.vla_adapter import load_overlay, validate_overlay
 from test_replay import FakeAnnotator, _stats
 from test_terminal_pipeline import _terminal_config
@@ -34,8 +35,8 @@ def test_bc_config_without_reward_or_iql_and_strict_method(configured, tmp_path)
     path.write_text(yaml.safe_dump(raw))
     config = load_train_config(path)
     assert not training_method(config.raw).requires_rewards
-    assert config.section("iql")["train_steps"] == 20
-    assert config.section("iql")["resume_checkpoint"] == str(tmp_path / "checkpoint")
+    assert config.section("training")["train_steps"] == 20
+    assert config.section("training")["resume_checkpoint"] == str(tmp_path / "checkpoint")
     assert config.section("training")["resume_checkpoint"] == str(tmp_path / "checkpoint")
     assert actor_lr_warmup(config.raw) == 5
     raw["training"]["method"] = "unknown"
@@ -86,7 +87,7 @@ def test_terminal_bc_skips_all_rewards_and_reuses_prepare(configured, tmp_path, 
     raw["overrides"]["training"] = {"method": "bc"}
     raw["overrides"]["reward"] = {"source": "final", "alpha": .5, "shaping_weight": .1}
     path.write_text(yaml.safe_dump(raw))
-    script = DEFAULT_TRAIN_CONFIG.parents[1] / "scripts" / "train_terminal.py"
+    script = PROJECT_ROOT / "scripts" / "train_terminal.py"
     spec = importlib.util.spec_from_file_location("bc_terminal_test", script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -129,8 +130,8 @@ def test_terminal_explicit_legacy_override_wins_over_base_common_values(configur
     terminal["overrides"]["iql"] = {"train_steps": 77, "resume_checkpoint": "new"}
     path.write_text(yaml.safe_dump(terminal))
     merged = merged_training_config(load_terminal_config(path))
-    assert merged["iql"]["train_steps"] == merged["training"]["train_steps"] == 77
-    assert merged["iql"]["resume_checkpoint"] == merged["training"]["resume_checkpoint"] == str(tmp_path / "new")
+    assert merged["training"]["train_steps"] == 77
+    assert merged["training"]["resume_checkpoint"] == str(tmp_path / "new")
 
 
 def test_iql_adapter_preserves_update_and_actor_objective(configured):
@@ -155,8 +156,8 @@ def test_iql_adapter_preserves_update_and_actor_objective(configured):
 
 def test_bc_cpu_training_resume_and_overlay(configured, monkeypatch):
     config = copy.deepcopy(configured)
-    config.raw["training"] = {"method": "bc", "actor_lr_warmup_steps": 0}
-    config.section("iql").update(train_steps=4, gradient_accumulation_steps=2, checkpoint_interval=2,
+    config.raw["training"].update(method="bc", actor_lr_warmup_steps=0)
+    config.section("training").update(train_steps=4, gradient_accumulation_steps=2, checkpoint_interval=2,
                                  micro_batch_size=2, policy_peak_lr=.01, policy_final_lr=.01)
     config.section("logging")["tensorboard"] = False
     prepare_dataset(config)
@@ -173,13 +174,13 @@ def test_bc_cpu_training_resume_and_overlay(configured, monkeypatch):
                           copy.deepcopy(components.proprio_projector.state_dict())))
         return components
 
-    monkeypatch.setattr(training, "load_components", load_components)
+    monkeypatch.setattr(vla_adapter, "load_components", load_components)
     monkeypatch.setattr(training, "_device", lambda _: torch.device("cpu"))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(training, "load_reward_index", lambda _: pytest.fail("BC loaded rewards"))
     monkeypatch.setattr("vla_rynn_iql.algorithms.PixelIQL", lambda **_: pytest.fail("BC created Q/V"))
-    monkeypatch.setattr(training, "processor_inputs", lambda c, prompts, *args: len(prompts))
-    monkeypatch.setattr(training, "extract_action_hidden_states", lambda c, n: c.model(torch.ones(n, 3)).detach())
+    monkeypatch.setattr(vla_adapter, "processor_inputs", lambda c, prompts, *args: len(prompts))
+    monkeypatch.setattr(vla_adapter, "extract_action_hidden_states", lambda c, n: c.model(torch.ones(n, 3)).detach())
     calls = 0
     interrupt = False
 
@@ -190,9 +191,9 @@ def test_bc_cpu_training_resume_and_overlay(configured, monkeypatch):
             training.request_training_stop()
         return c.action_head(hidden + c.proprio_projector(proprio.float())).reshape(-1, 8, 7)
 
-    monkeypatch.setattr(training, "predict_normalized", predict)
+    monkeypatch.setattr(vla_adapter, "predict_normalized", predict)
     full = load_overlay(training.train(config))
-    validate_overlay(full, config.section("vla")["base_checkpoint"], "test")
+    validate_overlay(full, config.section("model")["base_checkpoint"], "test")
     assert full.reward_sha256 is None
     full_weights = torch.load(full.action_head, weights_only=True)
     calls, interrupt = 0, True
@@ -202,7 +203,7 @@ def test_bc_cpu_training_resume_and_overlay(configured, monkeypatch):
     canceled = next(json.loads(p.read_text()) for p in summaries if json.loads(p.read_text())["status"] == "canceled")
     assert canceled["steps"] == 2
     interrupt = False
-    config.section("iql")["resume_checkpoint"] = canceled["cancel_checkpoint"]
+    config.section("training")["resume_checkpoint"] = canceled["cancel_checkpoint"]
     resumed = load_overlay(training.train(config))
     for key, value in torch.load(resumed.action_head, weights_only=True).items():
         assert torch.equal(value, full_weights[key])

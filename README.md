@@ -194,13 +194,13 @@ run from the workspace root:
 
 ```bash
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/materialize_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
+  --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
   --config vla-adapter-rynn-iql/configs/inference.yaml
 ```
