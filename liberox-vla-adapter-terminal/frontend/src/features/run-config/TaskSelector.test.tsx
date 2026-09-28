@@ -18,6 +18,33 @@ const tasks: TaskInfo[] = [
   { ...bowl, task_id: "LEVEL3::missing", level: "LEVEL3", prompt: "missing scene", available: false },
 ];
 
+const compositeTasks = [
+  { ...bowl, family_id: "bowl_in_drawer_and_close", family_label: "place the bowl in the drawer and close it",
+    task_id: "LEVEL1::drawer_and_bowl", task_name: "drawer_and_bowl", level: "LEVEL1",
+    prompt: "place the yellow bowl in the bottom drawer of the white cabinet and close the drawer" },
+  { ...bowl, family_id: "stove_off_and_sort_bowls", family_label: "turn off the stove and sort two bowls into the drainer",
+    task_id: "LEVEL1::stove_and_bowls", task_name: "stove_and_bowls", level: "LEVEL1",
+    prompt: "turn off the stove and place the smallest bowl in the left side of the drainer and the medium bowl in the right side" },
+] satisfies TaskInfo[];
+
+it.each(compositeTasks)("selects and filters the LEVEL1-only $family_id task", (task) => {
+  const catalog = [...tasks, ...compositeTasks];
+  function Form() {
+    const [value, setValue] = useState("LEVEL4::cyan");
+    return <TaskSelector tasks={catalog} value={value} onChange={setValue} />;
+  }
+  render(<Form />);
+  fireEvent.change(screen.getByLabelText("任务"), { target: { value: task.family_id } });
+  const level = screen.getByLabelText("难度") as HTMLSelectElement;
+  const prompt = screen.getByLabelText("提示词") as HTMLSelectElement;
+  expect(level.value).toBe("LEVEL1");
+  expect(level.options).toHaveLength(1);
+  expect(prompt.value).toBe(task.task_id);
+  expect(prompt.selectedOptions[0].textContent).toBe(task.prompt);
+  expect(taskIdsForScope(catalog, scopeForTask(catalog, task.task_id))).toEqual([task.task_id]);
+  expect(filterByTaskScope(catalog, catalog, { family_id: task.family_id, level: "", task_id: "" })).toEqual([task]);
+});
+
 it("resolves purpose → difficulty → exact prompt with three selectors and excludes LEVEL5", () => {
   function Form() {
     const [value, setValue] = useState(tasks[0].task_id);

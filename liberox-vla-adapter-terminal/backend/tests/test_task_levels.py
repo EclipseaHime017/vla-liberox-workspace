@@ -88,7 +88,7 @@ def test_level5_identity_persisted_in_run_branch_and_batch_evaluation(tmp_path, 
     task_id = f"LEVEL5::{scene}::L5-2"
     policy = SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base",
         manifest=None, compatibility_sha256=None, stats_key="stats",
-        action_head=None, proprio_projector=None, training_step=None)
+        action_head=None, proprio_projector=None, backbone=None, model_config=None, training_step=None)
     manager = object.__new__(SimulationManager)
     manager.catalog = catalog
     manager.eval_config = SimpleNamespace(seed=0, disabled_policy_cameras=(), control_hz=20)

@@ -7,8 +7,9 @@ macro-only multiplicative fusion, dataset-level evaluation controls, and
 separate Original Final Reward / Final Reward comparisons.
 
 Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse / FACTR takeover,
-offline post-training, and reproducible batch policy testing for the three
-Franka/LIBERO-X task families, including their official LEVEL1–4 variants.
+offline post-training, and reproducible batch policy testing for five
+Franka/LIBERO-X task families: three with LEVEL1–4 variants and two LEVEL1
+longer-horizon composite tasks.
 
 - Backend: FastAPI application service with a background simulation worker.
 - Frontend: React + TypeScript, served by FastAPI after a Vite production build.
@@ -17,7 +18,7 @@ Franka/LIBERO-X task families, including their official LEVEL1–4 variants.
 - Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
 - FACTR Franka: GUI and CLI share official calibration and gravity compensation, with one reference capture and explicit ON/OFF. Joint following includes slow leader alignment; GUI records measured end-effector action labels, trajectories and dual-camera video through the standard manual-data pipeline. Physical acceptance is still required.
-- Three cascading selectors resolve task purpose → LEVEL1–4 → exact prompt, covering 13 physical scenes; the same hierarchy filters sessions, datasets, training datasets and test history. Purpose groups are explicitly configured in `ui_config.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
+- Three cascading selectors resolve task purpose → difficulty → exact prompt, covering 15 physical scenes; the same hierarchy filters sessions, datasets, training datasets and test history. The new LEVEL1 tasks place a yellow bowl inside an open drawer and close it, or turn off the stove and sort two bowls into the drainer. Purpose groups are explicitly configured in `ui_config.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
 - Run drafts can choose a simulation seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact. Simulation, dataset selection/split, training and test-schedule seeds have distinct roles. Changing the simulation seed does not select a new benchmark init state or inherit the training RNG.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
 - Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#49-在-web-ui-中创建数据集标注与训练).

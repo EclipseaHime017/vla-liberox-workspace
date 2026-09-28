@@ -24,6 +24,13 @@ additional_tasks:
     task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
   - level: LEVEL1
     task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+  # Longer-horizon baselines; retain LEVEL1 to isolate task composition.
+  - level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    optional: true
+  - level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side
+    optional: true
   # Optional extensions remain visible but disabled if assets are not installed.
   - level: LEVEL2
     task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
@@ -77,3 +84,11 @@ task_families:
       - EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
       - EXTENSION_KITCHEN_SCENE25_LEVEL3__T133_stack_the_blue_bowl_on_the_green_bowl
       - EXTENSION_KITCHEN_SCENE25_LEVEL4__T133__A1_stack_the_cyan_bowl_on_the_green_bowl
+  - family_id: bowl_in_drawer_and_close
+    label: place the bowl in the drawer and close it
+    task_names:
+      - EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+  - family_id: stove_off_and_sort_bowls
+    label: turn off the stove and sort two bowls into the drainer
+    task_names:
+      - EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side

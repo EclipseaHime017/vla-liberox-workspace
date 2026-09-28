@@ -35,7 +35,7 @@ def test_rejects_ambiguous_family_configuration(tmp_path, families):
         load_ui_config(path)
 
 
-def test_default_catalog_has_three_purposes_and_thirteen_unique_level1_to_4_scenes(monkeypatch):
+def test_default_catalog_adds_two_level1_composite_tasks_without_changing_existing_scenes(monkeypatch):
     root = Path(__file__).resolve().parents[3]
     config = load_ui_config(root / "configs/ui_config.yaml")
     default = SimpleNamespace(level="LEVEL1", task_name=config.task_families[0].task_names[0])
@@ -43,19 +43,51 @@ def test_default_catalog_has_three_purposes_and_thirteen_unique_level1_to_4_scen
     def parse(path):
         language = Path(path).read_text().split("(:language", 1)[1].split(")", 1)[0].strip()
         return {"language": language}
-    monkeypatch.setattr(tasks_module.direct, "load_initial_states", lambda *_: np.zeros((10, 5)))
+    reads = []
+    def load_states(_runtime, path):
+        reads.append(path)
+        return np.zeros((10, 5))
+    monkeypatch.setattr(tasks_module.direct, "load_initial_states", load_states)
     catalog = ConfiguredTaskCatalog(SimpleNamespace(parse_bddl_file=parse), root / "LIBERO-X",
                                    default, config.additional_tasks, config.task_families)
     entries = catalog.list_tasks()
-    assert len(entries) == 13
+    assert len(entries) == 15
     assert all(entry["available"] for entry in entries)
     assert {entry["level"] for entry in entries} == {f"LEVEL{i}" for i in range(1, 5)}
-    assert {entry["family_id"] for entry in entries} == {"bowl_on_stove", "open_top_drawer", "stack_bowls"}
-    assert len({(e["family_id"], e["level"], e["prompt"]) for e in entries}) == 13
+    assert {entry["family_id"] for entry in entries} == {
+        "bowl_on_stove", "open_top_drawer", "stack_bowls",
+        "bowl_in_drawer_and_close", "stove_off_and_sort_bowls",
+    }
+    assert len({(e["family_id"], e["level"], e["prompt"]) for e in entries}) == 15
+    assert {level: sum(e["level"] == level for e in entries)
+            for level in ("LEVEL1", "LEVEL2", "LEVEL3", "LEVEL4")} == {
+                "LEVEL1": 5, "LEVEL2": 3, "LEVEL3": 3, "LEVEL4": 4,
+            }
     bowl = [e for e in entries if e["family_id"] == "bowl_on_stove"]
     assert len(bowl) == 5 and len({e["family_label"] for e in bowl}) == 1
     assert len([e for e in bowl if e["level"] == "LEVEL4"]) == 2
     assert all(e["task_id"] == f"{e['level']}::{e['task_name']}" for e in entries)
+    new_tasks = {
+        "bowl_in_drawer_and_close": (
+            "EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer",
+            "place the yellow bowl in the bottom drawer of the white cabinet and close the drawer",
+        ),
+        "stove_off_and_sort_bowls": (
+            "EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side",
+            "turn off the stove and place the smallest bowl in the left side of the drainer and the medium bowl in the right side",
+        ),
+    }
+    for family, (name, prompt) in new_tasks.items():
+        entry, = [e for e in entries if e["family_id"] == family]
+        assert entry["task_id"] == f"LEVEL1::{name}"
+        assert entry["prompt"] == prompt
+        assert entry["init_state_index_max"] == 9
+        bddl, init = catalog.paths(entry["task_id"])
+        assert bddl.is_file() and init.is_file()
+        assert catalog.initial_state(entry["task_id"], 9).shape == (5,)
+    # Listing and selecting scenes reuse cached metadata; no simulator is loaded.
+    catalog.list_tasks()
+    assert len(reads) == len(set(reads)) == 15
 
 
 def test_task_set_filters_before_pagination_counts_and_status_checks(tmp_path, monkeypatch):

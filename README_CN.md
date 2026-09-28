@@ -8,7 +8,7 @@
 2. 统一数据集评价配置，支持复用已有输出重算 Final Reward 或串行执行 All，保护原始评价与历史训练。
 3. 详情分别显示 Original Final Reward 三组件和融合后的 Final Reward，训练不再单独选择奖励类型。
 
-这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse / FACTR 人工接管与数据管理终端。UI 按「任务 → 难度 → 提示词」提供三个任务族的 LEVEL1–4 官方变体，暂不开放 LEVEL5；下文保留 LEVEL1 黑碗任务作为 CLI 配置示例。实体控制器能力仍需在连接对应硬件后验收。
+这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse / FACTR 人工接管与数据管理终端。UI 按「任务 → 难度 → 提示词」提供五个任务族：原有三个任务的 LEVEL1–4 官方变体，以及两个 LEVEL1 长程组合任务，暂不开放 LEVEL5；下文保留 LEVEL1 黑碗任务作为 CLI 配置示例。实体控制器能力仍需在连接对应硬件后验收。
 
 默认任务：
 
@@ -569,24 +569,33 @@ curl -s http://127.0.0.1:8000/api/controller | python -m json.tool
 
 确认 UI 使用的同一个环境安装了 `requirements-spacemouse.txt`，并按 3.6 节安装精确 udev 规则、重新加载规则后拔插设备。无需修改 VID/PID。
 
-UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。`configs/ui_config.yaml` 的 `task_families` 显式定义三个实际目的，不以颜色或提示词措辞拆成不同任务：
+UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz 控制设置。`configs/ui_config.yaml` 的 `task_families` 显式定义五个实际目的，不以颜色或提示词措辞拆成不同任务：
 
 - `place the bowl on the stove`；
 - `open the top drawer of the wooden cabinet`；
-- `stack the bowls`。
+- `stack the bowls`；
+- `place the bowl in the drawer and close it`（新增，仅 LEVEL1）；
+- `turn off the stove and sort two bowls into the drainer`（新增，仅 LEVEL1）。
 
 随后选择难度和真实提示词，例如 `place the bowl on the stove → LEVEL1 → place the black bowl on the flat stove`。LEVEL4 同一任务内可再选青色碗或大浅灰碗；最终仍提交唯一原始 `task_id`，不改变轨迹身份、训练提示词或数据存储格式。
 
 | 难度 | 资源与变化 | 当前选择数 |
 |---|---|---:|
-| LEVEL1 | 局部空间扰动；原有三个任务 | 3 |
+| LEVEL1 | 局部空间扰动；原有三个任务及两个长程组合任务 | 5 |
 | LEVEL2 | 扩展空间扰动；同名任务对应 LEVEL2 BDDL/init | 3 |
 | LEVEL3 | 场景布局重构；按官方 T7/T70/T133 对应任务 | 3 |
 | LEVEL4 | 物体视觉属性变体；放炉任务为青色碗/大浅灰碗两个版本，叠碗为青色碗，抽屉保留真实原任务提示词 | 4 |
 
 等级含义见 [LIBERO-X 官方说明](https://meituan.github.io/LIBERO-X/)。LEVEL5 资源仍保留在 `LIBERO-X/libero/libero_x/LEVEL5/`，它是复用 LEVEL4 场景的语言改写评价，不是另一个物理难度场景；本阶段从默认选择和检索选项中移除，不删除上游文件或历史数据。
 
-当前共 13 个场景，本地每个场景有 10 个 init states。仿真和测试配置使用三个关联选择框，切换上级会同步选择有效下级；活动仿真和分支仍锁定场景。数据检索也使用相同顺序，允许停在「全部任务／全部难度／全部提示词」；跨场景筛选在分页之前执行，计数与结果一致。创建数据集、轨迹评价和 ZIP 导出仍需选定具体提示词，训练可从检索结果中选择一个冻结数据集。缺失可选资源禁止创建仿真，但历史数据仍可检索。
+当前共 15 个场景，本地每个场景有 10 个 init states。仿真和测试配置使用三个关联选择框，切换上级会同步选择有效下级；活动仿真和分支仍锁定场景。数据检索也使用相同顺序，允许停在「全部任务／全部难度／全部提示词」；跨场景筛选在分页之前执行，计数与结果一致。创建数据集、轨迹评价和 ZIP 导出仍需选定具体提示词，训练可从检索结果中选择一个冻结数据集。缺失可选资源禁止创建仿真，但历史数据仍可检索。
+
+两个新增任务沿用官方场景及提示词，不修改奖励或成功判定：
+
+- **黄色碗入抽屉并关门**：`LEVEL1::EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer`。抽屉初始打开；成功需要碗在底层抽屉内且抽屉关闭，不包含额外的开抽屉步骤。
+- **关炉子并收纳两个碗**：`LEVEL1::EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side`。炉子初始开启；成功需要炉子关闭、最小碗在沥水架左侧、中等碗在右侧。三个最终条件同时满足即可，环境不强制它们的执行顺序。
+
+先开放 LEVEL1，以分开比较任务长度与场景扰动的影响。选择长程任务后，请根据完整示教耗时调整“总控制步数”；平台不会自动增加原有步数预算，也不改变 20 Hz 或每次预测的 8 步 action chunk。比较不同训练方法时应固定同一任务的预算、初始状态及连续成功阈值。新任务缺失 BDDL/init 时会显示为不可用，不阻止其他任务启动。
 
 所有任务继续使用所选基础策略或 overlay，不附加 `experimental_ood` 标签，不改变环境 done、连续成功阈值或成功率统计逻辑。扩展难度不意味着已测得策略成功率；本机已完成资源验证和短无模型场景烟测。seed 和初始状态索引的说明保留在文档，表单下方不再显示说明段落；数值范围校验不变。
 
@@ -618,7 +627,13 @@ additional_tasks:
     task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
   - level: LEVEL1
     task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
-  # 完整 LEVEL2–4 目录及三个任务分组见 configs/ui_config.yaml。
+  - level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    optional: true
+  - level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side
+    optional: true
+  # 完整 LEVEL2–4 目录及五个任务分组见 configs/ui_config.yaml。
 task_families:
   - family_id: bowl_on_stove
     label: place the bowl on the stove
