@@ -187,7 +187,7 @@ def test_disabling_rynnvalue_reuses_evaluation_and_materializes_sparse_only(
     prepare_dataset(configured)
     annotation_path = annotate_manifest(configured, FakeAnnotator())
     annotation_before = json.loads(annotation_path.read_text(encoding="utf-8"))
-    configured.raw["reward"]["rynnvalue"] = False
+    configured.raw["reward"].update(source="sparse", rynnvalue=False)
 
     class UnexpectedModelLoad:
         def __init__(self, _config):
@@ -198,11 +198,26 @@ def test_disabling_rynnvalue_reuses_evaluation_and_materializes_sparse_only(
     assert rebuilt["reward_config"]["rynnvalue"] is False
     assert json.loads(annotation_path.read_text(encoding="utf-8")) == annotation_before
     with np.load(rebuilt["episodes"][0]["reward_path"], allow_pickle=False) as arrays:
-        assert np.any(arrays["pbrs_shaping_reward"] != 0.0)
-        assert np.all(arrays["dense_reward"] == 0.0)
+        assert "pbrs_shaping_reward" not in arrays
+        assert "dense_reward" not in arrays
         assert np.array_equal(arrays["pbrs_chunk_reward"], arrays["sparse_reward"])
 
 
+def test_manifest_without_explicit_reward_mode_is_rebuilt(configured, monkeypatch):
+    prepare_dataset(configured)
+    annotate_manifest(configured, FakeAnnotator())
+    manifest_path = materialize_reward_manifest(configured)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["reward_config"]["accumulate_primitive_steps"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    class UnexpectedModelLoad:
+        def __init__(self, _config):
+            raise AssertionError("mode migration must reuse stored RynnValue heads")
+
+    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    rebuilt = load_reward_index(configured)
+    assert rebuilt["reward_config"]["accumulate_primitive_steps"] is False
 
 
 def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
@@ -380,12 +395,15 @@ def test_sparse_reward_uses_only_debounced_terminal(configured):
     branch = next(item for item in index["episodes"] if item["run_id"] == "branch")
     with np.load(branch["reward_path"], allow_pickle=False) as annotation:
         rewards = annotation["pbrs_chunk_reward"]
-    # The final chunk is one completing macro action, irrespective of its five
-    # executed low-level actions or earlier transient done=True samples.
-    expected = 0.0
-    # Evaluation continues through the recorded post-terminal tail. The final
-    # replay chunk is therefore not necessarily the final diagnostic chunk.
-    assert np.isclose(rewards[len(prepared_branch["chunks"]) - 1], expected)
+    # The chunk completing the confirmation streak receives the success reward,
+    # irrespective of its length or earlier transient done=True samples.
+    success_chunk = next(
+        index for index, chunk in enumerate(prepared_branch["evaluation_chunks"])
+        if chunk["end"] == prepared_branch["terminal_step"] + 1
+    )
+    assert np.isclose(rewards[success_chunk], 0.0)
+    # Training also retains the recorded tail, whose saved sparse reward is zero.
+    assert success_chunk < len(rewards) - 1
     assert np.isclose(rewards[-1], 0.0)
 
 

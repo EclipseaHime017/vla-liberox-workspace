@@ -1,0 +1,53 @@
+schema_version: 2
+# Shared run/actor settings. Model adaptation and algorithm optimizers are separate.
+training:
+  policy_peak_lr: 0.00003
+  policy_final_lr: 0.000003
+  train_steps: 10000
+  micro_batch_size: 1
+  gradient_accumulation_steps: 32
+  checkpoint_interval: 512
+  resume_checkpoint: null
+  seed: 7
+  device: cuda:0
+  dtype: bfloat16
+paths:
+  dataset_sources:
+    - ../../dataset-root
+  work_dir: ../outputs/work
+  output_dir: ../outputs/training
+  annotation_cache: ../outputs/annotation-cache
+  vla_adapter_root: ../../VLA-Adapter
+  libero_x_root: ../../LIBERO-X
+  rynnvalue_root: ../../RynnValue
+  policy_registry: ../../policy-registry
+data:
+  project_id: libero_x_vla
+  task_ids: []
+  # Optional immutable UI dataset manifest. null preserves recursive CLI discovery.
+  selection_manifest: null
+  # Optional immutable Stage annotation snapshot; null reads each episode sidecar.
+  stage_annotations_manifest: null
+  control_hz: 20.0
+  success_consecutive_steps: 5
+  # false: train through the confirming action only; keep full recordings/evaluations.
+  include_post_success: true
+  validation_fraction: 0.2
+  split_seed: 7
+  allow_no_success: true
+logging:
+  # TensorBoard events are written beside metrics.jsonl for each training run.
+  tensorboard: true
+  wandb:
+    # Online mode requires `wandb login` before unattended training.
+    enabled: false
+    mode: online
+    project: vla-adapter-rynn-iql
+    entity: null
+    run_name: null
+    group: null
+    tags: [liberox]
+    log_interval_steps: 10
+  flush_seconds: 5
+  # Print progress, rolling throughput, ETA, losses and VRAM every N train steps.
+  console_interval_steps: 10

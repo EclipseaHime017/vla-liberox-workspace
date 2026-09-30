@@ -100,6 +100,16 @@ def test_terminal_yaml_rejects_duplicate_keys(configured, tmp_path: Path):
         load_terminal_config(path)
 
 
+def test_new_fusion_override_promotes_a_legacy_base(configured, tmp_path: Path):
+    from vla_rynn_iql.config import needs_stage, needs_rynnvalue
+    terminal = load_terminal_config(_terminal_config(tmp_path, configured.path))
+    terminal.overrides["reward"] = {"alpha": .5, "shaping_weight": 0.}
+    raw = merged_training_config(terminal)
+    assert raw["reward"]["source"] == "final"
+    assert needs_stage(raw["reward"])
+    assert not needs_rynnvalue(raw["reward"])
+
+
 def test_terminal_yaml_rejects_invalid_environment_and_unknown_override(
     configured, tmp_path: Path,
 ):
@@ -164,6 +174,9 @@ def test_prepare_fingerprint_cache_and_bound_evaluation(configured, tmp_path: Pa
     selection_path.parent.mkdir(parents=True)
     selection_path.write_text(json.dumps(selection), encoding="utf-8")
     fingerprint = prepare_fingerprint(selection, raw)
+    raw["data"]["include_post_success"] = False
+    assert prepare_fingerprint(selection, raw) == fingerprint  # Replay-only selection; full Prepare is reusable.
+    raw["data"]["include_post_success"] = True
     work = terminal.pipeline_root / "cache" / fingerprint / "work"
     raw["paths"]["work_dir"] = str(work)
     raw["data"]["task_ids"] = [selection["task_id"]]
@@ -206,7 +219,30 @@ def test_prepare_fingerprint_cache_and_bound_evaluation(configured, tmp_path: Pa
 def test_training_only_override_does_not_change_prepare_fingerprint(configured, tmp_path: Path):
     _, raw, _, selection = _selection(configured, tmp_path)
     before = prepare_fingerprint(selection, raw)
-    raw["iql"]["train_steps"] += 1000
+    raw["training"]["train_steps"] += 1000
     assert prepare_fingerprint(selection, raw) == before
     raw["data"]["success_consecutive_steps"] += 1
     assert prepare_fingerprint(selection, raw) != before
+
+
+@pytest.mark.parametrize("complete_tail", [True, False])
+def test_legacy_prepare_cache_requires_complete_recorded_tail(
+    configured, tmp_path: Path, complete_tail: bool,
+):
+    _, raw, _, selection = _selection(configured, tmp_path)
+    fingerprint = prepare_fingerprint(selection, raw)
+    prepared = prepare_dataset(configured)
+    manifest = json.loads(prepared.manifest.read_text(encoding="utf-8"))
+    manifest.pop("replay_policy")
+    manifest["source_dataset_sha256"] = selection["dataset_sha256"]
+    branch = next(ep for ep in manifest["episodes"] if ep["run_id"] == "branch")
+    branch["action_count"] = 18
+    branch["chunks"] = branch["chunks"][:-1]
+    if not complete_tail:
+        branch["evaluation_chunks"] = branch["evaluation_chunks"][:-1]
+    prepared.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    original = prepared.manifest.read_bytes()
+    mark_prepare_cache(prepared.manifest.parent, fingerprint, selection["dataset_sha256"])
+
+    assert prepare_cache_valid(prepared.manifest.parent, fingerprint) is complete_tail
+    assert prepared.manifest.read_bytes() == original

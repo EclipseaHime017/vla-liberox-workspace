@@ -102,6 +102,8 @@ def bind_reward_manifest(
         raise ValueError(f"Prepared manifest is invalid: {prepared_path}")
     if rewards is None or rewards.get("complete") is not True:
         raise ValueError(f"Reward manifest is incomplete: {reward_path}")
+    if rewards.get("reward_config", {}).get("source", "rynnvalue") != "rynnvalue":
+        raise ValueError("Only original RynnValue rewards may be bound as RynnValue evaluation")
     if (
         rewards.get("schema_version") != REWARD_SCHEMA_VERSION
         or rewards.get("kind") != "derived_iql_reward"

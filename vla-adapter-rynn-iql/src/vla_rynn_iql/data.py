@@ -19,6 +19,18 @@ from .io import atomic_json, sha256_file, stable_hash
 LOG = logging.getLogger(__name__)
 MANIFEST_NAME = "dataset_manifest.json"
 MANIFEST_SCHEMA_VERSION = 4
+REPLAY_POLICY = "full_recording_v1"
+
+
+def training_replay_policy(include_post_success: bool = True) -> str:
+    return REPLAY_POLICY if include_post_success else "confirmed_success_v1"
+
+
+def replay_end_step(episode: dict[str, Any], include_post_success: bool = True) -> int:
+    """Exclusive training endpoint; physical recordings and reward indices stay intact."""
+    terminal = episode.get("terminal_step")
+    return (int(episode["recorded_action_count"]) if include_post_success or terminal is None
+            else int(terminal) + 1)
 
 
 @dataclass(frozen=True)
@@ -114,17 +126,61 @@ def build_semi_mdp_chunks(
     return chunks
 
 
+def replay_chunks(episode: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return full-recording replay without changing prepared/cache identities.
+
+    Older schema-4 manifests kept the post-success tail in evaluation_chunks
+    and annotated its rewards at those same indices. Reuse that complete list
+    in memory, while retaining the manifest and its existing reward hash.
+    """
+    recorded_end = int(episode["recorded_action_count"])
+    prepared = episode["chunks"]
+    complete = bool(prepared) and int(prepared[-1]["end"]) == recorded_end
+    chunks = prepared if complete else episode.get("evaluation_chunks", [])
+    run_id = episode["run_id"]
+    error = (
+        f"Run {run_id} lacks aligned full-recording replay chunks; "
+        "rerun preparation and reward materialization for the complete recording"
+    )
+    expected_start = 0
+    for chunk in chunks:
+        start, end, length = int(chunk["start"]), int(chunk["end"]), int(chunk["length"])
+        if start != expected_start or length <= 0 or end - start != length:
+            raise ValueError(error)
+        expected_start = end
+    if expected_start != recorded_end or not chunks:
+        raise ValueError(error)
+    if not complete:
+        if len(prepared) > len(chunks) or any(
+            any(original[key] != full[key] for key in ("start", "end", "length", "action_source"))
+            for original, full in zip(prepared, chunks)
+        ):
+            raise ValueError(error)
+        return [
+            {**chunk, "transition_type": chunk["action_source"]}
+            if chunk.get("transition_type") == "post_terminal_evaluation" else chunk
+            for chunk in chunks
+        ]
+    return chunks
+
+
 def iter_unique_replay_chunks(
     episodes: list[dict[str, Any]], *, split: str | None = None,
+    include_post_success: bool = True,
 ) -> Iterator[tuple[dict[str, Any], int]]:
-    """Yield replay chunks while counting physically copied prefixes once."""
+    """Select the training interval, retaining full reward indices and de-duplicating prefixes."""
+    full_chunks = {str(episode["run_id"]): replay_chunks(episode) for episode in episodes}
+    for episode in episodes:
+        end = replay_end_step(episode, include_post_success)
+        if not any(int(chunk["end"]) == end for chunk in full_chunks[str(episode["run_id"])]):
+            raise ValueError(f"Run {episode['run_id']} lacks a chunk at the confirmed success boundary; rerun Prepare")
     copied_prefix_keys = {
         (
             str(episode["root_run_id"]), int(chunk["start"]),
             int(chunk["end"]), str(chunk["action_source"]),
         )
         for episode in episodes
-        for chunk in episode["chunks"]
+        for chunk in full_chunks[str(episode["run_id"])]
         if bool(chunk.get("copied_prefix", False))
     }
     seen_copied_prefixes: set[tuple[str, int, int, str]] = set()
@@ -135,7 +191,9 @@ def iter_unique_replay_chunks(
     for episode in ordered:
         if split is not None and episode["split"] != split:
             continue
-        for chunk_index, chunk in enumerate(episode["chunks"]):
+        for chunk_index, chunk in enumerate(full_chunks[str(episode["run_id"])]):
+            if int(chunk["end"]) > replay_end_step(episode, include_post_success):
+                continue
             key = (
                 str(episode["root_run_id"]), int(chunk["start"]),
                 int(chunk["end"]), str(chunk["action_source"]),
@@ -293,7 +351,8 @@ def _materialize_export(run_dir: Path, cache_dir: Path) -> tuple[Path, Path]:
     return trajectory_path, observations_path
 
 
-def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
+def _load_run(run_json: Path, config: LoadedConfig, *,
+              frozen_observations_sha256: str | None = None) -> dict[str, Any] | None:
     run = json.loads(run_json.read_text(encoding="utf-8"))
     if run.get("status") != "COMPLETED" or run.get("error"):
         return None
@@ -305,6 +364,8 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
     trajectory = episode_dir / "trajectory.npz"
     observations = episode_dir / "trajectory_observations.npz"
     observation_orientation = "libero_raw"
+    if frozen_observations_sha256 is not None and (not trajectory.is_file() or not observations.is_file()):
+        raise ValueError("Frozen source files are unavailable; cannot reconstruct reward inputs")
     if not trajectory.is_file() or not observations.is_file():
         cache = Path(config.section("paths")["work_dir"]) / "materialized" / str(run["id"])
         trajectory, observations = _materialize_export(run_json.parent, cache)
@@ -377,25 +438,29 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         required_success_steps = int(data_cfg["success_consecutive_steps"])
         terminal_step = confirmed_terminal_step(done, required_success_steps)
         environment_success = terminal_step is not None
-        # A single-frame goal crossing is not stable completion. Preserve actions until
-        # the configured consecutive-success threshold is met, and use the confirming
-        # action (the final True in that streak) as the terminal transition.
-        action_count = terminal_step + 1 if terminal_step is not None else recorded_action_count
-        trailing_action_count = recorded_action_count - action_count
+        # Success confirmation remains the reward/outcome boundary. Replay keeps
+        # the complete recording, including actions after the confirming streak.
+        action_count = recorded_action_count
+        success_end = terminal_step + 1 if terminal_step is not None else recorded_action_count
+        trailing_action_count = recorded_action_count - success_end
         post_terminal_false_count = (
-            int(np.count_nonzero(~done[action_count:])) if terminal_step is not None else 0
+            int(np.count_nonzero(~done[success_end:])) if terminal_step is not None else 0
         )
         recorded_success = bool(run.get("success", False))
         if recorded_success != raw_environment_success:
             raise ValueError(f"run.success and environment done disagree: {run_json}")
-    with np.load(observations, allow_pickle=False) as images:
-        for key in ("agentview_image", "wrist_image"):
-            if key not in images or images[key].shape[0] != recorded_action_count + 1:
-                raise ValueError(f"Invalid {key} alignment: {observations}")
-            if images[key].ndim != 4 or images[key].shape[-1] != 3:
-                raise ValueError(f"Invalid {key} image dimensions: {observations}")
-            if images[key].dtype != np.uint8:
-                raise ValueError(f"{key} must contain uint8 RGB images: {observations}")
+    # UI reward inheritance only reconstructs control/chunk metadata from
+    # already frozen sources. Full source hashes are verified before training;
+    # status requests must not repeatedly decompress the two image archives.
+    if frozen_observations_sha256 is None:
+        with np.load(observations, allow_pickle=False) as images:
+            for key in ("agentview_image", "wrist_image"):
+                if key not in images or images[key].shape[0] != recorded_action_count + 1:
+                    raise ValueError(f"Invalid {key} alignment: {observations}")
+                if images[key].ndim != 4 or images[key].shape[-1] != 3:
+                    raise ValueError(f"Invalid {key} image dimensions: {observations}")
+                if images[key].dtype != np.uint8:
+                    raise ValueError(f"{key} must contain uint8 RGB images: {observations}")
     kind = str(run.get("kind", "original"))
     resume = int(run.get("resume_step") or 0) if kind == "branch" else 0
     if not 0 <= resume < action_count:
@@ -406,7 +471,7 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         raise ValueError(f"Branch suffix contains unexpected action_source values: {run_json}")
     if trailing_action_count:
         LOG.info(
-            "Run %s confirmed success at action %d; excluding %d post-terminal actions "
+            "Run %s confirmed success at action %d; retaining %d post-success actions in Prepare "
             "(%d later done=False)",
             run["id"], terminal_step, trailing_action_count, post_terminal_false_count,
         )
@@ -444,7 +509,7 @@ def _load_run(run_json: Path, config: LoadedConfig) -> dict[str, Any] | None:
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
-        "observations_sha256": sha256_file(observations),
+        "observations_sha256": frozen_observations_sha256 or sha256_file(observations),
         "observation_orientation": observation_orientation,
         "source_manifest": str(run_json.resolve()),
         "source_manifest_sha256": sha256_file(run_json),
@@ -455,6 +520,38 @@ def _split(root_run_id: str, seed: int, validation_fraction: float) -> str:
     digest = hashlib.sha256(f"{seed}:{root_run_id}".encode()).digest()
     value = int.from_bytes(digest[:8], "big") / float(2**64)
     return "validation" if value < validation_fraction else "train"
+
+
+def add_episode_chunks(episode: dict[str, Any], horizon: int) -> None:
+    """Describe the complete recording identically for Prepare and inheritance."""
+    resume_step = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
+    success_end = (int(episode["terminal_step"]) + 1 if episode["terminal_step"] is not None
+                   else int(episode["recorded_action_count"]))
+    chunks = build_semi_mdp_chunks(first=0, end=success_end, horizon=horizon,
+                                   source_segments=episode["action_source_segments"])
+    if success_end < int(episode["recorded_action_count"]):
+        chunks.extend(build_semi_mdp_chunks(first=success_end,
+            end=int(episode["recorded_action_count"]), horizon=horizon,
+            source_segments=episode["recorded_action_source_segments"]))
+    if episode["kind"] == "branch":
+        for chunk in chunks:
+            if int(chunk["end"]) > resume_step:
+                continue
+            if str(chunk["action_source"]) != "policy":
+                raise ValueError(f"Branch {episode['run_id']} has non-policy action "
+                                 f"before resume_step={resume_step}: {chunk['action_source']!r}")
+            chunk["copied_prefix"] = True
+            if int(chunk["end"]) == resume_step and int(chunk["length"]) < horizon:
+                chunk["transition_type"] = "policy_interrupted"
+                chunk["interrupted"] = True
+            else:
+                chunk["transition_type"] = "policy_prefix"
+    episode["chunks"] = chunks
+    episode["evaluation_chunks"] = [
+        {**chunk, "transition_type": "post_terminal_evaluation"}
+        if int(chunk["start"]) >= success_end else dict(chunk) for chunk in chunks]
+    episode["reward_boundaries"] = sorted({
+        value for chunk in episode["evaluation_chunks"] for value in (chunk["start"], chunk["end"])})
 
 
 def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
@@ -519,51 +616,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             selected[episode["run_id"]]["split"]
             if selected else _split(episode["root_run_id"], seed, fraction)
         )
-        resume_step = (
-            int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
-        )
-        chunks = build_semi_mdp_chunks(
-            first=0,
-            end=int(episode["action_count"]),
-            horizon=horizon,
-            source_segments=episode["action_source_segments"],
-        )
-        if episode["kind"] == "branch":
-            for chunk in chunks:
-                if int(chunk["end"]) > resume_step:
-                    continue
-                if str(chunk["action_source"]) != "policy":
-                    raise ValueError(
-                        f"Branch {episode['run_id']} has non-policy action "
-                        f"before resume_step={resume_step}: {chunk['action_source']!r}"
-                    )
-                chunk["copied_prefix"] = True
-                if int(chunk["end"]) == resume_step and int(chunk["length"]) < horizon:
-                    chunk["transition_type"] = "policy_interrupted"
-                    chunk["interrupted"] = True
-                else:
-                    chunk["transition_type"] = "policy_prefix"
-        episode["chunks"] = chunks
-        # Replay terminates at the debounced success transition, but trajectory
-        # evaluation must continue over every physically recorded observation.
-        # Keeping the training chunks first preserves ReplayDataset's chunk
-        # indices while RynnValue and the detail UI retain the complete timeline.
-        evaluation_chunks = list(chunks)
-        if int(episode["action_count"]) < int(episode["recorded_action_count"]):
-            trailing_chunks = build_semi_mdp_chunks(
-                first=int(episode["action_count"]),
-                end=int(episode["recorded_action_count"]),
-                horizon=horizon,
-                source_segments=episode["recorded_action_source_segments"],
-            )
-            for chunk in trailing_chunks:
-                chunk["transition_type"] = "post_terminal_evaluation"
-            evaluation_chunks.extend(trailing_chunks)
-        episode["evaluation_chunks"] = evaluation_chunks
-        episode["reward_boundaries"] = sorted({
-            value for chunk in evaluation_chunks
-            for value in (chunk["start"], chunk["end"])
-        })
+        add_episode_chunks(episode, horizon)
     if not selected and all(ep["split"] == "validation" for ep in episodes):
         # Tiny smoke-test datasets still need at least one train root.
         root = episodes[0]["root_run_id"]
@@ -582,6 +635,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             raise RuntimeError(message)
     payload = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
+        "replay_policy": REPLAY_POLICY,
         "chunking": "variable_duration_action_source_v2_full_branch_prefix",
         "source_dataset_id": None if selection_payload is None else selection_payload["id"],
         "source_dataset_sha256": None if selection_payload is None else selection_payload["dataset_sha256"],

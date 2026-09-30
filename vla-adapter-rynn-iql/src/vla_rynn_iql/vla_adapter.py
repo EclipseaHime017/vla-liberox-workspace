@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from PIL import Image
 
 from .config import LoadedConfig, UniqueKeyLoader
 from .io import sha256_file, stable_hash
+from .models import model_config
 
 
 ACTION_HORIZON = 8
@@ -90,41 +92,79 @@ def _add_vla_path(config: LoadedConfig) -> None:
         sys.path.insert(0, str(root))
 
 
+@contextmanager
+def _rank_component_loader(utils, device):
+    """Keep upstream DDP-key handling while avoiding checkpoint CUDA tags.
+
+    Object-Pro component checkpoints contain cuda:0 storages. Each rank must
+    deserialize on CPU before copying into its own device-resident modules.
+    The hook is local to model construction in this isolated worker process.
+    """
+    import torch
+    original = utils.load_component_state_dict
+
+    def load_cpu(path):
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        return {key.removeprefix("module."): value for key, value in state.items()}
+
+    utils.DEVICE = device
+    utils.load_component_state_dict = load_cpu
+    try:
+        yield
+    finally:
+        utils.load_component_state_dict = original
+
+
 def load_components(
-    config: LoadedConfig, overlay: Path | None = None, *, training: bool = True
+    config: LoadedConfig, overlay: Path | None = None, *, training: bool = True, device: Any = None
 ) -> VLAComponents:
+    from .model_adaptation import configure_components
     _add_vla_path(config)
+    if device is not None:
+        # Upstream constructors use module constants, not training.device.
+        # Each torchrun worker has its own interpreter; this does not affect UI.
+        from experiments.robot import openvla_utils, robot_utils
+        openvla_utils.DEVICE = device
+        robot_utils.DEVICE = device
     from experiments.robot.libero.run_libero_eval import GenerateConfig, initialize_model
 
-    vla_cfg = config.section("vla")
+    vla_cfg = config.section("model")
     cfg = GenerateConfig(
         pretrained_checkpoint=vla_cfg["base_checkpoint"],
         task_suite_name=vla_cfg["stats_key"],
         use_l1_regression=True, use_minivlm=True, num_images_in_input=2,
         use_proprio=True, use_film=False, use_pro_version=True,
         load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=ACTION_HORIZON,
-        seed=int(config.section("iql")["seed"]), phase="Inference",
+        seed=int(config.section("training")["seed"]), phase="Inference",
     )
-    model, action_head, proprio_projector, _, processor = initialize_model(cfg)
+    if device is None:
+        model, action_head, proprio_projector, _, processor = initialize_model(cfg)
+    else:
+        with _rank_component_loader(openvla_utils, device):
+            model, action_head, proprio_projector, _, processor = initialize_model(cfg)
     stats_key = resolve_stats_key(model.norm_stats, vla_cfg["stats_key"])
     cfg.unnorm_key = stats_key
     if overlay is not None:
         policy = load_overlay(overlay)
         validate_overlay(policy, vla_cfg["base_checkpoint"], stats_key)
         import torch
+        if policy.backbone is not None:
+            model.load_state_dict(torch.load(policy.backbone, map_location="cpu", weights_only=True), strict=True)
         action_head.load_state_dict(torch.load(policy.action_head, map_location="cpu", weights_only=True))
         proprio_projector.load_state_dict(torch.load(policy.proprio_projector, map_location="cpu", weights_only=True))
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    model.eval()
-    action_head.train(training)
-    proprio_projector.train(training)
-    return VLAComponents(
+    components = VLAComponents(
         cfg=cfg, model=model, action_head=action_head,
         proprio_projector=proprio_projector, processor=processor,
         stats_key=stats_key, action_stats=model.norm_stats[stats_key]["action"],
         proprio_stats=model.norm_stats[stats_key]["proprio"],
     )
+    configure_components(components, model_config(config.raw), training=training)
+    if device is not None:
+        for name in ("model", "action_head", "proprio_projector"):
+            module = getattr(components, name).to(device)
+            if any(parameter.device != device for parameter in module.parameters()):
+                raise RuntimeError(f"{name} did not load on the requested device {device}")
+    return components
 
 
 def qwen_prompt(task: str) -> str:
@@ -195,7 +235,7 @@ def processor_inputs(
 
 
 def extract_action_hidden_states(components: VLAComponents, inputs: Any):
-    """Frozen VLA forward up to the Pro action-head conditioning tensor."""
+    """Differentiable Pro conditioning; frozen backbones retain the no-grad path."""
     import torch
     from prismatic.vla.constants import IGNORE_INDEX, NUM_TOKENS, STOP_INDEX
 
@@ -203,7 +243,8 @@ def extract_action_hidden_states(components: VLAComponents, inputs: Any):
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
     pixel_values = inputs["pixel_values"]
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=input_ids.is_cuda):
+    gradients = torch.is_grad_enabled() and any(p.requires_grad for p in model.parameters())
+    with torch.set_grad_enabled(gradients), torch.autocast("cuda", dtype=torch.bfloat16, enabled=input_ids.is_cuda):
         labels = input_ids.clone()
         labels[:] = IGNORE_INDEX
         prompt_tokens = input_ids.shape[-1] - 1
@@ -234,7 +275,15 @@ def extract_action_hidden_states(components: VLAComponents, inputs: Any):
             action_hidden = action_hidden.reshape(hidden.shape[0], 1, NUM_TOKENS, -1)
             task_hidden = hidden[:, :patch_count].reshape(hidden.shape[0], 1, patch_count, -1)
             layers.append(torch.cat((task_hidden, action_hidden), dim=2))
-        return torch.cat(layers, dim=1).detach()
+        return torch.cat(layers, dim=1)
+
+
+def predict_batch(components: VLAComponents, batch: dict, device: Any):
+    import torch
+    inputs = processor_inputs(components, list(batch["prompt"]),
+                              batch["agent_image"].cpu().numpy(), batch["wrist_image"].cpu().numpy())
+    hidden = extract_action_hidden_states(components, inputs)
+    return predict_normalized(components, hidden, batch["proprio"].to(device=device, dtype=torch.bfloat16))
 
 
 def predict_normalized(components: VLAComponents, hidden: Any, proprio: Any):
@@ -257,10 +306,12 @@ class PolicyOverlay:
     action_dim: int
     proprio_dim: int
     dataset_sha256: str
-    reward_sha256: str
+    reward_sha256: str | None
     training_step: int
     component_sha256: dict[str, str]
     compatibility_sha256: str
+    backbone: Path | None = None
+    model_config: dict[str, Any] | None = None
 
 
 def load_overlay(path: Path) -> PolicyOverlay:
@@ -270,8 +321,21 @@ def load_overlay(path: Path) -> PolicyOverlay:
                 "action_head", "proprio_projector", "action_horizon", "action_dim",
                 "proprio_dim", "dataset_sha256", "reward_sha256", "training_step",
                 "component_sha256", "compatibility_sha256"}
-    if not isinstance(raw, dict) or set(raw) != required or raw["schema_version"] != 1:
+    if isinstance(raw, dict) and raw.get("schema_version") in (2, 3):
+        required.add("algorithm")
+    if isinstance(raw, dict) and raw.get("schema_version") == 3:
+        required.update(("backbone", "model_config"))
+        settings = model_config({"model": raw.get("model_config")})
+        if (settings["backbone"] == "frozen") != (raw.get("backbone") is None):
+            raise ValueError("Overlay backbone artifact does not match its model configuration")
+        if settings["backbone"] != "frozen" and (not isinstance(raw["backbone"], str) or not raw["backbone"].strip()):
+            raise ValueError("Adapted overlay backbone must be a non-empty path")
+    if not isinstance(raw, dict) or set(raw) != required or raw["schema_version"] not in (1, 2, 3):
         raise ValueError(f"Invalid policy overlay manifest: {path}")
+    if raw.get("algorithm", "iql") not in ("iql", "bc"):
+        raise ValueError("Unknown policy overlay algorithm")
+    if raw.get("algorithm") == "bc" and raw["reward_sha256"] is not None:
+        raise ValueError("BC overlays must not reference rewards")
     for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
         if not isinstance(raw[key], str) or not raw[key].strip():
             raise ValueError(f"Invalid policy overlay field {key}: {path}")
@@ -281,7 +345,8 @@ def load_overlay(path: Path) -> PolicyOverlay:
         if type(raw[key]) is not int or raw[key] < 1:
             raise ValueError(f"Invalid policy overlay integer {key}: {path}")
     hashes = raw["component_sha256"]
-    if not isinstance(hashes, dict) or set(hashes) != {"action_head", "proprio_projector"}:
+    names = {"action_head", "proprio_projector"} | ({"backbone"} if raw.get("backbone") else set())
+    if not isinstance(hashes, dict) or set(hashes) != names:
         raise ValueError(f"Invalid policy overlay component hashes: {path}")
     def component(name: str) -> Path:
         value = Path(raw[name]).expanduser()
@@ -293,8 +358,9 @@ def load_overlay(path: Path) -> PolicyOverlay:
         path, str(raw["policy_id"]), str(raw["label"]), str(raw["base_checkpoint"]),
         str(raw["stats_key"]), component("action_head"), component("proprio_projector"),
         int(raw["action_horizon"]), int(raw["action_dim"]), int(raw["proprio_dim"]),
-        str(raw["dataset_sha256"]), str(raw["reward_sha256"]), int(raw["training_step"]),
+        str(raw["dataset_sha256"]), raw["reward_sha256"], int(raw["training_step"]),
         dict(hashes), str(raw["compatibility_sha256"]),
+        component("backbone") if raw.get("backbone") else None, raw.get("model_config"),
     )
 
 
@@ -315,7 +381,10 @@ def validate_overlay(policy: PolicyOverlay, base_checkpoint: str, stats_key: str
     for name, path in (
         ("action_head", policy.action_head),
         ("proprio_projector", policy.proprio_projector),
+        ("backbone", policy.backbone),
     ):
+        if path is None:
+            continue
         expected_hash = policy.component_sha256.get(name)
         if not expected_hash or sha256_file(path) != expected_hash:
             raise ValueError(f"Policy overlay component hash mismatch: {name}")

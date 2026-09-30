@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
-from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, load_train_config
+from vla_rynn_iql.config import PROJECT_ROOT, load_train_config
 
 
 def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | None = None,
@@ -62,7 +62,10 @@ def configured(tmp_path: Path):
         dataset, "branch", kind="branch", resume=5, action_source="human",
         action_count=22, success=True, success_from=13,
     )
-    raw = yaml.safe_load(DEFAULT_TRAIN_CONFIG.read_text(encoding="utf-8"))
+    raw = load_train_config(PROJECT_ROOT / "configs/training/iql.yaml").raw
+    # Existing numerical regressions intentionally exercise the legacy Rynn path.
+    # Fusion tests explicitly opt into source=final using the same data fixture.
+    raw["reward"]["source"] = "rynnvalue"
     raw["paths"].update({
         "dataset_sources": [str(dataset)], "work_dir": str(tmp_path / "work"),
         "output_dir": str(tmp_path / "output"),

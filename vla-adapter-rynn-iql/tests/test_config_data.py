@@ -10,7 +10,7 @@ import yaml
 import pytest
 
 from vla_rynn_iql.config import load_train_config
-from vla_rynn_iql.data import load_manifest, prepare_dataset
+from vla_rynn_iql.data import REPLAY_POLICY, load_manifest, prepare_dataset, replay_chunks
 from vla_rynn_iql.io import sha256_file, stable_hash
 
 
@@ -53,6 +53,47 @@ def test_reward_accumulation_mode_must_be_boolean(configured, tmp_path: Path):
         load_train_config(path)
 
 
+@pytest.mark.parametrize("mode, expected", [("additive", True), ("multiplicative", False)])
+def test_final_cumulative_config_and_recipe_agree(configured, tmp_path, mode, expected):
+    from vla_rynn_iql.rewards import reward_derivation_config
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"].update(source="final", fusion_mode=mode, alpha=.5, accumulate_primitive_steps=True)
+    path = tmp_path / "fusion.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    reward = load_train_config(path).section("reward")
+    assert reward["accumulate_primitive_steps"] is expected
+    assert reward_derivation_config(reward)["accumulate_primitive_steps"] is expected
+
+
+@pytest.mark.parametrize("normalization", [None, "none", "initial_chunk_v1"])
+def test_final_normalization_preserves_legacy_recipe_identity(configured, tmp_path, normalization):
+    from vla_rynn_iql.rewards import reward_derivation_config
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"].update(source="final")
+    raw["reward"].pop("final_normalization")
+    if normalization is not None:
+        raw["reward"]["final_normalization"] = normalization
+    path = tmp_path / "normalization.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    reward = load_train_config(path).section("reward")
+    assert reward["final_normalization"] == (normalization or "none")
+    recipe = reward_derivation_config(reward)
+    if normalization == "initial_chunk_v1":
+        assert recipe["final_normalization"] == normalization
+    else:
+        assert "final_normalization" not in recipe
+
+
+def test_default_final_normalization_and_invalid_rule(configured, tmp_path):
+    assert configured.section("reward")["final_normalization"] == "initial_chunk_v1"
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"]["final_normalization"] = "clip"
+    path = tmp_path / "invalid-normalization.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="reward.final_normalization"):
+        load_train_config(path)
+
+
 def test_rynnvalue_reward_switch_must_be_boolean(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
     raw["reward"]["rynnvalue"] = "false"
@@ -66,7 +107,8 @@ def test_legacy_config_without_rynnvalue_switch_keeps_shaping_enabled(
     configured, tmp_path: Path,
 ):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
-    del raw["reward"]["rynnvalue"]
+    raw["reward"].pop("rynnvalue", None)
+    raw["reward"].pop("source", None)
     path = tmp_path / "legacy-without-rynnvalue-switch.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     assert load_train_config(path).section("reward")["rynnvalue"] is True
@@ -92,14 +134,21 @@ def test_tensorboard_logging_configuration_is_strict(configured, tmp_path: Path)
 
 def test_positive_micro_batch_is_not_artificially_limited_to_one(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
-    raw["iql"]["micro_batch_size"] = 8
+    raw["training"]["micro_batch_size"] = 8
     path = tmp_path / "batched.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    assert load_train_config(path).section("iql")["micro_batch_size"] == 8
+    assert load_train_config(path).section("training")["micro_batch_size"] == 8
 
 
-def test_default_advantage_weight_cap_is_twenty(configured):
-    assert configured.section("iql")["max_advantage_weight"] == 20.0
+def test_default_iql_stability_profile(configured):
+    iql = configured.section("iql")
+    assert iql["critic_optimizer"] == "adamw"
+    assert iql["critic_weight_decay"] == 0.01
+    assert iql["value_optimizer"] == "adamw"
+    assert iql["value_weight_decay"] == 0.01
+    assert iql["beta"] == 3.0
+    assert iql["max_advantage_weight"] == 20.0
+    assert iql["critic_warmup_steps"] == 1000
 
 
 @pytest.mark.parametrize("field", ["critic_optimizer", "value_optimizer"])
@@ -170,7 +219,7 @@ def test_branch_keeps_full_trajectory_and_marks_interrupted_policy_prefix(config
     manifest = load_manifest(configured)
     episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     assert [chunk["start"] for chunk in episodes["root"]["chunks"]] == [0, 8, 16]
-    assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [0, 5, 13]
+    assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [0, 5, 13, 18]
     assert episodes["branch"]["chunks"][0] == {
         "start": 0, "length": 5, "end": 5, "action_source": "policy",
         "transition_type": "policy_interrupted", "interrupted": True,
@@ -207,6 +256,7 @@ def test_branch_reward_boundaries_include_natural_rollout_before_takeover(config
         (0, 8, "policy_prefix"),
         (8, 13, "policy_interrupted"),
         (13, 18, "human"),
+        (18, 22, "human"),
     ]
     assert branch["reward_boundaries"] == [0, 8, 13, 18, 22]
 
@@ -256,10 +306,10 @@ def test_500_step_branch_evaluation_still_spans_full_25_seconds(configured):
     )
 
 
-def test_latched_done_tail_is_excluded_from_replay_without_changing_source(configured):
+def test_latched_done_tail_is_trained_without_changing_source(configured):
     source = Path(configured.section("paths")["dataset_sources"][0])
     trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
-    original_bytes = trajectory.read_bytes()
+    original_bytes = {path: path.read_bytes() for path in source.rglob("*") if path.is_file()}
 
     prepare_dataset(configured)
     branch = next(
@@ -270,23 +320,33 @@ def test_latched_done_tail_is_excluded_from_replay_without_changing_source(confi
     assert branch["recorded_action_count"] == 22
     assert branch["terminal_step"] == 17
     assert branch["success_streak_start"] == 13
-    assert branch["action_count"] == 18
+    assert branch["action_count"] == 22
     assert branch["trailing_action_count"] == 4
     assert branch["post_terminal_false_count"] == 0
-    assert branch["chunks"][-1] == {
+    assert branch["chunks"][-2] == {
         "start": 13, "length": 5, "end": 18, "action_source": "human",
         "transition_type": "human", "interrupted": False,
         "copied_prefix": False,
     }
     assert branch["reward_boundaries"][0] == 0
     assert branch["reward_boundaries"][-1] == 22
-    assert branch["evaluation_chunks"][:len(branch["chunks"])] == branch["chunks"]
+    assert branch["chunks"][-1] == {
+        "start": 18, "length": 4, "end": 22, "action_source": "human",
+        "transition_type": "human", "interrupted": False,
+        "copied_prefix": False,
+    }
+    assert branch["evaluation_chunks"][:-1] == branch["chunks"][:-1]
     assert branch["evaluation_chunks"][-1] == {
         "start": 18, "length": 4, "end": 22, "action_source": "human",
         "transition_type": "post_terminal_evaluation", "interrupted": False,
         "copied_prefix": False,
     }
-    assert trajectory.read_bytes() == original_bytes
+    assert all(path.read_bytes() == content for path, content in original_bytes.items())
+    manifest = load_manifest(configured)
+    assert manifest["replay_policy"] == REPLAY_POLICY
+    assert manifest["trajectory_chunk_count"] == manifest["chunk_count"] == 7
+    assert sum(ep["action_count"] for ep in manifest["episodes"]) == 39
+    assert sum(chunk["length"] for ep in manifest["episodes"] for chunk in replay_chunks(ep)) == 39
 
 
 def test_action_source_change_is_a_hard_chunk_boundary(configured):
@@ -312,7 +372,54 @@ def test_action_source_change_is_a_hard_chunk_boundary(configured):
         (0, 5, "policy"),
         (5, 10, "human"),
         (10, 18, "policy_requery"),
+        (18, 22, "policy_requery"),
     ]
+
+
+def test_post_success_source_change_starts_a_new_training_chunk(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["action_source"] = arrays["action_source"].astype("<U32")
+    arrays["action_source"][20:] = "policy_requery"
+    arrays["done"][19:] = False
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(ep for ep in load_manifest(configured)["episodes"] if ep["run_id"] == "branch")
+    assert branch["success"] is True
+    assert branch["terminal_step"] == 17
+    assert branch["post_terminal_false_count"] == 3
+    assert [(c["start"], c["end"], c["transition_type"]) for c in branch["chunks"][-2:]] == [
+        (18, 20, "human"), (20, 22, "policy_requery"),
+    ]
+    assert branch["action_source_segments"][-1] == {
+        "start": 20, "end": 22, "action_source": "policy_requery",
+    }
+
+
+def test_branch_can_resume_after_success_confirmation(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    run = json.loads(run_json.read_text(encoding="utf-8"))
+    run["resume_step"] = 20
+    run_json.write_text(json.dumps(run), encoding="utf-8")
+    trajectory = run_json.parent / "episodes" / "episode_000" / "trajectory.npz"
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["action_source"][:20] = "policy"
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(ep for ep in load_manifest(configured)["episodes"] if ep["run_id"] == "branch")
+    assert branch["terminal_step"] == 17
+    assert branch["resume_step"] == 20
+    assert branch["action_count"] == 22
+    assert branch["chunks"][-1]["start"] == 20
+    assert branch["chunks"][-1]["end"] == 22
+    assert branch["chunks"][-1]["action_source"] == "human"
+    assert branch["chunks"][-2]["copied_prefix"] is True
 
 
 def test_sibling_branches_keep_stable_interrupted_prefix_for_annotation(configured):
@@ -354,7 +461,7 @@ def test_transient_success_requires_a_new_complete_streak(configured):
     )
     assert branch["terminal_step"] == 20
     assert branch["success_streak_start"] == 16
-    assert branch["action_count"] == 21
+    assert branch["action_count"] == 22
     assert branch["trailing_action_count"] == 1
     assert branch["post_terminal_false_count"] == 0
 

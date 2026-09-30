@@ -82,6 +82,7 @@ def _print_preflight(
     force_annotate: bool,
 ) -> None:
     data, reward, iql = raw["data"], raw["reward"], raw["iql"]
+    training = raw["training"]
     wandb = raw["logging"]["wandb"]
     task_candidates = [item for item in candidates if item.task_id == task_id]
     members = selection_manifest["members"]
@@ -101,12 +102,12 @@ def _print_preflight(
     print(f"Bound evaluations : {evaluated_count}/{len(selected)}")
     print(f"RynnValue         : {reward['model']} @ {reward['revision']}")
     print(
-        f"IQL               : steps={iql['train_steps']}, "
+        f"IQL               : steps={training['train_steps']}, "
         f"warmup={iql['critic_warmup_steps']}, beta={iql['beta']}, "
         f"max_weight={iql['max_advantage_weight']}, "
-        f"micro_batch={iql['micro_batch_size']}, "
-        f"actor_batch={iql['micro_batch_size'] * iql['gradient_accumulation_steps']}, "
-        f"sample_budget={iql['train_steps'] * iql['micro_batch_size']}"
+        f"micro_batch={training['micro_batch_size']}, "
+        f"actor_batch={training['micro_batch_size'] * training['gradient_accumulation_steps']}, "
+        f"sample_budget={training['train_steps'] * training['micro_batch_size']}"
     )
     print(
         "W&B               : "
@@ -226,6 +227,11 @@ def main() -> int:
 
     config = load_terminal_config(args.config)
     raw = merged_training_config(config)
+    if raw["training"]["method"] != "iql" or raw["reward"]["source"] != "rynnvalue":
+        parser.error(
+            "This legacy entry point supports RynnValue + IQL only; "
+            "use train_server.py for BC or saved Stage/Final rewards"
+        )
     roots = dataset_roots(raw, config.pipeline_root / "imports")
     candidates, rejected = discover_candidates(
         roots, raw["data"]["project_id"],

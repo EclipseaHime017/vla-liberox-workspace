@@ -27,14 +27,10 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
   --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
 ```
 
-脚本显示数据选择、缓存和训练计划后会提示：
-
-```text
-Start this pipeline? [y/N]
-```
-
-- 输入 `y` 或 `yes`：确认并开始执行；
-- 直接按 Enter，或输入其他内容：取消执行。
+默认打开终端交互界面，选择任务、配置训练参数后启动。
+YAML 的 `runs_root` 指向复制来的原始数据及全局评价；服务器不运行评价模型。
+方法配置使用 `training/iql.yaml` 或 `training/bc.yaml`。
+SSH/nohup/Slurm 非交互运行时加 `--yes --task <完整任务ID>`。
 
 启动前只检查配置和数据，不执行训练：
 
@@ -44,5 +40,6 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
   --dry-run
 ```
 
-使用哪些物理 GPU 由 YAML 的 `distributed.gpu_ids` 明确指定；脚本会为
-`torchrun` 设置 `CUDA_VISIBLE_DEVICES`，无需在启动命令前重复设置。
+多任务目录执行 `--dry-run` 时需加 `--task <完整任务ID>`。
+GPU 由 `distributed.gpu_ids` 指定；若已有 `CUDA_VISIBLE_DEVICES`，
+索引对应调度器分配的可见卡，否则对应物理卡。

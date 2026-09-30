@@ -1,33 +1,26 @@
+"""Server execution settings; model and algorithm settings remain in training/*.yaml."""
 from __future__ import annotations
 
-import copy
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .config import TRAIN_SCHEMA, UniqueKeyLoader
-from .terminal_pipeline import (
-    MODES,
-    ORDERS,
-    OUTCOMES,
-    SOURCE_TYPES,
-    TerminalPipelineConfig,
-)
+from .config import UniqueKeyLoader
+from .terminal_pipeline import _strict_keys, _resolve, _validate_overrides
 
 
 @dataclass(frozen=True)
 class DistributedConfig:
     gpu_ids: tuple[int, ...]
-    backend: str
-    zero_stage: int
-    timeout_seconds: int
-    data_workers_per_rank: int
-    prefetch_factor: int
-    pin_memory: bool
-    persistent_workers: bool
+    backend: str = "nccl"
+    zero_stage: int = 1
+    timeout_seconds: int = 1800
+    data_workers_per_rank: int = 2
+    prefetch_factor: int = 2
+    pin_memory: bool = True
+    persistent_workers: bool = True
 
     @property
     def world_size(self) -> int:
@@ -35,207 +28,76 @@ class DistributedConfig:
 
 
 @dataclass(frozen=True)
-class ReplayCacheConfig:
-    enabled: bool
-    root: Path
-    rebuild: bool
-
-
-@dataclass(frozen=True)
-class ServerPipelineConfig:
+class ServerConfig:
     path: Path
-    terminal: TerminalPipelineConfig
+    training_config: Path
+    runs_root: Path
+    task_id: str | None
+    output_root: Path
+    cache_root: Path
+    environment: str
+    reward_source: str
     distributed: DistributedConfig
-    replay_cache: ReplayCacheConfig
+    overrides: dict[str, Any]
 
 
-def _mapping(value: Any, expected: set[str], context: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise TypeError(f"{context} must be a mapping")
-    missing = sorted(expected - set(value))
-    unknown = sorted(set(value) - expected)
-    if missing:
-        raise ValueError(f"Missing {context} keys: {missing}")
-    if unknown:
-        raise ValueError(f"Unknown {context} keys: {unknown}")
-    return value
-
-
-def _resolve(value: Any, base: Path, context: str) -> Path:
-    if not isinstance(value, str) or not value.strip():
-        raise TypeError(f"{context} must be a non-empty path")
-    path = Path(value).expanduser()
-    return (path if path.is_absolute() else base / path).resolve()
-
-
-def _validate_overrides(value: Any) -> dict[str, dict[str, Any]]:
-    sections = set(TRAIN_SCHEMA) - {"schema_version"}
-    raw = _mapping(value, sections, "overrides")
-    managed = {"paths": {"work_dir"}, "data": {"task_ids", "selection_manifest"}}
-    for section, values in raw.items():
-        if not isinstance(values, dict):
-            raise TypeError(f"overrides.{section} must be a mapping")
-        unknown = sorted(set(values) - set(TRAIN_SCHEMA[section]))
-        if unknown:
-            raise ValueError(f"Unknown overrides.{section} keys: {unknown}")
-        forbidden = sorted(set(values) & managed.get(section, set()))
-        if forbidden:
-            raise ValueError(f"Pipeline-managed overrides.{section} keys: {forbidden}")
-    return copy.deepcopy(raw)
-
-
-def load_server_config(path: Path) -> ServerPipelineConfig:
-    path = path.expanduser().resolve()
-    raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
-    root = _mapping(
-        raw,
-        {
-            "schema_version", "base_config", "pipeline_root", "environments",
-            "selection", "overrides", "distributed", "replay_cache",
-        },
-        "server config",
-    )
-    if root["schema_version"] != 1:
-        raise ValueError("Only server pipeline schema_version=1 is supported")
-
-    environments = _mapping(
-        root["environments"], {"prepare", "annotate", "train"}, "environments"
-    )
-    for name, environment in environments.items():
-        if not isinstance(environment, str) or re.fullmatch(
-            r"[A-Za-z0-9_.-]+", environment
-        ) is None:
-            raise ValueError(f"environments.{name} is not a valid Conda environment name")
-
-    selection = _mapping(
-        root["selection"],
-        {"task_id", "mode", "seed", "source_types", "outcomes", "size", "quotas"},
-        "selection",
-    )
-    # Reuse the already-audited terminal selection validation without writing a
-    # temporary file by constructing its value only after checking the same
-    # externally visible shape here. Detailed selection values are validated by
-    # select_candidates/build_selection_manifest before execution.
-    if not isinstance(selection["task_id"], str) or not selection["task_id"].strip():
-        raise TypeError("selection.task_id must be a non-empty string")
-    if selection["mode"] not in MODES:
-        raise ValueError("selection.mode must be quota, random, or all")
-    if type(selection["seed"]) is not int:
-        raise TypeError("selection.seed must be an integer")
-    for key, allowed in (("source_types", SOURCE_TYPES), ("outcomes", OUTCOMES)):
-        values = selection[key]
-        if (
-            not isinstance(values, list)
-            or not values
-            or any(value not in allowed for value in values)
-            or len(values) != len(set(values))
-        ):
-            raise ValueError(
-                f"selection.{key} must contain unique values from {sorted(allowed)}"
-            )
-    quotas = selection["quotas"]
-    if not isinstance(quotas, list):
-        raise TypeError("selection.quotas must be a list")
-    pairs: set[tuple[str, str]] = set()
-    for index, quota in enumerate(quotas):
-        quota = _mapping(
-            quota,
-            {"source_type", "outcome", "count", "order"},
-            f"selection.quotas[{index}]",
-        )
-        pair = (quota["source_type"], quota["outcome"])
-        if pair[0] not in SOURCE_TYPES or pair[1] not in OUTCOMES or pair in pairs:
-            raise ValueError("Quota source/outcome pairs must be unique and supported")
-        if type(quota["count"]) is not int or quota["count"] < 1:
-            raise ValueError("Every quota count must be a positive integer")
-        if quota["order"] not in ORDERS:
-            raise ValueError(f"Quota order must be one of {sorted(ORDERS)}")
-        pairs.add(pair)
-    if selection["mode"] == "quota":
-        if not quotas or selection["size"] is not None:
-            raise ValueError("quota mode requires quotas and size: null")
-    elif selection["mode"] == "random":
-        if type(selection["size"]) is not int or selection["size"] < 1 or quotas:
-            raise ValueError("random mode requires a positive size and quotas: []")
-    elif selection["size"] is not None or quotas:
-        raise ValueError("all mode requires size: null and quotas: []")
-
-    distributed_raw = _mapping(
-        root["distributed"],
-        {
-            "gpu_ids", "backend", "zero_stage", "timeout_seconds",
-            "data_workers_per_rank", "prefetch_factor", "pin_memory",
-            "persistent_workers",
-        },
-        "distributed",
-    )
-    gpu_ids = distributed_raw["gpu_ids"]
-    if (
-        not isinstance(gpu_ids, list)
-        or not 1 <= len(gpu_ids) <= 8
-        or any(type(value) is not int or value < 0 for value in gpu_ids)
-        or len(gpu_ids) != len(set(gpu_ids))
-    ):
-        raise ValueError("distributed.gpu_ids must contain 1-8 unique non-negative integers")
-    if distributed_raw["backend"] != "nccl":
-        raise ValueError("Server GPU training currently requires distributed.backend=nccl")
-    if distributed_raw["zero_stage"] != 1:
-        raise ValueError("Server GPU training currently requires distributed.zero_stage=1")
-    for key in ("timeout_seconds", "prefetch_factor"):
-        if type(distributed_raw[key]) is not int or distributed_raw[key] < 1:
-            raise ValueError(f"distributed.{key} must be a positive integer")
-    workers = distributed_raw["data_workers_per_rank"]
-    if type(workers) is not int or workers < 0:
-        raise ValueError("distributed.data_workers_per_rank must be a non-negative integer")
+def distributed_config(raw: dict) -> DistributedConfig:
+    defaults = DistributedConfig((0,)).__dict__
+    if not isinstance(raw, dict) or raw.keys() - defaults.keys():
+        raise ValueError("Unknown distributed settings")
+    values = {**defaults, **raw}
+    ids = values["gpu_ids"]
+    if (not isinstance(ids, (list, tuple)) or not 1 <= len(ids) <= 8
+            or any(type(item) is not int or item < 0 for item in ids) or len(set(ids)) != len(ids)):
+        raise ValueError("gpu_ids must specify 1–8 distinct non-negative GPU indices")
+    if values["backend"] != "nccl" or type(values["zero_stage"]) is not int or values["zero_stage"] != 1:
+        raise ValueError("Server training requires NCCL and ZeRO stage 1")
+    for key, minimum in (("timeout_seconds", 1), ("data_workers_per_rank", 0), ("prefetch_factor", 1)):
+        if type(values[key]) is not int or values[key] < minimum:
+            raise ValueError(f"distributed.{key} must be an integer >= {minimum}")
     for key in ("pin_memory", "persistent_workers"):
-        if type(distributed_raw[key]) is not bool:
+        if type(values[key]) is not bool:
             raise TypeError(f"distributed.{key} must be boolean")
-    if workers == 0 and distributed_raw["persistent_workers"]:
+    if not values["data_workers_per_rank"] and values["persistent_workers"]:
         raise ValueError("persistent_workers requires data_workers_per_rank > 0")
-
-    cache_raw = _mapping(root["replay_cache"], {"enabled", "root", "rebuild"}, "replay_cache")
-    for key in ("enabled", "rebuild"):
-        if type(cache_raw[key]) is not bool:
-            raise TypeError(f"replay_cache.{key} must be boolean")
-    if not cache_raw["enabled"]:
-        raise ValueError(
-            "The server trainer requires replay_cache.enabled=true to avoid repeated NPZ decompression"
-        )
-
-    terminal = TerminalPipelineConfig(
-        path=path,
-        base_config=_resolve(root["base_config"], path.parent, "base_config"),
-        pipeline_root=_resolve(root["pipeline_root"], path.parent, "pipeline_root"),
-        environments=dict(environments),
-        selection=copy.deepcopy(selection),
-        overrides=_validate_overrides(root["overrides"]),
-    )
-    distributed = DistributedConfig(
-        gpu_ids=tuple(gpu_ids),
-        backend=str(distributed_raw["backend"]),
-        zero_stage=int(distributed_raw["zero_stage"]),
-        timeout_seconds=int(distributed_raw["timeout_seconds"]),
-        data_workers_per_rank=workers,
-        prefetch_factor=int(distributed_raw["prefetch_factor"]),
-        pin_memory=bool(distributed_raw["pin_memory"]),
-        persistent_workers=bool(distributed_raw["persistent_workers"]),
-    )
-    replay_cache = ReplayCacheConfig(
-        enabled=True,
-        root=_resolve(cache_raw["root"], path.parent, "replay_cache.root"),
-        rebuild=bool(cache_raw["rebuild"]),
-    )
-    return ServerPipelineConfig(path, terminal, distributed, replay_cache)
+    return DistributedConfig(**{**values, "gpu_ids": tuple(ids)})
 
 
-def validate_global_batch(raw: dict[str, Any], distributed: DistributedConfig) -> tuple[int, int]:
-    global_micro_batch = int(raw["iql"]["micro_batch_size"])
-    if global_micro_batch % distributed.world_size:
-        raise ValueError(
-            "iql.micro_batch_size is the global micro batch in server mode and must be "
-            f"divisible by {distributed.world_size} GPUs; got {global_micro_batch}"
-        )
-    local_micro_batch = global_micro_batch // distributed.world_size
-    if local_micro_batch < 1:
-        raise ValueError("Server local micro batch must be at least one sample per GPU")
-    return global_micro_batch, local_micro_batch
+def load_server_config(path: Path) -> ServerConfig:
+    import re
+    path = path.expanduser().resolve()
+    raw = yaml.load(path.read_text(), Loader=UniqueKeyLoader)
+    _strict_keys(raw, {"schema_version", "training_config", "runs_root", "task_id",
+                      "output_root", "cache_root", "environment", "reward_source",
+                      "distributed", "overrides"}, "server")
+    if raw["schema_version"] != 3:
+        raise ValueError("Use server schema_version=3 with runs_root and task_id (no exported dataset required)")
+    if not isinstance(raw["environment"], str) or not re.fullmatch(r"[\w.-]+", raw["environment"]):
+        raise ValueError("environment must be a Conda environment name")
+    if raw["reward_source"] not in {"final", "rynnvalue", "stage", "sparse"}:
+        raise ValueError("reward_source must be final, rynnvalue, stage or sparse")
+    paths = {key: _resolve(raw[key], path.parent, key) for key in
+             ("training_config", "runs_root", "output_root", "cache_root")}
+    task_id = raw["task_id"]
+    if task_id is not None and (not isinstance(task_id, str) or not task_id.strip()):
+        raise ValueError("task_id must be null or a non-empty canonical task ID")
+    overrides = _validate_overrides(raw["overrides"])
+    # Semantic evaluator parameters belong to each copied global evaluation.
+    if set(overrides["reward"]) - {"gamma", "accumulate_primitive_steps"}:
+        raise ValueError("Server reward overrides only accept gamma and accumulate_primitive_steps")
+    if set(overrides["data"]) - {"include_post_success", "validation_fraction", "split_seed"}:
+        raise ValueError("Server data overrides accept include_post_success, validation_fraction and split_seed")
+    if "device" in overrides["training"]:
+        raise ValueError("Select server devices through distributed.gpu_ids, not training.device")
+    return ServerConfig(path, **paths, task_id=task_id, environment=raw["environment"],
+                        reward_source=raw["reward_source"], distributed=distributed_config(raw["distributed"]),
+                        overrides=overrides)
+
+
+def validate_global_batch(raw: dict, distributed: DistributedConfig) -> tuple[int, int]:
+    size = raw["training"]["micro_batch_size"]
+    if type(size) is not int or size < distributed.world_size or size % distributed.world_size:
+        raise ValueError(f"Global training.micro_batch_size must be divisible by {distributed.world_size} GPUs")
+    if raw["training"]["checkpoint_interval"] % raw["training"]["gradient_accumulation_steps"]:
+        raise ValueError("checkpoint_interval must be divisible by gradient_accumulation_steps")
+    return size, size // distributed.world_size

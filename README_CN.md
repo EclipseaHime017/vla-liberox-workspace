@@ -1166,70 +1166,47 @@ conda run -n vla-liberox wandb sync \
   vla-adapter-rynn-iql/outputs/training/<run>/wandb/offline-run-*
 ```
 
-#### 4.4.9 8×A100 资源配置
+#### 4.4.9 服务器单机多卡训练
 
-`main` 分支及 UI 仍使用单进程、单 GPU 的 `train_iql.py`；单机多卡训练只在独立 `server` 分支通过新入口提供，不会改变 UI 的训练行为。服务器部署先切换分支：
+服务器功能只在 `server` 分支维护，不合并 `main` 的 UI、仿真或遥操作功能。服务器只训练，直接读取从个人端复制的 `runs/` 和轨迹旁的全局评价，不需要 UI 数据库，也不会运行 RynnValue／Robometer 模型。
 
-```bash
-git fetch origin
-git switch server
-git pull --ff-only origin server
-```
-
-编辑 `configs/server_pipeline.yaml`，显式指定可使用的物理 GPU：
+配置入口为 `vla-adapter-rynn-iql/configs/server_pipeline.yaml`（schema 3）：
 
 ```yaml
+training_config: ./training/iql.yaml  # BC 使用 ./training/bc.yaml
+runs_root: ../../dataset-root/projects/libero_x_vla/runs
+task_id: null                       # 终端选择；批处理需明确指定
+reward_source: final                # final / rynnvalue / stage / sparse
 distributed:
   gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
   backend: nccl
   zero_stage: 1
-  timeout_seconds: 1800
-  data_workers_per_rank: 2
-  prefetch_factor: 2
-  pin_memory: true
-  persistent_workers: true
-
-replay_cache:
-  enabled: true
-  root: ../outputs/server-replay-cache
-  rebuild: false
-
 overrides:
-  reward:
-    # false为不启用RynnValue稠密奖励的消融；已有评价不会删除或重跑。
-    rynnvalue: true
-    # false（默认）为macro-step；true为逐控制步累计并使用gamma^L。
-    accumulate_primitive_steps: false
-  iql:
-    # server模式下是所有rank合计的全局micro batch。
+  training:
+    train_steps: 10000
     micro_batch_size: 8
     gradient_accumulation_steps: 4
+  reward: {}                        # 可选 gamma、accumulate_primitive_steps
 ```
 
-GPU 数量由 `gpu_ids` 长度决定，脚本只暴露这些设备给 `torchrun`，不会自动占用其余 GPU。全局 micro batch 必须能被 GPU 数整除；上述 8 卡配置为每卡 1 条 transition，每次 actor 更新的全局有效 batch 为 `8×4=32`。增加或减少 GPU 不会自动改变 `train_steps`、学习率或梯度累积语义。
-
-先检查选择、环境和batch配置，不创建流水线输出：
-
-```bash
-python vla-adapter-rynn-iql/scripts/train_server.py \
-  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml \
-  --dry-run
-```
-
-确认后启动：
+模型、通用训练参数和方法参数分别配置，支持冻结 backbone、LoRA 和全量微调。BC 使用所选任务全部已标记轨迹，以等权 masked L1 学习动作，不读取奖励、不创建 Q/V。IQL 读取所选来源的已保存全局奖励；缺失或损坏会明确报错，不静默减少样本。训练中的 γ 和累计模式调整只在本次训练目录派生奖励，不覆盖原评价；其他奖励参数沿用各轨迹保存的配置，相乘 Final Reward 仍只使用 macro-step。
 
 ```bash
 python vla-adapter-rynn-iql/scripts/train_server.py \
   --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
 ```
 
-流程仍是 `选择 → Prepare → RynnValue评价 → 奖励派生 → 绑定 → mmap缓存 → 多卡IQL训练`。评价阶段单卡串行使用 GPU，奖励派生是轻量 NumPy 过程；只有 IQL 训练通过一张卡一个进程的 DDP 分布。Q、V、actor overlay 分别使用独立的 PyTorch `ZeroRedundancyOptimizer`（ZeRO-1）；冻结的 VLA backbone 仍在每张卡各保留一份。target Q 不包 DDP，而是从同步后的 online Q 在每个rank执行完全相同的 Polyak 更新。服务器入口与单卡入口共享奖励消融：`reward.rynnvalue: false` 保留RynnValue评价输出，但令dense reward为0、Final Reward等于环境稀疏奖励；默认`true`。`reward.accumulate_primitive_steps: false` 将chunk作为一个宏动作，只应用一次稀疏奖励和折扣；`true` 累计chunk内逐步奖励，并以实际长度 `L` 使用 `γ^L` bootstrap。切换这些奖励派生字段只会从已有RynnValue输出重算确定性奖励，不会重新运行RynnValue；除此之外服务器分支的更新顺序、Advantage、优化器超参数和梯度裁剪均保持不变。
+默认打开终端交互界面，选择任务和训练参数后启动。非交互任务加 `--yes --task <完整任务ID>`；仅验证配置、评价完整性及数据时使用 `--dry-run --task <完整任务ID>`，不创建训练结果。
 
-服务器缓存以 prepared dataset、reward manifest、critic图像尺寸和源哈希为键，把实际参与训练的去重chunk整理为只读 `.npy` mmap。训练时不再逐样本重复解压大型 `trajectory_observations.npz`；图像通过操作系统页缓存共享，动作、proprio、mask和reward由每个rank启动时一次性整理。缓存不会修改源轨迹、RynnValue sidecar或UI数据集。
+处理流程为 `扫描已标记 runs → 校验／Prepare → 绑定已有奖励 → mmap 缓存 → torchrun 训练`。不调用个人端打包数据库，不进行仿真或在线评测。相对路径以声明它的 YAML 所在目录为基准。
 
-只有rank 0写入W&B、TensorBoard、`metrics.jsonl`、checkpoint和标准policy overlay。新增的 `server/*` 指标包含全局/每卡batch、全局吞吐、数据等待、host-to-device、backbone、Q/V、actor、DDP通信和最慢rank耗时。保存checkpoint前会把Q、V、actor三套ZeRO optimizer state汇总到rank 0；保存的模型键不带 `module.` 前缀，可在1卡和多卡服务器配置间恢复。`Ctrl+C`会转发到torchrun进程组，并在共同安全边界保存一次checkpoint。
+GPU 数量由 `gpu_ids` 决定。如果调度器已设置 `CUDA_VISIBLE_DEVICES`，配置索引对应该可见设备列表，否则对应物理 GPU。全局 micro batch 必须能被卡数整除；上述 8 卡配置每卡 1 条 chunk，actor 有效 batch 为 `8×4=32`。增加 GPU 不会自动修改训练步数或学习率。
 
-该实现遵循 PyTorch 的单卡单进程 DDP 与 ZeRO-1 组合方式：[DistributedDataParallel](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html)、[ZeroRedundancyOptimizer](https://docs.pytorch.org/docs/stable/distributed.optim.html)。第一版仅支持单机1–8卡，不支持跨节点；ZeRO-1只分片优化器状态，不分片冻结backbone参数。
+缓存把实际参与训练的去重 chunk 整理为只读 `.npy` mmap，避免训练时反复解压大型 observation NPZ；仅奖励变化可复用图像缓存。DDP 同步可训练参数的梯度，ZeRO-1 分片优化器状态，模型参数仍由每卡保留。IQL 复用原数学函数，在相同配置下不改变更新顺序、Advantage 和 Bellman target。
+
+仅 rank 0 写 W&B、TensorBoard、JSONL、checkpoint 和标准 overlay。日志区分数据、backbone、优化器与通信耗时；checkpoint 汇总各 optimizer state，支持 1–8 卡恢复。取消请求在共同安全边界保存，超时则终止训练进程组。CPU/Gloo 测试覆盖数值对齐与跨卡数恢复，真实 A100/NCCL 性能需要部署后验证。
+
+常规部署使用 `git fetch origin`、`git switch server`、`git pull --ff-only origin server`；如设备仍在被替换的旧合并历史上，先备份本地修改，再按本次部署说明对齐分支。
 
 ### 4.5 数据与奖励语义
 

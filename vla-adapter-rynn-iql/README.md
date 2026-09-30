@@ -101,72 +101,63 @@ The older `run_pipeline.py` remains a simple stateless stage launcher. Prefer
 
 ### Isolated single-node multi-GPU server trainer
 
-The `server` Git branch adds an isolated DDP + PyTorch ZeRO-1 entry point. It
-does not replace `train_iql.py`, `training.py`, or the UI job path; those remain
-the original single-process trainer. Select 1–8 physical GPUs explicitly in
-`configs/server_pipeline.yaml`, then inspect and launch the plan:
+The `server` branch provides a training-only DDP + PyTorch ZeRO-1 entry point.
+It consumes copied raw `runs/` directories and their adjacent global evaluations,
+without a UI database, simulation, or reward-model inference. The `main` branch
+and its UI remain separate.
+
+Edit `configs/server_pipeline.yaml` (schema 3), then launch the terminal UI:
 
 ```bash
-python vla-adapter-rynn-iql/scripts/train_server.py \
-  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml \
-  --dry-run
-
 python vla-adapter-rynn-iql/scripts/train_server.py \
   --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
 ```
 
-The server pipeline performs the same selection, Prepare, and RynnValue binding
-stages serially before launching `torchrun`. Only IQL optimization is
-distributed. Q, V, and the actor overlay each use DDP gradient synchronization
-and an independent `ZeroRedundancyOptimizer`; every rank retains its own frozen
-VLA backbone. Target Q remains local and is updated identically from the
-synchronized online Q replicas.
+Set `runs_root` to the copied runs directory. Select a task in the terminal, or
+set `task_id` in YAML. All marked runs for that task are used; missing or invalid
+required rewards fail validation rather than silently dropping data.
+For SSH/nohup/Slurm use `--yes --task <canonical-task-id>`. Use
+`--dry-run --task <canonical-task-id>` to validate inputs without creating a run.
+Relative YAML paths are resolved against the file declaring them.
 
-In server mode, `iql.micro_batch_size` is the **global** micro batch and must be
-divisible by the number of configured GPUs. For example, eight GPUs with global
-micro batch 8 use one transition per rank. With
-`gradient_accumulation_steps: 4`, the actor effective global batch is 32;
-`train_steps`, the learning-rate schedule, and accumulation semantics do not
-change with world size.
+`training_config` selects `training/iql.yaml` or `training/bc.yaml`.
+The shared configuration separates model adaptation, training budget, and
+method parameters. BC learns all selected actions with equal-weight masked L1;
+it does not load rewards or instantiate Q/V. IQL reads the saved global reward
+selected by `reward_source` (`final`, `rynnvalue`, `stage`, or `sparse`).
+Per-trajectory reward recipes remain attached to their inputs. Optional
+`overrides.reward.gamma` and `accumulate_primitive_steps` only derive private
+training rewards from saved semantic outputs; source evaluations are read-only.
+Multiplicative Final Reward remains macro-step only.
 
-Before `torchrun`, `build_server_cache.py` materializes only the de-duplicated
-training chunks into hash-keyed read-only `.npy` mmap arrays. Actor images and
-critic current/next images are shared through the OS page cache, while compact
-actions, proprioception, masks, and rewards are assembled once in each rank.
-Changing the dataset, critic image size, or source image hashes creates a
-different mmap cache. Reward-only changes reuse the image cache. Source
-trajectories and RynnValue sidecars remain read-only.
+`distributed.gpu_ids` selects 1–8 GPUs. If `CUDA_VISIBLE_DEVICES` is already
+set by a scheduler, IDs index that visible allocation; otherwise they are
+physical device indices. `training.micro_batch_size` is the global micro batch
+and must divide evenly across GPUs. Eight GPUs with micro batch 8 and
+`gradient_accumulation_steps: 4` use one chunk per rank and an actor effective
+batch of 32. Training steps and learning rates do not scale automatically.
 
-Server and single-GPU training share the same reward-reduction switch. Set
-`reward.rynnvalue: false` for a sparse-reward-only ablation; this keeps the
-stored RynnValue evaluation outputs for diagnostics but sets the dense reward
-to zero and makes the final training reward equal the sparse reward. The
-default is `true`. Set
-`reward.accumulate_primitive_steps: false` (the default) to treat each action
-chunk as one macro transition with one sparse reward and one Bellman discount.
-Set it to `true` to accumulate discounted primitive-step rewards and bootstrap
-with `gamma ** chunk_length`. Changing either switch, `reward.gamma`, or
-`reward.shaping_weight` rebuilds only the deterministic second-level reward
-cache from existing RynnValue outputs; it does not rerun the model.
+The integrated cache builds de-duplicated training chunks into read-only
+`.npy` mmap arrays, avoiding per-sample NPZ decompression. Reward-only changes
+reuse compatible image caches. DDP synchronizes trainable model components;
+ZeRO-1 shards their optimizer states, not model parameters. Frozen, LoRA, and
+full-backbone adaptation are configured under `model`; Q/V are IQL-only.
+The existing IQL mathematical functions are reused without changing update
+order, actor advantage, or Bellman reduction for a given configuration.
 
-Only rank zero writes JSONL, TensorBoard, W&B, checkpoints, and the standard
-policy overlay. Checkpoint save first consolidates all three ZeRO optimizer
-states on rank zero; unwrapped model keys allow a server checkpoint to resume
-with a different 1–8 GPU world size. `Ctrl+C` is handled at a shared safe step
-boundary and records one diagnostic checkpoint.
+Only rank zero writes JSONL, TensorBoard, W&B, checkpoints, and standard policy
+overlays. Distributed timing separates data, backbone, optimization, and
+communication. Checkpoints consolidate optimizer state and use unwrapped keys
+for 1–8 GPU recovery. Cancellation is requested at a common safe boundary;
+a timed fallback terminates the process group if workers do not respond.
 
-Deploy this branch on the training host with:
+Deploy with `git fetch origin`, `git switch server`, and
+`git pull --ff-only origin server` once the local branch matches the remote
+history. CPU/Gloo tests cover numerical alignment and cross-world-size
+checkpoint recovery; real NCCL/A100 throughput must be verified on the server.
 
-```bash
-git fetch origin
-git switch server
-git pull --ff-only origin server
-```
-
-The implementation follows PyTorch's documented one-process-per-GPU DDP model
-and its supported integration with `ZeroRedundancyOptimizer`:
-[DistributedDataParallel](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html),
-[distributed optimizers](https://docs.pytorch.org/docs/stable/distributed.optim.html).
+References: [DDP](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html),
+[ZeroRedundancyOptimizer](https://docs.pytorch.org/docs/stable/distributed.optim.html).
 
 The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan

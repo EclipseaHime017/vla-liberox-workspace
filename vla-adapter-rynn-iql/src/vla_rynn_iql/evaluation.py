@@ -21,9 +21,9 @@ def _training_view(config: LoadedConfig, base_checkpoint: str, stats_key: str) -
     ev, paths = config.section("evaluation"), config.section("paths")
     return LoadedConfig(config.path, {
         "paths": {"vla_adapter_root": paths["vla_adapter_root"]},
-        "vla": {"base_checkpoint": base_checkpoint, "stats_key": stats_key,
-                "use_pro_version": True, "freeze_backbone": True},
-        "iql": {"seed": ev["seed"]},
+        "model": {"family": "vla_adapter", "base_checkpoint": base_checkpoint, "stats_key": stats_key,
+                  "use_pro_version": True, "backbone": "frozen"},
+        "training": {"seed": ev["seed"]},
     })
 
 

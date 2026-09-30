@@ -16,15 +16,18 @@ from typing import Any, Iterable
 import numpy as np
 import yaml
 
-from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config
-from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step
+from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config, reward_source
+from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step, replay_chunks
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
+from .methods import COMMON_TRAINING_KEYS
+from .models import DEFAULT_MODEL
 from .rewards import (
     ANNOTATION_SCHEMA_VERSION,
     REWARD_SCHEMA_VERSION,
     official_inference_config,
     reward_derivation_config,
+    reward_implementation_fingerprint,
 )
 
 
@@ -84,12 +87,22 @@ def _resolve(path: str, base: Path, context: str) -> Path:
 
 
 def _validate_overrides(overrides: Any) -> dict[str, dict[str, Any]]:
-    sections = set(TRAIN_SCHEMA) - {"schema_version"}
+    if isinstance(overrides, dict):
+        overrides.setdefault("training", {})
+        overrides.setdefault("model", {})
+        for section in TRAIN_SCHEMA:
+            if section != "schema_version":
+                overrides.setdefault(section, {})
+        overrides.setdefault("vla", {})
+    sections = (set(TRAIN_SCHEMA) - {"schema_version"}) | {"vla"}
     result = _strict_keys(overrides, sections, "overrides")
     for section, values in result.items():
         if not isinstance(values, dict):
             raise TypeError(f"overrides.{section} must be a mapping")
-        allowed = set(TRAIN_SCHEMA[section])
+        allowed = (COMMON_TRAINING_KEYS | {"method", "actor_lr_warmup_steps"}
+                   if section == "training" else set(DEFAULT_MODEL) if section == "model"
+                   else {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"} if section == "vla"
+                   else set(TRAIN_SCHEMA[section]) | (COMMON_TRAINING_KEYS if section == "iql" else set()))
         unknown = sorted(set(values) - allowed)
         if unknown:
             raise ValueError(f"Unknown overrides.{section} keys: {unknown}")
@@ -173,22 +186,8 @@ def load_terminal_config(path: Path) -> TerminalPipelineConfig:
 
 
 def merged_training_config(config: TerminalPipelineConfig) -> dict[str, Any]:
-    raw = copy.deepcopy(load_train_config(config.base_config).raw)
-    for section, values in config.overrides.items():
-        for key, value in values.items():
-            if section == "paths":
-                if key == "dataset_sources":
-                    if not isinstance(value, list) or not value:
-                        raise TypeError("overrides.paths.dataset_sources must be a non-empty list")
-                    value = [
-                        str(_resolve(item, config.path.parent, f"overrides.paths.dataset_sources[{index}]"))
-                        for index, item in enumerate(value)
-                    ]
-                else:
-                    value = str(_resolve(value, config.path.parent, f"overrides.paths.{key}"))
-            elif section == "iql" and key == "resume_checkpoint" and value is not None:
-                value = str(_resolve(value, config.path.parent, "overrides.iql.resume_checkpoint"))
-            raw[section][key] = value
+    raw = load_train_config(config.base_config, overrides=config.overrides,
+                            overrides_path=config.path).raw
     raw["data"]["task_ids"] = [config.selection["task_id"]]
     raw["data"]["selection_manifest"] = None
     return raw
@@ -227,6 +226,10 @@ def dataset_roots(raw: dict[str, Any], import_root: Path) -> list[Path]:
 
 
 def _artifact_path(run_path: Path, value: Any, fallback: Path) -> Path:
+    # Recordings may have been copied from another device. Local conventional
+    # files take precedence over stale absolute metadata, without rewriting it.
+    if fallback.is_file():
+        return fallback.resolve()
     if isinstance(value, str) and value.strip():
         path = Path(value).expanduser()
         return (path if path.is_absolute() else run_path.parent / path).resolve()
@@ -429,6 +432,8 @@ def build_selection_manifest(
 
 
 def prepare_fingerprint(selection_manifest: dict[str, Any], raw: dict[str, Any]) -> str:
+    # Schema-4 evaluation tails already describe full replay and have reusable
+    # annotations. Keep their prepare identity stable across the replay policy change.
     data = raw["data"]
     return stable_hash({
         "selection_sha256": selection_manifest["dataset_sha256"],
@@ -447,6 +452,11 @@ def prepare_cache_valid(work_dir: Path, fingerprint: str) -> bool:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return False
+    try:
+        for episode in manifest["episodes"]:
+            replay_chunks(episode)
+    except (KeyError, TypeError, ValueError):
         return False
     return bool(
         state.get("fingerprint") == fingerprint
@@ -496,6 +506,10 @@ def annotation_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> boo
 
 
 def reward_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
+    # Direct sources must validate current Stage sidecars/frozen annotations in
+    # materialize_reward_manifest, which cheaply reuses matching reward arrays.
+    if reward_source(reward_config) != "rynnvalue":
+        return False
     prepared_path = work_dir / MANIFEST_NAME
     annotation_path = work_dir / "annotations" / "annotation_manifest.json"
     reward_path = work_dir / "rewards" / "reward_manifest.json"
@@ -512,6 +526,7 @@ def reward_cache_valid(work_dir: Path, reward_config: dict[str, Any]) -> bool:
         or rewards.get("dataset_sha256") != prepared.get("dataset_sha256")
         or rewards.get("annotation_manifest_sha256") != stable_hash(annotations)
         or rewards.get("reward_config") != reward_derivation_config(reward_config)
+        or rewards.get("derivation_implementation_sha256") != reward_implementation_fingerprint("rynnvalue")
     ):
         return False
     for episode in rewards.get("episodes", []):
