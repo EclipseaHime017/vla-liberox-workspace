@@ -27,7 +27,7 @@ def assert_stopped(config):
         raise RuntimeError(f"UI port {config.port} is still listening; stop UI before migration")
     # Compatibility check for old CLI processes that do not hold storage leases.
     scripts = {"run_ui.py", "train_terminal.py", "prepare_dataset.py", "annotate_rewards.py",
-               "train_iql.py", "evaluate_trajectories.py", "transfer_dataset.py"}
+               "train_iql.py", "evaluate_trajectories.py"}
     for proc in Path("/proc").glob("[0-9]*"):
         if proc.name == str(os.getpid()):
             continue

@@ -56,14 +56,14 @@ python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py --rollback
 
 保留 `dataset-root/.run-layout.json` 和 `.run-layout-migration.json`，它们用于旧路径兼容和故障恢复；不创建旧目录软链接。
 
-在 UI 冻结数据集并完成评价后：
+UI **数据集 → 已打包数据集 → 导出数据集**，完成后复制显示的 `runs/` 路径。例如（替换导出 ID、主机和路径）：
 
 ```bash
-python vla-adapter-rynn-iql/scripts/transfer_dataset.py export \
-  --dataset ds_YOUR_DATASET_ID --require-reward final
+rsync -av --progress dataset-exports/<导出ID>/runs/ \
+  SERVER:/path/to/workspace/dataset-root/projects/libero_x_vla/runs/
 ```
 
-将生成的整个 `training-datasets/<任务ID>/<数据集ID>/` 复制到服务器相同位置。旧数据批量复制迁移：`python vla-adapter-rynn-iql/scripts/transfer_dataset.py migrate`，不会移动原文件。
+保留完整 run 文件夹，不要只复制评价 JSON。各类奖励优先导出数据集专属结果，否则复用全局结果；源数据不变，无需重新评价。服务器的 `runs_root` 指向复制后的目录，仅按所选奖励要求读取已标记轨迹。
 
 ## 服务器端：启动全屏训练（仅 server 分支）
 
@@ -83,7 +83,7 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
   --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
 ```
 
-方向键选数据集 → Enter 配置 → 选 `START` 按 Enter 开训；`q` / `Ctrl+C` 安全停止。只训练并导出模型，不运行仿真、策略评测或奖励模型。默认 8 卡、全局 batch 8、累积 4；启动前按获分配的 GPU 修改配置。
+方向键选任务（全部已标记记录） → Enter 配置 → 选 `START` 按 Enter 开训；`q` / `Ctrl+C` 安全停止。只训练并导出模型，不运行仿真、策略评测或奖励模型。默认 8 卡、全局 batch 8、累积 4；启动前按获分配的 GPU 修改配置。
 
 ## 原始数据：单卡终端流水线
 

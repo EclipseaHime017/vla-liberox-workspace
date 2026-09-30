@@ -1,12 +1,8 @@
-from pathlib import Path
-
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from .dependencies import (
-    dataset_service, http_error, offline_job_service, service,
+    http_error, offline_job_service, service,
     training_dataset_service, trajectory_evaluation_service,
     robometer_evaluation_service,
     stage_annotation_service,
@@ -111,20 +107,6 @@ async def evaluate_trajectories(body: TrajectoryEvaluationRequest, request: Requ
             run_ids=None if body.run_ids is None else list(body.run_ids),
             overwrite=False if body.overwrite is None else body.overwrite,
             evaluators=list(body.evaluators),
-        )
-    except Exception as exc:
-        raise http_error(exc) from exc
-
-
-@router.get("/export")
-async def export(request: Request, task_id: str = Query(min_length=1)):
-    try:
-        path, filename = dataset_service(request).export_task(task_id)
-        return FileResponse(
-            path,
-            media_type="application/zip",
-            filename=filename,
-            background=BackgroundTask(Path(path).unlink, missing_ok=True),
         )
     except Exception as exc:
         raise http_error(exc) from exc

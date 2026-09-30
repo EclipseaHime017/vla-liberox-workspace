@@ -1,3 +1,15 @@
+export interface DatasetExportStatus {
+  id: string;
+  dataset_id: string;
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+  stage: string;
+  completed_runs: number;
+  total_runs: number;
+  current_file?: string;
+  output_path: string | null;
+  error: string | null;
+}
+
 export type TaskInfo = {
   family_id?: string;
   family_label?: string;

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  createTrainingDataset, datasetExportUrl, deriveTrainingDataset,
+  createTrainingDataset, deriveTrainingDataset,
   deleteTrainingDataset, evaluateTrajectories, getBootstrap, getDatasetSummary,
   getTrajectoryDetail, listDatasetRuns, listOfflineJobs, listTrainingDatasets,
   previewTrainingDataset,
@@ -285,7 +285,7 @@ export function DatasetPage() {
             <label title={robometerCapability?.reason ?? undefined}><input type="checkbox" disabled={robometerCapability?.available === false} checked={evaluators.includes("robometer")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "robometer"] : current.filter((value) => value !== "robometer"))} />Robometer{robometerCapability?.available === false ? "（未配置）" : ""}</label>
             <label><input type="checkbox" checked={batchOverwrite} onChange={(event) => setBatchOverwrite(event.target.checked)} />覆盖已有评价</label>
             <button disabled={busy || !taskId || !evaluators.length} onClick={() => void evaluate(null, batchOverwrite)}>批量评价</button><button className="primary" disabled={busy || !taskId || !evaluationSelection.length || !evaluators.length} onClick={() => void evaluate(evaluationSelection, batchOverwrite)}>{batchOverwrite ? "评价所选（覆盖已有）" : "评价所选（仅补缺失）"}</button>
-          </div> : <><button className="primary" disabled={!taskId} onClick={() => openBuilder()}>创建训练数据集</button><a className="export-button" href={taskId ? datasetExportUrl(taskId) : undefined} download aria-disabled={!taskId}>导出任务 ZIP</a></>}
+          </div> : <button className="primary" disabled={!taskId} onClick={() => openBuilder()}>创建训练数据集</button>}
           {!taskId && <span className="task-scope-note">请选择具体提示词后进行评价、打包或导出。</span>}
         </div>
         {runsLoading && !runPage ? <div className="empty-table">正在加载轨迹索引…</div> : <RunTable runs={runs} selectable={section === "evaluation" || (builder && selection.mode === "manual")} excludeTests={section === "package"} selected={section === "evaluation" ? evaluationSelection : selection.run_ids} onToggle={(runId, checked) => section === "evaluation" ? setEvaluationSelection((current) => checked ? [...current, runId] : current.filter((value) => value !== runId)) : patchSelection({ run_ids: checked ? [...selection.run_ids, runId] : selection.run_ids.filter((value) => value !== runId) })} onOpen={(runId) => void openDetail(runId)} />}
@@ -313,7 +313,7 @@ export function DatasetPage() {
 
       {section === "package" && <div className="surface frozen-datasets">
         <div className="panel-title"><strong>已打包数据集</strong><span>{datasets.length}</span></div>
-        {datasetsLoading && !datasets.length ? <div className="empty-table">正在加载冻结数据集…</div> : datasets.length ? datasets.map((dataset) => <FrozenDatasetCard key={dataset.id} dataset={dataset} disabled={busy}
+        {datasetsLoading && !datasets.length ? <div className="empty-table">正在加载冻结数据集…</div> : datasets.length ? datasets.map((dataset) => <FrozenDatasetCard key={dataset.id} dataset={dataset} disabled={busy} exportEnabled
           robometerUnavailable={robometerCapability?.available === false ? robometerCapability.reason ?? "Robometer 环境未配置" : undefined}
           onRemove={() => void removeDataset(dataset)} onDerive={() => openBuilder(dataset)} onRefresh={refresh}
           onJob={setAnnotationJob} onError={setError} onOpen={(runId, datasetId) => void openDetail(runId, datasetId)} />) : <div className="empty-table">尚未创建训练数据集。</div>}

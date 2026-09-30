@@ -1,16 +1,22 @@
-"""Read-only PC export adapter; no UI server, simulation or GPU model is started."""
+"""Export frozen members as ordinary runs with self-contained saved evaluations."""
 from __future__ import annotations
 
 import copy
 import json
+import hashlib
+import re
+import shutil
 import tempfile
 from pathlib import Path
 
 from ..storage.paths import storage_path, storage_lease
 from types import SimpleNamespace
 
-from .dataset_reward_versions import DatasetRewardVersions
+from .dataset_export_rewards import ExportRewards, checked
+from .inherited_reward_inputs import offline_module
 from .training_dataset_service import TrainingDatasetService
+from ..storage.files import atomic_write_json
+from .trajectory_reward_snapshot import _hash
 
 
 class _ReadOnlyDatasets(TrainingDatasetService):
@@ -44,7 +50,7 @@ class _ReadOnlyDatasets(TrainingDatasetService):
         raise KeyError(run_id)
 
 
-class _ExportRewards(DatasetRewardVersions):
+class _ExportContext:
     read_only = True
 
     def __init__(self, datasets, base_config, offline_root, scratch):
@@ -53,8 +59,8 @@ class _ExportRewards(DatasetRewardVersions):
         self.jobs_root, self.cache_root = scratch / "jobs", scratch / "cache"
 
     def _load_base_config(self, *args):
-        from vla_rynn_iql.config import load_train_config
-        return copy.deepcopy(load_train_config(self.base_config_path).raw)
+        config = offline_module(self.ui_config.offline_rl_root, "config")
+        return copy.deepcopy(config.load_train_config(self.base_config_path).raw)
 
     def _effective_config(self, dataset):
         raw = self._load_base_config()
@@ -67,40 +73,104 @@ class _ExportRewards(DatasetRewardVersions):
 
 
 def export_dataset(project_root: Path, dataset_id: str, destination: Path, base_config: Path,
-                   offline_root: Path, *, required_rewards: tuple[str, ...] = ()) -> Path:
+                   offline_root: Path, *, progress=lambda **_: None) -> Path:
     with storage_lease(project_root.resolve().parents[1]):
         return _export_dataset(project_root, dataset_id, destination, base_config, offline_root,
-                               required_rewards=required_rewards)
+                               progress=progress)
 
 
 def _export_dataset(project_root: Path, dataset_id: str, destination: Path, base_config: Path,
-                    offline_root: Path, *, required_rewards: tuple[str, ...] = ()) -> Path:
-    from vla_rynn_iql.config import LoadedConfig
-    from vla_rynn_iql.data import prepare_dataset
-    from vla_rynn_iql.portable_dataset import export_bundle
-
+                    offline_root: Path, *, progress) -> Path:
     datasets = _ReadOnlyDatasets(project_root, dataset_id)
     selection_path, frozen = datasets._load(dataset_id)
     dataset = datasets.get(dataset_id)
-    with tempfile.TemporaryDirectory(prefix="vla-transfer-") as directory:
-        context = _ExportRewards(datasets, base_config, offline_root, Path(directory))
-        versions, unavailable = {}, {}
-        for source in ("sparse", "stage", "rynnvalue", "final"):
-            try:
-                versions[source], _ = context.pinned_reward(dataset, {"reward_source": source})
-            except (KeyError, ValueError, OSError, RuntimeError) as exc:
-                # A corrupt explicit dataset result is never replaced by another source.
-                if source in required_rewards or source in dataset.get("evaluation_version_ids", {}):
-                    raise ValueError(f"Cannot export {source}: {exc}") from exc
-                unavailable[source] = str(exc)
-        raw = context._effective_config(dataset)
-        # Evaluated datasets already have a complete, verified Prepare snapshot.
-        # Reusing it also preserves geometry if installation defaults changed.
-        if versions:
-            first = next(iter(versions.values()))
-            prepared = Path(first["prepared_manifest_path"])
-        else:
-            prepared = prepare_dataset(LoadedConfig(base_config, raw)).manifest
-        return export_bundle(destination, frozen, selection_path, prepared, versions,
-                             notes={"unavailable_rewards": unavailable,
-                                    "migration": "Source files are retained unchanged; old dated layouts remain readable"})
+    destination = destination.absolute()
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f"Export destination already exists: {destination}")
+    if destination.resolve().is_relative_to(project_root.resolve().parents[1]):
+        raise ValueError("Export must be outside dataset-root to avoid duplicate run IDs")
+    selection_hash = _hash(selection_path)
+    members = frozen["members"]
+    if not members or len({m["run_id"] for m in members}) != len(members):
+        raise ValueError("Dataset must contain unique, nonempty members")
+    task = re.sub(r"[^A-Za-z0-9_.-]+", "_", dataset["task_id"]).strip("._")
+    task = task[:160] + "_" + hashlib.sha256(dataset["task_id"].encode()).hexdigest()[:8]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    progress(stage="验证数据与评价", total_runs=len(members), completed_runs=0)
+    with tempfile.TemporaryDirectory(prefix=".dataset-export-", dir=destination.parent) as directory:
+        scratch = Path(directory)
+        staging = scratch / "payload"
+        staging.mkdir()
+        context = _ExportContext(datasets, base_config, offline_root, scratch)
+        rewards = ExportRewards(context, dataset)
+        exported = []
+        for number, member in enumerate(members):
+            run_id = member["run_id"]
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+                raise ValueError(f"Unsafe run ID: {run_id}")
+            artifacts = member["artifacts"]
+            manifest = checked(artifacts["manifest"]["path"], artifacts["manifest"]["sha256"])
+            source = manifest.parent
+            if source.is_symlink():
+                raise ValueError(f"Symlink run directory: {source}")
+            for artifact in artifacts.values():
+                path = checked(artifact["path"], artifact["sha256"])
+                if not path.resolve().is_relative_to(source.resolve()):
+                    raise ValueError(f"Run artifact is outside its directory: {path}")
+            target = staging / "runs" / task / run_id
+            progress(stage="复制轨迹", current_run=run_id)
+            # Copy all recording files, not the old ZIP's video/CSV whitelist.
+            # Streaming copy/hash avoids decompressing multi-GB observation archives.
+            originals = _copy_run(source, target, progress)
+            for artifact in artifacts.values():
+                checked(target / storage_path(artifact["path"]).relative_to(source), artifact["sha256"])
+            copied_episode = target / storage_path(artifacts["trajectory"]["path"]).relative_to(source).parent
+            progress(stage="绑定已有评价", current_file="")
+            evaluations = rewards.publish(member, copied_episode)
+            for path, signature in originals:
+                if _signature(path) != signature:
+                    raise ValueError(f"Source changed during export: {path}")
+            exported.append({"run_id": run_id, "path": str(target.relative_to(staging)),
+                "split": member["split"], "root_run_id": member["root_run_id"],
+                "parent_run_id": member.get("parent_run_id"), "evaluations": evaluations})
+            progress(completed_runs=number + 1)
+        if _hash(selection_path) != selection_hash:
+            raise ValueError("Dataset selection or active evaluation changed during export; retry")
+        # Selection is provenance only: server training scans the ordinary runs tree.
+        atomic_write_json(staging / "dataset.json", frozen)
+        progress(stage="校验导出文件", current_file="")
+        files = {str(p.relative_to(staging)): {"sha256": _hash(p), "size": p.stat().st_size}
+                 for p in sorted(staging.rglob("*")) if p.is_file()}
+        atomic_write_json(staging / "export.json", {"schema_version": 1, "complete": True,
+            "kind": "dataset_runs_export", "dataset_id": dataset_id, "dataset_name": dataset["name"],
+            "task_id": dataset["task_id"], "dataset_sha256": dataset["dataset_sha256"],
+            "runs_root": "runs", "members": exported, "files": files})
+        staging.rename(destination)
+    return destination
+
+
+def _signature(path: Path) -> tuple:
+    stat = path.lstat()
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode
+
+
+def _copy_run(source: Path, target: Path, progress) -> list:
+    signatures = [(source, _signature(source))]
+    target.mkdir(parents=True)
+    for path in sorted(source.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"Symlinks cannot be exported: {path}")
+        output = target / path.relative_to(source)
+        signature = _signature(path)
+        if path.is_dir():
+            output.mkdir(exist_ok=True)
+            signatures.append((path, signature))
+            continue
+        if not path.is_file():
+            raise ValueError(f"Not a regular recording file: {path}")
+        progress(current_file=str(path.relative_to(source)))
+        shutil.copyfile(path, output)
+        if _hash(path) != _hash(output) or _signature(path) != signature:
+            raise ValueError(f"Recording changed while copying: {path}")
+        signatures.append((path, signature))
+    return signatures

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import threading
-import zipfile
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,7 +12,6 @@ from backend.app.api import controller as api
 from backend.app.api.models import ControllerCalibrationRequest, ControllerGravityRequest, CreateBranchRequest
 from backend.app.domain.run import SimulationSession
 from backend.app.devices.factr import FactrSnapshot
-from backend.app.services.dataset_service import DatasetService
 from backend.app.services.run_service import RunService
 from backend.app.workers.simulation_worker import SimulationManager
 
@@ -143,7 +141,7 @@ def test_policy_requests_reject_controller_and_manual_defaults_remain_compatible
 
 
 
-def test_factr_metadata_and_export_preserve_manual_classification(tmp_path):
+def test_factr_metadata_preserves_manual_source(tmp_path):
     episode = tmp_path / "episodes" / "episode_000"
     episode.mkdir(parents=True)
     samples = episode / "factr_samples.csv"
@@ -152,16 +150,8 @@ def test_factr_metadata_and_export_preserve_manual_classification(tmp_path):
                                max_steps=10, open_loop_steps=1, control_mode="manual", manual_source="factr")
     public = record.public({"episodes/episode_000/factr_samples.csv": str(samples)})
     public["task_id"] = "task"
-    service = DatasetService(SimpleNamespace(list_runs=lambda: [public]))
-    assert service._episode_category(public) == "manual_intervention"
-    path, _ = service.export_task("task")
-    try:
-        with zipfile.ZipFile(path) as archive:
-            assert "runs/factr/episodes/episode_000/factr_samples.csv" in archive.namelist()
-            assert "factr" in archive.read("runs.csv").decode()
-            assert "human" in archive.read("runs.csv").decode()
-    finally:
-        path.unlink()
+    assert public["manual_source"] == "factr"
+    assert public["control_mode"] == "manual"
 
 
 def test_saved_factr_history_not_relabelled_spacemouse(tmp_path):
@@ -196,5 +186,4 @@ def test_factr_branch_record_locks_controller_and_parent_context(tmp_path):
     assert record.managed and not record.branchable
     worker._persist_manifest(record)
     assert (record.output_dir / "run.json").is_file()
-    service = DatasetService(SimpleNamespace(list_runs=lambda: [record.public()]))
-    assert service.list_runs()[0]["id"] == record.id
+    assert json.loads((record.output_dir / "run.json").read_text())["manual_source"] == "factr"

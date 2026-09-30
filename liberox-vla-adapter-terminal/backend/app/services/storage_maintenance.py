@@ -62,6 +62,9 @@ class StorageMaintenance:
                 self.idle.set()
 
     def _repair(self, app):
+        exports = getattr(app.state, "dataset_export_service", None)
+        if exports is not None and exports.active:
+            raise RuntimeError("数据集正在导出，请完成后再修复存储")
         worker, jobs = app.state.manager, app.state.offline_job_service
         if worker.active_session_id is not None or worker.draft is not None:
             raise RuntimeError("请先停止仿真并取消草稿，再修复存储目录")

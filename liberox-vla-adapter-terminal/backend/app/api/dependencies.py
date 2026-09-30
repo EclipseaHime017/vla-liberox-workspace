@@ -5,7 +5,7 @@ import logging
 from fastapi import HTTPException, Request
 
 from ..services.run_service import RunService
-from ..services.dataset_service import DatasetService
+from ..services.dataset_export_service import DatasetExportService
 from ..services.offline_job_service import OfflineJobService
 from ..services.training_dataset_service import TrainingDatasetService
 from ..services.trajectory_evaluation_service import TrajectoryEvaluationService
@@ -21,11 +21,10 @@ def service(request: Request) -> RunService:
     return current
 
 
-def dataset_service(request: Request) -> DatasetService:
-    current = getattr(request.app.state, "dataset_service", None)
+def dataset_export_service(request: Request) -> DatasetExportService:
+    current = getattr(request.app.state, "dataset_export_service", None)
     if current is None:
-        current = DatasetService(service(request))
-        request.app.state.dataset_service = current
+        raise HTTPException(status_code=503, detail="Dataset export service is unavailable")
     return current
 
 

@@ -208,38 +208,37 @@ are recorded below `outputs/terminal-pipelines/`.
 
 The older `run_pipeline.py` remains a simple stateless stage launcher.
 `train_terminal.py` retains the single-GPU raw-data workflow. For PC-evaluated
-datasets and server-only training, use the portable workflow below.
+trajectories and server-only training, use the direct-copy workflow below.
 
-### Portable datasets and branch separation
+### Copied global evaluations and branch separation
 
-`main` contains PC/UI collection, single-GPU training and the shared transfer
-format. The full-screen server launcher, DDP/ZeRO execution, mmap cache and
-multi-rank checkpoints exist only on `server`. Shared algorithms flow from main
-to server, never the other way around. On the PC, freeze/select a dataset and
-generate its desired rewards:
+Use **导出数据集** on a frozen dataset card, then copy the resulting
+`dataset-exports/<export-id>/runs/` directory between devices. It includes full
+recordings and saved per-type evaluations, preferring dataset-specific results
+over globals and materializing legacy globals found in dataset directories.
+Original observations, actions, videos and Stage labels are copied unchanged;
+saved reward NPZ arrays are not recalculated. No UI database or original cache
+is needed on the receiving device. Set the server's `runs_root` to the copied tree.
 
-```bash
-python vla-adapter-rynn-iql/scripts/transfer_dataset.py export \
-  --dataset ds_YOUR_DATASET_ID --require-reward final
-```
+Only `server` contains the full-screen launcher and DDP/ZeRO execution. Its
+schema-3 configuration uses `runs_root` and `task_id`; the selected task uses
+all runs with the requested global reward, without quotas. Missing rewards are
+reported/skipped; corrupt or incompatible saved rewards stop preparation.
+BC uses all marked runs without consuming reward arrays. Robometer is diagnostic.
+Bare Stage keyframes use the base configuration's p for CPU-only reduction;
+saved Stage/Final recipes remain per-run. Gamma/cumulative changes affect only
+private training copies. No reward model, simulator or UI is started.
 
-Copy the entire `training-datasets/<task>/<dataset-id>/` directory to the server.
-It contains source recordings, labels, available model outputs and independent
-training reward snapshots. Paths are relocatable and hashes are checked before
-training. Export uses saved evaluations only; missing required results are an
-error, not an instruction to reload a reward model. BC needs no reward. Run
-`transfer_dataset.py migrate --dry-run` and then `migrate` to copy all legacy
-frozen datasets into this layout. Original recordings and UI paths stay intact;
-existing destinations are never overwritten. This is a training export, not a
-UI database import. Keep the transfer root separate from `dataset-root` to avoid
-duplicate run IDs during raw-data scanning.
+Use `train_server.py --config configs/server_pipeline.yaml` in the server project,
+or pass `--task 'LEVEL1::task_id' --dry-run` for read-only validation. Batch launch
+uses `--yes`. The PC's `main` branch keeps its single-GPU UI unchanged.
+See the server branch README for GPU and checkpoint settings.
 
-After copying, use the `server` branch on the training machine. Its README
-contains the full-screen launch command, GPU/batch configuration, monitoring and
-checkpoint instructions. Server functionality is training and model export only:
-no simulator, policy evaluation or reward-model inference. Do not launch
-`train_server.py` from main; it is deliberately absent here. Keep separate
-worktrees for local development so uncommitted server files cannot leak into main.
+The old task ZIP and `transfer_dataset.py` bundle export/import tool are removed.
+Exports run in a bounded background worker and publish a fresh directory only
+after integrity checks succeed. Missing reward types remain missing; corrupt saved
+results fail the export. Source data, reward models and training are not modified.
+Copy whole run folders, not JSON metadata alone, before starting server training.
 
 The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan
@@ -343,12 +342,10 @@ run. Dataset configuration owns p, alpha, kappa and fusion mode. Gamma and
 cumulative (additive only) can be set there and at training launch; overrides
 derive private arrays from frozen signals without overwriting dataset results.
 Annotation hashes bind original `trajectory.npz` bytes and keyframes, not p;
-success is resolved with the dataset's confirmation threshold. A ZIP retaining
-original NPZ files and sidecars is
-supported; the UI's existing lightweight CSV/video export archives labels but
-cannot reuse that binding after reconstructing a different NPZ. Retain the
-original trajectory files for portable Stage training; hashes are never silently
-rewritten. Usage: [Chinese guide §4.4.2](../README_CN.md#442-annotate-与-reward-materialize-的边界).
+success is resolved with the dataset's confirmation threshold. Dataset export
+retains original NPZ files, labels and evaluation-time snapshots independently.
+Hashes are never silently rewritten. The importer also supports existing ZIPs
+containing the original NPZ files. Usage: [Chinese guide §4.4.2](../README_CN.md#442-annotate-与-reward-materialize-的边界).
 
 ## Training monitoring
 

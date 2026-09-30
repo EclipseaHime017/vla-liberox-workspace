@@ -6,7 +6,8 @@ import * as api from "../features/run-control/api";
 import type { Bootstrap, DatasetSummary, TrainingDataset } from "../features/run-control/types";
 
 vi.mock("../features/run-control/api", () => ({
-  annotateTrainingDataset: vi.fn(), createTrainingDataset: vi.fn(), datasetExportUrl: vi.fn(),
+  annotateTrainingDataset: vi.fn(), createTrainingDataset: vi.fn(),
+  getDatasetExport: vi.fn(), startDatasetExport: vi.fn(),
   deriveTrainingDataset: vi.fn(), deleteTrainingDataset: vi.fn(), evaluateTrajectories: vi.fn(),
   getBootstrap: vi.fn(), getDatasetSummary: vi.fn(), getTrajectoryDetail: vi.fn(),
   listDatasetRuns: vi.fn(), listOfflineJobs: vi.fn(), listTrainingDatasets: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock("../features/dataset/TrajectoryDetail", () => ({ TrajectoryDetail: () =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.getDatasetExport).mockResolvedValue(null);
   vi.mocked(api.getBootstrap).mockResolvedValue({ task: { task_id: "task" },
     task_catalog: [{ task_id: "task", prompt: "pick bowl" }] } as unknown as Bootstrap);
   vi.mocked(api.getDatasetSummary).mockResolvedValue({
@@ -47,6 +49,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("dataset evaluation configuration", () => {
+  it("keeps export feedback outside the action buttons", async () => {
+    const dataset = { id: "dataset", name: "Dataset", integrity_status: "HEALTHY",
+      annotation_status: "READY" } as TrainingDataset;
+    vi.mocked(api.getDatasetExport).mockResolvedValue({ id: "export", dataset_id: "dataset",
+      status: "COMPLETED", stage: "导出完成", total_runs: 1, completed_runs: 1,
+      output_path: "/workspace/dataset-exports/very-long-export-id/runs", error: null });
+    const { container } = render(<FrozenDatasetCard dataset={dataset} exportEnabled disabled={false}
+      onRefresh={async () => {}} onJob={() => {}} onError={() => {}} />);
+    await screen.findByLabelText("导出目录");
+    const actions = container.querySelector(".dataset-card-actions")!;
+    expect(actions.contains(screen.getByRole("button", { name: "导出数据集" }))).toBe(true);
+    expect(actions.contains(screen.getByRole("status"))).toBe(false);
+    expect(container.querySelector(".dataset-export-feedback")?.parentElement?.className).toBe("dataset-card");
+  });
+
   it("repairs storage from the dataset page and refreshes without evaluation", async () => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
     vi.mocked(api.repairDatasetStorage).mockResolvedValue({ status: "COMPLETED", moved: 2,

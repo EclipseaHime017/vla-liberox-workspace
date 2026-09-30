@@ -29,7 +29,7 @@ def _legacy_processes():
     """Conservative compatibility guard for consumers predating storage leases."""
     consumers = {"run_ui.py", "train.py", "train_iql.py", "train_terminal.py", "prepare_dataset.py",
                  "materialize_rewards.py", "annotate_rewards.py", "run_pipeline.py",
-                 "evaluate_trajectories.py", "transfer_dataset.py"}
+                 "evaluate_trajectories.py"}
     for proc in Path("/proc").glob("[0-9]*"):
         if proc.name == str(os.getpid()):
             continue

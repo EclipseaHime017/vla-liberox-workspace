@@ -8,17 +8,19 @@ import type {
 } from "../run-control/types";
 import { Badge } from "../../components/ui/Badge";
 import { RunTable } from "./RunTable";
+import { DatasetExportButton, DatasetExportResult, useDatasetExport } from "./DatasetExport";
 import { evaluationOperationLabels, rewardParameterLabels, rewardSourceLabels } from "./rewardVersions";
 const successful = (status: string) => ["COMPLETED", "READY"].includes(status);
 
-export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onRemove, onDerive, initialExpanded = false,
+export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onRemove, onDerive, initialExpanded = false, exportEnabled = false,
   onRefresh, onJob, onError, onOpen }: {
   dataset: TrainingDataset; disabled: boolean; robometerUnavailable?: string;
-  onRemove?: () => void; onDerive?: () => void; initialExpanded?: boolean; onRefresh: () => Promise<void>;
+  onRemove?: () => void; onDerive?: () => void; initialExpanded?: boolean; exportEnabled?: boolean; onRefresh: () => Promise<void>;
   onJob: (job: OfflineJob) => void; onError: (error: string) => void;
   onOpen?: (runId: string, datasetId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(initialExpanded);
+  const datasetExport = useDatasetExport(dataset.id, exportEnabled);
   const [showMembers, setShowMembers] = useState(false);
   const [configs, setConfigs] = useState<Partial<Record<RewardSource | EvaluationOperation, RewardParameters>>>({});
   const [configReady, setConfigReady] = useState(false);
@@ -142,7 +144,9 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
       {onDerive && <button disabled={blocked} onClick={onDerive}>调整成员并另存</button>}
       {onOpen && <button aria-expanded={showMembers} onClick={() => setShowMembers((value) => !value)}>成员</button>}
       <button aria-expanded={expanded} aria-controls={`reward-config-${dataset.id}`} onClick={() => setExpanded((value) => !value)}>配置</button>
+      {exportEnabled && <DatasetExportButton controller={datasetExport} disabled={blocked} />}
     </div>
+    {exportEnabled && <DatasetExportResult controller={datasetExport} />}
     {dataset.integrity_error && <p className="dataset-integrity-error">{dataset.integrity_error}</p>}
     {expanded && <section id={`reward-config-${dataset.id}`} className="dataset-reward-config" aria-label={`${dataset.name} 评价配置`}>
       <fieldset className="dataset-sampling-controls" aria-label="训练取样配置" disabled={disabled || busy}>

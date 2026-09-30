@@ -25,7 +25,7 @@ from .api.models import (
 from .core.config import DEFAULT_UI_CONFIG, UIConfig, load_ui_config
 from .core.frontend import frontend_build_info
 from .services.run_service import RunService
-from .services.dataset_service import DatasetService
+from .services.dataset_export_service import DatasetExportService
 from .services.offline_job_service import OfflineJobService
 from .services.training_dataset_service import TrainingDatasetService
 from .services.trajectory_evaluation_service import TrajectoryEvaluationService
@@ -71,10 +71,7 @@ def create_app(
                     app.state.trajectory_evaluation_service,
                     app.state.robometer_evaluation_service,
                 )
-                app.state.dataset_service = DatasetService(
-                    app.state.run_service,
-                    app.state.training_dataset_service.is_test,
-                )
+                app.state.dataset_export_service = DatasetExportService(app.state.training_dataset_service, ui_config)
                 app.state.offline_job_service = OfflineJobService(
                     ui_config, worker, app.state.training_dataset_service,
                     app.state.trajectory_evaluation_service,
@@ -84,7 +81,7 @@ def create_app(
                 worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
                 app.state.offline_job_service.start_training_queue()
             else:
-                app.state.dataset_service = DatasetService(app.state.run_service)
+                app.state.dataset_export_service = None
                 app.state.training_dataset_service = None
                 app.state.trajectory_evaluation_service = None
                 app.state.robometer_evaluation_service = None
@@ -93,6 +90,9 @@ def create_app(
             try:
                 yield
             finally:
+                exports = getattr(app.state, "dataset_export_service", None)
+                if exports is not None:
+                    await asyncio.to_thread(exports.close)
                 offline = getattr(app.state, "offline_job_service", None)
                 if offline is not None:
                     offline.close()

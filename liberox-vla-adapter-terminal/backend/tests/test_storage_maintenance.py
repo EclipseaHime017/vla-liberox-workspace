@@ -14,7 +14,6 @@ from backend.app.storage.files import legacy_session_id
 from backend.app.storage.paths import clear_storage_cache, storage_path, storage_lease
 from backend.app.workers.simulation_worker import SimulationManager
 from vla_rynn_iql.run_layout import migrate_layout, rollback_migration
-from vla_rynn_iql.portable_dataset import read_bundle
 import test_global_reward_inheritance as fixtures
 from test_training_platform import make_run
 
@@ -36,7 +35,7 @@ def recording(tmp_path, monkeypatch):
     return jobs, dataset, run
 
 
-def test_frozen_sources_global_labels_and_export_survive_relocation(tmp_path, monkeypatch):
+def test_frozen_sources_global_labels_and_export_survive_relocation(tmp_path, tmp_path_factory, monkeypatch):
     jobs, dataset, run = recording(tmp_path, monkeypatch)
     old = Path(run["trajectory"])
     identity = legacy_session_id(old)
@@ -56,10 +55,11 @@ def test_frozen_sources_global_labels_and_export_survive_relocation(tmp_path, mo
         assert jobs.defaults(dataset["id"], source)["reward_availability"]["ready"]
     config = tmp_path / "export.yaml"
     config.write_text(yaml.safe_dump(jobs._load_base_config()))
-    exported = tmp_path / "bundle"
+    exported = tmp_path_factory.mktemp("exports") / "dataset"
     export_dataset(jobs.datasets.root.parent, dataset["id"], exported, config,
-                   jobs.ui_config.offline_rl_root, required_rewards=("rynnvalue", "stage"))
-    assert {"stage", "rynnvalue"} <= read_bundle(exported, verify=True)["rewards"].keys()
+                   jobs.ui_config.offline_rl_root)
+    assert next(exported.rglob("stage_annotation.json")).is_file()
+    assert next(exported.rglob("trajectory_reward.rynnvalue.json")).is_file()
     assert frozen_path.read_bytes() == frozen_bytes
     assert all(storage_path(path).read_bytes() == value for path, value in original_files.items())
     # Materializing global bindings may legitimately add sidecars; rollback only

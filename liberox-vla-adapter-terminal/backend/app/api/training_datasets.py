@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Query, Request
 from starlette.concurrency import run_in_threadpool
 
-from .dependencies import http_error, offline_job_service, training_dataset_service
+from .dependencies import dataset_export_service, http_error, offline_job_service, training_dataset_service
 from .models import (
     CreateTrainingDatasetRequest,
     DatasetAnnotationRequest,
@@ -76,12 +76,28 @@ async def derive(dataset_id: str, body: DeriveTrainingDatasetRequest, request: R
 async def delete_dataset(
     dataset_id: str, body: DeleteTrainingDatasetRequest, request: Request
 ):
+    def remove():
+        with dataset_export_service(request).mutation_guard():
+            return offline_job_service(request).delete_dataset(
+                dataset_id, body.confirm_dataset_id, force=body.force
+            )
     try:
-        return offline_job_service(request).delete_dataset(
-            dataset_id, body.confirm_dataset_id, force=body.force
-        )
+        return await run_in_threadpool(remove)
     except Exception as exc:
         raise http_error(exc) from exc
+
+
+@router.post("/{dataset_id}/export", status_code=202)
+async def start_export(dataset_id: str, request: Request):
+    try:
+        return await run_in_threadpool(dataset_export_service(request).start, dataset_id)
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.get("/{dataset_id}/export")
+async def export_status(dataset_id: str, request: Request):
+    return await run_in_threadpool(dataset_export_service(request).get, dataset_id)
 
 
 @router.patch("/{dataset_id}/training-options")

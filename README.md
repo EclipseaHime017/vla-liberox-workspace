@@ -36,7 +36,7 @@ vla-liberox-workspace/
 ├── vla-adapter-rynn-iql/          # standalone reward annotation and offline RL
 ├── configs/                       # terminal/UI runtime configuration
 ├── dataset-root/                  # recorded source data (Git-ignored)
-├── training-datasets/             # portable task/dataset snapshots (Git-ignored)
+├── dataset-exports/               # self-contained dataset runs exports (Git-ignored)
 ├── policy-registry/               # immutable policy overlays (Git-ignored)
 ├── docs/                          # local development notes (Git-ignored)
 └── README_CN.md                   # complete Chinese setup and operating guide
@@ -56,10 +56,14 @@ persistent cross-process GPU lock. TensorBoard is read-only and remains outside
 that lock. Dataset manifests reference and hash source artifacts instead of
 copying trajectories or videos.
 
-For server transfer, `transfer_dataset.py export` explicitly copies a complete
-training snapshot with local, verified references. Legacy date-organized runs
-remain readable; `migrate` copies existing frozen datasets without rewriting
-their original files or UI catalog. New recordings omit the date directory layer.
+For server transfer, click **导出数据集** on a frozen dataset card. A background job
+copies its complete member recordings to `dataset-exports/<export-id>/runs/`,
+binding each saved reward/evaluation beside the copied trajectory. Dataset-specific
+results take precedence over global results, including legacy global evaluations
+stored only in dataset directories. Source files and model outputs remain unchanged;
+no evaluator runs. Copy the exported `runs/` tree to the server and select it as
+`runs_root`; no UI database or frozen-bundle import is required. Both dated and flat
+source layouts work. The old task ZIP and `transfer_dataset.py` bundle tool are removed.
 
 Start from `vla-liberox-workspace/` after activating `vla-liberox`:
 

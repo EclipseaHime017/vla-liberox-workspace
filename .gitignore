@@ -58,6 +58,7 @@ wandb/
 .cache/
 
 # Generated trajectories, videos, and portable dataset exports
+/dataset-exports/
 *.npy
 *.npz
 *.mp4

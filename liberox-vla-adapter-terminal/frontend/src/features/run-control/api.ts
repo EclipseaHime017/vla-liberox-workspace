@@ -4,7 +4,7 @@ import type {
   EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
   PaginatedRuns, PolicyDetail, PolicyInfo, TensorBoardStatus, TrajectoryDetail,
   TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe, RewardParameters,
-  RewardSource, TrainingRewardSource, EvaluationOperation,
+  RewardSource, TrainingRewardSource, EvaluationOperation, DatasetExportStatus,
 } from "./types";
 
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
@@ -53,8 +53,11 @@ export const evaluateTrajectories = (body: {
   kind: "trajectory_evaluation"; status: string; job: OfflineJob | null;
   selected_count: number; skipped_count: number; skipped_run_ids: string[]; message?: string;
 }>("/api/datasets/evaluations", { method: "POST", body: JSON.stringify(body) });
-export const datasetExportUrl = (taskId: string) => (
-  "/api/datasets/export?task_id=" + encodeURIComponent(taskId)
+export const getDatasetExport = (datasetId: string) => api<DatasetExportStatus | null>(
+  `/api/training-datasets/${encodeURIComponent(datasetId)}/export`,
+);
+export const startDatasetExport = (datasetId: string) => api<DatasetExportStatus>(
+  `/api/training-datasets/${encodeURIComponent(datasetId)}/export`, { method: "POST" },
 );
 
 export const previewTrainingDataset = (taskId: string, selection: DatasetSelection) =>

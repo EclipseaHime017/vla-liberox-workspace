@@ -588,7 +588,7 @@ UI 仍读取 `configs/config.yaml` 中的 checkpoint、seed、相机和 20 Hz �
 
 等级含义见 [LIBERO-X 官方说明](https://meituan.github.io/LIBERO-X/)。LEVEL5 资源仍保留在 `LIBERO-X/libero/libero_x/LEVEL5/`，它是复用 LEVEL4 场景的语言改写评价，不是另一个物理难度场景；本阶段从默认选择和检索选项中移除，不删除上游文件或历史数据。
 
-当前共 15 个场景，本地每个场景有 10 个 init states。仿真和测试配置使用三个关联选择框，切换上级会同步选择有效下级；活动仿真和分支仍锁定场景。数据检索也使用相同顺序，允许停在「全部任务／全部难度／全部提示词」；跨场景筛选在分页之前执行，计数与结果一致。创建数据集、轨迹评价和 ZIP 导出仍需选定具体提示词，训练可从检索结果中选择一个冻结数据集。缺失可选资源禁止创建仿真，但历史数据仍可检索。
+当前共 15 个场景，本地每个场景有 10 个 init states。仿真和测试配置使用三个关联选择框，切换上级会同步选择有效下级；活动仿真和分支仍锁定场景。数据检索也使用相同顺序，允许停在「全部任务／全部难度／全部提示词」；跨场景筛选在分页之前执行，计数与结果一致。创建数据集和轨迹评价需选定具体提示词；训练和导出直接选择一个已打包数据集。缺失可选资源禁止创建仿真，但历史数据仍可检索。
 
 两个新增任务沿用官方场景及提示词，不修改奖励或成功判定：
 
@@ -674,7 +674,7 @@ UI 启动后只探测控制器，不占用动作输出。选择 SpaceMouse 并�
 
 新会话按 `dataset-root/projects/libero_x_vla/runs/<task_name>/<YYYY-MM-DD>/<时间>__<session_id>/` 分组，不覆盖历史结果。`catalog.sqlite3` 只保存可重建的检索和成功率索引；run 目录仍是事实来源。`run.json` 是生命周期和安全删除所需的极简清单，`config.yaml` 固化任务、模型和控制参数，`summary.json` 只记录用户关心的结果与关键时序；轨迹、视频、图表和 SpaceMouse 采样统一放在 `episodes/episode_000/`。不再重复生成 `results.jsonl`、`trajectory.json`、`source_trajectory.json` 或 `spacemouse_device_summary.json`。完整回放 metadata 已内嵌在 `trajectory.npz`，逐步可读数据保留在 `trajectory.csv`。
 
-采集主界面的会话侧栏按“任务 → 难度 → 提示词”检索，支持全部任务、全部难度和全部提示词，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。数据集页进一步拆成“轨迹评价”和“打包训练数据集”：批量评价默认跳过已有 RynnValue sidecar，也可显式覆盖；选择一条或多条轨迹时可显式开启覆盖，未开启时只补充缺失结果。评价成功后 `rynnvalue_evaluation.json/npz` 与 `trajectory.npz` 位于同一 episode，后续冻结不同数据集时直接复用。轨迹表默认每页 5 条，可选 10/20/50，详情页显示结果视频、7维action、RynnValue的absolute/relative remaining time、由 `Φ(s)=-v(s)` 得到的observation potential与entropy估计，并在同一图中显示稀疏奖励、Shape Reward和Final Reward；点击后可拖动滑块或自动播放并查看chunk范围和实际长度`L`。完整head logits和Analysis仍保存在sidecar供审计，但不在详情UI展示。冻结数据集只固定成员；通过每行右侧“配置”更新当前评价结果，训练固定使用启动时的快照，具体操作见 §4.9。按任务导出的 offline RL ZIP 保留 `runs/<run_id>/episodes/episode_000/` 层级，包含 `runs.csv`、`export.json`、`DATA_FORMAT.md`、可用的 `run.json/config.yaml/summary.json`、逐步 `trajectory.csv`、推理 chunk CSV、可用的 RynnValue 评价 sidecar，以及 `agentview.mp4` 和同步的 VLA 双视角 `vla_views.mp4`。核心 `trajectory.npz`、observation NPZ、普通图表和原始 SpaceMouse 诊断默认排除；MP4 不在 ZIP 内重复压缩。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
+采集主界面的会话侧栏按“任务 → 难度 → 提示词”检索，支持全部任务、全部难度和全部提示词，切换后只列出并预览对应任务记录；导出仍集中在“数据集”页面，避免把浏览与数据生成操作混在一起。数据集页进一步拆成“轨迹评价”和“打包训练数据集”：批量评价默认跳过已有 RynnValue sidecar，也可显式覆盖；选择一条或多条轨迹时可显式开启覆盖，未开启时只补充缺失结果。评价成功后 `rynnvalue_evaluation.json/npz` 与 `trajectory.npz` 位于同一 episode，后续冻结不同数据集时直接复用。轨迹表默认每页 5 条，可选 10/20/50，详情页显示结果视频、7维action、RynnValue的absolute/relative remaining time、由 `Φ(s)=-v(s)` 得到的observation potential与entropy估计，并在同一图中显示稀疏奖励、Shape Reward和Final Reward；点击后可拖动滑块或自动播放并查看chunk范围和实际长度`L`。完整head logits和Analysis仍保存在sidecar供审计，但不在详情UI展示。冻结数据集只固定成员；通过每行右侧“配置”更新当前评价结果，训练固定使用启动时的快照，具体操作见 §4.9。已打包数据集每行提供“导出数据集”，后台将精确成员、完整原始记录及各类已有评价复制到独立 `dataset-exports/<导出ID>/runs/`。数据集专属结果优先，否则复用全局结果；不重跑评价、不修改源文件，详情见 §4.4.9。UI 的运行监视器通过已有会话 WebSocket 显示模型加载、控制器预热、环境创建、状态恢复和预览阶段，并记录首次模型加载或缓存复用耗时。桌面端监视器位于方形视频/仿真窗口右侧并与视频卡片等高，内部可滚动查看全部历史；方形预览会根据视口高度自动缩小，使顶部控制器延迟、视频和回溯进度条尽量保持在同一屏。窄屏时监视器自动移动到窗口下方。监视器停留在底部时自动追随最新事件，向上滚动后不再抢回滚动位置。Uvicorn 的逐请求 access log 已关闭，终端仍保留应用警告、错误和关键里程碑。
 
 创建分支时会立即把父轨迹控制数据物理复制为子目录中的 `source_trajectory.npz`，但不复制父 observations、视频或图表；因此父会话被删除后，子分支仍能独立恢复状态和绘制对比。原始会话生成轨迹图和 7 张 action 图；回溯分支不生成只包含二次推理的单独图表，只生成 7 张“完整原始轨迹 + 从回溯帧开始的二次推理/人工接管”action 对比图。若准备阶段尚未执行新动作就失败，仅保存精简轨迹、清单和 summary，不再重建整段视频、observations 或对比图。已有历史目录不会自动删除或迁移。
 
@@ -921,7 +921,7 @@ logging:
   console_interval_steps: 10
 ```
 
-`paths.dataset_sources` 中的每一项可以是当前 `dataset-root`，也可以是 UI 数据集页面导出的任务 ZIP。`reward.rynnvalue` 决定 Final Reward 是否包含 RynnValue 势函数项；设为 `false` 时仅使用环境 sparse reward。`reward.gamma` 同时用于 PBRS chunk 折扣与 IQL Bellman target，但不参与 RynnValue 模型评价缓存的身份计算。`reward.accumulate_primitive_steps` 是奖励语义开关：默认 `false` 表示每个 action chunk 是一个宏动作；设为 `true` 才累计其中每个 20 Hz primitive step，并使用实际长度折扣。修改这些奖励派生参数只会重建快速缓存，不会重新运行 RynnValue。导入器不会改写源文件；训练/验证按 root trajectory 分组，父轨迹和它的全部分支不会被拆到不同集合。
+`paths.dataset_sources` 中的每一项可以是当前 `dataset-root`、数据集导出的 `runs/` 目录或已有的兼容 ZIP。`reward.rynnvalue` 决定 Final Reward 是否包含 RynnValue 势函数项；设为 `false` 时仅使用环境 sparse reward。`reward.gamma` 同时用于 PBRS chunk 折扣与 IQL Bellman target，但不参与 RynnValue 模型评价缓存的身份计算。`reward.accumulate_primitive_steps` 是奖励语义开关：默认 `false` 表示每个 action chunk 是一个宏动作；设为 `true` 才累计其中每个 20 Hz primitive step，并使用实际长度折扣。修改这些奖励派生参数只会重建快速缓存，不会重新运行 RynnValue。导入器不会改写源文件；训练/验证按 root trajectory 分组，父轨迹和它的全部分支不会被拆到不同集合。
 
 ### 4.4 数据选择、轨迹评价、奖励派生、训练与评测
 
@@ -933,7 +933,7 @@ prepare 不会根据日期目录手工选择文件。它会递归扫描 `paths.d
 
 ```yaml
 paths:
-  # 可同时给出多个 dataset-root 目录或 UI 导出的任务 ZIP。
+  # 可同时给出多个 dataset-root / runs 目录或已有兼容 ZIP。
   dataset_sources:
     - ../../dataset-root
   # prepare manifest、ZIP 解包缓存和奖励缓存的共同工作目录。
@@ -1438,30 +1438,32 @@ conda run -n vla-liberox wandb sync \
 
 #### 4.4.9 PC 数据迁移与服务器分支
 
-分支职责固定：`main` 负责 PC 采集、GUI、单卡训练和数据/评价导出；`server` 负责服务器终端、DDP＋ZeRO-1 多卡训练、缓存和分布式 checkpoint。共享数据格式及训练算法从 `main` 同步到 `server`，服务器专用实现不反向并入 `main`。服务器仅训练和导出模型，不启动仿真、策略成功率评测或奖励模型。
+**数据集页面 → 选择已打包数据集 → 导出数据集。** 旧“导出任务 ZIP”已删除。新操作在后台复制，不启动评价模型，页面显示阶段、轨迹进度和最终 `runs` 路径。
 
-**第一步：在 PC 上准备并导出数据。** 在 UI 冻结数据集并完成需要的评价，然后执行（数据集 ID 可在数据集页面查看）：
+导出目录为 workspace 下的 `dataset-exports/<数据集ID>_<时间>_<随机后缀>/runs/<任务>/<run_id>/`。仅包含所选数据集的成员，保留完整原始轨迹、接管前缀、成功后记录、双相机 observation、视频、控制器日志及关键帧。训练取样截断不会裁掉导出的原始记录。
 
-```bash
-conda activate vla-liberox
-python vla-adapter-rynn-iql/scripts/transfer_dataset.py export \
-  --dataset ds_YOUR_DATASET_ID --require-reward final
-```
+各类已保存奖励独立导出：Sparse、Stage、RynnValue、Final Reward，以及诊断用 Robometer。每类优先使用该数据集当前专属结果，没有专属结果时使用全局结果；旧版仅存在 `datasets/` 中的全局回退评价也会绑定到导出副本的轨迹旁。未评价的类型保持缺失，不自动生成；存在但损坏的评价使导出失败，不静默退回其他结果。关键帧及评价时的标注快照分别保留，不重新标记或重算奖励。
 
-默认生成 `training-datasets/<任务ID>/<数据集ID>/`，不再按日期分目录。整个目录包含冻结成员与划分、原始录像/轨迹/observation、关键帧、已有 RynnValue/Robometer 输出及各训练奖励快照；可直接复制到另一台机器，不依赖原 PC 的绝对路径、SQLite 或全局 annotation cache。`--require-reward final` 要求存在有效 Final Reward；BC 不依赖奖励，可省略该选项。其他可用奖励一并导出，缺失的可选类型记录在清单，不静默替代所选训练奖励。全局继承评价会整理为独立快照；该步骤只做文件整理及必要的 CPU 奖励计算，不运行模型。
+完整复制导出的 `runs/`，服务器将它作为 `runs_root`，按 `run.json.task_id` 识别任务并使用符合当前奖励要求的已标记轨迹，不读取 UI 的 SQLite、原 PC 的缓存或冻结数据集。原始文件和历史训练不变；每次导出使用新目录，全部校验成功后才发布，失败不会留下可误用的半份 `runs`。
 
-旧设备保留日期目录也能读取。批量迁移使用非破坏性复制，**不搬走、不删除或改写旧数据，也不改 UI 数据库路径**：
+例如在 PC 执行（替换主机和远端绝对路径；不使用 `--delete`）：
 
 ```bash
-python vla-adapter-rynn-iql/scripts/transfer_dataset.py migrate --dry-run
-python vla-adapter-rynn-iql/scripts/transfer_dataset.py migrate
+rsync -av --progress dataset-exports/<导出ID>/runs/ \
+  SERVER:/path/to/workspace/dataset-root/projects/libero_x_vla/runs/
 ```
 
-迁移遍历已有冻结数据集；未打包的轨迹先在 UI 选择并冻结。已存在的目标目录不会被覆盖，重新导出修改后的数据集时用 `--output /新的导出根目录`。迁移包是服务器训练快照，不是将数据库导入另一套 UI 的命令。新采集数据直接写入 `dataset-root/projects/<project>/runs/<task>/<timestamp__run-id>/`；旧的 `<task>/<date>/<timestamp__run-id>/` 继续兼容，不在启动时自动移动。导出根目录与 `dataset-root` 分开放置，避免旧递归导入器将复制的轨迹当成重复成员。
+请复制**完整 run 文件夹**，不要只复制 JSON：其中包含 `run.json`、`trajectory.npz`、`trajectory_observations.npz`，以及已有的 `rynnvalue_evaluation.json/.npz`、`robometer_evaluation.json/.npz`、`stage_annotation.json`、`trajectory_reward.<source>.json` 和其引用的奖励 NPZ。导出根目录的 `export.json` 记录成员、各类评价来源及文件哈希，`dataset.json` 留存选择和划分供审计；服务器不要求导入这两个文件。服务器会列出并跳过缺少所选奖励的记录，不按配额抽样。
+
+复制期间不要同时覆盖 PC 评价或启动服务器训练。服务器验证内容哈希，不依赖复制后失效的 inode、修改时间或旧绝对路径；缺文件、哈希错误、成功阈值或 chunk 边界不兼容时明确报错，**不会补跑 RynnValue/Robometer、不会静默换奖励**。Robometer 只随数据保留作诊断，不作为 IQL 奖励。BC 使用全部已标记轨迹但不读取奖励数组；Sparse 从环境 done 计算；只有 Stage 标注、没有已保存 Stage 奖励时，使用基础配置的 p 在训练私有目录计算，不改写关键帧。
+
+IQL 默认选用全局 Final Reward；只有 RynnValue 评价时应显式选择 `reward_source: rynnvalue`。保存关键帧本身不等于已生成 Final Reward。每条已保存奖励的 α、κ、p、融合形式仍按原记录保留，γ/cumulative 可在训练配置调整。已有训练 run 会保存独立奖励快照，不受后续同步覆盖影响。
+
+不再需要先将数据集专属评价覆盖为全局评价。旧 `transfer_dataset.py export/migrate` 及独立 bundle 协议已移除；已生成的旧归档不会被删除。直接复制原始 `runs/` 仍可携带已落在轨迹旁的全局评价，但不能保证包含仅存于数据集目录的旧评价，建议使用新导出入口。
 
 **原地修复旧日期目录**：在数据集页面最底部点击“一键修复存储目录”，在提示框中选择“开始检测并修复”。操作自动检测当前项目的新旧布局，将 `<task>/<date>/<run>/` 移到 `<task>/<run>/`，并清理此前遗留的空日期目录；含其他文件的目录会保留并列出，不创建兼容软链接。遇到目标重名直接拒绝，不合并覆盖。请先停止仿真、取消草稿并结束所有后台任务；修复期间暂停新请求和任务派发，迁移记录后自动刷新历史列表。弹窗显示迁移和空目录清理数量；已是新布局则提示无需修改，不重新评价或改写数据。
 
-原始轨迹、observation、关键帧、评价数组和历史训练清单保持原字节，SQLite 仅更新匹配的文件路径；旧引用在文件读取时通过 `dataset-root/.run-layout.json` 解析，**不要求重新标注、重新评价或重新打包已有数据集**。请保留该映射和 `.run-layout-migration.json`。这是本机原地修复，不替代跨设备的 portable bundle 导出；服务器训练代码仍独立保留在 `server`。
+原始轨迹、observation、关键帧、评价数组和历史训练清单保持原字节，SQLite 仅更新匹配的文件路径；旧引用在文件读取时通过 `dataset-root/.run-layout.json` 解析，**不要求重新标注、重新评价或重新打包已有数据集**。请保留该映射和 `.run-layout-migration.json`。这是本机原地修复；跨设备复制完整 runs 目录即可，服务器不使用本机旧路径映射。
 
 无 GUI 时可使用下列备用命令（需退出 UI 和所有数据消费者）：
 
@@ -1476,29 +1478,17 @@ python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py --rollback
 
 普通错误会尝试自动回滚；若进程被强制终止留下未完成日志，服务会拒绝读取半迁移目录，需用 `--rollback` 恢复后重启。非标准目录会列出并跳过，不猜测其身份。两种布局的轨迹均可继续导出到服务器。
 
-**第二步：将整个任务/数据集目录复制到服务器。** 例如复制到服务器 workspace 的 `training-datasets/` 下；也可放其他磁盘并修改 `server_pipeline.yaml` 的 `datasets_root`。先校验复制是否完整：
+**在服务器的 `server` 分支启动训练。** 独立入口不在 `main`：
 
 ```bash
-python vla-adapter-rynn-iql/scripts/transfer_dataset.py verify \
-  training-datasets/<任务ID>/<数据集ID>
-```
-
-服务器只需训练环境 `vla-liberox`、当前 VLA 源码和对应基础 checkpoint；不需要 `rynnvalue-reward` 或 `robometer-reward` 环境。尚未缓存的基础模型仍需下载。所有完整哈希校验在启动训练时完成，选择页只读轻量摘要，不解压 observation。
-
-**第三步：在服务器的 `server` 分支启动训练。** 多卡脚本和配置只存在于该分支；不要在 `main` 直接运行。
-
-```bash
-git fetch origin
-git switch server
-git pull --ff-only origin server
 conda activate vla-liberox
 python vla-adapter-rynn-iql/scripts/train_server.py \
   --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
 ```
 
-方向键选择数据集 → Enter 配置 → 选择 `START` 并按 Enter 开训；`q` / `Ctrl+C` 安全停止。参数、GPU 分配及断点恢复说明维护在 **server 分支**的本节。部署前需要先提交并推送对应分支的新代码；本地未提交的改动不会通过上述命令同步到另一台设备。
+方向键选择任务 → Enter 配置 → `START` 开训；`q` / `Ctrl+C` 安全停止。任务内使用全部已标记记录，不选择本地冻结数据集。修改 `runs_root` 可读取其他磁盘；`task_id: null` 表示终端选任务。
 
-本地同时开发两条分支时使用独立 Git worktree，避免将未提交的服务器文件带入 `main`。PC 导出目录 `training-datasets/<task>/<dataset-id>/` 是分支间的数据交接边界；原数据、评价数组和 UI 单卡训练路径不因服务器开发改变。
+服务器只需训练环境、VLA 源码及基础 checkpoint，不需要 RynnValue/Robometer 环境；不启动 UI、仿真或成功率评测。新入口的改动须先提交并推送 `server`，另一台设备才可通过 `git fetch origin && git switch server && git pull --ff-only origin server` 获得。PC 的 `main` 保留原 UI 单卡训练行为。
 
 ### 4.5 数据与奖励语义
 
