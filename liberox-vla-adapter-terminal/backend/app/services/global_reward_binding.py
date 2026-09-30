@@ -8,6 +8,8 @@ import shutil
 import uuid
 from pathlib import Path
 
+from ..storage.paths import storage_path
+
 from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
 from .trajectory_reward_snapshot import (
@@ -51,15 +53,15 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
             path = snapshot_path(run, source)
             snapshot = read_reward_snapshot(run, source)
             if snapshot is None and path and path.is_file() and validate:
-                snapshot = _refresh_snapshot_identity(run, source)
+                snapshot = _refresh_snapshot_identity(run, source, publish=not getattr(jobs, "read_only", False))
             if snapshot:
                 metadata = snapshot["metadata"]
                 values = path.with_name(metadata["values_file"])
             elif path and path.exists():
                 raise ValueError("全局评价的源数据已变化或评价损坏")
-            elif source == "rynnvalue" and Path(run["trajectory"]).with_name("rynnvalue_evaluation.json").exists():
+            elif source == "rynnvalue" and storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json").exists():
                 # Native Rynn sidecars predate source-specific reward snapshots.
-                path = Path(run["trajectory"]).with_name("rynnvalue_evaluation.json")
+                path = storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json")
                 metadata = _json(path)
                 values = path.with_name("rynnvalue_evaluation.npz")
                 if metadata.get("schema_version") not in (5, 6):
@@ -117,7 +119,7 @@ def _first_saved_result(jobs, run_id: str, source: str) -> tuple[dict, Path]:
                 "values_sha256": entry["reward_sha256"], "entry": entry, "episode": episode,
                 "prepared": {key: value for key, value in prepared.items() if key != "episodes"},
                 "reward_config": index["reward_config"], "annotation_config": index.get("annotation_config", {})
-            }, Path(entry["reward_path"])
+            }, storage_path(entry["reward_path"])
         except (KeyError, ValueError, OSError, StopIteration):
             continue
     raise FileNotFoundError("缺少全局评价")

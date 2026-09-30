@@ -16,6 +16,14 @@ from ..services.dataset_evaluation_detail import attach_dataset_context, attach_
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
+
+@router.post("/storage/repair")
+async def repair_storage(request: Request):
+    try:
+        return await request.app.state.storage_maintenance.repair(request.app)
+    except Exception as exc:
+        raise http_error(exc) from exc
+
 @router.get("/summary")
 async def summary(request: Request): return service(request).dataset_summary()
 

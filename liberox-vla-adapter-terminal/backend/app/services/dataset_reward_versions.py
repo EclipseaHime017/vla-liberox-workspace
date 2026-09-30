@@ -16,6 +16,7 @@ import yaml
 
 from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
+from ..storage.paths import storage_path
 
 
 REWARD_PARAMETERS = {
@@ -112,7 +113,7 @@ class DatasetRewardVersions:
                         target = values_dir / f"{run_id}.npz"
                         if run_id not in compatible or target.exists():
                             continue
-                        original = Path(entry["annotation_path"])
+                        original = storage_path(entry["annotation_path"])
                         if not original.is_file() or original.is_symlink():
                             continue
                         shutil.copyfile(original, target)

@@ -10,6 +10,8 @@ import sys
 import threading
 from pathlib import Path
 
+from ..storage.paths import storage_path
+
 import numpy as np
 
 _IMPORT_LOCK = threading.Lock()
@@ -41,10 +43,10 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
     raw = jobs._effective_config(dataset)
     artifacts = member["artifacts"]
     for artifact in artifacts.values():
-        path = Path(artifact["path"])
+        path = storage_path(artifact["path"])
         if path.is_symlink() or not path.is_file() or path.stat().st_size != artifact["size"]:
             raise ValueError(f"冻结源文件缺失或已改变：{path.name}")
-    episode = data._load_run(Path(artifacts["manifest"]["path"]),
+    episode = data._load_run(storage_path(artifacts["manifest"]["path"]),
         config.LoadedConfig(jobs.base_config_path, raw),
         frozen_observations_sha256=artifacts["observations"]["sha256"])
     if episode is None or episode["run_id"] != member["run_id"]:
@@ -52,7 +54,7 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
     for name, field in (("manifest", "source_manifest"), ("trajectory", "trajectory"),
                         ("observations", "observations")):
         path_field = "source_manifest" if name == "manifest" else f"{field}_path"
-        if (Path(episode[path_field]).resolve() != Path(artifacts[name]["path"]).resolve()
+        if (storage_path(episode[path_field]).resolve() != storage_path(artifacts[name]["path"]).resolve()
                 or episode[f"{field}_sha256"] != artifacts[name]["sha256"]):
             raise ValueError(f"冻结 {name} 与全局评价源不匹配")
     if (episode["recorded_action_count"] != member["end_step"]
@@ -80,7 +82,7 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str) -> tupl
     gamma, cumulative = recipe["gamma"], recipe["accumulate_primitive_steps"]
     annotation = None
     if source == "stage":
-        path = Path(episode["trajectory_path"]).with_name("stage_annotation.json")
+        path = storage_path(episode["trajectory_path"]).with_name("stage_annotation.json")
         if not path.is_file() or path.is_symlink():
             raise ValueError("缺少已保存的全局 Stage 关键帧")
         annotation = stage.validate_stage_annotation(json.loads(path.read_text()),

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..storage.paths import storage_path
+
 from .trajectory_reward_snapshot import snapshot_path
 
 
@@ -18,7 +20,7 @@ def _json(path: Path) -> dict:
 
 
 def _values(path: str | Path) -> None:
-    candidate = Path(path)
+    candidate = storage_path(path)
     if candidate.is_symlink() or not candidate.is_file():
         raise ValueError("Evaluation values are unavailable")
 
@@ -77,7 +79,7 @@ class MemberEvaluationStatus:
         status = service.status(run) if service is not None else {"status": "NOT_EVALUATED"}
         if status["status"] == "READY":
             return status
-        if Path(run["trajectory"]).with_name(f"{source}_evaluation.json").exists():
+        if storage_path(run["trajectory"]).with_name(f"{source}_evaluation.json").exists():
             return status
 
         # Compatibility with results created before global sidecars existed:

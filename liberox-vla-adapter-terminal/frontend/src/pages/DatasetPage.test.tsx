@@ -13,6 +13,7 @@ vi.mock("../features/run-control/api", () => ({
   previewTrainingDataset: vi.fn(), verifyTrainingDataset: vi.fn(), setTrajectoryTestLabel: vi.fn(),
   getDatasetRewardConfig: vi.fn(), listTrainingDatasetMembers: vi.fn(),
   updateDatasetTrainingOptions: vi.fn(),
+  repairDatasetStorage: vi.fn(),
 }));
 vi.mock("../features/training/JobMonitor", () => ({ JobMonitor: () => null }));
 vi.mock("../features/dataset/TrajectoryDetail", () => ({ TrajectoryDetail: () => null }));
@@ -46,6 +47,25 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("dataset evaluation configuration", () => {
+  it("repairs storage from the dataset page and refreshes without evaluation", async () => {
+    vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
+    vi.mocked(api.repairDatasetStorage).mockResolvedValue({ status: "COMPLETED", moved: 2,
+      layout: "mixed", removed_date_dirs: 3, retained_date_dirs: [],
+      already_current: 1, skipped: [], message: "存储目录已更新，数据与评价保持不变" });
+    const { container } = render(<DatasetPage />);
+    await screen.findByText("/tmp/datasets");
+    const button = screen.getByRole("button", { name: "一键修复存储目录" });
+    expect(container.querySelector(".content-page")?.lastElementChild).toBe(button.parentElement);
+    fireEvent.click(button);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(api.repairDatasetStorage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "开始检测并修复" }));
+    await screen.findByText(/已迁移 2 条/);
+    await waitFor(() => expect(api.getDatasetSummary).toHaveBeenCalledTimes(2));
+    expect(api.repairDatasetStorage).toHaveBeenCalledOnce();
+    expect(api.evaluateTrajectories).not.toHaveBeenCalled();
+  });
+
   it("updates post-success sampling on the same dataset without evaluation or derivation", async () => {
     const dataset = { id: "dataset", name: "Dataset", success_consecutive_steps: 5,
       integrity_status: "HEALTHY", annotation_status: "NOT_STARTED" } as TrainingDataset;

@@ -11,6 +11,8 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ..storage.paths import storage_path
 from typing import Any, Iterable
 
 from ..core.exceptions import ConflictError
@@ -77,9 +79,9 @@ class TrainingDatasetService:
         else:
             source = "inference"
         outcome = "success" if bool(run.get("success")) else "failure"
-        trajectory = Path(str(run.get("trajectory") or ""))
+        trajectory = storage_path(str(run.get("trajectory") or ""))
         observations = trajectory.with_name("trajectory_observations.npz")
-        output = Path(str(run.get("output_dir") or trajectory.parent.parent.parent))
+        output = storage_path(str(run.get("output_dir") or trajectory.parent.parent.parent))
         manifest = output / "run.json"
         if not manifest.is_file():
             manifest = output / "session.json"
@@ -370,11 +372,11 @@ class TrainingDatasetService:
         split_seed: int,
         validation_fraction: float,
     ) -> dict[str, Any]:
-        output = Path(run["output_dir"])
+        output = storage_path(run["output_dir"])
         manifest = output / "run.json"
         if not manifest.is_file():
             manifest = output / "session.json"
-        trajectory = Path(run["trajectory"])
+        trajectory = storage_path(run["trajectory"])
         observations = trajectory.with_name("trajectory_observations.npz")
         root_id = str(run.get("root_session_id") or run.get("parent_session_id") or run["id"])
         return {
@@ -834,7 +836,7 @@ class TrainingDatasetService:
                 raise ValueError(f"Evaluation version integrity failed: {path_key}")
         manifest = json.loads(Path(value_path).read_text(encoding="utf-8"))
         for entry in manifest.get("episodes", []):
-            current = Path(entry.get("reward_path") or entry["annotation_path"])
+            current = storage_path(entry.get("reward_path") or entry["annotation_path"])
             expected = entry.get("reward_sha256") or entry.get("values_sha256") or entry["annotation_sha256"]
             if current.is_symlink() or not current.is_file() or _sha256(current) != expected:
                 raise ValueError(f"Evaluation version integrity failed: {entry['run_id']}")
@@ -847,7 +849,7 @@ class TrainingDatasetService:
             missing = []
             for member in payload.get("members", []):
                 for artifact in member.get("artifacts", {}).values():
-                    if not Path(artifact["path"]).is_file():
+                    if not storage_path(artifact["path"]).is_file():
                         missing.append(artifact["path"])
             if immutable_error or missing:
                 return self._update_metadata(dataset_id, {
@@ -876,7 +878,7 @@ class TrainingDatasetService:
                 raise ValueError(error)
             for member in payload["members"]:
                 for name, artifact in member["artifacts"].items():
-                    current = Path(artifact["path"])
+                    current = storage_path(artifact["path"])
                     if not current.is_file():
                         raise FileNotFoundError(f"{member['run_id']}:{name}: {current}")
                     if current.stat().st_size != artifact["size"]:

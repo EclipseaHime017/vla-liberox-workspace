@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from .paths import storage_path
+
 from trajectory_utils import load_trajectory
 import yaml
 
@@ -90,7 +92,7 @@ def safe_artifacts(directory: Path) -> dict[str, str]:
 
 
 def legacy_session_id(path: Path) -> str:
-    digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha1(str(storage_path(path.resolve(), original=True)).encode("utf-8")).hexdigest()[:16]
     return f"legacy-{digest}"
 
 

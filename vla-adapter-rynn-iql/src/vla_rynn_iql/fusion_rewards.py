@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .storage_paths import with_dataset_lease, storage_path
+
 import numpy as np
 
 from .config import LoadedConfig, effective_cumulative, needs_rynnvalue, needs_stage
@@ -40,7 +42,7 @@ def _validate_saved_model_inputs(payload: dict, prepared: dict) -> None:
         for key in ("trajectory_sha256", "observations_sha256", "source_manifest_sha256", "prompt"):
             if entry.get(key) != episode.get(key):
                 raise ValueError(f"Saved RynnValue {key} mismatch: {episode['run_id']}")
-        path = Path(entry["annotation_path"])
+        path = storage_path(entry["annotation_path"])
         if path.is_symlink() or sha256_file(path) != entry["annotation_sha256"]:
             raise ValueError(f"Saved RynnValue values changed: {episode['run_id']}")
         with np.load(path, allow_pickle=False) as arrays:
@@ -152,9 +154,9 @@ def _valid_cached_result(payload: dict, prepared: dict, snapshot: dict | None) -
         episode = expected[entry["run_id"]]
         if any(entry.get(key) != value for key, value in _episode_reward_metadata(episode).items()):
             return False
-        path = Path(entry["reward_path"])
+        path = storage_path(entry["reward_path"])
         if (path.is_symlink() or sha256_file(path) != entry["reward_sha256"]
-                or entry["annotation_path"] != str(path)):
+                or entry["annotation_path"] != entry["reward_path"]):
             return False
         with np.load(path, allow_pickle=False) as arrays:
             size = len(episode.get("evaluation_chunks", episode["chunks"]))
@@ -165,6 +167,7 @@ def _valid_cached_result(payload: dict, prepared: dict, snapshot: dict | None) -
     return True
 
 
+@with_dataset_lease
 def materialize_final_reward(config: LoadedConfig, *, force: bool = False) -> Path:
     """Recompute from saved signals only; missing inputs never instantiate a model."""
     from .rewards import (
@@ -225,7 +228,7 @@ def materialize_final_reward(config: LoadedConfig, *, force: bool = False) -> Pa
             annotation_hash = labels["annotation_sha256"]
         if annotation:
             entry = by_run[episode["run_id"]]
-            with np.load(entry["annotation_path"], allow_pickle=False) as data:
+            with np.load(storage_path(entry["annotation_path"]), allow_pickle=False) as data:
                 if not np.array_equal(data["boundary_steps"], episode["reward_boundaries"]):
                     raise ValueError(f"RynnValue boundaries mismatch: {episode['run_id']}")
                 signals.update(validate_official_outputs({k: data[k] for k in OFFICIAL_OUTPUT_KEYS},

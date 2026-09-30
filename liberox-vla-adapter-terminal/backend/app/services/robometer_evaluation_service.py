@@ -11,6 +11,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ..storage.paths import storage_path
 from typing import Any
 
 import numpy as np
@@ -65,7 +67,7 @@ class RobometerEvaluationService:
 
     @staticmethod
     def _episode_dir(run: dict[str, Any]) -> Path:
-        raw = Path(str(run.get("trajectory") or ""))
+        raw = storage_path(str(run.get("trajectory") or ""))
         if raw.is_symlink():
             raise ValueError(f"Symlink trajectories cannot be evaluated: {run.get('id')}")
         trajectory = raw.resolve()
@@ -76,7 +78,7 @@ class RobometerEvaluationService:
     @staticmethod
     def _manifest_path(run: dict[str, Any], episode: Path) -> Path:
         candidates = [
-            Path(str(run.get("output_dir") or "")) / "run.json",
+            storage_path(str(run.get("output_dir") or "")) / "run.json",
             episode.parents[1] / "run.json",
             episode.parents[1] / "session.json",
         ]
@@ -231,7 +233,7 @@ class RobometerEvaluationService:
             if not overwrite and self._load(run) is not None:
                 skipped.append(run_id)
                 continue
-            source = Path(str(item["annotation_path"])).resolve()
+            source = storage_path(str(item["annotation_path"])).resolve()
             if source.is_symlink() or not source.is_file():
                 raise FileNotFoundError(source)
             if item.get("values_sha256") != _sha256(source):

@@ -692,7 +692,8 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         runner = Path(__file__).resolve().parents[1] / "workers" / "offline_job_runner.py"
         try:
             process = subprocess.Popen(
-                [sys.executable, str(runner), "--job-dir", str(job_dir)],
+                [sys.executable, str(runner), "--job-dir", str(job_dir),
+                 "--dataset-root", str(self.ui_config.dataset_root)],
                 cwd=str(self.ui_config.offline_rl_root),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,

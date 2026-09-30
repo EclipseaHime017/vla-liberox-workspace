@@ -24,6 +24,7 @@ longer-horizon composite tasks.
 - Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#49-在-web-ui-中创建数据集标注与训练).
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
 - Serial training queue: register independent runs while another run is active; the form stays open with its parameters ready to edit for the next run. Each job pins its configuration and rewards; completion, failure or cancellation advances to the next job. The backend schedules without an open browser and restores pending jobs after restart. UI checkpoint resume is hidden; CLI resume remains available.
+- Branch separation: `main` owns PC collection, GUI, single-GPU training and portable dataset/evaluation exports. The `server` branch alone owns the full-screen terminal, multi-GPU DDP + ZeRO-1 training, mmap cache and distributed checkpoints. Shared data contracts and training algorithms flow from `main` to `server`; server-specific execution does not merge back into `main`. See [transfer and branch instructions](README_CN.md#449-pc-数据迁移与服务器分支).
 - Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
 - Batch testing: preview a deterministic init-state/seed schedule, then register independent policy tests in a persistent FIFO queue. Tests share the training dispatcher and GPU lock; canceling a waiting test or stopping the current test leaves subsequent tasks intact.
 
@@ -35,6 +36,7 @@ vla-liberox-workspace/
 ├── vla-adapter-rynn-iql/          # standalone reward annotation and offline RL
 ├── configs/                       # terminal/UI runtime configuration
 ├── dataset-root/                  # recorded source data (Git-ignored)
+├── training-datasets/             # portable task/dataset snapshots (Git-ignored)
 ├── policy-registry/               # immutable policy overlays (Git-ignored)
 ├── docs/                          # local development notes (Git-ignored)
 └── README_CN.md                   # complete Chinese setup and operating guide
@@ -53,6 +55,11 @@ uses `rynnvalue-reward`, and simulation/annotation/training/testing share a
 persistent cross-process GPU lock. TensorBoard is read-only and remains outside
 that lock. Dataset manifests reference and hash source artifacts instead of
 copying trajectories or videos.
+
+For server transfer, `transfer_dataset.py export` explicitly copies a complete
+training snapshot with local, verified references. Legacy date-organized runs
+remain readable; `migrate` copies existing frozen datasets without rewriting
+their original files or UI catalog. New recordings omit the date directory layer.
 
 Start from `vla-liberox-workspace/` after activating `vla-liberox`:
 

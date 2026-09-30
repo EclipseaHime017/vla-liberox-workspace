@@ -10,6 +10,8 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .storage_paths import with_dataset_lease, storage_path
 from typing import Any, Callable
 
 import numpy as np
@@ -183,6 +185,7 @@ class OfficialRobometerAnnotator:
         return np.asarray(outputs_progress, np.float32), np.asarray(outputs_success, np.float32)
 
 
+@with_dataset_lease
 def evaluate_selection(
     config: Config,
     annotator_factory: Callable[[Config], Any] = OfficialRobometerAnnotator,
@@ -209,9 +212,9 @@ def evaluate_selection(
     for index, member in enumerate(members, 1):
         run_id = str(member["run_id"])
         artifacts = member["artifacts"]
-        trajectory = Path(artifacts["trajectory"]["path"]).resolve()
-        observations = Path(artifacts["observations"]["path"]).resolve()
-        manifest = Path(artifacts["manifest"]["path"]).resolve()
+        trajectory = storage_path(artifacts["trajectory"]["path"])
+        observations = storage_path(artifacts["observations"]["path"])
+        manifest = storage_path(artifacts["manifest"]["path"])
         target = values_dir / f"{run_id}.npz"
         metadata_path = values_dir / f"{run_id}.json"
         trajectory_sha = sha256_file(trajectory)

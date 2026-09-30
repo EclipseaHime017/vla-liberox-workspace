@@ -12,6 +12,8 @@ import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+
+from ..storage.paths import storage_path
 from types import SimpleNamespace
 from typing import Any
 
@@ -528,7 +530,6 @@ class SimulationManager:
         output_dir = (
             self.ui_config.output_root
             / task_group
-            / now.strftime("%Y-%m-%d")
             / f"{stamp}__{session_id}"
         )
         episode_dir = output_dir / "episodes" / "episode_000"
@@ -1170,7 +1171,7 @@ class SimulationManager:
         trajectory_name = manifest.get("trajectory")
         trajectory = None
         if isinstance(trajectory_name, str) and trajectory_name:
-            candidate = (directory / trajectory_name).resolve()
+            candidate = storage_path(directory / trajectory_name).resolve()
             try:
                 candidate.relative_to(directory.resolve())
             except ValueError:

@@ -174,7 +174,7 @@ suffix so RynnValue can score the natural rollout before takeover. The training
 replay de-duplicates physically copied parent prefixes across the parent and
 sibling branches.
 
-For terminal-only training on a remote machine, use the stateful orchestrator;
+For a single-GPU pipeline starting from raw, not-yet-evaluated data, use the stateful orchestrator;
 it does not import or start the web backend or frontend:
 
 ```bash
@@ -206,8 +206,40 @@ explicit `resume_checkpoint` override is provided. `--force-prepare` and
 effective configuration, timings, cache decisions, and the resulting overlay
 are recorded below `outputs/terminal-pipelines/`.
 
-The older `run_pipeline.py` remains a simple stateless stage launcher. Prefer
-`train_terminal.py` for unattended or resumable remote workflows.
+The older `run_pipeline.py` remains a simple stateless stage launcher.
+`train_terminal.py` retains the single-GPU raw-data workflow. For PC-evaluated
+datasets and server-only training, use the portable workflow below.
+
+### Portable datasets and branch separation
+
+`main` contains PC/UI collection, single-GPU training and the shared transfer
+format. The full-screen server launcher, DDP/ZeRO execution, mmap cache and
+multi-rank checkpoints exist only on `server`. Shared algorithms flow from main
+to server, never the other way around. On the PC, freeze/select a dataset and
+generate its desired rewards:
+
+```bash
+python vla-adapter-rynn-iql/scripts/transfer_dataset.py export \
+  --dataset ds_YOUR_DATASET_ID --require-reward final
+```
+
+Copy the entire `training-datasets/<task>/<dataset-id>/` directory to the server.
+It contains source recordings, labels, available model outputs and independent
+training reward snapshots. Paths are relocatable and hashes are checked before
+training. Export uses saved evaluations only; missing required results are an
+error, not an instruction to reload a reward model. BC needs no reward. Run
+`transfer_dataset.py migrate --dry-run` and then `migrate` to copy all legacy
+frozen datasets into this layout. Original recordings and UI paths stay intact;
+existing destinations are never overwritten. This is a training export, not a
+UI database import. Keep the transfer root separate from `dataset-root` to avoid
+duplicate run IDs during raw-data scanning.
+
+After copying, use the `server` branch on the training machine. Its README
+contains the full-screen launch command, GPU/batch configuration, monitoring and
+checkpoint instructions. Server functionality is training and model export only:
+no simulator, policy evaluation or reward-model inference. Do not launch
+`train_server.py` from main; it is deliberately absent here. Keep separate
+worktrees for local development so uncommitted server files cannot leak into main.
 
 The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan
@@ -382,13 +414,10 @@ frequency without changing the per-step JSONL/TensorBoard records. See the
 root Chinese README sections 4.4.8 and 4.4.9 for complete configuration and
 8xA100 deployment guidance.
 
-The trainer is currently single-process and single-GPU, but one GPU can process
-multiple same-task replay transitions in each forward pass. Restrict a job to one
-physical GPU with `CUDA_VISIBLE_DEVICES=N` and leave both configured devices as
-`cuda:0`; the visible device is remapped to process-local index zero. Eight A100s
-are best used for eight independent seeded/hyperparameter runs after preparing
-and annotating once. A single run does not use DDP/FSDP yet and cannot be made
-eight-GPU merely by exposing all devices.
+The UI and `train_terminal.py` remain single-process, single-GPU trainers. Use
+`train_server.py` on the **server branch** for a multi-GPU run; exposing more devices alone does
+not change either single-GPU entrypoint. Details are in Portable datasets and
+branch separation above.
 
 For a fast CPU test without model downloads:
 

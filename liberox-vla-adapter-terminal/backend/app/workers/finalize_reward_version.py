@@ -7,8 +7,13 @@ import argparse
 import hashlib
 import json
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from backend.app.storage.paths import storage_path
 
 
 def digest(path: Path) -> str:
@@ -46,12 +51,12 @@ def seal(version_path: Path) -> dict:
     official_dir = work / "official_outputs"
     official_dir.mkdir(exist_ok=True)
     for entry in manifest["episodes"]:
-        value_path = Path(entry.get("reward_path") or entry["annotation_path"])
+        value_path = storage_path(entry.get("reward_path") or entry["annotation_path"])
         expected_hash = entry.get("reward_sha256") or entry.get("values_sha256") or entry["annotation_sha256"]
         if value_path.is_symlink() or digest(value_path) != expected_hash:
             raise ValueError(f"Evaluation values changed for {entry['run_id']}")
         if entry.get("official_annotation_path"):
-            original = Path(entry["official_annotation_path"])
+            original = storage_path(entry["official_annotation_path"])
             copied = official_dir / f"{entry['run_id']}.npz"
             shutil.copyfile(original, copied)
             entry["official_annotation_path"] = str(copied.resolve())
@@ -61,7 +66,7 @@ def seal(version_path: Path) -> dict:
     if annotation_path.is_file():
         annotations = json.loads(annotation_path.read_text(encoding="utf-8"))
         for entry in annotations["episodes"]:
-            original = Path(entry["annotation_path"])
+            original = storage_path(entry["annotation_path"])
             copied = official_dir / f"{entry['run_id']}.npz"
             if not copied.exists():
                 shutil.copyfile(original, copied)

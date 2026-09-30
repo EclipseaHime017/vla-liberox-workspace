@@ -1262,9 +1262,9 @@ python vla-adapter-rynn-iql/scripts/run_pipeline.py \
 
 只想完成 `prepare → annotate → materialize rewards → train` 而暂不仿真评测时，加 `--skip-evaluation`。
 
-#### 4.4.6 不启动图形界面的远程终端训练
+#### 4.4.6 从原始数据启动单卡终端流水线
 
-远程服务器不需要启动 FastAPI、React 或浏览器。推荐使用有状态终端流水线，它会在两个 Conda 环境之间依次执行数据选择、Prepare、RynnValue评价、奖励派生、评价绑定和IQL训练：
+原始数据尚未打包或评价时，可使用单卡有状态终端流水线，它会在两个 Conda 环境之间依次执行数据选择、Prepare、RynnValue评价、奖励派生、评价绑定和IQL训练。不需要启动 FastAPI、React 或浏览器。**PC 已完成评价、仅需将数据交给服务器训练时，使用 §4.4.9 的迁移和多卡入口，不重复运行本节评价流程。**
 
 ```bash
 python vla-adapter-rynn-iql/scripts/train_terminal.py \
@@ -1357,7 +1357,7 @@ vla-adapter-rynn-iql/outputs/terminal-pipelines/
     └── train_result.json
 ```
 
-`Ctrl+C`会转发给当前Conda子进程；训练阶段仍通过安全checkpoint停止，流水线记录为 `INTERRUPTED`。原来的 `run_pipeline.py` 保留为无选择清单、无阶段状态检查的简单编排入口，新远程训练应优先使用 `train_terminal.py`。
+`Ctrl+C`会转发给当前Conda子进程；训练阶段仍通过安全checkpoint停止，流水线记录为 `INTERRUPTED`。原来的 `run_pipeline.py` 保留为无选择清单、无阶段状态检查的简单编排入口；`train_terminal.py` 保持单卡原始数据流水线行为，已评价数据的服务器训练另走 `train_server.py`。
 
 #### 4.4.7 使用 TensorBoard 查看训练变化
 
@@ -1436,24 +1436,69 @@ conda run -n vla-liberox wandb sync \
   vla-adapter-rynn-iql/outputs/training/<run>/wandb/offline-run-*
 ```
 
-#### 4.4.9 8×A100 资源配置
+#### 4.4.9 PC 数据迁移与服务器分支
 
-当前实现是**单进程、单GPU训练器**。`reward.device`和`training.device`各接受一个`cuda:N`；没有DDP/FSDP，设置8张可见卡不会让单次训练自动使用8卡。单卡内已支持同一任务prompt的批量双视角VLA输入，远程终端默认使用 `micro_batch_size=8`、`gradient_accumulation_steps=4`提高A100显存利用率；Q/V、actor梯度、随机采样和checkpoint尚未做多rank同步。
+分支职责固定：`main` 负责 PC 采集、GUI、单卡训练和数据/评价导出；`server` 负责服务器终端、DDP＋ZeRO-1 多卡训练、缓存和分布式 checkpoint。共享数据格式及训练算法从 `main` 同步到 `server`，服务器专用实现不反向并入 `main`。服务器仅训练和导出模型，不启动仿真、策略成功率评测或奖励模型。
 
-在共享服务器上，推荐由调度器为每条流水线分配一张A100。用物理GPU 3时：
+**第一步：在 PC 上准备并导出数据。** 在 UI 冻结数据集并完成需要的评价，然后执行（数据集 ID 可在数据集页面查看）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 python \
-  vla-adapter-rynn-iql/scripts/train_terminal.py \
-  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml \
-  --yes
+conda activate vla-liberox
+python vla-adapter-rynn-iql/scripts/transfer_dataset.py export \
+  --dataset ds_YOUR_DATASET_ID --require-reward final
 ```
 
-此时YAML中的 `reward.device: cuda:0` 和 `training.device: cuda:0` **保持不变**：进程内的 `cuda:0` 已映射到物理GPU 3。不要在只暴露一张卡时写 `cuda:3`。
+默认生成 `training-datasets/<任务ID>/<数据集ID>/`，不再按日期分目录。整个目录包含冻结成员与划分、原始录像/轨迹/observation、关键帧、已有 RynnValue/Robometer 输出及各训练奖励快照；可直接复制到另一台机器，不依赖原 PC 的绝对路径、SQLite 或全局 annotation cache。`--require-reward final` 要求存在有效 Final Reward；BC 不依赖奖励，可省略该选项。其他可用奖励一并导出，缺失的可选类型记录在清单，不静默替代所选训练奖励。全局继承评价会整理为独立快照；该步骤只做文件整理及必要的 CPU 奖励计算，不运行模型。
 
-要利用8张A100，当前最有效的方式是并行运行8个独立实验，而不是让一个实验占8卡：先用一条流水线完成Prepare和RynnValue评价绑定；确认第二次 `--dry-run` 显示这两个阶段可跳过后，再准备8份配置，分别修改 `training.seed`、待比较的超参数、`wandb.run_name`，并保持相同 `wandb.group`。每个进程绑定不同物理GPU。这样缓存评价只计算一次，8张卡用于8组IQL实验，W&B可在同一group中直接比较。
+旧设备保留日期目录也能读取。批量迁移使用非破坏性复制，**不搬走、不删除或改写旧数据，也不改 UI 数据库路径**：
 
-Slurm环境建议每个array job申请一张卡（例如 `--gres=gpu:a100:1`），并继续在YAML内使用 `cuda:0`；Slurm会完成可见设备映射。若目标是用8卡缩短**同一个**训练run，需要另行实现DDP/FSDP，不能只改YAML或启动命令。
+```bash
+python vla-adapter-rynn-iql/scripts/transfer_dataset.py migrate --dry-run
+python vla-adapter-rynn-iql/scripts/transfer_dataset.py migrate
+```
+
+迁移遍历已有冻结数据集；未打包的轨迹先在 UI 选择并冻结。已存在的目标目录不会被覆盖，重新导出修改后的数据集时用 `--output /新的导出根目录`。迁移包是服务器训练快照，不是将数据库导入另一套 UI 的命令。新采集数据直接写入 `dataset-root/projects/<project>/runs/<task>/<timestamp__run-id>/`；旧的 `<task>/<date>/<timestamp__run-id>/` 继续兼容，不在启动时自动移动。导出根目录与 `dataset-root` 分开放置，避免旧递归导入器将复制的轨迹当成重复成员。
+
+**原地修复旧日期目录**：在数据集页面最底部点击“一键修复存储目录”，在提示框中选择“开始检测并修复”。操作自动检测当前项目的新旧布局，将 `<task>/<date>/<run>/` 移到 `<task>/<run>/`，并清理此前遗留的空日期目录；含其他文件的目录会保留并列出，不创建兼容软链接。遇到目标重名直接拒绝，不合并覆盖。请先停止仿真、取消草稿并结束所有后台任务；修复期间暂停新请求和任务派发，迁移记录后自动刷新历史列表。弹窗显示迁移和空目录清理数量；已是新布局则提示无需修改，不重新评价或改写数据。
+
+原始轨迹、observation、关键帧、评价数组和历史训练清单保持原字节，SQLite 仅更新匹配的文件路径；旧引用在文件读取时通过 `dataset-root/.run-layout.json` 解析，**不要求重新标注、重新评价或重新打包已有数据集**。请保留该映射和 `.run-layout-migration.json`。这是本机原地修复，不替代跨设备的 portable bundle 导出；服务器训练代码仍独立保留在 `server`。
+
+无 GUI 时可使用下列备用命令（需退出 UI 和所有数据消费者）：
+
+```bash
+# 只读预览，不改文件或数据库
+python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py --dry-run
+# 执行原地迁移
+python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py --apply
+# 仅在最近一次迁移后的记录未变化时回滚；不丢弃新数据
+python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py --rollback
+```
+
+普通错误会尝试自动回滚；若进程被强制终止留下未完成日志，服务会拒绝读取半迁移目录，需用 `--rollback` 恢复后重启。非标准目录会列出并跳过，不猜测其身份。两种布局的轨迹均可继续导出到服务器。
+
+**第二步：将整个任务/数据集目录复制到服务器。** 例如复制到服务器 workspace 的 `training-datasets/` 下；也可放其他磁盘并修改 `server_pipeline.yaml` 的 `datasets_root`。先校验复制是否完整：
+
+```bash
+python vla-adapter-rynn-iql/scripts/transfer_dataset.py verify \
+  training-datasets/<任务ID>/<数据集ID>
+```
+
+服务器只需训练环境 `vla-liberox`、当前 VLA 源码和对应基础 checkpoint；不需要 `rynnvalue-reward` 或 `robometer-reward` 环境。尚未缓存的基础模型仍需下载。所有完整哈希校验在启动训练时完成，选择页只读轻量摘要，不解压 observation。
+
+**第三步：在服务器的 `server` 分支启动训练。** 多卡脚本和配置只存在于该分支；不要在 `main` 直接运行。
+
+```bash
+git fetch origin
+git switch server
+git pull --ff-only origin server
+conda activate vla-liberox
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
+```
+
+方向键选择数据集 → Enter 配置 → 选择 `START` 并按 Enter 开训；`q` / `Ctrl+C` 安全停止。参数、GPU 分配及断点恢复说明维护在 **server 分支**的本节。部署前需要先提交并推送对应分支的新代码；本地未提交的改动不会通过上述命令同步到另一台设备。
+
+本地同时开发两条分支时使用独立 Git worktree，避免将未提交的服务器文件带入 `main`。PC 导出目录 `training-datasets/<task>/<dataset-id>/` 是分支间的数据交接边界；原数据、评价数组和 UI 单卡训练路径不因服务器开发改变。
 
 ### 4.5 数据与奖励语义
 

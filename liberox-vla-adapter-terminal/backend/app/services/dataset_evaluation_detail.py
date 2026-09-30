@@ -6,6 +6,8 @@ import json
 import io
 from functools import lru_cache
 from pathlib import Path
+
+from ..storage.paths import storage_path
 from typing import Any
 
 import numpy as np
@@ -22,7 +24,7 @@ def _signature(path: Path) -> tuple[int, ...]:
 
 @lru_cache(maxsize=64)
 def _read_checked(path_name: str, digest: str, signature: tuple[int, ...], arrays: bool):
-    path = Path(path_name)
+    path = storage_path(path_name)
     if path.is_symlink() or not path.is_file():
         raise ValueError("Evaluation artifact is missing or is a symlink")
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -67,7 +69,7 @@ def attach_inherited_rewards(result: dict, jobs: Any, dataset_id: str | None) ->
 
 
 def _artifact(path: str, digest: str, *, arrays: bool = False):
-    candidate = Path(path)
+    candidate = storage_path(path)
     if not path or not digest:
         raise ValueError("Evaluation artifact is not sealed; generate a new version")
     return _read_checked(str(candidate), digest, _signature(candidate), arrays)

@@ -14,6 +14,8 @@ import uuid
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .storage_paths import with_dataset_lease
 from typing import Any
 
 import numpy as np
@@ -395,6 +397,7 @@ def _restore_checkpoint(
     return int(trainer["step"])
 
 
+@with_dataset_lease
 def train(config: LoadedConfig) -> Path:
     _STOP_REQUESTED.clear()
     training_cfg = config.section("training")

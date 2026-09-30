@@ -1,11 +1,23 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..domain.run import TERMINAL_STATES
+from ..services.storage_maintenance import storage_thread
 
 router = APIRouter()
+
+
+@asynccontextmanager
+async def storage_access(websocket):
+    gate = getattr(websocket.app.state, "storage_maintenance", None)
+    if gate is None:
+        yield
+    else:
+        async with gate.request():
+            yield
 
 
 @router.websocket("/ws/jobs/{job_id}")
@@ -19,21 +31,30 @@ async def job_socket(websocket: WebSocket, job_id: str):
     offset = 0
     try:
         while True:
-            job = await asyncio.to_thread(service.get, job_id)
-            logs = await asyncio.to_thread(service.logs, job_id, offset)
+            if getattr(websocket.app.state, "storage_maintenance", None) and websocket.app.state.storage_maintenance.busy:
+                await asyncio.sleep(0.5)
+                continue
+            async with storage_access(websocket):
+                job = await storage_thread(service.get, job_id)
+                logs = await storage_thread(service.logs, job_id, offset)
             offset = logs["next_offset"]
             await websocket.send_json({"type": "job", "job": job, "logs": logs})
             if job["status"] in {"COMPLETED", "FAILED", "CANCELED"} and not logs["text"]:
                 await asyncio.sleep(1.0)
             else:
                 await asyncio.sleep(0.5)
-    except (WebSocketDisconnect, KeyError):
+    except (WebSocketDisconnect, KeyError, RuntimeError):
         return
 
 @router.websocket("/ws/sessions/{run_id}")
 async def session_socket(websocket: WebSocket, run_id: str):
     service = websocket.app.state.run_service
-    try: public = service.get_run(run_id)
+    try:
+        async with storage_access(websocket):
+            public = service.get_run(run_id)
+    except RuntimeError:
+        await websocket.close(code=1013, reason="Storage maintenance in progress")
+        return
     except KeyError:
         await websocket.close(code=4404, reason="Run not found")
         return
@@ -46,6 +67,10 @@ async def session_socket(websocket: WebSocket, run_id: str):
             return
     try:
         while True:
+            gate = getattr(websocket.app.state, "storage_maintenance", None)
+            if gate and gate.busy:
+                await asyncio.sleep(0.1)
+                continue
             public = service.get_run(run_id)
             await websocket.send_json({"type": "session", "session": public})
             if public["status"] in TERMINAL_STATES: return

@@ -3,6 +3,7 @@
 /LIBERO-X/
 /VLA-Adapter/
 /dataset-root/
+/training-datasets/
 /runs/
 /policy-registry/*
 !/policy-registry/.gitkeep

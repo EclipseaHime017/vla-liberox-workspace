@@ -17,6 +17,7 @@ import { Badge } from "../components/ui/Badge";
 import { ApiError } from "../api/client";
 import { TrajectoryDetail } from "../features/dataset/TrajectoryDetail";
 import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
+import { StorageRepair } from "../features/dataset/StorageRepair";
 import { TaskFilter } from "../features/run-config/TaskSelector";
 import { ALL_TASK_SCOPE, filterByTaskScope, scopeForTask, taskIdsForScope, type TaskScope } from "../features/run-config/taskHierarchy";
 
@@ -320,5 +321,9 @@ export function DatasetPage() {
       {monitor}
       <div className="path-card"><span>数据根目录</span><code>{summary.dataset_root}</code><span>目录索引</span><code>{summary.catalog}</code></div>
     </>}
+    <StorageRepair disabled={busy} onBusyChange={setBusy} onRepaired={async () => {
+      setSummary(await getDatasetSummary());
+      await refresh();
+    }} />
   </section>;
 }

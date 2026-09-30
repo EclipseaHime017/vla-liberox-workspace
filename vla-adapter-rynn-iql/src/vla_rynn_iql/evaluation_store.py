@@ -7,6 +7,8 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .storage_paths import storage_path
 from typing import Any
 
 import numpy as np
@@ -40,7 +42,7 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 
 def valid_bound_evaluation(episode: dict[str, Any]) -> dict[str, Any] | None:
     """Return a hash-checked durable trajectory evaluation, if present."""
-    trajectory = Path(episode["trajectory_path"])
+    trajectory = storage_path(episode["trajectory_path"])
     sidecar = trajectory.parent / SIDECAR_NAME
     values = trajectory.parent / VALUES_NAME
     if (
@@ -151,10 +153,10 @@ def bind_reward_manifest(
             skipped.append(run_id)
             continue
 
-        trajectory = Path(episode["trajectory_path"])
+        trajectory = storage_path(episode["trajectory_path"])
         if trajectory.is_symlink() or not trajectory.is_file():
             raise FileNotFoundError(f"Unsafe or missing trajectory for {run_id}: {trajectory}")
-        source = Path(str(reward.get("annotation_path") or ""))
+        source = storage_path(str(reward.get("annotation_path") or ""))
         if source.is_symlink() or not source.is_file():
             raise FileNotFoundError(f"Missing annotation for {run_id}: {source}")
         if sha256_file(source) != reward.get("annotation_sha256"):

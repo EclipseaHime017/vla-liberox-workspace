@@ -10,6 +10,11 @@ import type {
 export const getBootstrap = () => api<Bootstrap>("/api/bootstrap");
 export const listRuns = () => api<Session[]>("/api/runs");
 export const getDatasetSummary = () => api<DatasetSummary>("/api/datasets/summary");
+export const repairDatasetStorage = () => api<{
+  status: string; moved: number; already_current: number; skipped: string[]; message: string;
+  layout: "dated" | "mixed" | "undated" | "empty";
+  removed_date_dirs: number; retained_date_dirs: string[];
+}>("/api/datasets/storage/repair", { method: "POST" });
 function taskQuery(taskId?: string, taskIds?: string[]) {
   const query = new URLSearchParams();
   if (taskId) query.set("task_id", taskId);

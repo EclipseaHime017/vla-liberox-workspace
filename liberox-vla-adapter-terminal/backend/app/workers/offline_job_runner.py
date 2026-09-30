@@ -13,12 +13,17 @@ import fcntl
 import json
 import os
 import signal
+import sys
 import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from backend.app.storage.paths import storage_lease
 
 
 def utc_now() -> str:
@@ -142,6 +147,7 @@ class Runner:
             return 1
         finally:
             self.stop.set()
+            heartbeat.join()
             self.persist(heartbeat_at=utc_now())
             if lock_stream is not None:
                 fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
@@ -151,8 +157,10 @@ class Runner:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-dir", type=Path, required=True)
+    parser.add_argument("--dataset-root", type=Path)
     args = parser.parse_args()
-    return Runner(args.job_dir).run()
+    with storage_lease(args.dataset_root):
+        return Runner(args.job_dir).run()
 
 
 if __name__ == "__main__":

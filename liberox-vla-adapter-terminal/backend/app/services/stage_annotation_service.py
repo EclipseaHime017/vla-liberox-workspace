@@ -7,6 +7,8 @@ import json
 import threading
 from collections import OrderedDict
 from pathlib import Path
+
+from ..storage.paths import storage_path
 from typing import Any
 
 import numpy as np
@@ -52,7 +54,7 @@ class StageAnnotationService:
 
     @staticmethod
     def _paths(run: dict) -> tuple[Path, Path]:
-        trajectory = Path(str(run.get("trajectory") or ""))
+        trajectory = storage_path(str(run.get("trajectory") or ""))
         if trajectory.is_symlink() or trajectory.parent.is_symlink():
             raise ValueError("Stage annotation does not accept symlink trajectories")
         if trajectory.name != "trajectory.npz" or not trajectory.is_file():

@@ -11,6 +11,8 @@ import sys
 import uuid
 from collections import defaultdict
 from pathlib import Path
+
+from .storage_paths import with_dataset_lease, storage_path
 from typing import Any, Protocol, Sequence
 
 import numpy as np
@@ -107,7 +109,7 @@ def _episode_reward_metadata(episode: dict[str, Any]) -> dict[str, Any]:
 
 
 def _episode_timeline_arrays(episode: dict[str, Any]) -> dict[str, np.ndarray]:
-    with np.load(episode["trajectory_path"], allow_pickle=False) as trajectory:
+    with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as trajectory:
         times = np.asarray(trajectory["time_seconds"], dtype=np.float64)
         done = np.asarray(trajectory["done"], dtype=bool)
     return {"observation_steps": np.arange(len(times), dtype=np.int64),
@@ -116,6 +118,13 @@ def _episode_timeline_arrays(episode: dict[str, Any]) -> dict[str, np.ndarray]:
 
 def reward_manifest_digest(index: dict[str, Any]) -> str:
     """Content identity for direct rewards; legacy RynnValue hashes stay unchanged."""
+    if index.get("portable_source_sha256"):
+        return stable_hash({"source": index["portable_source_sha256"],
+            "dataset_sha256": index["dataset_sha256"], "reward_config": index["reward_config"],
+            "implementation": index.get("derivation_implementation_sha256"),
+            "episodes": [{key: entry.get(key) for key in ("run_id", "reward_sha256",
+                "saved_reward_config", "training_reward_config", "saved_annotation_config")}
+                for entry in sorted(index["episodes"], key=lambda entry: entry["run_id"])]})
     if index.get("binding_kind") == "global_trajectory_snapshots":
         return stable_hash({"dataset_sha256": index["dataset_sha256"], "episodes": [
             {key: entry.get(key) for key in ("run_id", "reward_sha256", "saved_reward_config",
@@ -714,7 +723,7 @@ def _reusable_manifest_entry(
     )
     if not isinstance(entry, dict):
         return None
-    path = Path(str(entry.get("annotation_path") or ""))
+    path = storage_path(str(entry.get("annotation_path") or ""))
     if (
         path.is_symlink() or not path.is_file()
         or entry.get("annotation_sha256") != sha256_file(path)
@@ -758,7 +767,7 @@ def _reusable_official_sidecar(
     episode: dict[str, Any], reward_cfg: dict[str, Any]
 ) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, Any]] | None:
     """Load hash-checked v4/v5 official heads without running RynnValue again."""
-    trajectory = Path(episode["trajectory_path"])
+    trajectory = storage_path(episode["trajectory_path"])
     sidecar = trajectory.parent / "rynnvalue_evaluation.json"
     values = trajectory.parent / "rynnvalue_evaluation.npz"
     if not sidecar.is_file() or sidecar.is_symlink() or not values.is_file() or values.is_symlink():
@@ -827,6 +836,7 @@ def shaped_chunk_reward(
     )[2]
 
 
+@with_dataset_lease
 def annotate_manifest(
     config: LoadedConfig,
     annotator: TemporalValueAnnotator | None = None,
@@ -907,7 +917,7 @@ def annotate_manifest(
                 current = json.loads(meta_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 current = None
-            cached_output = Path(str(current.get("annotation_path") or output)) if isinstance(current, dict) else output
+            cached_output = storage_path(str(current.get("annotation_path") or output)) if isinstance(current, dict) else output
             if (
                 isinstance(current, dict)
                 and current.get("source_key") == source_key
@@ -922,7 +932,7 @@ def annotate_manifest(
             LOG.info("Reusing official RynnValue outputs for %s", episode["run_id"])
         else:
             current_annotator = live_annotator()
-            with np.load(episode["observations_path"], allow_pickle=False) as images:
+            with np.load(storage_path(episode["observations_path"]), allow_pickle=False) as images:
                 raw = images["agentview_image"]
                 frames = [
                     reward_view(raw[int(index)], episode["observation_orientation"])
@@ -1010,7 +1020,7 @@ def load_annotation_index(config: LoadedConfig) -> dict[str, Any]:
     if len(payload.get("episodes", [])) != len(manifest.get("episodes", [])):
         raise ValueError("RynnValue annotation manifest does not cover every episode")
     for episode in payload["episodes"]:
-        annotation_path = Path(str(episode.get("annotation_path") or ""))
+        annotation_path = storage_path(str(episode.get("annotation_path") or ""))
         if (
             annotation_path.is_symlink()
             or not annotation_path.is_file()
@@ -1022,6 +1032,7 @@ def load_annotation_index(config: LoadedConfig) -> dict[str, Any]:
     return payload
 
 
+@with_dataset_lease
 def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) -> Path:
     """Build the cheap reward cache from immutable official RynnValue outputs."""
     if config.section("reward").get("manifest_path"):
@@ -1060,7 +1071,7 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
         ):
             valid = True
             for episode in current["episodes"]:
-                reward_path = Path(str(episode.get("reward_path") or ""))
+                reward_path = storage_path(str(episode.get("reward_path") or ""))
                 if (
                     reward_path.is_symlink()
                     or not reward_path.is_file()
@@ -1080,7 +1091,7 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
         annotation = annotations.get(str(episode["run_id"]))
         if annotation is None:
             raise KeyError(f"RynnValue annotation is missing for {episode['run_id']}")
-        annotation_path = Path(annotation["annotation_path"])
+        annotation_path = storage_path(annotation["annotation_path"])
         expected_boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
         with np.load(annotation_path, allow_pickle=False) as source:
             boundaries = np.asarray(source["boundary_steps"], dtype=np.int64)
@@ -1273,10 +1284,10 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
         episode = expected[str(entry["run_id"])]
         for path_key, hash_key in (("trajectory_path", "trajectory_sha256"),
                                    ("observations_path", "observations_sha256")):
-            source_path = Path(episode[path_key])
+            source_path = storage_path(episode[path_key])
             if (not source_path.is_file() or sha256_file(source_path) != episode[hash_key]):
                 raise ValueError(f"Pinned reward source data changed: {episode['run_id']} ({path_key})")
-        values_path = Path(entry["reward_path"])
+        values_path = storage_path(entry["reward_path"])
         if (values_path.is_symlink() or not values_path.is_file()
                 or sha256_file(values_path) != entry["reward_sha256"]):
             raise ValueError(f"Pinned reward arrays are missing or corrupted: {episode['run_id']}")
@@ -1336,7 +1347,7 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
                 generated.append((entry, episode, None))
                 continue
         gamma, cumulative = float(effective["gamma"]), bool(effective["accumulate_primitive_steps"])
-        with np.load(entry["reward_path"], allow_pickle=False) as values:
+        with np.load(storage_path(entry["reward_path"]), allow_pickle=False) as values:
             arrays = {name: values[name] for name in values.files}
         chunks = episode.get("evaluation_chunks", episode["chunks"])
         done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
@@ -1428,7 +1439,7 @@ def load_stage_annotations(config: LoadedConfig, manifest: dict[str, Any]) -> di
     invalid: list[str] = []
     for episode in manifest["episodes"]:
         run_id = str(episode["run_id"])
-        trajectory = Path(episode["trajectory_path"])
+        trajectory = storage_path(episode["trajectory_path"])
         try:
             if frozen is None and episode.get("observation_orientation") == "vla_policy":
                 raise ValueError(
@@ -1478,9 +1489,9 @@ def _materialize_direct_rewards(config: LoadedConfig, *, force: bool) -> Path:
             if (all(previous.get(key) == value for key, value in identity.items())
                     and previous.get("complete") is True
                     and len(previous["episodes"]) == len(manifest["episodes"])
-                    and all(not Path(item["reward_path"]).is_symlink()
-                            and Path(item["reward_path"]).is_file()
-                            and sha256_file(Path(item["reward_path"])) == item["reward_sha256"]
+                    and all(not storage_path(item["reward_path"]).is_symlink()
+                            and storage_path(item["reward_path"]).is_file()
+                            and sha256_file(storage_path(item["reward_path"])) == item["reward_sha256"]
                             for item in previous["episodes"])):
                 if snapshot is None or (
                     Path(previous["stage_annotations_path"]).is_file()
@@ -1503,7 +1514,7 @@ def _materialize_direct_rewards(config: LoadedConfig, *, force: bool) -> Path:
             done[int(episode["terminal_step"]):] = True
         if source == "stage":
             annotation = snapshot["annotations"][str(episode["run_id"])]
-            with np.load(episode["trajectory_path"], allow_pickle=False) as trajectory:
+            with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as trajectory:
                 context = stage_annotation_context(annotation, done=trajectory["done"],
                     success_consecutive_steps=int(config.section("data")["success_consecutive_steps"]),
                     exponent=derivation["stage_exponent"])

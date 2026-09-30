@@ -31,6 +31,7 @@ from .services.training_dataset_service import TrainingDatasetService
 from .services.trajectory_evaluation_service import TrajectoryEvaluationService
 from .services.robometer_evaluation_service import RobometerEvaluationService
 from .services.stage_annotation_service import StageAnnotationService
+from .services.storage_maintenance import StorageMaintenance, StorageRequestGate
 from .workers.simulation_worker import SimulationManager
 
 
@@ -46,61 +47,65 @@ def create_app(
     """Compose adapters while retaining injectable workers for tests."""
     ui_config = ui_config or load_ui_config(DEFAULT_UI_CONFIG)
     eval_config = eval_config or direct.load_config(direct.DEFAULT_CONFIG_PATH.resolve())
+    maintenance = StorageMaintenance(ui_config)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        owned = manager is None
-        worker = manager or SimulationManager(ui_config, eval_config)
-        app.state.manager = worker  # compatibility for local diagnostics
-        app.state.run_service = RunService(worker)
-        if hasattr(ui_config, "project_root"):
-            app.state.robometer_evaluation_service = RobometerEvaluationService(
-                app.state.run_service, ui_config.project_root
-            )
-            app.state.trajectory_evaluation_service = TrajectoryEvaluationService(
-                app.state.run_service, ui_config.project_root
-            )
-            app.state.stage_annotation_service = StageAnnotationService(
-                app.state.run_service, ui_config.offline_rl_root,
-            )
-            app.state.training_dataset_service = TrainingDatasetService(
-                app.state.run_service, ui_config,
-                app.state.trajectory_evaluation_service,
-                app.state.robometer_evaluation_service,
-            )
-            app.state.dataset_service = DatasetService(
-                app.state.run_service,
-                app.state.training_dataset_service.is_test,
-            )
-            app.state.offline_job_service = OfflineJobService(
-                ui_config, worker, app.state.training_dataset_service,
-                app.state.trajectory_evaluation_service,
-                app.state.robometer_evaluation_service,
-                stage_annotations=app.state.stage_annotation_service,
-            )
-            worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
-            app.state.offline_job_service.start_training_queue()
-        else:
-            app.state.dataset_service = DatasetService(app.state.run_service)
-            app.state.training_dataset_service = None
-            app.state.trajectory_evaluation_service = None
-            app.state.robometer_evaluation_service = None
-            app.state.offline_job_service = None
-            app.state.stage_annotation_service = None
-        try:
-            yield
-        finally:
-            offline = getattr(app.state, "offline_job_service", None)
-            if offline is not None:
-                offline.close()
-            if owned:
-                await asyncio.to_thread(app.state.run_service.close)
+        with maintenance:
+            owned = manager is None
+            worker = manager or SimulationManager(ui_config, eval_config)
+            app.state.manager = worker  # compatibility for local diagnostics
+            app.state.run_service = RunService(worker)
+            if hasattr(ui_config, "project_root"):
+                app.state.robometer_evaluation_service = RobometerEvaluationService(
+                    app.state.run_service, ui_config.project_root
+                )
+                app.state.trajectory_evaluation_service = TrajectoryEvaluationService(
+                    app.state.run_service, ui_config.project_root
+                )
+                app.state.stage_annotation_service = StageAnnotationService(
+                    app.state.run_service, ui_config.offline_rl_root,
+                )
+                app.state.training_dataset_service = TrainingDatasetService(
+                    app.state.run_service, ui_config,
+                    app.state.trajectory_evaluation_service,
+                    app.state.robometer_evaluation_service,
+                )
+                app.state.dataset_service = DatasetService(
+                    app.state.run_service,
+                    app.state.training_dataset_service.is_test,
+                )
+                app.state.offline_job_service = OfflineJobService(
+                    ui_config, worker, app.state.training_dataset_service,
+                    app.state.trajectory_evaluation_service,
+                    app.state.robometer_evaluation_service,
+                    stage_annotations=app.state.stage_annotation_service,
+                )
+                worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
+                app.state.offline_job_service.start_training_queue()
+            else:
+                app.state.dataset_service = DatasetService(app.state.run_service)
+                app.state.training_dataset_service = None
+                app.state.trajectory_evaluation_service = None
+                app.state.robometer_evaluation_service = None
+                app.state.offline_job_service = None
+                app.state.stage_annotation_service = None
+            try:
+                yield
+            finally:
+                offline = getattr(app.state, "offline_job_service", None)
+                if offline is not None:
+                    offline.close()
+                if owned:
+                    await asyncio.to_thread(app.state.run_service.close)
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
         version="0.6.0",
         lifespan=lifespan,
     )
+    app.state.storage_maintenance = maintenance
+    app.add_middleware(StorageRequestGate, maintenance=maintenance)
     app.include_router(runs.router)
     app.include_router(drafts.router)
     app.include_router(controller.router)

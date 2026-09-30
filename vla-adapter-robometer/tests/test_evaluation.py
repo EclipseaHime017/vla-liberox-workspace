@@ -10,6 +10,7 @@ import yaml
 
 from vla_adapter_robometer.config import DEFAULT_CONFIG, load_config
 from vla_adapter_robometer.evaluation import evaluate_selection, evaluation_steps, prefix_indices
+from vla_adapter_robometer.storage_paths import storage_path
 
 
 def test_sampling_includes_first_and_last():
@@ -78,3 +79,39 @@ def test_complete_trajectory_is_evaluated(tmp_path: Path):
     config_path.write_text(yaml.safe_dump(raw))
     evaluate_selection(load_config(config_path), Fake)
     assert len(loads) == 3
+
+
+def test_relocated_selection_reuses_output_without_model_forward(tmp_path):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "vla-adapter-rynn-iql/src"))
+    from vla_rynn_iql.run_layout import migrate_layout
+    from vla_rynn_iql.io import sha256_file
+    run = tmp_path / "projects/test/runs/task/2026-01-01/run"
+    episode = run / "episodes/episode_000"
+    episode.mkdir(parents=True)
+    trajectory, observations, manifest = episode / "trajectory.npz", episode / "trajectory_observations.npz", run / "run.json"
+    np.savez(trajectory, time_seconds=np.arange(11) / 20, done=np.zeros(10, bool))
+    np.savez(observations, agentview_image=np.zeros((11, 4, 4, 3), np.uint8))
+    manifest.write_text(json.dumps({"id": "run", "task": "do task"}))
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({"dataset_sha256": "selection", "members": [{"run_id": "run", "artifacts": {
+        name: {"path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size}
+        for name, path in (("trajectory", trajectory), ("observations", observations), ("manifest", manifest))}}]}))
+    raw = yaml.safe_load(DEFAULT_CONFIG.read_text())
+    raw["paths"].update(selection_manifest=str(selection), output_dir=str(tmp_path / "out"), robometer_root=str(tmp_path))
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump(raw))
+    class Fake:
+        commit = "fake"
+        load_seconds = 0
+        def __init__(self, _): pass
+        def __call__(self, frames, steps, prompt):
+            return np.linspace(0, 1, len(steps)), np.linspace(0, 1, len(steps))
+    evaluate_selection(load_config(config), Fake)
+    selection_bytes = selection.read_bytes()
+    migrate_layout(tmp_path, "test")
+    def no_model(_): pytest.fail("moving files must not trigger model loading")
+    result = json.loads(evaluate_selection(load_config(config), no_model).read_text())
+    assert result["cache_stats"]["skipped"] == 1
+    assert selection.read_bytes() == selection_bytes
+    assert storage_path(trajectory).is_file() and not trajectory.exists()

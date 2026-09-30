@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from .storage_paths import storage_path
 from typing import Any
 
 import numpy as np
@@ -48,9 +50,9 @@ class ActionDataset(Dataset):
         episode, chunk_index, annotation_path = self.items[item]
         chunk = self.chunks[episode["run_id"]][chunk_index]
         start, end, length = int(chunk["start"]), int(chunk["end"]), int(chunk["length"])
-        with np.load(episode["trajectory_path"], allow_pickle=False) as source:
+        with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as source:
             trajectory = {key: source[key] for key in source.files}
-        with np.load(episode["observations_path"], allow_pickle=False) as source:
+        with np.load(storage_path(episode["observations_path"]), allow_pickle=False) as source:
             agent_raw, wrist_raw = source["agentview_image"], source["wrist_image"]
             agent = policy_view(agent_raw[start], episode["observation_orientation"])
             wrist = policy_view(wrist_raw[start], episode["observation_orientation"])
@@ -100,7 +102,7 @@ class ReplayDataset(ActionDataset):
             raise ValueError("Reward annotation manifest is incomplete")
         if index["dataset_sha256"] != self.manifest["dataset_sha256"]:
             raise ValueError("Reward annotations were generated for a different dataset manifest")
-        annotations = {item["run_id"]: Path(item["annotation_path"]) for item in index["episodes"]}
+        annotations = {item["run_id"]: storage_path(item["annotation_path"]) for item in index["episodes"]}
         checked = set()
         for episode, _, _ in self.items:
             run_id = episode["run_id"]

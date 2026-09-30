@@ -9,6 +9,8 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ..storage.paths import storage_path
 from typing import Any
 
 import numpy as np
@@ -69,7 +71,7 @@ class TrajectoryEvaluationService:
 
     @staticmethod
     def _episode_dir(run: dict[str, Any]) -> Path:
-        raw = Path(str(run.get("trajectory") or ""))
+        raw = storage_path(str(run.get("trajectory") or ""))
         if raw.is_symlink():
             raise ValueError(f"Symlink trajectories cannot be evaluated: {run.get('id')}")
         trajectory = raw.resolve()
@@ -244,7 +246,7 @@ class TrajectoryEvaluationService:
             episode = prepared_by_id.get(run_id)
             if episode is None:
                 raise ValueError(f"Reward run is missing from prepared manifest: {run_id}")
-            raw_trajectory = Path(episode["trajectory_path"])
+            raw_trajectory = storage_path(episode["trajectory_path"])
             if raw_trajectory.is_symlink():
                 raise ValueError(f"Symlink trajectories cannot be evaluated: {run_id}")
             trajectory = raw_trajectory.resolve()
@@ -259,7 +261,7 @@ class TrajectoryEvaluationService:
                         continue
                 except Exception:
                     pass
-            source = Path(reward["annotation_path"]).resolve()
+            source = storage_path(reward["annotation_path"]).resolve()
             if not source.is_file() or source.is_symlink():
                 raise FileNotFoundError(source)
             if _sha256(source) != reward["annotation_sha256"]:

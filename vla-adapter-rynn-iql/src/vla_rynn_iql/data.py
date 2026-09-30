@@ -8,6 +8,8 @@ import shutil
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from .storage_paths import with_dataset_lease, storage_path
 from typing import Any, Iterator
 
 import numpy as np
@@ -269,7 +271,7 @@ def _selected_runs(config: LoadedConfig) -> tuple[dict[str, dict[str, Any]], dic
         run_id = member.get("run_id")
         artifacts = member.get("artifacts") or {}
         source = artifacts.get("manifest") or {}
-        source_path = Path(str(source.get("path") or "")).expanduser().resolve()
+        source_path = storage_path(str(source.get("path") or "")).resolve()
         if not isinstance(run_id, str) or not run_id or run_id in selected:
             raise ValueError("Training dataset members must have unique non-empty run_id values")
         if member.get("split") not in {"train", "validation"}:
@@ -353,6 +355,7 @@ def _materialize_export(run_dir: Path, cache_dir: Path) -> tuple[Path, Path]:
 
 def _load_run(run_json: Path, config: LoadedConfig, *,
               frozen_observations_sha256: str | None = None) -> dict[str, Any] | None:
+    run_json = storage_path(run_json)
     run = json.loads(run_json.read_text(encoding="utf-8"))
     if run.get("status") != "COMPLETED" or run.get("error"):
         return None
@@ -554,6 +557,7 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int) -> None:
         value for chunk in episode["evaluation_chunks"] for value in (chunk["start"], chunk["end"])})
 
 
+@with_dataset_lease
 def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
     work = Path(config.section("paths")["work_dir"])
     work.mkdir(parents=True, exist_ok=True)
@@ -679,8 +683,8 @@ def load_manifest(config: LoadedConfig) -> dict[str, Any]:
 
 def iter_episode_arrays(manifest: dict[str, Any]) -> Iterator[tuple[dict[str, Any], dict[str, np.ndarray], dict[str, np.ndarray]]]:
     for episode in manifest["episodes"]:
-        with np.load(episode["trajectory_path"], allow_pickle=False) as trajectory, np.load(
-            episode["observations_path"], allow_pickle=False
+        with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as trajectory, np.load(
+            storage_path(episode["observations_path"]), allow_pickle=False
         ) as observations:
             yield episode, {key: trajectory[key] for key in trajectory.files}, {
                 key: observations[key] for key in observations.files

@@ -5,12 +5,14 @@ import json
 import os
 import tempfile
 from pathlib import Path
+
+from .storage_paths import storage_path
 from typing import Any
 
 
 def sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with storage_path(path).open("rb") as stream:
         while chunk := stream.read(block_size):
             digest.update(chunk)
     return digest.hexdigest()

@@ -41,7 +41,51 @@ python liberox-vla-adapter-terminal/scripts/setup_factr.py --install-usb-rule
 
 `mode: simulation`：先 `c` 校准、`g` 开补偿，再 `s` 启动。实体主臂会缓慢对齐静止的仿真机械臂，请留出空间；倒计时后七关节按 1:1 跟随。独立测试不记录；GUI 走同一关节路径并保存标准人工轨迹，正常完成保留补偿。SpaceMouse 采集不受影响。
 
-## 服务器端：启动终端训练
+## 个人端：导出已评价数据
+
+原地整理旧目录：UI **数据集页面最底部 → 一键修复存储目录 → 开始检测并修复**。先停止仿真、取消草稿及后台任务；自动检测并迁移旧记录、清理遗留空日期目录，不重跑评价。含其他文件的目录会保留并提示；已是新布局则无需修改。
+
+终端备用（默认只预览，`--apply` 才移动；请先退出 UI）：
+
+```bash
+python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py
+python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py --apply
+# 仅回滚最近一次迁移；迁移后轨迹/评价有新修改时拒绝回滚
+python liberox-vla-adapter-terminal/scripts/migrate_run_layout.py --rollback
+```
+
+保留 `dataset-root/.run-layout.json` 和 `.run-layout-migration.json`，它们用于旧路径兼容和故障恢复；不创建旧目录软链接。
+
+在 UI 冻结数据集并完成评价后：
+
+```bash
+python vla-adapter-rynn-iql/scripts/transfer_dataset.py export \
+  --dataset ds_YOUR_DATASET_ID --require-reward final
+```
+
+将生成的整个 `training-datasets/<任务ID>/<数据集ID>/` 复制到服务器相同位置。旧数据批量复制迁移：`python vla-adapter-rynn-iql/scripts/transfer_dataset.py migrate`，不会移动原文件。
+
+## 服务器端：启动全屏训练（仅 server 分支）
+
+在服务器代码目录先切换分支；这些脚本不在 `main`：
+
+```bash
+git fetch origin
+git switch server
+git pull --ff-only origin server
+```
+
+配置文件：`vla-adapter-rynn-iql/configs/server_pipeline.yaml`（GPU、全局 batch、方法和输出目录）
+
+```bash
+conda activate vla-liberox
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
+```
+
+方向键选数据集 → Enter 配置 → 选 `START` 按 Enter 开训；`q` / `Ctrl+C` 安全停止。只训练并导出模型，不运行仿真、策略评测或奖励模型。默认 8 卡、全局 batch 8、累积 4；启动前按获分配的 GPU 修改配置。
+
+## 原始数据：单卡终端流水线
 
 配置文件：`vla-adapter-rynn-iql/configs/terminal_pipeline.yaml`
 

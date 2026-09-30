@@ -14,6 +14,8 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ..storage.paths import storage_path
 from typing import Any
 
 import numpy as np
@@ -49,7 +51,7 @@ def _trajectory(run: dict) -> Path | None:
     value = run.get("trajectory")
     if not value:
         return None
-    path = Path(value)
+    path = storage_path(value)
     return path if path.is_file() and not path.is_symlink() else None
 
 
@@ -100,13 +102,13 @@ def needs_snapshot_validation(run: dict, source: str | None = None) -> bool:
             and read_reward_snapshot(run, source) is None)
 
 
-def _refresh_snapshot_identity(run: dict, source: str | None = None) -> dict[str, Any] | None:
+def _refresh_snapshot_identity(run: dict, source: str | None = None, *, publish: bool = True) -> dict[str, Any] | None:
     """Revalidate moved/touched observations off the request path, once per stat."""
     trajectory = _trajectory(run)
     if trajectory is None:
         return None
     sidecar = snapshot_path(run, source)
-    if _IDENTITY_CHECKS.get(str(sidecar)) == _identity_fingerprint(trajectory, sidecar):
+    if publish and _IDENTITY_CHECKS.get(str(sidecar)) == _identity_fingerprint(trajectory, sidecar):
         return None
     try:
         original = sidecar.read_bytes()
@@ -122,6 +124,12 @@ def _refresh_snapshot_identity(run: dict, source: str | None = None) -> dict[str
                 or _hash(values) != payload["values_sha256"]
                 or _hash(observations) != payload["observations_sha256"]):
             return None
+        if not publish:
+            with np.load(values, allow_pickle=False) as archive:
+                arrays = {key: archive[key] for key in archive.files}
+            if "final_reward" not in arrays or not np.isfinite(arrays["final_reward"]).all():
+                return None
+            return {"metadata": payload, "arrays": arrays}
         with _LOCK:
             if sidecar.read_bytes() != original:
                 return read_reward_snapshot(run, source)
@@ -132,7 +140,8 @@ def _refresh_snapshot_identity(run: dict, source: str | None = None) -> dict[str
     except (OSError, KeyError, ValueError, TypeError):
         return None
     finally:
-        _IDENTITY_CHECKS[str(sidecar)] = _identity_fingerprint(trajectory, sidecar)
+        if publish:
+            _IDENTITY_CHECKS[str(sidecar)] = _identity_fingerprint(trajectory, sidecar)
 
 
 def read_reward_snapshot(run: dict, source: str | None = None) -> dict[str, Any] | None:
@@ -231,7 +240,7 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
         if selected is not None and run_id not in selected:
             continue
         episode = members[run_id]
-        trajectory = Path(episode["trajectory_path"])
+        trajectory = storage_path(episode["trajectory_path"])
         # Dataset regeneration must not reread a multi-GB observation archive
         # merely to preserve an already published first result.
         run = {"id": run_id, "trajectory": str(trajectory)}
@@ -239,8 +248,8 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
                               or (source == "rynnvalue" and _existing_rynn(trajectory, run_id))):
             skipped.append(run_id)
             continue
-        observations = Path(episode["observations_path"])
-        values = Path(entry.get("reward_path") or entry["annotation_path"])
+        observations = storage_path(episode["observations_path"])
+        values = storage_path(entry.get("reward_path") or entry["annotation_path"])
         expected = entry.get("reward_sha256") or entry["annotation_sha256"]
         if (trajectory.is_symlink() or observations.is_symlink() or values.is_symlink()
                 or _hash(trajectory) != episode["trajectory_sha256"]

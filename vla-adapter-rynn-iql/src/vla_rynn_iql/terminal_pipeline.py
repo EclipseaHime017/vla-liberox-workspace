@@ -226,6 +226,10 @@ def dataset_roots(raw: dict[str, Any], import_root: Path) -> list[Path]:
 
 
 def _artifact_path(run_path: Path, value: Any, fallback: Path) -> Path:
+    # Recordings may have been copied from another device. Local conventional
+    # files take precedence over stale absolute metadata, without rewriting it.
+    if fallback.is_file():
+        return fallback.resolve()
     if isinstance(value, str) and value.strip():
         path = Path(value).expanduser()
         return (path if path.is_absolute() else run_path.parent / path).resolve()
