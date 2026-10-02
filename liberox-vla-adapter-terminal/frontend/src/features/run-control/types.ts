@@ -214,9 +214,11 @@ export type DatasetRewardEvaluation = {
 };
 
 export type StageKeyframe = { step: number; kind: "positive" | "negative" };
+export type AnnotationDataset = { dataset_id: string; dataset_name: string };
 
 export type StageAnnotation = {
   run_id: string; status: "missing" | "ready" | "stale"; error?: string | null;
+  dataset_id?: string | null; dataset_name?: string | null; origin?: string;
   derivation_error?: string | null;
   action_count: number; time_seconds: number[]; success_step: number | null;
   success_consecutive_steps: number; exponent: number; keyframes: StageKeyframe[];

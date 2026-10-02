@@ -208,6 +208,7 @@ class DatasetRewardVersions:
                 _, frozen = self.datasets._load(dataset_id)
                 snapshot = self.stage_annotations.validate_members(
                     frozen["members"], dataset["success_consecutive_steps"],
+                    dataset_id=dataset_id,
                     **({"exponent": parameters["stage_exponent"], "nonpositive": True}
                        if source in {"final", "all"} else {}),
                 )

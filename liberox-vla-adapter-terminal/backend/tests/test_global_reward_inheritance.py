@@ -34,6 +34,9 @@ def setup_recording(tmp_path, monkeypatch):
         done=done, action_source=np.array(["policy"]*3 + ["human"]*(count-3)))
     manifest = Path(run["output_dir"]) / "run.json"
     manifest.write_text(json.dumps(run))
+    label = build_stage_annotation(run_id="run", trajectory_sha256=digest(path), done=done,
+                                   keyframes=[{"step": 6, "kind": "positive"}])
+    path.with_name("stage_annotation.json").write_text(json.dumps(label))
     monkeypatch.setattr(fixture, "make_run", lambda *_: run)
     jobs, dataset = fixture.setup_jobs(tmp_path)
     load_base = jobs._load_base_config
@@ -42,9 +45,6 @@ def setup_recording(tmp_path, monkeypatch):
         raw["data"]["project_id"] = "test"
         return raw
     jobs._load_base_config = test_config
-    label = build_stage_annotation(run_id="run", trajectory_sha256=digest(path), done=done,
-                                   keyframes=[{"step": 6, "kind": "positive"}])
-    path.with_name("stage_annotation.json").write_text(json.dumps(label))
     return jobs, dataset, run
 
 
@@ -162,10 +162,13 @@ def test_global_overwrite_affects_future_inheritance_not_existing_training_pin(t
     assert old_path.read_bytes() == old_bytes
 
 
-def test_missing_or_corrupt_global_labels_block_only_the_requested_source(tmp_path, monkeypatch):
+def test_global_label_changes_do_not_change_copied_dataset_labels(tmp_path, monkeypatch):
     jobs, dataset, run = setup_recording(tmp_path, monkeypatch)
     label = Path(run["trajectory"]).with_name("stage_annotation.json")
     label.write_text("{}")
+    assert jobs.defaults(dataset["id"], "stage")["reward_availability"]["ready"]
+    _, frozen = jobs.datasets._load(dataset["id"])
+    jobs.datasets.stage_labels.save(frozen, "run", {})
     assert not jobs.defaults(dataset["id"], "stage")["reward_availability"]["ready"]
     assert jobs.defaults(dataset["id"], "sparse")["reward_availability"]["ready"]
     with pytest.raises(ConflictError):
@@ -182,6 +185,7 @@ def test_dataset_reevaluation_overrides_only_stage_while_sibling_inherits_global
     sibling = jobs.datasets.derive(dataset["id"], name="sibling",
                                    selection={"mode": "manual", "run_ids": ["run"]})
     jobs.stage_annotations = StageAnnotationService(jobs.datasets.run_service, jobs.ui_config.offline_rl_root)
+    jobs.stage_annotations.bind_datasets(jobs.datasets)
     job = jobs.start_annotation(dataset["id"], source="stage", stage_exponent=4)
     config = load_train_config(job["config_path"])
     prepare_dataset(config)

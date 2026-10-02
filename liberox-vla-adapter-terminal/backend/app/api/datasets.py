@@ -81,9 +81,9 @@ async def update_run_labels(
 
 
 @router.get("/runs/{run_id}/stage-annotation")
-async def get_stage_annotation(run_id: str, request: Request):
+async def get_stage_annotation(run_id: str, request: Request, dataset_id: str | None = None):
     try:
-        return await run_in_threadpool(stage_annotation_service(request).detail, run_id)
+        return await run_in_threadpool(stage_annotation_service(request).detail, run_id, dataset_id)
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -94,6 +94,7 @@ async def save_stage_annotation(run_id: str, body: StageAnnotationRequest, reque
         return await run_in_threadpool(
             stage_annotation_service(request).save, run_id,
             [frame.model_dump() for frame in body.keyframes], body.exponent, body.revision,
+            body.dataset_id, inherit_global=body.inherit_global,
         )
     except Exception as exc:
         raise http_error(exc) from exc

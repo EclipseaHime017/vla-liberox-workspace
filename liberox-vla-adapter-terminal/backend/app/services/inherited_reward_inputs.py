@@ -82,10 +82,11 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str) -> tupl
     gamma, cumulative = recipe["gamma"], recipe["accumulate_primitive_steps"]
     annotation = None
     if source == "stage":
-        path = storage_path(episode["trajectory_path"]).with_name("stage_annotation.json")
-        if not path.is_file() or path.is_symlink():
-            raise ValueError("缺少已保存的全局 Stage 关键帧")
-        annotation = stage.validate_stage_annotation(json.loads(path.read_text()),
+        with jobs.datasets.lock:
+            _, _, label = jobs.datasets.stage_labels.member(dataset["id"], member["run_id"])
+        if label.get("annotation") is None:
+            raise ValueError(label.get("error") or "缺少已保存的数据集 Stage 关键帧")
+        annotation = stage.validate_stage_annotation(label["annotation"],
             run_id=episode["run_id"], trajectory_sha256=episode["trajectory_sha256"],
             done=arrays["environment_done"], success_consecutive_steps=header["success_consecutive_steps"])
         context = stage.stage_annotation_context(annotation, done=arrays["environment_done"],

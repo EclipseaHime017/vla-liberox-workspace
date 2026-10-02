@@ -31,11 +31,12 @@ export const getTrajectoryDetail = (runId: string, datasetId?: string) => {
   if (datasetId) query.set("dataset_id", datasetId);
   return api<TrajectoryDetail>(`/api/datasets/runs/${encodeURIComponent(runId)}${query.size ? `?${query}` : ""}`);
 };
-export const getStageAnnotation = (runId: string) => api<StageAnnotation>(
-  `/api/datasets/runs/${encodeURIComponent(runId)}/stage-annotation`,
+export const getStageAnnotation = (runId: string, datasetId?: string) => api<StageAnnotation>(
+  `/api/datasets/runs/${encodeURIComponent(runId)}/stage-annotation${datasetId ? `?${new URLSearchParams({ dataset_id: datasetId })}` : ""}`,
 );
 export const saveStageAnnotation = (runId: string, body: {
   keyframes: StageKeyframe[]; exponent?: number; revision: string | null;
+  dataset_id?: string; inherit_global?: boolean;
 }) => api<StageAnnotation>(`/api/datasets/runs/${encodeURIComponent(runId)}/stage-annotation`, {
   method: "PUT", body: JSON.stringify(body),
 });

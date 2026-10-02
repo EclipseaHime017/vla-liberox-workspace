@@ -293,6 +293,9 @@ def attach_dataset_context(result: dict, datasets: Any, dataset_id: str | None,
             ids[explicit["evaluator"]] = version_id
         result["dataset_context"] = {"dataset_id": dataset_id, "dataset_name": dataset["name"],
             "version_id": selected, "status": "READY" if ids else "GLOBAL_FALLBACK", "source": None, "config": {}}
+        # Do not show a global Stage curve as if it described independent dataset labels.
+        result["reward_evaluations"].pop("stage", None)
+        result["evaluation_sources"].pop("stage", None)
         for source, identifier in ids.items():
             # Invalid local data is reported, never silently replaced by global.
             result["reward_evaluations"].pop(source, None)

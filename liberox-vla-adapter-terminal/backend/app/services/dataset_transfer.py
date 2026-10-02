@@ -7,6 +7,7 @@ import hashlib
 import re
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 from ..storage.paths import storage_path, storage_lease
@@ -17,6 +18,7 @@ from .inherited_reward_inputs import offline_module
 from .training_dataset_service import TrainingDatasetService
 from ..storage.files import atomic_write_json
 from .trajectory_reward_snapshot import _hash
+from .dataset_stage_annotations import DatasetStageAnnotations
 
 
 class _ReadOnlyDatasets(TrainingDatasetService):
@@ -24,6 +26,8 @@ class _ReadOnlyDatasets(TrainingDatasetService):
         self.root = project_root / "datasets"
         self.run_service = self
         self.primary_dataset = dataset_id
+        self.lock = threading.RLock()
+        self.stage_labels = DatasetStageAnnotations(self, read_only=True)
 
     def get(self, dataset_id, *, quick_verify=False):
         _, payload = self._load(dataset_id)
@@ -84,6 +88,7 @@ def _export_dataset(project_root: Path, dataset_id: str, destination: Path, base
     datasets = _ReadOnlyDatasets(project_root, dataset_id)
     selection_path, frozen = datasets._load(dataset_id)
     dataset = datasets.get(dataset_id)
+    labels = datasets.stage_labels.load(frozen)["annotations"]
     destination = destination.absolute()
     if destination.exists() or destination.is_symlink():
         raise ValueError(f"Export destination already exists: {destination}")
@@ -127,6 +132,14 @@ def _export_dataset(project_root: Path, dataset_id: str, destination: Path, base
             copied_episode = target / storage_path(artifacts["trajectory"]["path"]).relative_to(source).parent
             progress(stage="绑定已有评价", current_file="")
             evaluations = rewards.publish(member, copied_episode)
+            label = labels[run_id]
+            if label.get("error"):
+                raise ValueError(f"Invalid dataset keyframes for {run_id}: {label['error']}")
+            stage_path = copied_episode / "stage_annotation.json"
+            if label.get("annotation") is not None:
+                atomic_write_json(stage_path, label["annotation"])
+            elif stage_path.exists():
+                stage_path.unlink()  # Export copy only; never leak unrelated global labels.
             for path, signature in originals:
                 if _signature(path) != signature:
                     raise ValueError(f"Source changed during export: {path}")

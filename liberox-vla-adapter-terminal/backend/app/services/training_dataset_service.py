@@ -65,6 +65,8 @@ class TrainingDatasetService:
         self.evaluations = evaluations
         self.robometer_evaluations = robometer_evaluations
         self.lock = threading.RLock()
+        from .dataset_stage_annotations import DatasetStageAnnotations
+        self.stage_labels = DatasetStageAnnotations(self)
         self._index_existing()
 
     @staticmethod
@@ -536,6 +538,7 @@ class TrainingDatasetService:
                 }
                 manifest_path = directory / "dataset.json"
                 atomic_write_json(manifest_path, payload)
+                self.stage_labels.load(payload)
                 self.repository.upsert(payload, manifest_path)
                 return self._public(payload)
             except BaseException:

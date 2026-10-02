@@ -25,6 +25,7 @@ def export(jobs, dataset, destination):
 
 def local_stage(jobs, dataset, exponent=4):
     jobs.stage_annotations = StageAnnotationService(jobs.datasets.run_service, jobs.ui_config.offline_rl_root)
+    jobs.stage_annotations.bind_datasets(jobs.datasets)
     job = jobs.start_annotation(dataset["id"], source="stage", stage_exponent=exponent)
     config = load_train_config(job["config_path"])
     prepare_dataset(config)
@@ -69,7 +70,7 @@ def test_full_members_and_all_evaluations_are_portable_readonly(tmp_path, tmp_pa
     assert (copied / "rynnvalue_evaluation.npz").read_bytes() == native.read_bytes()
     assert (copied / "agentview.mp4").read_bytes() == b"video"
     assert (copied / "factr_samples.csv").read_text() == "step,joint\n0,1\n"
-    assert (copied / "stage_annotation.json").read_bytes() == (episode / "stage_annotation.json").read_bytes()
+    assert json.loads((copied / "stage_annotation.json").read_text()) == json.loads((episode / "stage_annotation.json").read_text())
     stage = json.loads((copied / "trajectory_reward.stage.json").read_text())
     assert stage["reward_config"]["stage_exponent"] == 4
     assert stage["origin"] == "dataset" and stage["evaluation_id"] == version["id"]
@@ -87,9 +88,9 @@ def test_full_members_and_all_evaluations_are_portable_readonly(tmp_path, tmp_pa
         assert digest(copied / "trajectory.npz") == metadata["trajectory_sha256"]
 
 
-def test_legacy_global_in_dataset_directory_is_materialized(tmp_path, tmp_path_factory, monkeypatch):
+def test_sibling_export_keeps_its_labels_not_another_datasets_reward(tmp_path, tmp_path_factory, monkeypatch):
     jobs, dataset, run = setup_recording(tmp_path, monkeypatch)
-    original = local_stage(jobs, dataset)
+    local_stage(jobs, dataset)
     sibling = jobs.datasets.derive(dataset["id"], name="sibling",
         selection={"mode": "manual", "run_ids": ["run"]})
     # With a current label, implicit global Stage takes precedence over history.
@@ -100,9 +101,46 @@ def test_legacy_global_in_dataset_directory_is_materialized(tmp_path, tmp_path_f
     labels.unlink()
     destination = tmp_path_factory.mktemp("exports") / "sibling"
     export(jobs, sibling, destination)
-    metadata = json.loads(next(destination.rglob("trajectory_reward.stage.json")).read_text())
-    assert metadata["origin"] == "global" and metadata["evaluation_id"] == original["id"]
-    assert metadata["reward_config"]["stage_exponent"] == 4
+    assert not list(destination.rglob("trajectory_reward.stage.json"))
+    assert json.loads(next(destination.rglob("stage_annotation.json")).read_text())["keyframes"]
+
+
+def test_generation_and_export_use_dataset_marks_without_changing_old_rewards(tmp_path, tmp_path_factory, monkeypatch):
+    jobs, dataset, run = setup_recording(tmp_path, monkeypatch)
+    first = local_stage(jobs, dataset)
+    index = json.loads(Path(first["reward_manifest_path"]).read_text())
+    snapshot = Path(index["stage_annotations_path"])
+    protected = {p: p.read_bytes() for p in (snapshot, Path(first["reward_manifest_path"]),
+        Path(index["episodes"][0]["reward_path"]), Path(run["trajectory"]).with_name("stage_annotation.json"))}
+    stages = jobs.stage_annotations
+    view = stages.detail("run", dataset["id"])
+    stages.save("run", [{"step": 7, "kind": "positive"}], 2, view["revision"], dataset["id"])
+    destination = tmp_path_factory.mktemp("exports") / "independent-labels"
+    export(jobs, dataset, destination)
+    copied = json.loads(next(destination.rglob("stage_annotation.json")).read_text())
+    assert copied["keyframes"][0]["step"] == 7
+    # Existing reward and its snapshot still describe the earlier marks.
+    exported_reward = json.loads(next(destination.rglob("trajectory_reward.stage.json")).read_text())
+    assert exported_reward["stage_annotations_snapshot"]["annotations"]["run"]["keyframes"][0]["step"] == 6
+    second = local_stage(jobs, dataset)
+    regenerated = json.loads(Path(second["reward_manifest_path"]).read_text())
+    latest = json.loads(Path(regenerated["stage_annotations_path"]).read_text())
+    assert latest["annotations"]["run"]["keyframes"][0]["step"] == 7
+    assert all(p.read_bytes() == value for p, value in protected.items())
+
+
+def test_compatible_saved_global_stage_export_does_not_recompute(tmp_path, tmp_path_factory, monkeypatch):
+    from backend.app.services.trajectory_reward_snapshot import bind_reward_snapshot
+    jobs, dataset, run = setup_recording(tmp_path, monkeypatch)
+    first = local_stage(jobs, dataset)
+    bind_reward_snapshot(Path(first["prepared_manifest_path"]), Path(first["reward_manifest_path"]))
+    sibling = jobs.datasets.derive(dataset["id"], name="same labels",
+        selection={"mode": "manual", "run_ids": ["run"]})
+    monkeypatch.setattr("backend.app.services.global_reward_binding.direct_global_reward",
+                        lambda *_: pytest.fail("Export must not recompute rewards"))
+    destination = tmp_path_factory.mktemp("exports") / "global-stage"
+    export(jobs, sibling, destination)
+    assert next(destination.rglob("trajectory_reward.stage.json")).is_file()
 
 
 class FakeAnnotator:

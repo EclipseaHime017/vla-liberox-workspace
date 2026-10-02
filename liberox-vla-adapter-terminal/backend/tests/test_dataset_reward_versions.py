@@ -91,7 +91,7 @@ def test_direct_generation_is_cpu_only_and_snapshots_latest_labels(tmp_path):
     assert first["parameters"]["requires_gpu"] is False
     version = finish(jobs, dataset, first)
     original_bytes = Path(version["reward_manifest_path"]).read_bytes()
-    jobs.stage_annotations.validate_members = lambda *_: {"run": {"annotation_sha256": "new-label", "keyframes": []}}
+    jobs.stage_annotations.validate_members = lambda *_, **__: {"run": {"annotation_sha256": "new-label", "keyframes": []}}
     second = jobs.start_annotation(dataset["id"], source="stage", stage_exponent=4.0)
     snapshot = json.loads((second["output_path"] / "stage_annotations.json").read_text())
     assert snapshot["annotations"]["run"]["annotation_sha256"] == "new-label"
@@ -132,7 +132,7 @@ def test_unprepared_dataset_cannot_train_and_missing_labels_stop_generation(tmp_
     jobs, dataset = setup_jobs(tmp_path)
     with pytest.raises(ConflictError):
         jobs.start_training(dataset["id"], {})
-    def missing(*_):
+    def missing(*_, **__):
         raise ValueError("run: missing keyframes")
     jobs.stage_annotations.validate_members = missing
     with pytest.raises(ValueError, match="missing keyframes"):

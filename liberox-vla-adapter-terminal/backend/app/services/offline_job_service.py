@@ -117,6 +117,8 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         self.trajectory_evaluations = trajectory_evaluations
         self.robometer_evaluations = robometer_evaluations
         self.stage_annotations = stage_annotations
+        if stage_annotations is not None:
+            stage_annotations.bind_datasets(datasets)
         self.project_root = ui_config.project_root
         self.jobs_root = self.project_root / "jobs"
         self.training_root = self.project_root / "training"

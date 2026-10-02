@@ -37,6 +37,8 @@ class StageAnnotationRequest(StrictModel):
     keyframes: list[StageKeyframe] = Field(max_length=10000)
     exponent: StrictFloat | StrictInt = Field(default=2.0, ge=1, allow_inf_nan=False)
     revision: StrictStr | None = None
+    dataset_id: StrictStr | None = Field(default=None, min_length=1)
+    inherit_global: StrictBool = False
 
 
 class DraftRequest(StrictModel):

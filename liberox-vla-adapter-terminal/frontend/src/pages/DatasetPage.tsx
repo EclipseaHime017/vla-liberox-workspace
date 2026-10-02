@@ -7,7 +7,7 @@ import {
   setTrajectoryTestLabel,
 } from "../features/run-control/api";
 import type {
-  Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, OfflineJob,
+  AnnotationDataset, Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, OfflineJob,
   PaginatedRuns, Session, TrainingDataset, TrajectoryDetail as TrajectoryDetailData,
 } from "../features/run-control/types";
 import { SuccessRateChart } from "../features/metrics/SuccessRateChart";
@@ -52,6 +52,7 @@ export function DatasetPage() {
   const [batchOverwrite, setBatchOverwrite] = useState(false);
   const [evaluators, setEvaluators] = useState<Array<"rynnvalue" | "robometer">>(["rynnvalue"]);
   const [detail, setDetail] = useState<TrajectoryDetailData | null>(null);
+  const [annotationDataset, setAnnotationDataset] = useState<AnnotationDataset | null>(null);
   const [datasets, setDatasets] = useState<TrainingDataset[]>([]);
   const [selection, setSelection] = useState<DatasetSelection>(initialSelection);
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
@@ -261,6 +262,7 @@ export function DatasetPage() {
   if (detail) return <>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     <TrajectoryDetail detail={detail} contextLoading={busy}
+      annotationDataset={annotationDataset} onAnnotationDatasetChange={setAnnotationDataset}
       onContextChange={(datasetId) => void openDetail(detail.run.id, datasetId)}
       onBack={() => { detailRequest.current += 1; setDetail(null); setBusy(false); }} onSetTest={async (isTest) => {
     await setTrajectoryTestLabel(detail.run.id, isTest);

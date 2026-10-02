@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatasetPage } from "./DatasetPage";
 import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
+import { TrajectoryDetail } from "../features/dataset/TrajectoryDetail";
 import * as api from "../features/run-control/api";
 import type { Bootstrap, DatasetSummary, TrainingDataset } from "../features/run-control/types";
 
@@ -17,10 +18,11 @@ vi.mock("../features/run-control/api", () => ({
   repairDatasetStorage: vi.fn(),
 }));
 vi.mock("../features/training/JobMonitor", () => ({ JobMonitor: () => null }));
-vi.mock("../features/dataset/TrajectoryDetail", () => ({ TrajectoryDetail: () => null }));
+vi.mock("../features/dataset/TrajectoryDetail", () => ({ TrajectoryDetail: vi.fn(() => null) }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(TrajectoryDetail).mockImplementation(() => <></>);
   vi.mocked(api.getDatasetExport).mockResolvedValue(null);
   vi.mocked(api.getBootstrap).mockResolvedValue({ task: { task_id: "task" },
     task_catalog: [{ task_id: "task", prompt: "pick bowl" }] } as unknown as Bootstrap);
@@ -49,6 +51,26 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("dataset evaluation configuration", () => {
+  it("keeps the annotation dataset when returning to the list and opening another trajectory", async () => {
+    vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
+    vi.mocked(api.listDatasetRuns).mockResolvedValue({ items: ["one", "two"].map((id) => ({ id, status: "COMPLETED" })),
+      total: 2, page: 1, page_size: 5, pages: 1 } as Awaited<ReturnType<typeof api.listDatasetRuns>>);
+    vi.mocked(api.getTrajectoryDetail).mockImplementation(async (id) => ({ run: { id } }) as Awaited<ReturnType<typeof api.getTrajectoryDetail>>);
+    vi.mocked(TrajectoryDetail).mockImplementation(({ detail, annotationDataset, onAnnotationDatasetChange, onBack }) => <>
+      <span>Editing {detail.run.id}: {annotationDataset?.dataset_name ?? "global"}</span>
+      <button onClick={() => onAnnotationDatasetChange?.({ dataset_id: "A", dataset_name: "Dataset A" })}>Pin A</button>
+      <button onClick={onBack}>Back</button>
+    </>);
+    render(<DatasetPage />);
+    fireEvent.click((await screen.findAllByRole("button", { name: "详情" }))[0]);
+    await screen.findByText("Editing one: global");
+    fireEvent.click(screen.getByRole("button", { name: "Pin A" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click((await screen.findAllByRole("button", { name: "详情" }))[1]);
+    await screen.findByText("Editing two: Dataset A");
+    expect(api.getTrajectoryDetail).toHaveBeenLastCalledWith("two", undefined);
+  });
+
   it("keeps export feedback outside the action buttons", async () => {
     const dataset = { id: "dataset", name: "Dataset", integrity_status: "HEALTHY",
       annotation_status: "READY" } as TrainingDataset;

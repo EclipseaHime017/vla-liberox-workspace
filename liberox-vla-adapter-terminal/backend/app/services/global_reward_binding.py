@@ -57,8 +57,18 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
             if snapshot:
                 metadata = snapshot["metadata"]
                 values = path.with_name(metadata["values_file"])
+                if source == "stage":
+                    with jobs.datasets.lock:
+                        _, _, owned = jobs.datasets.stage_labels.member(dataset["id"], member["run_id"])
+                    annotation = owned.get("annotation")
+                    if (annotation is None or metadata.get("entry", {}).get("stage_annotation_sha256")
+                            != annotation.get("annotation_sha256")):
+                        raise ValueError("数据集关键帧与全局 Stage 奖励不一致，请重新生成数据集奖励")
             elif path and path.exists():
                 raise ValueError("全局评价的源数据已变化或评价损坏")
+            elif source == "stage":
+                # Legacy implicit Stage never consults another dataset's/global live labels.
+                metadata, values = direct_global_reward(jobs, dataset, member, source)
             elif source == "rynnvalue" and storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json").exists():
                 # Native Rynn sidecars predate source-specific reward snapshots.
                 path = storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json")

@@ -1,9 +1,9 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StageAnnotationPanel, stageVideoStep } from "./StageAnnotationPanel";
 import { getStageAnnotation, saveStageAnnotation } from "../run-control/api";
-import type { StageAnnotation } from "../run-control/types";
+import type { AnnotationDataset, StageAnnotation } from "../run-control/types";
 
 vi.mock("../run-control/api", () => ({ getStageAnnotation: vi.fn(), saveStageAnnotation: vi.fn() }));
 const onSaved = vi.fn();
@@ -20,9 +20,18 @@ function Fixture() {
     <StageAnnotationPanel runId="episode" videoRef={ref} onSaved={onSaved} onDirtyChange={onDirtyChange} /></>;
 }
 
+const owners = [{ dataset_id: "A", dataset_name: "Dataset A" }, { dataset_id: "B", dataset_name: "Dataset B" }];
+function OwnedFixture({ runId = "episode", options = owners }: { runId?: string; options?: AnnotationDataset[] }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  const [owner, setOwner] = useState<AnnotationDataset | null>(null);
+  return <><video ref={ref} src="/agentview.mp4" data-testid="video" />
+    <StageAnnotationPanel runId={runId} videoRef={ref} onSaved={onSaved} onDirtyChange={onDirtyChange}
+      annotationDataset={owner} datasetOptions={options} onAnnotationDatasetChange={setOwner} /></>;
+}
+
 async function openEditor() {
   render(<Fixture />);
-  await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  await waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ run_id: "episode" })));
   fireEvent.click(screen.getByRole("button", { name: "切片 / 标记关键帧" }));
   const video = screen.getByTestId("video") as HTMLVideoElement;
   Object.defineProperty(video, "duration", { configurable: true, value: 0.5 });
@@ -42,6 +51,73 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("stage keyframe editor", () => {
+  it("pins ownership across runs and blocks nonmembers without falling back globally", async () => {
+    const rendered = render(<OwnedFixture />);
+    await screen.findByText("尚未保存阶段标注");
+    const video = screen.getByTestId("video");
+    fireEvent.click(screen.getByRole("button", { name: "切片 / 标记关键帧" }));
+    fireEvent.change(screen.getByLabelText("标注归属"), { target: { value: "A" } });
+    await waitFor(() => expect(getStageAnnotation).toHaveBeenLastCalledWith("episode", "A"));
+    rendered.rerender(<OwnedFixture runId="next" options={[owners[1]]} />);
+    await screen.findByText(/当前轨迹不属于已固定的标注数据集，请选择/);
+    expect((screen.getByLabelText("标注归属") as HTMLSelectElement).value).toBe("A");
+    expect(getStageAnnotation).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "保存关键帧" })).toBeNull();
+    rendered.rerender(<OwnedFixture runId="next" />);
+    await waitFor(() => expect(getStageAnnotation).toHaveBeenLastCalledWith("next", "A"));
+    expect(screen.getByTestId("video")).toBe(video);
+    expect(saveStageAnnotation).not.toHaveBeenCalled();
+  });
+
+  it("confirms ownership changes with unsaved marks and explicitly copies global labels", async () => {
+    render(<OwnedFixture />);
+    await screen.findByText("尚未保存阶段标注");
+    fireEvent.click(screen.getByRole("button", { name: "切片 / 标记关键帧" }));
+    const video = screen.getByTestId("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { configurable: true, value: .5 });
+    fireEvent.loadedMetadata(video);
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "标记当前帧" }));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    fireEvent.change(screen.getByLabelText("标注归属"), { target: { value: "A" } });
+    expect((screen.getByLabelText("标注归属") as HTMLSelectElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "删除帧 3" })).toBeTruthy();
+    expect(getStageAnnotation).toHaveBeenCalledTimes(1);
+    confirm.mockReturnValue(true);
+    fireEvent.change(screen.getByLabelText("标注归属"), { target: { value: "A" } });
+    await waitFor(() => expect(getStageAnnotation).toHaveBeenCalledTimes(2));
+    await screen.findByRole("button", { name: "保存关键帧" });
+    fireEvent.click(screen.getByRole("button", { name: "继承全局关键帧" }));
+    await waitFor(() => expect(saveStageAnnotation).toHaveBeenCalledWith("episode", {
+      keyframes: [], revision: "original-token", dataset_id: "A", inherit_global: true,
+    }));
+  });
+
+  it("ignores late loads and saves from a different annotation scope", async () => {
+    let finishLoad!: (value: StageAnnotation) => void;
+    vi.mocked(getStageAnnotation).mockImplementation((_run, id) => id === "A"
+      ? new Promise((resolve) => { finishLoad = resolve; })
+      : Promise.resolve({ ...annotation, dataset_id: id }));
+    const rendered = render(<OwnedFixture />);
+    await screen.findByText("尚未保存阶段标注");
+    fireEvent.click(screen.getByRole("button", { name: "切片 / 标记关键帧" }));
+    fireEvent.change(screen.getByLabelText("标注归属"), { target: { value: "A" } });
+    fireEvent.change(screen.getByLabelText("标注归属"), { target: { value: "B" } });
+    await waitFor(() => expect(onSaved).toHaveBeenLastCalledWith(expect.objectContaining({ dataset_id: "B" })));
+    finishLoad({ ...annotation, dataset_id: "A" });
+    await Promise.resolve();
+    expect(onSaved).toHaveBeenLastCalledWith(expect.objectContaining({ dataset_id: "B" }));
+    let finishSave!: (value: StageAnnotation) => void;
+    vi.mocked(saveStageAnnotation).mockImplementation(() => new Promise((resolve) => { finishSave = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "保存关键帧" }));
+    expect((screen.getByLabelText("标注归属") as HTMLSelectElement).disabled).toBe(true);
+    rendered.rerender(<OwnedFixture runId="next" options={[]} />);
+    finishSave({ ...annotation, dataset_id: "B", status: "ready" });
+    await Promise.resolve();
+    expect(onSaved).toHaveBeenLastCalledWith(null);
+    expect(screen.queryByText("关键帧已保存")).toBeNull();
+  });
+
   it("uses the actually displayed frame rather than rounding to the next one", () => {
     expect(stageVideoStep(.074, .5, 10)).toBe(1);
     expect(stageVideoStep(.1, .5, 10)).toBe(2);

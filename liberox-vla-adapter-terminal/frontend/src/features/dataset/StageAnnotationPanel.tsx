@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import { getStageAnnotation, saveStageAnnotation } from "../run-control/api";
-import type { StageAnnotation, StageKeyframe } from "../run-control/types";
+import type { AnnotationDataset, StageAnnotation, StageKeyframe } from "../run-control/types";
 import { stepToVideoTime } from "../simulation-view/controls";
 
 export function stageVideoStep(time: number, duration: number, actionCount: number) {
@@ -10,9 +10,12 @@ export function stageVideoStep(time: number, duration: number, actionCount: numb
   return Math.max(0, Math.min(actionCount, Math.floor(time / duration * actionCount + 1e-6)));
 }
 
-export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }: {
+export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange,
+  annotationDataset = null, datasetOptions = [], onAnnotationDatasetChange }: {
   runId: string; videoRef: RefObject<HTMLVideoElement | null>;
-  onSaved: (annotation: StageAnnotation) => void; onDirtyChange: (dirty: boolean) => void;
+  onSaved: (annotation: StageAnnotation | null) => void; onDirtyChange: (dirty: boolean) => void;
+  annotationDataset?: AnnotationDataset | null; datasetOptions?: AnnotationDataset[];
+  onAnnotationDatasetChange?: (dataset: AnnotationDataset | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [annotation, setAnnotation] = useState<StageAnnotation | null>(null);
@@ -24,6 +27,8 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
   const [error, setError] = useState("");
   const [videoReady, setVideoReady] = useState(false);
   const requestId = useRef(0);
+  const datasetId = annotationDataset?.dataset_id;
+  const unavailable = Boolean(datasetId && !datasetOptions.some((item) => item.dataset_id === datasetId));
   const dirty = annotation != null && JSON.stringify(keyframes) !== JSON.stringify(annotation.keyframes);
 
   const accept = useCallback((next: StageAnnotation) => {
@@ -32,16 +37,19 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
   }, [onSaved]);
   const load = useCallback(async () => {
     const request = ++requestId.current;
+    setAnnotation(null); setKeyframes([]); setSaving(false);
+    onSaved(null);
+    if (unavailable) { setLoading(false); setError(""); return; }
     setLoading(true); setError("");
     try {
-      const next = await getStageAnnotation(runId);
+      const next = await (datasetId ? getStageAnnotation(runId, datasetId) : getStageAnnotation(runId));
       if (request === requestId.current) accept(next);
     } catch (reason) {
       if (request === requestId.current) setError(String(reason));
     } finally {
       if (request === requestId.current) setLoading(false);
     }
-  }, [accept, runId]);
+  }, [accept, runId, datasetId, unavailable, onSaved]);
   useEffect(() => { void load(); return () => { requestId.current += 1; }; }, [load]);
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => {
@@ -91,15 +99,24 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
         annotation.action_count / video.duration);
     }
   };
-  const save = async () => {
-    if (!annotation) return;
+  const save = async (inheritGlobal = false) => {
+    if (!annotation || unavailable) return;
+    if (inheritGlobal && !window.confirm("用当前全局关键帧替换此数据集的标注？其他数据集和已生成奖励不变。")) return;
+    const request = ++requestId.current;
     setSaving(true); setError("");
     try {
-      accept(await saveStageAnnotation(runId, {
+      const next = await saveStageAnnotation(runId, {
         keyframes, revision: annotation.revision,
-      }));
-    } catch (reason) { setError(String(reason)); }
-    finally { setSaving(false); }
+        ...(datasetId ? { dataset_id: datasetId } : {}),
+        ...(inheritGlobal ? { inherit_global: true } : {}),
+      });
+      if (request === requestId.current) accept(next);
+    } catch (reason) { if (request === requestId.current) setError(String(reason)); }
+    finally { if (request === requestId.current) setSaving(false); }
+  };
+  const changeDataset = (id: string) => {
+    if (dirty && !window.confirm("切换标注数据集会丢弃未保存的切片标记，是否继续？")) return;
+    onAnnotationDatasetChange?.(datasetOptions.find((item) => item.dataset_id === id) ?? null);
   };
   const close = () => {
     if (dirty && !window.confirm("切片标记尚未保存，是否丢弃本次修改？")) return;
@@ -129,14 +146,31 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange }
   return <section className="stage-annotation" aria-label="关键帧切片">
     <div className="stage-toolbar"><button onClick={() => open ? close() : setOpen(true)} disabled={saving}>
       {open ? "收起切片" : "切片 / 标记关键帧"}
-    </button><span role="status">{loading ? "读取切片标记…" : dirty ? "有未保存的修改"
+    </button><span role="status">{unavailable ? "当前轨迹不属于已固定的标注数据集" : loading ? "读取切片标记…" : dirty ? "有未保存的修改"
       : annotation?.status === "ready" ? "关键帧已保存" : annotation?.status === "stale"
         ? "原数据或标注规则已变化，请检查后重新保存" : "尚未保存阶段标注"}</span></div>
     {annotation?.derivation_error && <p className="error-banner">关键帧已保存，奖励预览计算失败：{annotation.derivation_error}。请检查评价配置，标记无需重新保存。</p>}
     {open && <div className="stage-editor">
+      {onAnnotationDatasetChange && <div className="stage-annotation-owner">
+        <label>标注归属<select value={datasetId ?? ""} disabled={saving}
+          onChange={(event) => changeDataset(event.target.value)}>
+          <option value="">全局关键帧（模板）</option>
+          {unavailable && <option value={datasetId}>{annotationDataset?.dataset_name}（非当前轨迹成员）</option>}
+          {datasetOptions.map((item) => <option key={item.dataset_id} value={item.dataset_id}>{item.dataset_name}</option>)}
+        </select></label>
+        {datasetId && <button disabled={saving || loading || unavailable || !annotation}
+          onClick={() => void save(true)}>继承全局关键帧</button>}
+        <span className="field-hint">选择在后续轨迹中保持，不随上方“数据来源”切换。保存只影响此标注归属。</span>
+      </div>}
+      {unavailable && <p className="error-banner">当前轨迹不属于已固定的标注数据集，请选择其他标注归属后再编辑。</p>}
+      {annotation?.origin && annotation.origin !== "global" && <p className="field-hint">
+        {annotation.origin === "global_copy" ? "已复制全局关键帧，后续修改独立保存。"
+          : annotation.origin === "parent_copy" ? "已复制父数据集关键帧，后续修改独立保存。"
+            : annotation.origin === "reward_snapshot" ? "已从此数据集的奖励快照恢复关键帧。" : "关键帧独立保存在当前数据集。"}
+      </p>}
       {(error || annotation?.error) && <div className="error-banner"><span>{error || annotation?.error}</span>
         <button onClick={reload} disabled={loading || saving}>重新加载标注</button></div>}
-      {loading ? <p>正在读取时间轴与标记，不加载评价模型。</p> : annotation && <>
+      {loading ? <p>正在读取时间轴与标记，不加载评价模型。</p> : !unavailable && annotation && <>
         <p className="field-hint">仅标记原始 observation step，不裁剪轨迹。首帧、接管前缀与成功后的记录均保留。</p>
         {!videoReady && <p role="status">{videoRef.current ? "等待视频元数据，加载后可逐帧定位。" : "没有主视角视频，不能进行可视化切片。"}</p>}
         <fieldset disabled={saving || !videoReady} className="stage-controls">

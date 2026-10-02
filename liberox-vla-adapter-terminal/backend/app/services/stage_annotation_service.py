@@ -29,6 +29,12 @@ class StageAnnotationService:
         self._lock = threading.RLock()
         self._sources: OrderedDict[str, tuple[tuple, dict]] = OrderedDict()
         self._math = None
+        self.datasets = None
+
+    def bind_datasets(self, datasets) -> None:
+        self.datasets = datasets
+        # One lock order for dataset creation, label edits and reward snapshots.
+        self._lock = datasets.lock
 
     def _module(self):
         if self._math is None:
@@ -60,8 +66,6 @@ class StageAnnotationService:
         if trajectory.name != "trajectory.npz" or not trajectory.is_file():
             raise FileNotFoundError(f"Trajectory unavailable: {run.get('id')}")
         sidecar = trajectory.parent / SIDECAR_NAME
-        if sidecar.is_symlink():
-            raise ValueError("Stage annotation sidecar must not be a symlink")
         return trajectory, sidecar
 
     def _source(self, path: Path) -> dict:
@@ -96,6 +100,8 @@ class StageAnnotationService:
 
     @staticmethod
     def _read_sidecar(path: Path) -> tuple[dict | None, bytes]:
+        if path.is_symlink():
+            raise ValueError("Stage annotation sidecar must not be a symlink")
         if not path.exists():
             return None, b""
         if path.stat().st_size > 2 * 1024 * 1024:
@@ -107,21 +113,40 @@ class StageAnnotationService:
             return None, data
 
     @staticmethod
-    def _revision(source: dict, data: bytes, threshold: int) -> str:
-        return hashlib.sha256(source["trajectory_sha256"].encode() + data + str(threshold).encode()).hexdigest()
+    def _revision(source: dict, data: bytes, threshold: int, dataset_id: str | None = None) -> str:
+        return hashlib.sha256(source["trajectory_sha256"].encode() + data
+                              + f"{threshold}:{dataset_id or 'global'}".encode()).hexdigest()
 
-    def _view(self, run: dict, threshold: int, exponent: float) -> dict:
+    def _labels(self, run: dict, dataset_id: str | None) -> tuple:
         trajectory, sidecar = self._paths(run)
         source = self._source(trajectory)
-        payload, data = self._read_sidecar(sidecar)
+        if dataset_id is None:
+            payload, data = self._read_sidecar(sidecar)
+            return source, payload, data, None, {"origin": "global", "error": None}
+        if self.datasets is None:
+            raise ValueError("Dataset annotation service is unavailable")
+        dataset, member, entry = self.datasets.stage_labels.member(dataset_id, run["id"])
+        if source["trajectory_sha256"] != member["artifacts"]["trajectory"]["sha256"]:
+            raise ValueError("源轨迹与冻结数据集不匹配")
+        data = json.dumps(entry, sort_keys=True).encode()
+        return source, entry.get("annotation"), data, dataset, entry
+
+    def _view(self, run: dict, threshold: int, exponent: float, dataset_id: str | None = None) -> dict:
+        source, payload, data, dataset, entry = self._labels(run, dataset_id)
+        if dataset is not None:
+            threshold = dataset["success_consecutive_steps"]
         math = self._module()
         response = {"run_id": run["id"], "status": "missing", "error": None,
                     "action_count": source["action_count"], "time_seconds": source["time_seconds"],
                     "success_step": math.confirmed_success_step(source["done"], threshold),
                     "success_consecutive_steps": threshold, "exponent": exponent,
                     "keyframes": [], "scores": [], "anchors": [],
-                    "revision": self._revision(source, data, threshold)}
-        if not data:
+                    "dataset_id": dataset_id, "dataset_name": dataset["name"] if dataset else None,
+                    "origin": entry["origin"],
+                    "revision": self._revision(source, data, threshold, dataset_id)}
+        if payload is None and (dataset is not None or not data):
+            if entry.get("error"):
+                response.update(status="stale", error=entry["error"])
             return response
         try:
             valid = math.validate_stage_annotation(
@@ -149,47 +174,62 @@ class StageAnnotationService:
                     and type(frame.get("step")) is int and frame.get("kind") in {"positive", "negative"}]
         return response
 
-    def detail(self, run_id: str) -> dict:
+    def detail(self, run_id: str, dataset_id: str | None = None) -> dict:
         with self._lock:
-            return self._view(self.run_service.get_run(run_id), *self._defaults())
+            return self._view(self.run_service.get_run(run_id), *self._defaults(), dataset_id)
 
-    def save(self, run_id: str, keyframes: list[dict], exponent: float, revision: str | None) -> dict:
+    def save(self, run_id: str, keyframes: list[dict], exponent: float, revision: str | None,
+             dataset_id: str | None = None, *, inherit_global: bool = False) -> dict:
         with self._lock:
             run = self.run_service.get_run(run_id)
             if run.get("status") in ACTIVE:
                 raise RuntimeError("Cannot mark keyframes while this simulation is active")
             threshold, _ = self._defaults()
             trajectory, sidecar = self._paths(run)
-            source = self._source(trajectory)
-            _, data = self._read_sidecar(sidecar)
-            current = self._revision(source, data, threshold)
+            source, _, data, dataset, _ = self._labels(run, dataset_id)
+            if dataset is not None:
+                threshold = dataset["success_consecutive_steps"]
+            current = self._revision(source, data, threshold, dataset_id)
             if revision != current:
                 raise ConflictError("轨迹或标注已改变，请重新加载后保存", code="STAGE_REVISION_CONFLICT")
+            if inherit_global:
+                if dataset is None:
+                    raise ValueError("请选择要继承全局标注的数据集")
+                global_labels, _ = self._read_sidecar(sidecar)
+                if global_labels is None:
+                    raise ValueError("缺少有效的全局关键帧标注")
+                valid = self._module().validate_stage_annotation(global_labels,
+                    run_id=run_id, trajectory_sha256=source["trajectory_sha256"],
+                    done=source["done"], success_consecutive_steps=threshold)
+                keyframes = valid["keyframes"]
             payload = self._module().build_stage_annotation(
                 run_id=run_id, trajectory_sha256=source["trajectory_sha256"], done=source["done"],
                 keyframes=keyframes, success_consecutive_steps=threshold, exponent=exponent,
             )
             if self._fingerprint(trajectory) != self._sources[str(trajectory.resolve())][0]:
                 raise RuntimeError("Trajectory changed during save; reload the editor")
-            atomic_write_json(sidecar, payload)
-            return self._view(run, threshold, exponent)
+            if dataset is None:
+                atomic_write_json(sidecar, payload)
+            else:
+                self.datasets.stage_labels.save(dataset, run_id, payload,
+                    origin="global_copy" if inherit_global else "dataset")
+            return self._view(run, threshold, exponent, dataset_id)
 
     def validate_members(self, members: list[dict], success_consecutive_steps: int,
-                         *, exponent: float | None = None, nonpositive: bool = False) -> dict[str, dict]:
+                         *, exponent: float | None = None, nonpositive: bool = False,
+                         dataset_id: str | None = None) -> dict[str, dict]:
         """Preflight all selected members, even ones whose prefixes replay deduplicates."""
         result, errors = {}, []
         with self._lock:
             for member in members:
                 run_id = member["run_id"]
                 try:
-                    trajectory, sidecar = self._paths(self.run_service.get_run(run_id))
-                    source = self._source(trajectory)
+                    source, payload, _, _, entry = self._labels(self.run_service.get_run(run_id), dataset_id)
                     expected = member.get("artifacts", {}).get("trajectory", {}).get("sha256")
                     if expected and expected != source["trajectory_sha256"]:
                         raise ValueError("源轨迹与冻结数据集不匹配")
-                    payload, _ = self._read_sidecar(sidecar)
                     if payload is None:
-                        raise ValueError("缺少已保存的 Stage 标注")
+                        raise ValueError(entry.get("error") or "缺少已保存的 Stage 标注")
                     result[run_id] = self._module().validate_stage_annotation(
                         payload, run_id=run_id, trajectory_sha256=source["trajectory_sha256"],
                         done=source["done"], success_consecutive_steps=success_consecutive_steps,

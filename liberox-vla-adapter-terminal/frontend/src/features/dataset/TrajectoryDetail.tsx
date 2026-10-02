@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { StageAnnotation, TrajectoryDetail as Detail } from "../run-control/types";
+import type { AnnotationDataset, StageAnnotation, TrajectoryDetail as Detail } from "../run-control/types";
 import { Badge } from "../../components/ui/Badge";
 import { Dialog } from "../../components/ui/Dialog";
 import { StageAnnotationPanel } from "./StageAnnotationPanel";
@@ -172,11 +172,14 @@ function PlotInspector({ plot, onClose }: { plot: Plot; onClose: () => void }) {
   </Dialog>;
 }
 
-export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, contextLoading = false }: {
+export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, contextLoading = false,
+  annotationDataset = null, onAnnotationDatasetChange }: {
   detail: Detail; onBack: () => void;
   onSetTest?: (isTest: boolean) => Promise<void>;
   onContextChange?: (datasetId?: string) => void;
   contextLoading?: boolean;
+  annotationDataset?: AnnotationDataset | null;
+  onAnnotationDatasetChange?: (dataset: AnnotationDataset | null) => void;
 }) {
   const [openedTitle, setOpenedTitle] = useState<string | null>(null);
   const [isTest, setIsTest] = useState(Boolean(detail.run.is_test));
@@ -200,7 +203,10 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
     } else if (!detail.evaluation_sources?.stage && !reward
       && (detail.evaluation_sources || (!detail.global_evaluation_pending && !detail.global_evaluation_error
         && detail.dataset_context?.source !== "stage" && detail.global_evaluation?.source !== "stage"))
-      && stageAnnotation?.status === "ready" && stageAnnotation.scores.length) {
+      && stageAnnotation?.status === "ready" && stageAnnotation.scores.length
+      && stageAnnotation.run_id === detail.run.id
+      && (stageAnnotation.dataset_id ?? null) === (annotationDataset?.dataset_id ?? null)
+      && (stageAnnotation.dataset_id ?? null) === (detail.dataset_context?.dataset_id ?? null)) {
       values.push({
         title: "关键帧奖励预览（未评价）", unit: "reward [-]", times: stageAnnotation.time_seconds,
         labels: ["direct stage reward"], values: stageAnnotation.scores.map((score) => [score]),
@@ -315,7 +321,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
       }
     }
     return values;
-  }, [detail, stageAnnotation]);
+  }, [detail, stageAnnotation, annotationDataset]);
   const opened = plots.find((plot) => plot.title === openedTitle);
   const videoName = selectMainVideoArtifact(detail.artifacts);
   const video = videoName ? detail.artifacts[videoName] : null;
@@ -355,12 +361,14 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
         {Object.entries(detail.evaluation_sources ?? {}).map(([source, context]) => context && <div key={source} className="evaluation-current-summary">
           <span>{rewardSourceLabels[source as keyof typeof rewardSourceLabels]} · {context.origin === "dataset" ? "当前数据集" : detail.dataset_context ? "全局回退" : "全局"} · {context.status}</span>
           <div className="reward-parameter-chips">{rewardParameterLabels(context.config).map((label) => <span key={label}>{label}</span>)}</div></div>)}
-        <small>关键帧保存在原轨迹中；在数据集配置中重新评价即可更新奖励。</small></div>
+        <small>此处只切换评价图表；关键帧标注归属在下方切片面板独立选择。</small></div>
     </div>}
     {detail.global_evaluation_error && <p className="error-banner">{detail.global_evaluation_error}</p>}
     {labelError && <div className="error-banner"><span>{labelError}</span><button onClick={() => setLabelError("")}>关闭</button></div>}
     <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video ref={videoRef} controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}
-      <StageAnnotationPanel key={detail.run.id} runId={detail.run.id} videoRef={videoRef} onSaved={setStageAnnotation} onDirtyChange={setStageDirty} />
+      <StageAnnotationPanel key={detail.run.id} runId={detail.run.id} videoRef={videoRef} onSaved={setStageAnnotation} onDirtyChange={setStageDirty}
+        annotationDataset={annotationDataset} datasetOptions={detail.available_dataset_contexts}
+        onAnnotationDatasetChange={onAnnotationDatasetChange} />
     </article>
     {comparison && <article className="surface detail-summary"><strong>RynnValue / Robometer 对比</strong>{comparison.available ? <><span>Pearson r = {comparison.correlation?.toFixed(4)}</span><span>终点进度：Rynn {comparison.rynnEnd?.toFixed(3)} / Robometer {comparison.roboEnd?.toFixed(3)}</span><span>Robometer 成功概率 {comparison.successEnd?.toFixed(3)}</span><span>环境成功：{comparison.environmentSuccess ? "是" : "否"}</span></> : <span>{comparison.reason}</span>}</article>}
     <div className="trajectory-plots">{plots.map((plot) => <PlotCard key={plot.title} plot={plot} onOpen={() => setOpenedTitle(plot.title)} />)}</div>

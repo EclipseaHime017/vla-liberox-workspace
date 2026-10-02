@@ -118,7 +118,7 @@ class ExportRewards:
                 _, meta, values, episode, header = records[0]
                 result = ({**meta, "episode": episode, "prepared": header}, values)
             else:
-                if has_implicit_global(run, source):
+                if source == "stage" or has_implicit_global(run, source):
                     return None  # Keep environment outcomes/keyframes, not an unrelated historical recipe.
                 version = self._first_global_version(run_id, source)
                 if version is None:
