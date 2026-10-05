@@ -52,7 +52,8 @@ class RunService:
         return self.worker.calibrate_controller(controller_id, phase)
     def manual_connect(self, run_id): return self.worker.manual_connect(run_id)
     def manual_disconnect(self, run_id): return self.worker.manual_disconnect(run_id)
-    def manual_settings(self, run_id, translation, rotation): return self.worker.manual_settings(run_id, translation, rotation)
+    def manual_settings(self, run_id, translation, rotation, **kwargs):
+        return self.worker.manual_settings(run_id, translation, rotation, **kwargs)
 
     def latest_frame(self, run_id: str) -> tuple[bytes | None, int]:
         lock = getattr(self.worker, "lock", None)

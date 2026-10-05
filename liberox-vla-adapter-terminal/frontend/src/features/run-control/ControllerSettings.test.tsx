@@ -12,7 +12,8 @@ const status: ControllerStatus = {
 const props = () => ({controllerId: "factr" as const, controller: status, active: false,
   manualActive: false, busy: false, translationGain: .25, rotationGain: .25,
   onSelect: vi.fn(), onCalibrate: vi.fn(), onGravity: vi.fn(),
-  onTranslationGain: vi.fn(), onRotationGain: vi.fn()});
+  onTranslationGain: vi.fn(), onRotationGain: vi.fn(),
+  controlFrame: "world" as const, onControlFrame: vi.fn()});
 
 describe("shared controller settings", () => {
   it("one calibration call replaces reference/open/closed phases", () => {
@@ -40,6 +41,35 @@ describe("shared controller settings", () => {
     expect(screen.getByRole("slider", {name: "位移增益"})).toBeTruthy();
     fireEvent.click(screen.getByRole("button", {name: "校准控制器"}));
     expect(p.onCalibrate).toHaveBeenCalledExactlyOnceWith();
+  });
+  it("switches SpaceMouse frames live and explains neutral-wait without locking gains", () => {
+    const p = props();
+    const view = render(<ControllerSettings {...p} controllerId="spacemouse" active manualActive
+      controlFrame="tool" controller={{...status, control_frame: "world", pending_control_frame: "tool"}} />);
+    expect(screen.getByRole("status").textContent).toContain("请松开摇杆回中");
+    const select = screen.getByLabelText("控制坐标") as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    fireEvent.change(select, {target: {value: "world"}});
+    expect(p.onControlFrame).toHaveBeenCalledWith("world");
+    view.rerender(<ControllerSettings {...p} controllerId="spacemouse" active manualActive={false} />);
+    expect((screen.getByLabelText("控制坐标") as HTMLSelectElement).disabled).toBe(true);
+    view.rerender(<ControllerSettings {...p} />);
+    expect(screen.queryByLabelText("控制坐标")).toBeNull();
+  });
+  it("shows SpaceMouse intent without replacing live sensitivity controls", () => {
+    const p = props();
+    const mouse: ControllerStatus = {...status, controller_id: "spacemouse", state: "ARMED",
+      motion_mode: "exclusive", motion_intent: "translation", intent_switch_ratio: 1.25};
+    const view = render(<ControllerSettings {...p} controllerId="spacemouse" controller={mouse} active manualActive />);
+    expect(screen.getByText("平移／旋转互斥 · 当前：平移")).toBeTruthy();
+    fireEvent.change(screen.getByRole("slider", {name: "位移增益"}), {target: {value: "0.5"}});
+    expect(p.onTranslationGain).toHaveBeenCalledWith(0.5);
+    view.rerender(<ControllerSettings {...p} controllerId="spacemouse" controller={{...mouse, motion_intent: "rotation"}} />);
+    expect(screen.getByText("平移／旋转互斥 · 当前：旋转")).toBeTruthy();
+    view.rerender(<ControllerSettings {...p} controllerId="spacemouse" controller={{...mouse, motion_intent: "idle", stale: true}} />);
+    expect(screen.getByText("平移／旋转互斥 · 当前：待输入")).toBeTruthy();
+    view.rerender(<ControllerSettings {...p} controllerId="spacemouse" controller={{...mouse, motion_mode: "combined", motion_intent: "combined"}} />);
+    expect(screen.getByText("六轴联动 · 当前：六轴联动")).toBeTruthy();
   });
   it("shows faults and supports explicit reconnect, never auto-enables", () => {
     const p = props(); render(<ControllerSettings {...p} controller={{...status, state: "ERROR", connected: false, error: "bus fault"}} />);

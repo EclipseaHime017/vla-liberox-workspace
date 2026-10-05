@@ -111,6 +111,9 @@ def run_control_loop(
             # the rate limiter can add almost one full control period of avoidable
             # latency when the controller exposes a continuously updated state.
             rate_limiter.wait_before_step()
+            if stop_requested is not None and stop_requested():
+                stopped_reason = "user_stop"
+                break
             value = manual_query(recorder.action_count)
             if value is None:
                 stopped_reason = "controller_stop"

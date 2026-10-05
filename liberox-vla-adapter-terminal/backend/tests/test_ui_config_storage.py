@@ -163,6 +163,9 @@ def test_spacemouse_latency_and_live_gains_are_published(tmp_path: Path):
                 connected=True,
                 stale=False,
                 error=None,
+                motion_intent="translation",
+                translation_strength=0.5,
+                rotation_strength=0.1,
             )
 
     manager = object.__new__(SimulationManager)
@@ -201,6 +204,9 @@ def test_spacemouse_latency_and_live_gains_are_published(tmp_path: Path):
     assert public["spacemouse_status"] == "ready"
     assert record.spacemouse_samples[0]["step"] == 42
     assert record.spacemouse_samples[0]["button_left"] == 1
+    assert record.spacemouse_samples[0]["motion_intent"] == "translation"
+    assert record.spacemouse_samples[0]["translation_strength"] == 0.5
+    assert record.spacemouse_samples[0]["rotation_strength"] == 0.1
 
 
 def _write_minimal_trajectory(path: Path) -> None:

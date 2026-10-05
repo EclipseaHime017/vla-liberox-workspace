@@ -225,13 +225,17 @@ class SpaceMouseControllerService:
         session_id: str,
         translation_gain: float,
         rotation_gain: float,
+        *, gripper: float = -1.0,
+        control_frame: str | None = None,
     ) -> None:
         with self._lock:
             if self._state != "READY" or self._input is None or self._calibration is None:
                 raise RuntimeError("SpaceMouse must be calibrated before takeover")
             controller = self._input
             controller.set_gains(translation_gain, rotation_gain)
-            controller.reset_for_arm(gripper=-1.0)
+            controller.reset_for_arm(gripper=gripper, control_frame=(
+                self.config.control_frame if control_frame is None else control_frame
+            ))
             self._armed_session_id = session_id
             self._state = "ARMED"
             self._message = "SpaceMouse 接管中"
@@ -289,6 +293,11 @@ class SpaceMouseControllerService:
             controller = self._input
         return None if controller is None else controller.diagnostics()
 
+    def request_control_frame(self, session_id: str, frame: str) -> None:
+        with self._lock:
+            if self._state == "ARMED" and self._armed_session_id == session_id and self._input is not None:
+                self._input.request_control_frame(frame)
+
     def status(self) -> dict[str, Any]:
         self._poll_once()
         with self._lock:
@@ -313,10 +322,15 @@ class SpaceMouseControllerService:
                 "stale_timeout_ms": self.config.stale_timeout_ms,
                 "green_latency_max_ms": 50,
                 "probe": self._probe_details,
+                "motion_mode": self.config.motion_mode,
+                "intent_switch_ratio": self.config.intent_switch_ratio,
+                "control_frame": self.config.control_frame,
+                "pending_control_frame": None,
             }
         latency_ms = None
         stale = False
         snapshot_error = None
+        motion_intent = "idle"
         if state == "ARMED" and controller is not None:
             snapshot = controller.latest_snapshot()
             latency_ms = (
@@ -326,6 +340,9 @@ class SpaceMouseControllerService:
             )
             stale = snapshot.stale
             snapshot_error = snapshot.error
+            motion_intent = snapshot.motion_intent
+            result["control_frame"] = snapshot.control_frame
+            result["pending_control_frame"] = snapshot.pending_control_frame
         result.update({
             "latency_ms": latency_ms,
             "latency_level": latency_level(
@@ -335,6 +352,7 @@ class SpaceMouseControllerService:
                 error=snapshot_error,
             ) if state == "ARMED" else None,
             "stale": stale,
+            "motion_intent": motion_intent,
         })
         return result
 

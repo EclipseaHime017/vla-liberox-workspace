@@ -88,11 +88,14 @@ class CreateBranchRequest(StrictModel):
     translation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
     rotation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
     controller_id: Literal["spacemouse", "factr"] | None = None
+    control_frame: Literal["world", "tool"] | None = None
 
     @model_validator(mode="after")
     def validate_controller(self):
         if self.control_mode == "policy" and self.controller_id is not None:
             raise ValueError("controller_id is only valid for manual branches")
+        if self.control_frame is not None and (self.control_mode != "manual" or self.controller_id == "factr"):
+            raise ValueError("control_frame is only valid for SpaceMouse manual branches")
         return self
 
 

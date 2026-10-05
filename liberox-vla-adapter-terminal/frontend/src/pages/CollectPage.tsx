@@ -6,7 +6,7 @@ import {
 } from "../features/simulation-view/controls";
 import { api, ApiError } from "../api/client";
 import { sessionWebSocket } from "../api/websocket";
-import { ACTIVE, TERMINAL, type Bootstrap, type ControllerId, type ControllerStatus, type Draft, type FrameState, type PolicyBranchDraft, type PolicyCameraId, type Session, type TaskInfo } from "../features/run-control/types";
+import { ACTIVE, TERMINAL, type Bootstrap, type ControllerId, type ControllerStatus, type ControlFrame, type Draft, type FrameState, type PolicyBranchDraft, type PolicyCameraId, type Session, type TaskInfo } from "../features/run-control/types";
 import { Info, Metric } from "../features/metrics/MetricsPanel";
 import { ControllerSettings } from "../features/run-control/ControllerSettings";
 import { calibrateController, setControllerGravity, CONTROLLER_LABELS, controllerConnection, getControllers } from "../features/run-control/controller";
@@ -38,8 +38,9 @@ function CollectPage() {
   const [taskId, setTaskId] = useState("");
   const [policyId, setPolicyId] = useState("base");
   const [sessionTaskFilter, setSessionTaskFilter] = useState<TaskScope>(ALL_TASK_SCOPE);
-  const [translationGain, setTranslationGain] = useState(0.25);
-  const [rotationGain, setRotationGain] = useState(0.08);
+  const [translationGain, setTranslationGain] = useState(0.5);
+  const [rotationGain, setRotationGain] = useState(0.5);
+  const [controlFrame, setControlFrame] = useState<ControlFrame>("world");
   const [controller, setController] = useState<ControllerStatus | null>(null);
   const [controllers, setControllers] = useState<ControllerStatus[]>([]);
   const [controllerId, setControllerId] = useState<ControllerId>("spacemouse");
@@ -52,7 +53,7 @@ function CollectPage() {
   const trajectoryVideo = useRef<HTMLVideoElement | null>(null);
   const gainRef = useRef({ translationGain, rotationGain });
   const controllerGains = useRef<Record<ControllerId, { translationGain: number; rotationGain: number }>>({
-    spacemouse: { translationGain: 0.25, rotationGain: 0.08 },
+    spacemouse: { translationGain: 0.5, rotationGain: 0.5 },
     factr: { translationGain: 0.25, rotationGain: 0.25 },
   });
 
@@ -98,6 +99,7 @@ function CollectPage() {
       ]))
       .then(([boot, history, catalog]) => {
         setBootstrap(boot);
+        setControlFrame(boot.config.manual.control_frame ?? "world");
         setSessions(history);
         setMaxSteps(boot.config.max_steps);
         setOpenLoop(boot.config.open_loop_steps);
@@ -106,8 +108,6 @@ function CollectPage() {
         setDisabledPolicyCameras(boot.config.disabled_policy_cameras);
         setTaskId(boot.task.task_id);
         setPolicyId("base");
-        setTranslationGain(boot.config.manual.translation_gain);
-        setRotationGain(boot.config.manual.rotation_gain);
         controllerGains.current.spacemouse = {
           translationGain: boot.config.manual.translation_gain,
           rotationGain: boot.config.manual.rotation_gain,
@@ -120,15 +120,26 @@ function CollectPage() {
           rotationGain: factrStatus?.rotation_gain ?? 0.25,
         };
         setControllers(catalog.controllers);
-        const initial = catalog.controllers.find((item) => item.connected && item.state !== "ERROR")
-          ?? catalog.controllers.find((item) => item.controller_id === "spacemouse");
-        if (initial?.controller_id) {
-          setControllerId(initial.controller_id);
-          setController(initial);
-          setTranslationGain(controllerGains.current[initial.controller_id].translationGain);
-          setRotationGain(controllerGains.current[initial.controller_id].rotationGain);
-        }
-        if (history[0]) setSelectedId(history[0].id);
+        const runningManual = history.find((session) => session.control_mode === "manual"
+          && ACTIVE.has(session.status) && !session.legacy);
+        const initialId = runningManual
+          ? runningManual.manual_source === "factr" ? "factr" : "spacemouse"
+          : catalog.controllers.find((item) => item.connected && item.state !== "ERROR")?.controller_id ?? "spacemouse";
+        const defaults = controllerGains.current[initialId];
+        // Restore a live takeover once on page load. Historical recordings and
+        // later branch responses must never reset the operator's preferences.
+        const gains = {
+          translationGain: runningManual?.manual_translation_gain ?? defaults.translationGain,
+          rotationGain: runningManual?.manual_rotation_gain ?? defaults.rotationGain,
+        };
+        controllerGains.current[initialId] = gains;
+        gainRef.current = gains;
+        setControllerId(initialId);
+        setController(catalog.controllers.find((item) => item.controller_id === initialId) ?? null);
+        setTranslationGain(gains.translationGain);
+        setRotationGain(gains.rotationGain);
+        const initialSession = runningManual ?? history[0];
+        if (initialSession) setSelectedId(initialSession.id);
       })
       .catch((reason) => setError(String(reason)));
   }, []);
@@ -156,11 +167,8 @@ function CollectPage() {
 
   useEffect(() => {
     if (selected?.control_mode !== "manual") return;
-    if (selected.manual_translation_gain !== null) {
-      setTranslationGain(selected.manual_translation_gain);
-    }
-    if (selected.manual_rotation_gain !== null) {
-      setRotationGain(selected.manual_rotation_gain);
+    if (selected.manual_source === "spacemouse") {
+      setControlFrame(selected.manual_requested_control_frame ?? selected.manual_control_frame ?? "world");
     }
   }, [selected?.id]);
 
@@ -212,10 +220,7 @@ function CollectPage() {
         && !selected.legacy
         && ACTIVE.has(selected.status)
       ) {
-        const gains = {
-          translationGain: selected.manual_translation_gain ?? gainRef.current.translationGain,
-          rotationGain: selected.manual_rotation_gain ?? gainRef.current.rotationGain,
-        };
+        const gains = gainRef.current;
         socket.send(JSON.stringify({
           type: "manual_settings",
           translation_gain: gains.translationGain,
@@ -402,6 +407,7 @@ function CollectPage() {
             controller_id: controllerId,
             translation_gain: translationGain,
             rotation_gain: rotationGain,
+            ...(controllerId === "spacemouse" ? {control_frame: controlFrame} : {}),
           } : {}),
         }),
       });
@@ -412,6 +418,19 @@ function CollectPage() {
     } catch (reason) {
       setError(String(reason));
     } finally { setBusy(false); }
+  };
+
+  const selectControlFrame = (frame: ControlFrame) => {
+    if (manualSessionActive && controllerId === "spacemouse") {
+      const socket = websocket.current;
+      if (socket?.readyState !== WebSocket.OPEN) {
+        setError("控制连接尚未就绪，请稍后切换坐标。");
+        return;
+      }
+      socket.send(JSON.stringify({type: "manual_settings", translation_gain: translationGain,
+        rotation_gain: rotationGain, control_frame: frame}));
+    }
+    setControlFrame(frame);
   };
 
   const calibrate = async () => {
@@ -664,6 +683,7 @@ function CollectPage() {
             onSelect={selectController} onCalibrate={() => void calibrate()}
             onGravity={(enabled) => void toggleGravity(enabled)}
             onTranslationGain={setTranslationGain} onRotationGain={setRotationGain}
+            controlFrame={controlFrame} onControlFrame={selectControlFrame}
           />
 
           {!draft && selected && Object.keys(selected.artifacts).length > 0 && <div className="panel artifacts-panel">

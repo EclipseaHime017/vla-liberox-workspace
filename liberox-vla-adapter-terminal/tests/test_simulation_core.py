@@ -123,3 +123,27 @@ def test_manual_input_is_sampled_after_the_control_boundary_wait():
         stop_on_success=False,
     )
     assert order == ["wait", "query", "step"]
+
+
+def test_manual_stop_during_wait_does_not_execute_an_extra_action():
+    stopped = False
+
+    class StopDuringWait:
+        def wait_before_step(self):
+            nonlocal stopped
+            stopped = True
+
+    env = FakeEnv()
+    recorder = TrajectoryRecorder(control_hz=20, capture_images=False)
+    recorder.record_initial(env, observation(0))
+
+    def forbidden_query(_step):
+        raise AssertionError("Stopped manual control must not sample or step")
+
+    result = run_control_loop(
+        env=env, recorder=recorder, initial_observation=observation(0),
+        target_action_count=1, rate_limiter=StopDuringWait(), action_source="human",
+        manual_query=forbidden_query, stop_requested=lambda: stopped,
+    )
+    assert result.stopped_reason == "user_stop"
+    assert result.executed_steps == recorder.action_count == env.step_index == 0

@@ -80,7 +80,8 @@ async def session_socket(websocket: WebSocket, run_id: str):
             if payload.get("type") == "heartbeat":
                 continue
             if payload.get("type") == "manual_settings" and is_manual:
-                service.manual_settings(run_id, payload.get("translation_gain"), payload.get("rotation_gain"))
+                service.manual_settings(run_id, payload.get("translation_gain"), payload.get("rotation_gain"),
+                    **({"control_frame": payload["control_frame"]} if "control_frame" in payload else {}))
                 continue
             raise ValueError(f"Unsupported WebSocket message type: {payload.get('type')!r}")
     except WebSocketDisconnect:

@@ -13,6 +13,8 @@ class FakeInput:
         self.stopped = False
         self.gains = None
         self.reset_count = 0
+        self.gripper = -1.0
+        self.control_frame = config.control_frame
 
     def start(self):
         self.started = True
@@ -27,9 +29,14 @@ class FakeInput:
         progress(1.0, "保持帽盖静止，正在校准", 1)
         return {"bias": [0.0] * 6, "movement_resets": 1}
 
-    def reset_for_arm(self, gripper=-1.0):
-        assert gripper == -1.0
+    def reset_for_arm(self, gripper=-1.0, *, control_frame=None):
+        self.gripper = gripper
+        if control_frame is not None:
+            self.control_frame = control_frame
         self.reset_count += 1
+
+    def request_control_frame(self, frame):
+        self.control_frame = frame
 
     def set_gains(self, translation_gain, rotation_gain):
         self.gains = (translation_gain, rotation_gain)
@@ -43,11 +50,12 @@ class FakeInput:
             raw_axes=(0.0,) * 6,
             corrected_axes=(0.0,) * 6,
             command_axes=(0.0,) * 6,
-            action=(0.0,) * 6 + (-1.0,),
+            action=(0.0,) * 6 + (self.gripper,),
             buttons=(0, 0),
             connected=True,
             stale=False,
             error=None,
+            control_frame=self.control_frame,
         )
 
     def diagnostics(self):
@@ -82,11 +90,21 @@ def test_controller_uses_exact_uncalibrated_state_and_reuses_calibration():
 
         service.arm("branch", 0.2, 0.1)
         assert service.status()["state"] == "ARMED"
+        assert service.status()["motion_mode"] == "exclusive"
+        assert service.status()["intent_switch_ratio"] == 1.25
+        assert service.status()["motion_intent"] == "idle"
         assert created[0].gains == (0.2, 0.1)
         assert service.snapshot("branch").connected
         service.disarm("branch")
         assert service.status()["state"] == "READY"
         assert len(created) == 1
+        service.arm("closed-gripper-branch", 0.25, 0.1, gripper=1.0)
+        assert service.snapshot("closed-gripper-branch").action[-1] == 1.0
+        service.request_control_frame("closed-gripper-branch", "tool")
+        assert service.status()["control_frame"] == "tool"
+        service.request_control_frame("other-session", "world")
+        assert service.status()["control_frame"] == "tool"
+        service.disarm("closed-gripper-branch")
     finally:
         service.close()
 

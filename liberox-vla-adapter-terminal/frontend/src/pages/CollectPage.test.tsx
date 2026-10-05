@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CollectPage from "./CollectPage";
 import { api } from "../api/client";
 import { getController, getControllers } from "../features/run-control/controller";
+import { sessionWebSocket } from "../api/websocket";
 import type { Bootstrap, ControllerStatus, Session } from "../features/run-control/types";
 
 vi.mock("../api/client", () => ({ api: vi.fn(), ApiError: class extends Error {} }));
@@ -11,7 +12,7 @@ vi.mock("../features/run-control/controller", async (importOriginal) => ({
   getController: vi.fn(), getControllers: vi.fn(),
 }));
 vi.mock("../api/websocket", () => ({
-  sessionWebSocket: () => ({ close: vi.fn(), send: vi.fn(), readyState: 0 }),
+  sessionWebSocket: vi.fn(() => ({ close: vi.fn(), send: vi.fn(), readyState: 0 })),
 }));
 vi.mock("../features/run-control/SessionMonitor", () => ({ SessionMonitor: () => null }));
 
@@ -31,7 +32,7 @@ const bootstrap = {
   config: {
     max_steps: 300, open_loop_steps: 8, seed: 0, control_hz: 20, video_fps: 20,
     disabled_policy_cameras: [], preview: { width: 512, height: 512, stream_width: 1024, stream_height: 1024 },
-    manual: { translation_gain: 0.25, rotation_gain: 0.08 },
+    manual: { translation_gain: 0.5, rotation_gain: 0.5 },
   },
   model: { gpu: "cpu", checkpoint: "base", policy_label: "Base", action_schema: { predicted_chunk_size: 8 } },
   task: { task_id: "task", task_name: "pick", prompt: "pick bowl", level: "LEVEL1", init_state_index_min: 0 },
@@ -40,19 +41,27 @@ const bootstrap = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(sessionWebSocket).mockImplementation(() => ({
+    close: vi.fn(), send: vi.fn(), readyState: WebSocket.CONNECTING,
+  }) as unknown as WebSocket);
   vi.mocked(getController).mockImplementation(async (id) => ({ ...device, controller_id: id, gravity_enabled: id === "factr" }));
   vi.mocked(getControllers).mockImplementation(async () => ({
     controllers: await Promise.all([getController("spacemouse"), getController("factr")]),
   }));
-  vi.mocked(api).mockImplementation(async (path) => {
+  let branchCount = 0;
+  vi.mocked(api).mockImplementation(async (path, options) => {
     if (path === "/api/draft") return { discarded: false };
     if (path === "/api/bootstrap") return bootstrap;
     if (path === "/api/sessions") return [source];
     if (path.includes("/frames/")) return { step: 0, time_seconds: 0 };
-    if (path === "/api/sessions/source/branches") return {
-      ...source, id: "factr-branch", kind: "branch", control_mode: "manual", manual_source: "factr",
-      status: "READY", managed: true, branchable: false, manual_translation_gain: 0.25, manual_rotation_gain: 0.25,
-    };
+    if (path === "/api/sessions/source/branches") {
+      const request = JSON.parse(String(options?.body));
+      branchCount += 1;
+      return {...source, id: `${request.controller_id}-branch${branchCount > 1 ? `-${branchCount}` : ""}`, kind: "branch", control_mode: "manual",
+        manual_source: request.controller_id, status: "READY", managed: true, branchable: false,
+        manual_translation_gain: request.translation_gain, manual_rotation_gain: request.rotation_gain,
+        manual_control_frame: request.control_frame};
+    }
     throw new Error(`Unexpected request: ${path}`);
   });
 });
@@ -124,11 +133,111 @@ describe("collection controller integration", () => {
     const rotation = screen.getByRole("slider", { name: "旋转增益" }) as HTMLInputElement;
     fireEvent.change(translation, { target: { value: "0.6" } });
     fireEvent.change(rotation, { target: { value: "0.7" } });
+    fireEvent.change(screen.getByLabelText("控制坐标"), {target: {value: "tool"}});
     fireEvent.change(selector, { target: { value: "factr" } });
     await waitFor(() => expect((selector as HTMLSelectElement).value).toBe("factr"));
     expect(screen.queryByRole("slider", { name: "位移增益" })).toBeNull();
     fireEvent.change(selector, { target: { value: "spacemouse" } });
     expect((screen.getByRole("slider", { name: "位移增益" }) as HTMLInputElement).value).toBe("0.6");
     expect((screen.getByRole("slider", { name: "旋转增益" }) as HTMLInputElement).value).toBe("0.7");
+    expect((screen.getByLabelText("控制坐标") as HTMLSelectElement).value).toBe("tool");
+  });
+
+  it("submits the selected tool frame only for SpaceMouse takeover", async () => {
+    render(<CollectPage />);
+    fireEvent.change(await screen.findByLabelText("控制坐标"), {target: {value: "tool"}});
+    const takeover = await screen.findByRole("button", {name: "SpaceMouse 接管"});
+    await waitFor(() => expect((takeover as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(takeover);
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/source/branches", {
+      method: "POST", body: JSON.stringify({resume_step: 0, control_mode: "manual", open_loop_steps: 8,
+        controller_id: "spacemouse", translation_gain: .5, rotation_gain: .5, control_frame: "tool"}),
+    }));
+  });
+
+  it("preserves tool mode on reconnect and gain changes, sending frame only on explicit selection", async () => {
+    const socket = {readyState: WebSocket.CONNECTING, close: vi.fn(), send: vi.fn(), onopen: null} as unknown as WebSocket;
+    vi.mocked(sessionWebSocket).mockReturnValueOnce(socket);
+    const original = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation(async (path, options) => path === "/api/sessions"
+      ? [source, {...source, id: "active-mouse", kind: "branch", status: "RUNNING", control_mode: "manual",
+          manual_source: "spacemouse", manual_control_frame: "tool", manual_requested_control_frame: "tool",
+          manual_translation_gain: .25, manual_rotation_gain: .08}]
+      : original(path, options));
+    render(<CollectPage />);
+    await waitFor(() => expect((screen.getByLabelText("控制坐标") as HTMLSelectElement).value).toBe("tool"));
+    expect((screen.getByRole("slider", {name: "位移增益"}) as HTMLInputElement).value).toBe("0.25");
+    expect((screen.getByRole("slider", {name: "旋转增益"}) as HTMLInputElement).value).toBe("0.08");
+    await waitFor(() => expect(socket.onopen).toBeTruthy());
+    fireEvent.change(screen.getByRole("slider", {name: "位移增益"}), {target: {value: ".5"}});
+    // Opening a delayed connection must send the latest slider value, not the
+    // initial gain captured from the running session.
+    expect(sessionWebSocket).toHaveBeenLastCalledWith("active-mouse");
+    expect(socket.send).not.toHaveBeenCalled();
+    Object.assign(socket, {readyState: WebSocket.OPEN});
+    socket.onopen?.call(socket, new Event("open"));
+    expect(JSON.parse(String(vi.mocked(socket.send).mock.lastCall?.[0]))).toMatchObject({
+      translation_gain: .5, rotation_gain: .08,
+    });
+    for (const [message] of vi.mocked(socket.send).mock.calls) {
+      expect(JSON.parse(String(message))).not.toHaveProperty("control_frame");
+    }
+    fireEvent.change(screen.getByLabelText("控制坐标"), {target: {value: "world"}});
+    expect(JSON.parse(String(vi.mocked(socket.send).mock.lastCall?.[0]))).toMatchObject({
+      type: "manual_settings", translation_gain: .5, rotation_gain: .08, control_frame: "world",
+    });
+  });
+
+  it.each(["spacemouse", "factr"])("does not restore %s history gains as current preferences", async (manual_source) => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation(async (path, options) => path === "/api/sessions"
+      ? [{...source, id: "old-manual", control_mode: "manual", manual_source,
+          manual_translation_gain: .1, manual_rotation_gain: .2}, source]
+      : original(path, options));
+    render(<CollectPage />);
+    const translation = await screen.findByRole("slider", {name: "位移增益"}) as HTMLInputElement;
+    const rotation = screen.getByRole("slider", {name: "旋转增益"}) as HTMLInputElement;
+    expect(translation.value).toBe("0.5");
+    expect(rotation.value).toBe("0.5");
+    fireEvent.change(translation, {target: {value: ".6"}});
+    fireEvent.change(rotation, {target: {value: ".7"}});
+    fireEvent.click(screen.getByRole("button", {name: /原始 · source /}));
+    fireEvent.click(screen.getByRole("button", {name: /原始 · old-manual /}));
+    expect(translation.value).toBe("0.6");
+    expect(rotation.value).toBe("0.7");
+  });
+
+  it("keeps live gain edits through completion and the next takeover", async () => {
+    vi.mocked(sessionWebSocket).mockImplementation(() => ({
+      readyState: WebSocket.OPEN, close: vi.fn(), send: vi.fn(),
+    }) as unknown as WebSocket);
+    render(<CollectPage />);
+    const takeover = await screen.findByRole("button", {name: "SpaceMouse 接管"});
+    await waitFor(() => expect((takeover as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(takeover);
+    await waitFor(() => expect(sessionWebSocket).toHaveBeenLastCalledWith("spacemouse-branch"));
+    const socket = vi.mocked(sessionWebSocket).mock.results.at(-1)!.value as WebSocket;
+    fireEvent.change(screen.getByRole("slider", {name: "位移增益"}), {target: {value: ".6"}});
+    fireEvent.change(screen.getByRole("slider", {name: "旋转增益"}), {target: {value: ".7"}});
+    expect(JSON.parse(String(vi.mocked(socket.send).mock.lastCall?.[0]))).toMatchObject({
+      type: "manual_settings", translation_gain: .6, rotation_gain: .7,
+    });
+    act(() => socket.onmessage?.call(socket, new MessageEvent("message", {data: JSON.stringify({
+      type: "session", session: {...source, id: "spacemouse-branch", kind: "branch", branchable: false,
+        control_mode: "manual", manual_source: "spacemouse", manual_translation_gain: .5, manual_rotation_gain: .5},
+    })})));
+    fireEvent.click(screen.getByRole("button", {name: /原始 · source /}));
+    fireEvent.click(screen.getByRole("button", {name: /分支 · spacemouse-branch /}));
+    expect((screen.getByRole("slider", {name: "位移增益"}) as HTMLInputElement).value).toBe("0.6");
+    fireEvent.click(screen.getByRole("button", {name: /原始 · source /}));
+    const next = screen.getByRole("button", {name: "SpaceMouse 接管"});
+    await waitFor(() => expect((next as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(next);
+    await waitFor(() => {
+      const calls = vi.mocked(api).mock.calls.filter(([path]) => path === "/api/sessions/source/branches");
+      expect(calls).toHaveLength(2);
+      expect(JSON.parse(String(calls[1][1]?.body))).toMatchObject({translation_gain: .6, rotation_gain: .7});
+    });
+    expect((screen.getByRole("slider", {name: "旋转增益"}) as HTMLInputElement).value).toBe("0.7");
   });
 });

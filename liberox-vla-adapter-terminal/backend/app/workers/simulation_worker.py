@@ -29,6 +29,7 @@ from trajectory_utils import (
 
 from ..core.config import UIConfig
 from ..devices.spacemouse import SpaceMouseInput, SpaceMouseSnapshot, load_spacemouse_config
+from ..devices.spacemouse_motion import SpaceMouseActionMapper, validate_control_frame
 from ..devices.factr import load_factr_config
 from ..services.factr_controller_service import FactrControllerService
 from ..domain.run import (
@@ -353,6 +354,7 @@ class SimulationManager:
                 "manual": {
                     "translation_gain": self.ui_config.manual_translation_gain,
                     "rotation_gain": self.ui_config.manual_rotation_gain,
+                    "control_frame": getattr(self.spacemouse_config, "control_frame", "world"),
                 },
                 "spacemouse": {
                     "configured": self.spacemouse_config is not None,
@@ -494,6 +496,7 @@ class SimulationManager:
         manual_translation_gain: float | None = None,
         manual_rotation_gain: float | None = None,
         controller_id: str | None = None,
+        control_frame: str | None = None,
     ) -> SimulationSession:
         eval_config = getattr(self, "eval_config", None)
         default_seed = int(getattr(eval_config, "seed", 0))
@@ -561,6 +564,8 @@ class SimulationManager:
             manual_source=(controller_id or "spacemouse") if control_mode == "manual" else None,
             manual_translation_gain=manual_translation_gain,
             manual_rotation_gain=manual_rotation_gain,
+            manual_control_frame=(control_frame or "world") if control_mode == "manual" and controller_id != "factr" else None,
+            manual_requested_control_frame=(control_frame or "world") if control_mode == "manual" and controller_id != "factr" else None,
             spacemouse_deadman_ms=(
                 self.spacemouse_config.stale_timeout_ms
                 if control_mode == "manual" and controller_id != "factr" and self.spacemouse_config is not None
@@ -860,7 +865,12 @@ class SimulationManager:
         translation_gain: float | None = None,
         rotation_gain: float | None = None,
         controller_id: str | None = None,
+        control_frame: str | None = None,
     ) -> dict[str, Any]:
+        if control_frame is not None:
+            validate_control_frame(control_frame)
+            if control_mode != "manual" or controller_id == "factr":
+                raise ValueError("control_frame is only valid for SpaceMouse manual branches")
         parent = self.get_public(parent_id)
         if parent["kind"] != "original" or not parent.get("branchable"):
             raise ValueError("Only a completed original trajectory may create one-level branches")
@@ -888,6 +898,8 @@ class SimulationManager:
                 raise ValueError("manual gains must be omitted for policy branches")
         else:
             controller_id = controller_id or "spacemouse"
+            if controller_id == "spacemouse":
+                control_frame = control_frame or getattr(self.spacemouse_config, "control_frame", "world")
             controller = self._controller_service(controller_id)
             defaults = getattr(controller, "config", None) if controller_id == "factr" else None
             translation_gain = (
@@ -935,6 +947,7 @@ class SimulationManager:
             manual_translation_gain=translation_gain,
             manual_rotation_gain=rotation_gain,
             controller_id=controller_id,
+            control_frame=control_frame,
         )
         try:
             self._copy_branch_source(record, parent)
@@ -973,8 +986,13 @@ class SimulationManager:
         session_id: str,
         translation_gain: float,
         rotation_gain: float,
+        *, control_frame: str | None = None,
     ) -> None:
         record = self._manual_record(session_id)
+        if control_frame is not None:
+            validate_control_frame(control_frame)
+            if record.manual_source == "factr":
+                raise ValueError("control_frame is only valid for SpaceMouse")
         translation_gain = float(translation_gain)
         rotation_gain = float(rotation_gain)
         if not 0.05 <= translation_gain <= 1.0:
@@ -984,9 +1002,25 @@ class SimulationManager:
         with self.lock:
             record.manual_translation_gain = translation_gain
             record.manual_rotation_gain = rotation_gain
-        controller = self._controller_service(record.manual_source or "spacemouse")
-        if controller is not None:
-            controller.set_gains(record.id, translation_gain, rotation_gain)
+            if control_frame is not None:
+                record.manual_requested_control_frame = control_frame
+            controller = self._controller_service(record.manual_source or "spacemouse")
+            if controller is not None:
+                controller.set_gains(record.id, translation_gain, rotation_gain)
+                if control_frame is not None:
+                    controller.request_control_frame(record.id, control_frame)
+
+    def _arm_spacemouse(self, record: SimulationSession, gripper: float) -> None:
+        # Serialize the READY -> ARMED handoff with settings, so a selection
+        # made during countdown cannot be lost between reading and arming.
+        with self.lock:
+            self.controller.arm(record.id, record.manual_translation_gain, record.manual_rotation_gain,
+                                gripper=gripper,
+                                control_frame=record.manual_requested_control_frame or "world")
+            record.manual_control_frame = record.manual_requested_control_frame or "world"
+            record.spacemouse_status = "armed"
+            record.spacemouse_connected = True
+            record.spacemouse_stale = False
 
     def manual_disconnect(self, session_id: str) -> None:
         record = self._manual_record(session_id)
@@ -1082,6 +1116,7 @@ class SimulationManager:
                     "id": record.manual_source,
                     "translation_gain": record.manual_translation_gain,
                     "rotation_gain": record.manual_rotation_gain,
+                    "control_frame": record.manual_control_frame,
                 },
             },
         )
@@ -1113,6 +1148,8 @@ class SimulationManager:
                 "resume_step": record.resume_step,
                 "control_mode": record.control_mode,
                 "manual_source": record.manual_source,
+                "manual_control_frame": record.manual_control_frame,
+                "manual_requested_control_frame": record.manual_requested_control_frame,
                 "policy_id": record.policy_id,
                 "policy_label": record.policy_label,
                 "policy_base_checkpoint": record.policy_base_checkpoint,
@@ -1180,6 +1217,11 @@ class SimulationManager:
                 trajectory = str(candidate)
         action_count = int(result.get("steps", manifest.get("action_count", 0)) or 0)
         state_count = int(manifest.get("state_count", action_count + (1 if action_count else 0)) or 0)
+        manual_source = (controller.get("type", manifest.get("manual_source") or "spacemouse")
+                         if controller else manifest.get("manual_source"))
+        control_frame = None
+        if manual_source == "spacemouse":
+            control_frame = controller.get("control_frame") or manifest.get("manual_control_frame") or "world"
         return {
             "id": manifest["id"],
             "kind": manifest.get("kind", "original"),
@@ -1202,16 +1244,15 @@ class SimulationManager:
             "policy_compatibility_sha256": manifest.get(
                 "policy_compatibility_sha256"
             ),
-            "manual_source": (
-                controller.get("type", manifest.get("manual_source") or "spacemouse")
-                if controller else manifest.get("manual_source")
-            ),
+            "manual_source": manual_source,
             "manual_translation_gain": controller.get(
                 "translation_gain", manifest.get("manual_translation_gain")
             ),
             "manual_rotation_gain": controller.get(
                 "rotation_gain", manifest.get("manual_rotation_gain")
             ),
+            "manual_control_frame": control_frame,
+            "manual_requested_control_frame": manifest.get("manual_requested_control_frame") or control_frame,
             "spacemouse_status": None,
             "spacemouse_connected": None,
             "spacemouse_stale": None,
@@ -1291,10 +1332,15 @@ class SimulationManager:
             record.spacemouse_stale = stale
             record.spacemouse_latency_ms = latency_ms
 
-    def _spacemouse_action(self, record: SimulationSession, step: int) -> np.ndarray:
+    def _spacemouse_action(self, record: SimulationSession, step: int,
+                          mapper: SpaceMouseActionMapper | None = None) -> np.ndarray:
         if self.controller is None:
             raise RuntimeError("SpaceMouse controller service is unavailable")
         snapshot: SpaceMouseSnapshot = self.controller.snapshot(record.id)
+        if mapper is None and snapshot.control_frame != "world":
+            raise RuntimeError("Tool control requires the control environment's OSC mapper")
+        action = (np.asarray(snapshot.action, dtype=np.float32) if mapper is None
+                  else mapper.convert(snapshot.action, snapshot.control_frame))
         latency_ms = (
             None
             if snapshot.sample_age_seconds is None
@@ -1309,6 +1355,7 @@ class SimulationManager:
         else:
             status = "ready"
         with self.lock:
+            record.manual_control_frame = snapshot.control_frame
             record.spacemouse_status = status
             record.spacemouse_connected = snapshot.connected
             record.spacemouse_stale = snapshot.stale
@@ -1329,6 +1376,12 @@ class SimulationManager:
                 "button_right": snapshot.buttons[1] if len(snapshot.buttons) > 1 else 0,
                 "translation_gain": record.manual_translation_gain,
                 "rotation_gain": record.manual_rotation_gain,
+                "motion_intent": snapshot.motion_intent,
+                "translation_strength": snapshot.translation_strength,
+                "rotation_strength": snapshot.rotation_strength,
+                "control_frame": snapshot.control_frame,
+                "pending_control_frame": snapshot.pending_control_frame or "",
+                "frame_mapping_limited": False if mapper is None else mapper.limited,
                 "error": snapshot.error or "",
             }
             for prefix, values in (
@@ -1339,10 +1392,12 @@ class SimulationManager:
                 for axis, value in zip(("x", "y", "z", "rx", "ry", "rz"), values):
                     row[f"{prefix}_{axis}"] = value
             row["gripper_action"] = snapshot.action[6]
+            for axis, value in zip(("x", "y", "z", "rx", "ry", "rz"), action[:6]):
+                row[f"env_command_{axis}"] = float(value)
             record.spacemouse_samples.append(row)
         if snapshot.error is not None:
             raise RuntimeError(f"SpaceMouse reader failed: {snapshot.error}")
-        return np.asarray(snapshot.action, dtype=np.float32)
+        return action
 
 
     @staticmethod
@@ -1394,6 +1449,9 @@ class SimulationManager:
         return {
             "type": "spacemouse",
             "device": self.spacemouse_config.device_name,
+            "motion_mode": self.spacemouse_config.motion_mode,
+            "intent_switch_ratio": self.spacemouse_config.intent_switch_ratio,
+            "control_frame": record.manual_control_frame,
             "translation_gain": record.manual_translation_gain,
             "rotation_gain": record.manual_rotation_gain,
             "sample_count": len(rows),
@@ -1410,6 +1468,7 @@ class SimulationManager:
     def _run_session(self, record: SimulationSession) -> None:
         recorder: TrajectoryRecorder | None = None
         follower = None
+        spacemouse_mapper = None
         env = None
         source_trajectory: dict[str, np.ndarray] | None = None
         restore_error: float | None = None
@@ -1512,6 +1571,8 @@ class SimulationManager:
             if record.manual_source == "factr":
                 from ..devices.factr_joint_control import JointFollower
                 follower = JointFollower(env)
+            elif record.manual_source == "spacemouse":
+                spacemouse_mapper = SpaceMouseActionMapper(env)
             phase("preparing_preview", "准备实时四视角")
             record.preview_event.clear()
             record.preview_error = None
@@ -1552,16 +1613,13 @@ class SimulationManager:
                 record.countdown_remaining = None
                 if not record.stop_event.is_set():
                     arm_args = (record.id, record.manual_translation_gain, record.manual_rotation_gain)
+                    gripper = recorder.env_actions[-1][6] if recorder.env_actions else -1.
                     if follower is not None:
                         controller.finish_alignment(record.id)
-                        gripper = recorder.env_actions[-1][6] if recorder.env_actions else -1.
                         sample = controller.arm(*arm_args, gripper=1. if gripper > 0 else -1.)
                         follower.check_aligned(sample.joint_positions)
                     else:
-                        controller.arm(*arm_args)
-                        record.spacemouse_status = "armed"
-                        record.spacemouse_connected = True
-                        record.spacemouse_stale = False
+                        self._arm_spacemouse(record, gripper=1. if gripper > 0 else -1.)
                     record.controller_status = "armed"
                     record.controller_connected = True
                     record.controller_stale = False
@@ -1614,7 +1672,7 @@ class SimulationManager:
                 result = run_control_loop(
                     **common,
                     action_source="human",
-                    manual_query=lambda step: self._spacemouse_action(record, step),
+                    manual_query=lambda step: self._spacemouse_action(record, step, spacemouse_mapper),
                 )
             else:
                 result = run_control_loop(
@@ -1827,6 +1885,8 @@ class SimulationManager:
             "controller_deadman_ms": record.controller_deadman_ms,
             "manual_translation_gain": record.manual_translation_gain,
             "manual_rotation_gain": record.manual_rotation_gain,
+            "manual_control_frame": record.manual_control_frame,
+            "manual_requested_control_frame": record.manual_requested_control_frame,
             "spacemouse_deadman_ms": record.spacemouse_deadman_ms,
             "spacemouse_latency_ms": record.spacemouse_latency_ms,
             "spacemouse_status": record.spacemouse_status,

@@ -19,8 +19,16 @@ expected_product_id: 0xc63a
 axis_convention: ros
 axis_order: [y, x, z, roll, pitch, yaw]
 axis_signs: [1, -1, 1, 1, 1, -1]
-translation_gain: 0.25
-rotation_gain: 0.08
+translation_gain: 0.5
+rotation_gain: 0.5
+# Choose one motion group before applying gains. "combined" restores six-axis
+# control for comparison. In exclusive mode an idle/competing group must be
+# >1.25x stronger to start/switch; ambiguous idle input produces no motion.
+motion_mode: exclusive
+intent_switch_ratio: 1.25
+# Both translation and rotation: fixed world axes or current tool axes.
+# Tool axes are not the wrist camera's screen axes.
+control_frame: world
 deadzone: 0.05
 # 1.0 disables filtering so the first diagnostic measures the device directly.
 smoothing_alpha: 1.0
