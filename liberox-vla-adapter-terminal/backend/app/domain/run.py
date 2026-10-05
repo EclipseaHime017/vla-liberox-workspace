@@ -50,6 +50,8 @@ class SimulationSession:
     manual_source: str | None = None
     manual_translation_gain: float | None = None
     manual_rotation_gain: float | None = None
+    manual_control_frame: str | None = None
+    manual_requested_control_frame: str | None = None
     status: str = "IDLE"
     created_at: str = field(default_factory=utc_now)
     completed_at: str | None = None
@@ -124,6 +126,8 @@ class SimulationSession:
             "controller_deadman_ms": self.controller_deadman_ms,
             "manual_translation_gain": self.manual_translation_gain,
             "manual_rotation_gain": self.manual_rotation_gain,
+            "manual_control_frame": self.manual_control_frame,
+            "manual_requested_control_frame": self.manual_requested_control_frame,
             "spacemouse_status": self.spacemouse_status,
             "spacemouse_connected": self.spacemouse_connected,
             "spacemouse_stale": self.spacemouse_stale,

@@ -33,6 +33,7 @@ from backend.app.devices.spacemouse import (
     SpaceMouseTestConfig,
     load_spacemouse_config,
 )
+from backend.app.devices.spacemouse_motion import SpaceMouseActionMapper
 from simulation_core import run_control_loop
 from trajectory_utils import TrajectoryRecorder, save_trajectory_bundle
 
@@ -141,6 +142,9 @@ def _config_record(config: SpaceMouseTestConfig) -> dict[str, Any]:
         "axis_signs": list(config.axis_signs),
         "translation_gain": config.translation_gain,
         "rotation_gain": config.rotation_gain,
+        "motion_mode": config.motion_mode,
+        "intent_switch_ratio": config.intent_switch_ratio,
+        "control_frame": config.control_frame,
         "deadzone": config.deadzone,
         "smoothing_alpha": config.smoothing_alpha,
         "neutral_calibration_seconds": config.neutral_calibration_seconds,
@@ -170,6 +174,11 @@ def _snapshot_row(snapshot: SpaceMouseSnapshot, start_time: float, index: int) -
         "button_left": snapshot.buttons[0] if len(snapshot.buttons) > 0 else 0,
         "button_right": snapshot.buttons[1] if len(snapshot.buttons) > 1 else 0,
         "gripper_action": snapshot.action[6],
+        "motion_intent": snapshot.motion_intent,
+        "translation_strength": snapshot.translation_strength,
+        "rotation_strength": snapshot.rotation_strength,
+        "control_frame": snapshot.control_frame,
+        "pending_control_frame": snapshot.pending_control_frame or "",
         "error": snapshot.error or "",
     }
     for prefix, values in (
@@ -196,6 +205,11 @@ SAMPLE_FIELDS = [
     "button_left",
     "button_right",
     "gripper_action",
+    "motion_intent",
+    "translation_strength",
+    "rotation_strength",
+    "control_frame",
+    "pending_control_frame",
     "error",
 ]
 
@@ -247,6 +261,10 @@ def _device_statistics(
             "event_interval_ms": _distribution(event_intervals_ms),
             "sample_age_ms": _distribution(sample_ages_ms),
             "coverage": _axis_and_button_coverage(samples),
+            "mixed_motion_samples": sum(
+                any(sample.command_axes[:3]) and any(sample.command_axes[3:])
+                for sample in samples
+            ),
         }
     )
     mean_interval = diagnostics["event_interval_ms"]["mean"]
@@ -278,6 +296,7 @@ def run_device_test(
             )
             print(
                 f"\rRAW {raw} | CMD {command} | buttons={snapshot.buttons} "
+                f"intent={snapshot.motion_intent} frame={snapshot.control_frame} "
                 f"gripper={snapshot.action[6]:+.0f} stale={snapshot.stale}   ",
                 end="",
                 flush=True,
@@ -498,6 +517,7 @@ def run_simulation_test(
         eval_config.headless,
     )
     timed_env = TimedEnvironment(env)
+    mapper = SpaceMouseActionMapper(env)
     recorder = TrajectoryRecorder(control_hz=20.0, capture_images=False)
     rate_limiter = direct.RealTimeControlLimiter(20.0, True)
     samples: list[SpaceMouseSnapshot] = []
@@ -507,6 +527,7 @@ def run_simulation_test(
     success = False
     video_frames = 0
     trajectory_paths: dict[str, str] = {}
+    limited_steps = 0
     started = time.monotonic()
 
     try:
@@ -514,16 +535,20 @@ def run_simulation_test(
         recorder.record_initial(timed_env, observation)
         direct.render_live_window(env)
         _countdown(test_config.countdown_seconds)
+        controller.reset_for_arm(control_frame=test_config.control_frame)
         LOGGER.info(
             "SpaceMouse control active: left=open, right=close, Ctrl+C or closing Viewer stops"
         )
 
         def manual_query(_step: int) -> np.ndarray:
+            nonlocal limited_steps
             snapshot = controller.latest_snapshot()
             samples.append(snapshot)
             if snapshot.error is not None:
                 raise RuntimeError(f"SpaceMouse reader failed: {snapshot.error}")
-            return np.asarray(snapshot.action, dtype=np.float32)
+            action = mapper.convert(snapshot.action, snapshot.control_frame)
+            limited_steps += int(mapper.limited)
+            return action
 
         def after_transition(_observation: dict[str, Any], _step: int, _success: bool) -> None:
             viewer_started = time.monotonic()
@@ -602,6 +627,10 @@ def run_simulation_test(
             "axis_convention": test_config.axis_convention,
             "axis_order": list(test_config.axis_order),
             "axis_signs": list(test_config.axis_signs),
+            "motion_mode": test_config.motion_mode,
+            "intent_switch_ratio": test_config.intent_switch_ratio,
+            "control_frame": test_config.control_frame,
+            "frame_mapping_limited_steps": limited_steps,
             "timing": timing,
         }
         trajectory_paths = save_trajectory_bundle(
@@ -690,9 +719,14 @@ def main() -> int:
         result["acceptance"] = {
             "all_axes_and_buttons_observed": bool(result["functional_check_complete"]),
             "sample_age_p95_le_50ms": sample_age_p95 is not None and sample_age_p95 <= 50.0,
+            "motion_exclusivity": test_config.motion_mode != "exclusive"
+            or device_statistics["mixed_motion_samples"] == 0,
         }
         result["acceptance_passed"] = all(result["acceptance"].values())
     elif test_config.mode == "simulation" and not result.get("error"):
+        result["timing"]["acceptance"]["motion_exclusivity"] = (
+            test_config.motion_mode != "exclusive" or device_statistics["mixed_motion_samples"] == 0
+        )
         result["acceptance_passed"] = all(result["timing"]["acceptance"].values())
     device_summary = {
         "config": _config_record(test_config),

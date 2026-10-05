@@ -142,6 +142,9 @@ def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
                 "manual_source": metadata.get("manual_source"),
                 "manual_translation_gain": metadata.get("manual_translation_gain"),
                 "manual_rotation_gain": metadata.get("manual_rotation_gain"),
+                "manual_control_frame": (metadata.get("manual_control_frame") or "world")
+                if metadata.get("manual_source") == "spacemouse" else None,
+                "manual_requested_control_frame": metadata.get("manual_requested_control_frame"),
                 "spacemouse_connected": None,
                 "spacemouse_stale": None,
                 "spacemouse_latency_ms": None,

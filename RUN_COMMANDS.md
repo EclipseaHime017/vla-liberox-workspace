@@ -17,6 +17,15 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 
 访问：`http://127.0.0.1:8000`
 
+## 个人端：SpaceMouse 互斥控制测试
+
+配置文件：`configs/spacemouse_test_config.yaml`（先 `mode: device`，再 `simulation`；默认 `motion_mode: exclusive`、`intent_switch_ratio: 1.25`，两类灵敏度独立保留）。`control_frame: world` 为世界坐标，`tool` 为末端工具坐标。修改后重启程序，`combined` 可恢复六轴联动作对照。UI 可在控制器设置中直接切换坐标，运行中需松开摇杆回中后生效。
+
+```bash
+conda activate vla-liberox
+python liberox-vla-adapter-terminal/scripts/test_spacemouse.py
+```
+
 ## 个人端：FACTR 校准与重力补偿测试
 
 配置文件：`configs/factr_test_config.yaml`（先 `mode: device`，通过后再 `simulation`）

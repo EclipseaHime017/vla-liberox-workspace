@@ -385,7 +385,7 @@ conda activate vla-liberox
 python liberox-vla-adapter-terminal/scripts/test_spacemouse.py
 ```
 
-首次诊断时设置 `mode: device`，只验证 HID，不导入 MuJoCo、LIBERO 或 VLA。静止校准期间不要触摸帽盖；设备在完全静止时不发送新报告属于正常情况，此时使用已初始化的零状态，随后的覆盖测试仍会验证真实 HID 报告。倒计时后依次让六个轴向正负两个方向运动并按下左右键。终端显示 raw 输入和最终 OSC_POSE command，运行结束后检查 `summary.json` 的 `functional_check_complete` / `acceptance_passed` 与 `device_summary.json` 的轴/按钮覆盖率。未完成覆盖或性能验收时脚本以状态码 `2` 结束，运行错误使用状态码 `1`。
+首次诊断时设置 `mode: device`，只验证 HID，不导入 MuJoCo、LIBERO 或 VLA。静止校准期间不要触摸帽盖；设备在完全静止时不发送新报告属于正常情况，此时使用已初始化的零状态，随后的覆盖测试仍会验证真实 HID 报告。倒计时后依次让六个轴向正负两个方向运动并按下左右键。终端显示 raw 输入、当前 intent 和最终 OSC_POSE command，运行结束后检查 `summary.json` 的 `functional_check_complete` / `acceptance_passed` 与 `device_summary.json` 的轴/按钮覆盖率。未完成覆盖或性能验收时脚本以状态码 `2` 结束，运行错误使用状态码 `1`。
 
 确认设备读取正确后，将 `configs/spacemouse_test_config.yaml` 改为：
 
@@ -396,22 +396,51 @@ mode: simulation
 再次运行相同命令即可在当前 `configs/config.yaml` 的 LEVEL、任务、seed 和第一个 benchmark init state 中控制机械臂。该模式不加载 VLA：
 
 - SpaceMouse 独立线程以约 1 ms 间隔非阻塞读取 HID，20 Hz 控制环在每个控制边界只取最新快照；
-- PySpaceMouse 2.0.0 固定输出 legacy 轴；本项目再显式映射为 ROS 右手 Z-up normalized OSC_POSE `[X,Y,Z,Rx,Ry,Rz,gripper]`，默认映射是 `[legacy_y,-legacy_x,legacy_z,legacy_roll,legacy_pitch,-legacy_yaw]`；当前位移/旋转增益分别为 `0.25 / 0.08`；
-- 左键将夹爪锁存为打开 `-1`，右键锁存为闭合 `+1`；进入 simulation 即启用六轴，不要求按住按钮；
-- 设备断连、读取异常或超过 `250 ms` 没有新 HID 报告时，六维运动立即归零，夹爪保持最后状态；
-- `Ctrl+C`、关闭 MuJoCo Viewer、任务成功或达到 `max_steps` 都会安全结束并保存已有轨迹；
+- PySpaceMouse 2.0.0 固定输出 legacy 轴；本项目映射为右手系六维输入，默认映射是 `[legacy_y,-legacy_x,legacy_z,legacy_roll,legacy_pitch,-legacy_yaw]`；默认按世界坐标解释，也可选择工具坐标，最终执行和保存的始终是世界坐标 normalized OSC_POSE `[X,Y,Z,Rx,Ry,Rz,gripper]`；位移/旋转增益默认分别为 `0.5 / 0.25`；
+- 默认 `motion_mode: exclusive`：平移与旋转互斥，每次只放行其中一组三轴；左键将夹爪锁存为打开 `-1`，右键锁存为闭合 `+1`，运动不要求按住按钮；
+- 设备断连、读取异常或达到 `250 ms` 没有新 HID 报告时，六维运动归零，夹爪保持最后状态；静止设备恢复报告后可继续输入，不因正常静止反复要求校准；
+- `Ctrl+C`、关闭 MuJoCo Viewer 或达到 `max_steps` 会安全结束并保存已有轨迹；成功后仍记录到结束；
 - 视频根据 state 在控制结束后离线渲染，不消耗实时 50 ms 控制预算。
 
 每次运行都会在 `../runs/spacemouse_tests` 下创建唯一目录，主要文件如下：
 
-- `device_summary.json`：设备身份、校准、HID 事件间隔、样本年龄和六轴/按钮覆盖率；
-- `spacemouse_samples.csv`：每次控制采样的 raw、校准后、最终 command、按钮和样本年龄；
+- `device_summary.json`：设备身份、校准、最近最多 4096 条 HID 报告的事件间隔、累计报告数、样本年龄、六轴/按钮覆盖率与 `mixed_motion_samples`（互斥模式应为 0）；
+- `spacemouse_samples.csv`：每次控制采样的 raw、校准后和所选坐标系中的 command、`control_frame`、待切换坐标、`motion_intent`、两组输入强度、按钮和样本年龄；转换后实际执行的世界坐标动作见 trajectory；
 - `control_timing.csv`：控制周期、`env.step`、Viewer 同步、样本年龄和 deadline miss；
 - `spacemouse_trajectory.{npz,csv,json}` 与动作图；
 - `spacemouse_agentview.mp4`：结束后生成的 agentview 回放；
 - `summary.json`：成功状态、停止原因、实测频率、P50/P95/P99 和推测瓶颈。
 
 `smoothing_alpha: 1.0` 默认不滤波，用于真实测量设备输入。若实测确认有抖动，再降低该值；轴方向不符合操作习惯时，只修改严格校验的 `axis_order` 和 `axis_signs`。如果脚本能枚举设备但无法打开，先检查 udev 规则和是否有其他 HID/spacenav 进程占用设备。
+
+平移／旋转互斥配置同样供 UI 使用，修改 YAML 后重启 UI 或独立测试程序：
+
+```yaml
+motion_mode: exclusive       # combined 恢复六轴联动，便于对照
+intent_switch_ratio: 1.25
+control_frame: world          # tool：平移和旋转均相对于当前末端工具坐标系
+translation_gain: 0.5
+rotation_gain: 0.25
+```
+
+页面内调整的灵敏度会继续用于下一次接管，浏览历史、重新校准或切换控制器再返回不会重置。重新加载页面时采用 YAML 默认值；若已有接管正在运行，则恢复该会话的实际增益，不用默认值覆盖。
+
+每个新 HID 报告先扣除静止偏置、经过 deadzone 和轴映射，再比较两组三轴的 L2 范数，**不把灵敏度增益用于意图判断**。待输入时，某组强度严格超过另一组的 1.25 倍才开始运动；两组接近则保持待输入。运动中保留当前组，另一组超过当前组的 1.25 倍才切换；松手回到待输入。它是带迟滞的硬选择，不是混合两组动作的 softmax，也不增加等待窗口。提高比例会更抗抖但更难起动／切换，降低到 1 会更灵敏但更易跳变。选中组保留全部三轴和独立增益；切换时立即清空另一组，松手及 stale 后清空滤波和意图，避免 EMA 残留。互斥保证的是提交的动作，接触或控制器跟踪误差仍可能带来少量实际位姿耦合。
+
+UI 的 SpaceMouse 控制器设置新增“控制坐标”选择：
+
+- **世界坐标**（默认）：平移和旋转增量沿固定世界轴，与原控制方式一致；这里仍是增量控制，不是绝对目标位置。
+- **工具坐标**：每个控制步使用控制环境的最新末端姿态，将平移和旋转增量转换到世界坐标。工具轴随末端转动，适合配合手腕视角操作，但不等同于相机画面的方向。
+
+运行中可以切换；有输入时先显示待切换提示，松开摇杆、六轴回到校准后的 deadzone 内才生效，并清空旧滤波和意图。切换不改变夹爪、灵敏度或环境状态。转换使用 OSC 的实际缩放范围；超出世界轴动作限制时，对相应三轴组同比缩小以保留方向。GUI 采样日志还记录转换后的 `env_command_*` 和 `frame_mapping_limited`，session 保存实际控制坐标；旧记录默认世界坐标。FACTR、策略推理以及训练动作格式不受影响。独立测试通过上述 YAML 选择坐标，修改后重新启动。
+
+验收时加入“平移时故意轻微扭动、旋转时故意轻微推动、连续切换、松手、静止后重新输入”的操作，检查 `motion_intent` 和 command：不能同时包含非零平移与旋转；修改增益不应改变相同输入的意图。无 HID 设备时可运行合成输入的真实 MuJoCo 烟测（不加载 VLA），但它不能代替实体鼠标手感验收：
+
+```bash
+cd liberox-vla-adapter-terminal
+RUN_MUJOCO_SMOKE=1 MUJOCO_GL=egl PYTHONPATH=.:scripts \
+  conda run --no-capture-output -n vla-liberox python -m pytest tests/test_spacemouse_simulation.py -q
+```
 
 独立测试和 Web UI 复用同一个 `SpaceMouseInput`、轴映射、静止校准、按钮锁存和 250 ms stale deadman 实现，因此通过本节实机验收后无需维护第二套设备控制代码。
 
@@ -620,8 +649,8 @@ preview_width: 512
 preview_height: 512
 preview_fps: 10
 jpeg_quality: 85
-manual_translation_gain: 0.25
-manual_rotation_gain: 0.08
+manual_translation_gain: 0.5
+manual_rotation_gain: 0.25
 additional_tasks:
   - level: LEVEL1
     task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
@@ -664,7 +693,7 @@ LOADING → READY（人工接管倒计时）→ RUNNING → STOPPING → POSTPRO
 
 UI 启动后只探测控制器，不占用动作输出。选择 SpaceMouse 并连接后，控制器设置区显示已连接·待校准（`UNCALIBRATED`）；顶部只显示是否有控制器连接，点击“校准”并松开帽盖连续静止 2 秒即可。校准期间若任一轴超过 `neutral_max_abs`，静止进度会重置并提示松开帽盖，不再使分支进入 `ERROR`；30 秒内始终无法稳定才报告可重试的校准失败。一次成功校准会由全局控制器服务持续复用，设备拔插或 UI 服务重启后必须重新校准。FACTR 按官方整臂近似参考构型一次校准，不做帽盖静止或三步端点校准。
 
-点击 SpaceMouse 接管后，后端依次显示“读取轨迹、加载环境、恢复状态、准备预览”，取得有效首帧后进入 `READY`，显示清晰的 `3、2、1` 倒计时；倒计时结束前控制器保持 disarmed，机械臂不会运动。开始接管后左键张开夹爪，右键闭合；位移和旋转增益可在创建分支前调整，也可在运行时通过 `0.05..1.0` 的滑杆实时更新。顶部控制器 pill 显示输入样本年龄：绿色 `<50 ms`，黄色 `50–249 ms`，红色 `≥250 ms`、断连或读取错误；红色状态下六维运动自动归零。接管会话的 WebSocket 断开会安全停止分支并保存已有轨迹。
+点击 SpaceMouse 接管后，后端依次显示“读取轨迹、加载环境、恢复状态、准备预览”，取得有效首帧后进入 `READY`，显示清晰的 `3、2、1` 倒计时；倒计时结束前控制器保持 disarmed，机械臂不会运动。开始接管时保持前缀最后一条夹爪命令（没有前缀动作时默认打开），不再强制张开；左键张开夹爪，右键闭合，需新的按键边沿才切换。位移和旋转增益可在创建分支前调整，也可在运行时通过 `0.05..1.0` 的滑杆实时更新；控制器设置显示当前互斥模式和意图，状态显示通过原有轮询更新，不参与实时动作执行。顶部控制器 pill 显示输入样本年龄：绿色 `<50 ms`，黄色 `50–249 ms`，红色 `≥250 ms`、断连或读取错误；红色状态下六维运动自动归零。接管会话的 WebSocket 断开会安全停止分支并保存已有轨迹。
 
 `configs/ui_config.yaml` 的 `legacy_scan_roots` 会在启动时递归索引已有 `trajectory_*.npz`：
 

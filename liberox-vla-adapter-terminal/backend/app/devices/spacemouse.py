@@ -11,12 +11,16 @@ import importlib.metadata
 import os
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import numpy as np
 import yaml
+
+from .spacemouse_intent import SpaceMouseIntent
+from .spacemouse_motion import validate_control_frame
 
 
 DEFAULT_SPACEMOUSE_CONFIG = (
@@ -85,6 +89,9 @@ class SpaceMouseTestConfig:
     save_video: bool
     trajectory_plot: bool
     output_root: Path
+    motion_mode: str = "exclusive"
+    intent_switch_ratio: float = 1.25
+    control_frame: str = "world"
 
 
 def _strict_string(raw: dict[str, Any], key: str) -> str:
@@ -135,6 +142,10 @@ def load_spacemouse_config(
         raise TypeError("All SpaceMouse configuration keys must be strings")
 
     expected = {field.name for field in fields(SpaceMouseTestConfig)}
+    # Older device configs inherit the new mode; all other keys remain required.
+    raw.setdefault("motion_mode", "exclusive")
+    raw.setdefault("intent_switch_ratio", 1.25)
+    raw.setdefault("control_frame", "world")
     missing = sorted(expected - set(raw))
     unknown = sorted(set(raw) - expected)
     if missing:
@@ -196,6 +207,9 @@ def load_spacemouse_config(
         save_video=_strict_bool(raw, "save_video"),
         trajectory_plot=_strict_bool(raw, "trajectory_plot"),
         output_root=output_root.resolve(),
+        motion_mode=_strict_string(raw, "motion_mode"),
+        intent_switch_ratio=_strict_number(raw, "intent_switch_ratio"),
+        control_frame=validate_control_frame(_strict_string(raw, "control_frame")),
     )
 
     if config.mode not in VALID_MODES:
@@ -241,6 +255,7 @@ def load_spacemouse_config(
         raise ValueError("SpaceMouse key 'max_steps' must be >= 1")
     if not 0 <= config.countdown_seconds <= 10:
         raise ValueError("SpaceMouse key 'countdown_seconds' must be in [0, 10]")
+    SpaceMouseIntent(config.motion_mode, config.intent_switch_ratio)
     return config
 
 
@@ -258,6 +273,11 @@ class SpaceMouseSnapshot:
     connected: bool
     stale: bool
     error: str | None
+    motion_intent: str = "idle"
+    translation_strength: float = 0.0
+    rotation_strength: float = 0.0
+    control_frame: str = "world"
+    pending_control_frame: str | None = None
 
     @property
     def sample_age_seconds(self) -> float | None:
@@ -267,7 +287,7 @@ class SpaceMouseSnapshot:
 
 
 class SpaceMouseTransform:
-    """Bias correction, deadzone, axis mapping, gain, and optional EMA."""
+    """Bias / deadzone / mapping / intent gate / gain / optional EMA."""
 
     def __init__(self, config: SpaceMouseTestConfig):
         self.config = config
@@ -276,6 +296,7 @@ class SpaceMouseTransform:
         self._axis_indices = np.asarray([AXIS_NAMES.index(name) for name in config.axis_order])
         self._translation_gain = config.translation_gain
         self._rotation_gain = config.rotation_gain
+        self.intent = SpaceMouseIntent(config.motion_mode, config.intent_switch_ratio)
 
     @property
     def gains(self) -> tuple[float, float]:
@@ -303,7 +324,7 @@ class SpaceMouseTransform:
                 f"neutral_max_abs={self.config.neutral_max_abs:.4f}"
             )
         self.bias = np.median(values, axis=0)
-        self.filtered.fill(0.0)
+        self.reset_filter()
         return {
             "sample_count": int(len(values)),
             "bias": self.bias.tolist(),
@@ -313,6 +334,7 @@ class SpaceMouseTransform:
 
     def reset_filter(self) -> None:
         self.filtered.fill(0.0)
+        self.intent.reset()
 
     def apply(self, raw_axes: Iterable[float]) -> tuple[np.ndarray, np.ndarray]:
         raw = np.asarray(tuple(raw_axes), dtype=np.float64)
@@ -326,8 +348,13 @@ class SpaceMouseTransform:
             (magnitude[active] - self.config.deadzone) / (1.0 - self.config.deadzone)
         )
         mapped = deadzoned[self._axis_indices] * np.asarray(self.config.axis_signs)
+        mapped = self.intent.apply(mapped)
         mapped[:3] *= self._translation_gain
         mapped[3:] *= self._rotation_gain
+        # Release and the losing group stop immediately, even if firmware sends
+        # only one neutral report and then stays silent. EMA must not leak an old
+        # translation into a newly selected rotation (or vice versa).
+        self.filtered[mapped == 0.0] = 0.0
         alpha = self.config.smoothing_alpha
         self.filtered = alpha * mapped + (1.0 - alpha) * self.filtered
         return corrected, np.clip(self.filtered, -1.0, 1.0).copy()
@@ -364,7 +391,9 @@ class SpaceMouseInput:
         self._buttons: tuple[int, ...] = ()
         self._previous_buttons: tuple[int, ...] = ()
         self._gripper = -1.0
-        self._event_times: list[float] = []
+        self._control_frame = config.control_frame
+        self._pending_control_frame: str | None = None
+        self._event_times: deque[float] = deque(maxlen=4096)
         self._device_details: dict[str, Any] = {}
 
     def __enter__(self) -> "SpaceMouseInput":
@@ -626,6 +655,12 @@ class SpaceMouseInput:
     ) -> None:
         now = self._clock()
         with self._lock:
+            # Reset even if no consumer sampled the stale interval. A returning
+            # report must not inherit an old intent or smoothed command.
+            if (self._event_monotonic is not None
+                    and now - self._event_monotonic >= self.config.stale_timeout_ms / 1000.0):
+                self.transform.reset_filter()
+            self._apply_pending_frame(raw_axes)
             corrected, command = self.transform.apply(raw_axes)
             previous = self._previous_buttons
             left_pressed = len(buttons) > 0 and buttons[0] and (len(previous) < 1 or not previous[0])
@@ -750,7 +785,7 @@ class SpaceMouseInput:
         now = self._clock()
         with self._lock:
             age = None if self._event_monotonic is None else now - self._event_monotonic
-            stale = age is None or age > self.config.stale_timeout_ms / 1000.0
+            stale = age is None or age >= self.config.stale_timeout_ms / 1000.0
             command = self._command_axes.copy()
             if stale or not self._connected:
                 command.fill(0.0)
@@ -769,6 +804,11 @@ class SpaceMouseInput:
                 connected=self._connected,
                 stale=stale,
                 error=self._error,
+                motion_intent=self.transform.intent.selected,
+                translation_strength=self.transform.intent.translation_strength,
+                rotation_strength=self.transform.intent.rotation_strength,
+                control_frame=self._control_frame,
+                pending_control_frame=self._pending_control_frame,
             )
 
     def latest_action(self) -> np.ndarray:
@@ -779,11 +819,36 @@ class SpaceMouseInput:
         with self._lock:
             self.transform.set_gains(translation_gain, rotation_gain)
 
-    def reset_for_arm(self, gripper: float = -1.0) -> None:
+    def request_control_frame(self, frame: str) -> None:
+        """Switch on actual neutral input, never on gated/stale zero output."""
+        validate_control_frame(frame)
+        with self._lock:
+            self._pending_control_frame = frame if frame != self._control_frame else None
+            if self._connected:
+                self._apply_pending_frame(self._raw_axes)
+
+    def _apply_pending_frame(self, raw_axes) -> None:
+        # Caller holds the input lock. A previously observed neutral report is
+        # sufficient even when neutral firmware is silent; stale moving input
+        # and ambiguous intent are NOT neutral.
+        if self._pending_control_frame is not None and np.all(
+            np.abs(np.asarray(raw_axes) - self.transform.bias) <= self.config.deadzone
+        ):
+            self._control_frame = self._pending_control_frame
+            self._pending_control_frame = None
+            self._command_axes.fill(0.)
+            self.transform.reset_filter()
+
+    def reset_for_arm(self, gripper: float = -1.0, *, control_frame: str | None = None) -> None:
         """Discard idle input so a takeover always starts from zero motion."""
         if gripper not in {-1.0, 1.0}:
             raise ValueError("gripper must be -1.0 or +1.0")
+        if control_frame is not None:
+            validate_control_frame(control_frame)
         with self._lock:
+            if control_frame is not None:
+                self._control_frame = control_frame
+            self._pending_control_frame = None
             self._command_axes.fill(0.0)
             self.transform.reset_filter()
             self._gripper = gripper
@@ -792,17 +857,21 @@ class SpaceMouseInput:
     def diagnostics(self) -> dict[str, Any]:
         with self._lock:
             event_times = np.asarray(self._event_times, dtype=np.float64)
-            return {
+            result = {
                 **self._device_details,
-                "pyspacemouse_version": self.dependency_version(),
                 "axis_convention": self.config.axis_convention,
                 "axis_order": list(self.config.axis_order),
                 "axis_signs": list(self.config.axis_signs),
                 "connected_at_shutdown": self._connected,
-                "event_count": int(len(event_times)),
-                "event_times": event_times.copy(),
+                "event_count": self._sequence,
+                "event_window_count": len(event_times),
+                "event_times": event_times,
+                "motion_mode": self.config.motion_mode,
+                "intent_switch_ratio": self.config.intent_switch_ratio,
+                "control_frame": self._control_frame,
                 "reader_error": self._error,
-                "path_permissions": self.path_permissions(
-                    self._device_details.get("device_path")
-                ),
             }
+        # Dependency/filesystem inspection must not hold up the HID reader.
+        result["pyspacemouse_version"] = self.dependency_version()
+        result["path_permissions"] = self.path_permissions(result.get("device_path"))
+        return result

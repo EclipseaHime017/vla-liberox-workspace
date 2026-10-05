@@ -60,7 +60,7 @@ export type Bootstrap = {
       cameras: Array<{ id: string; label: string; policy_input: boolean }>;
       recorded_cameras: string[];
     };
-    manual: { translation_gain: number; rotation_gain: number };
+    manual: { translation_gain: number; rotation_gain: number; control_frame?: ControlFrame };
     spacemouse: {
       configured: boolean; dependency_version: string | null; config_error: string | null;
       device_name: string | null; vendor_id: number | null; product_id: number | null;
@@ -105,6 +105,8 @@ export type Session = {
   policy_id: string; policy_label: string | null; policy_base_checkpoint: string | null;
   policy_overlay: string | null; policy_compatibility_sha256: string | null;
   manual_translation_gain: number | null; manual_rotation_gain: number | null;
+  manual_control_frame?: ControlFrame | null;
+  manual_requested_control_frame?: ControlFrame | null;
   spacemouse_status: string | null; spacemouse_connected: boolean | null;
   spacemouse_stale: boolean | null; spacemouse_latency_ms: number | null;
   spacemouse_deadman_ms: number | null; status: string; created_at: string | null;
@@ -470,6 +472,7 @@ export type TensorBoardStatus = {
 };
 
 export type ControllerId = "spacemouse" | "factr";
+export type ControlFrame = "world" | "tool";
 
 export type ControllerStatus = {
   controller_id?: ControllerId;
@@ -483,6 +486,11 @@ export type ControllerStatus = {
   cycle_ms?: number | null;
   reference_joint_positions?: number[];
   translation_gain?: number; rotation_gain?: number;
+  motion_mode?: "exclusive" | "combined";
+  intent_switch_ratio?: number;
+  motion_intent?: "idle" | "translation" | "rotation" | "combined";
+  control_frame?: ControlFrame;
+  pending_control_frame?: ControlFrame | null;
 };
 
 export type FrameState = {

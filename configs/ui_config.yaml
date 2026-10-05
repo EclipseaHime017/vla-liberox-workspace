@@ -10,8 +10,8 @@ preview_width: 512
 preview_height: 512
 preview_fps: 10
 jpeg_quality: 85
-manual_translation_gain: 0.25
-manual_rotation_gain: 0.08
+manual_translation_gain: 0.5
+manual_rotation_gain: 0.25
 offline_rl_root: ../vla-adapter-rynn-iql
 train_environment: vla-liberox
 reward_environment: rynnvalue-reward
