@@ -396,7 +396,7 @@ mode: simulation
 再次运行相同命令即可在当前 `configs/config.yaml` 的 LEVEL、任务、seed 和第一个 benchmark init state 中控制机械臂。该模式不加载 VLA：
 
 - SpaceMouse 独立线程以约 1 ms 间隔非阻塞读取 HID，20 Hz 控制环在每个控制边界只取最新快照；
-- PySpaceMouse 2.0.0 固定输出 legacy 轴；本项目映射为右手系六维输入，默认映射是 `[legacy_y,-legacy_x,legacy_z,legacy_roll,legacy_pitch,-legacy_yaw]`；默认按世界坐标解释，也可选择工具坐标，最终执行和保存的始终是世界坐标 normalized OSC_POSE `[X,Y,Z,Rx,Ry,Rz,gripper]`；位移/旋转增益默认均为 `0.5`；
+- PySpaceMouse 2.0.0 固定输出 legacy 轴；本项目映射为右手系六维输入，默认映射是 `[legacy_y,-legacy_x,legacy_z,legacy_roll,legacy_pitch,-legacy_yaw]`；默认按世界坐标解释，也可选择工具坐标，最终执行和保存的始终是世界坐标 normalized OSC_POSE `[X,Y,Z,Rx,Ry,Rz,gripper]`；位移/旋转增益默认分别为 `0.5 / 0.25`；
 - 默认 `motion_mode: exclusive`：平移与旋转互斥，每次只放行其中一组三轴；左键将夹爪锁存为打开 `-1`，右键锁存为闭合 `+1`，运动不要求按住按钮；
 - 设备断连、读取异常或达到 `250 ms` 没有新 HID 报告时，六维运动归零，夹爪保持最后状态；静止设备恢复报告后可继续输入，不因正常静止反复要求校准；
 - `Ctrl+C`、关闭 MuJoCo Viewer 或达到 `max_steps` 会安全结束并保存已有轨迹；成功后仍记录到结束；
@@ -420,7 +420,7 @@ motion_mode: exclusive       # combined 恢复六轴联动，便于对照
 intent_switch_ratio: 1.25
 control_frame: world          # tool：平移和旋转均相对于当前末端工具坐标系
 translation_gain: 0.5
-rotation_gain: 0.5
+rotation_gain: 0.25
 ```
 
 页面内调整的灵敏度会继续用于下一次接管，浏览历史、重新校准或切换控制器再返回不会重置。重新加载页面时采用 YAML 默认值；若已有接管正在运行，则恢复该会话的实际增益，不用默认值覆盖。
@@ -650,7 +650,7 @@ preview_height: 512
 preview_fps: 10
 jpeg_quality: 85
 manual_translation_gain: 0.5
-manual_rotation_gain: 0.5
+manual_rotation_gain: 0.25
 additional_tasks:
   - level: LEVEL1
     task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet

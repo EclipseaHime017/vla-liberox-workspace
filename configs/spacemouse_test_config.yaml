@@ -20,7 +20,7 @@ axis_convention: ros
 axis_order: [y, x, z, roll, pitch, yaw]
 axis_signs: [1, -1, 1, 1, 1, -1]
 translation_gain: 0.5
-rotation_gain: 0.5
+rotation_gain: 0.25
 # Choose one motion group before applying gains. "combined" restores six-axis
 # control for comparison. In exclusive mode an idle/competing group must be
 # >1.25x stronger to start/switch; ambiguous idle input produces no motion.

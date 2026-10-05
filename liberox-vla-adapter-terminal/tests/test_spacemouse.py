@@ -33,7 +33,8 @@ def test_default_config_is_valid_and_targets_cabled_wireless_device():
     assert config.axis_signs == (1, -1, 1, 1, 1, -1)
     assert config.motion_mode == "exclusive"
     assert config.intent_switch_ratio == 1.25
-    assert config.translation_gain == config.rotation_gain == 0.5
+    assert config.translation_gain == 0.5
+    assert config.rotation_gain == 0.25
 
 
 def test_config_rejects_duplicate_unknown_and_invalid_axis_mapping(tmp_path: Path):

@@ -1,6 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CollectPage from "./CollectPage";
+import App from "../app/App";
 import { api } from "../api/client";
 import { getController, getControllers } from "../features/run-control/controller";
 import { sessionWebSocket } from "../api/websocket";
@@ -32,7 +33,7 @@ const bootstrap = {
   config: {
     max_steps: 300, open_loop_steps: 8, seed: 0, control_hz: 20, video_fps: 20,
     disabled_policy_cameras: [], preview: { width: 512, height: 512, stream_width: 1024, stream_height: 1024 },
-    manual: { translation_gain: 0.5, rotation_gain: 0.5 },
+    manual: { translation_gain: 0.5, rotation_gain: 0.25 },
   },
   model: { gpu: "cpu", checkpoint: "base", policy_label: "Base", action_schema: { predicted_chunk_size: 8 } },
   task: { task_id: "task", task_name: "pick", prompt: "pick bowl", level: "LEVEL1", init_state_index_min: 0 },
@@ -52,6 +53,7 @@ beforeEach(() => {
   vi.mocked(api).mockImplementation(async (path, options) => {
     if (path === "/api/draft") return { discarded: false };
     if (path === "/api/bootstrap") return bootstrap;
+    if (path === "/api/build-info") return {dist_fingerprint: "test-build"};
     if (path === "/api/sessions") return [source];
     if (path.includes("/frames/")) return { step: 0, time_seconds: 0 };
     if (path === "/api/sessions/source/branches") {
@@ -68,6 +70,30 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("collection controller integration", () => {
+  it("shows live status in the top bar without remounting the console when navigating", async () => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation(async (path, options) => path === "/api/sessions"
+      ? [{...source, id: "live", status: "RUNNING", control_mode: "manual", manual_source: "spacemouse",
+          manual_translation_gain: .5, manual_rotation_gain: .5}]
+      : original(path, options));
+    render(<App />);
+    const header = screen.getByRole("banner");
+    const stream = await screen.findByAltText("主视角、腕部、左侧和右侧实时画面");
+    const connection = within(header).getByLabelText("控制器连接状态");
+    expect(within(header).getByText("LIBERO-X仿真与干预控制台").tagName).toBe("STRONG");
+    expect(within(header).getByLabelText("系统状态").textContent).toContain("RUNNING · live");
+    expect(screen.queryByRole("heading", {level: 1})).toBeNull();
+    expect(screen.queryByText("LOCAL ROBOTICS WORKBENCH")).toBeNull();
+    const socket = vi.mocked(sessionWebSocket).mock.results[0].value as WebSocket;
+    fireEvent.click(screen.getByRole("button", {name: /设置/}));
+    expect(connection.closest("[hidden]")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", {name: /控制台/}));
+    expect(connection.closest("[hidden]")).toBeNull();
+    expect(screen.getByAltText("主视角、腕部、左侧和右侧实时画面")).toBe(stream);
+    expect(sessionWebSocket).toHaveBeenCalledTimes(1);
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
   it("shows recorded FACTR history like other manual sessions", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     vi.mocked(api).mockImplementation(async (path, options) => path === "/api/sessions"
@@ -151,7 +177,7 @@ describe("collection controller integration", () => {
     fireEvent.click(takeover);
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/source/branches", {
       method: "POST", body: JSON.stringify({resume_step: 0, control_mode: "manual", open_loop_steps: 8,
-        controller_id: "spacemouse", translation_gain: .5, rotation_gain: .5, control_frame: "tool"}),
+        controller_id: "spacemouse", translation_gain: .5, rotation_gain: .25, control_frame: "tool"}),
     }));
   });
 
@@ -198,7 +224,7 @@ describe("collection controller integration", () => {
     const translation = await screen.findByRole("slider", {name: "位移增益"}) as HTMLInputElement;
     const rotation = screen.getByRole("slider", {name: "旋转增益"}) as HTMLInputElement;
     expect(translation.value).toBe("0.5");
-    expect(rotation.value).toBe("0.5");
+    expect(rotation.value).toBe("0.25");
     fireEvent.change(translation, {target: {value: ".6"}});
     fireEvent.change(rotation, {target: {value: ".7"}});
     fireEvent.click(screen.getByRole("button", {name: /原始 · source /}));

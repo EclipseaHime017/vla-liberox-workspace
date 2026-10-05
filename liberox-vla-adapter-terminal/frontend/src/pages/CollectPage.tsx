@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   selectMainVideoArtifact,
   stepToVideoTime,
@@ -22,7 +23,7 @@ function fixed(values: number[] | null, digits = 4): string {
   return values ? values.map((value) => value.toFixed(digits)).join(", ") : "—";
 }
 
-function CollectPage() {
+function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | null }) {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [policyBranchDraft, setPolicyBranchDraft] = useState<PolicyBranchDraft | null>(null);
@@ -39,7 +40,7 @@ function CollectPage() {
   const [policyId, setPolicyId] = useState("base");
   const [sessionTaskFilter, setSessionTaskFilter] = useState<TaskScope>(ALL_TASK_SCOPE);
   const [translationGain, setTranslationGain] = useState(0.5);
-  const [rotationGain, setRotationGain] = useState(0.5);
+  const [rotationGain, setRotationGain] = useState(0.25);
   const [controlFrame, setControlFrame] = useState<ControlFrame>("world");
   const [controller, setController] = useState<ControllerStatus | null>(null);
   const [controllers, setControllers] = useState<ControllerStatus[]>([]);
@@ -53,7 +54,7 @@ function CollectPage() {
   const trajectoryVideo = useRef<HTMLVideoElement | null>(null);
   const gainRef = useRef({ translationGain, rotationGain });
   const controllerGains = useRef<Record<ControllerId, { translationGain: number; rotationGain: number }>>({
-    spacemouse: { translationGain: 0.5, rotationGain: 0.5 },
+    spacemouse: { translationGain: 0.5, rotationGain: 0.25 },
     factr: { translationGain: 0.25, rotationGain: 0.25 },
   });
 
@@ -530,30 +531,24 @@ function CollectPage() {
   const controllerLabel = CONTROLLER_LABELS[controllerId];
   const connection = controllerConnection(controllers.map((item) =>
     controller && item.controller_id === controller.controller_id ? controller : item));
+  const systemStatus = active ? active.status + " · " + active.id : "IDLE · 可开始";
+  const statusControls = <div className="state-pills">
+    <div className={"system-state controller-state " + connection.level} aria-label="控制器连接状态">
+      <span className="pulse" />{connection.text}
+    </div>
+    <div className={"system-state " + (active ? "running" : "")} aria-label="系统状态" title={systemStatus}>
+      <span className="pulse" />{systemStatus}
+    </div>
+    {(controller?.state === "UNCALIBRATED" || controller?.state === "ERROR") && <button
+      className="calibrate-shortcut"
+      disabled={Boolean(active) || (!controller.connected && controller.state !== "ERROR") || controllerBusy}
+      onClick={() => void calibrate()}
+    >校准</button>}
+  </div>;
 
   return (
     <section className="collect-page">
-      <header>
-        <div>
-          <p className="eyebrow">LOCAL ROBOTICS WORKBENCH</p>
-          <h1>LIBERO-X 仿真与干预控制台</h1>
-          <p className="subtitle">单会话 · 20 Hz 实时控制 · 精确状态回溯</p>
-        </div>
-        <div className="state-pills">
-          <div className={"system-state controller-state " + connection.level} aria-label="控制器连接状态">
-            <span className="pulse" />{connection.text}
-          </div>
-          <div className={"system-state " + (active ? "running" : "")}>
-            <span className="pulse" />
-            {active ? active.status + " · " + active.id : "IDLE · 可开始"}
-          </div>
-          {(controller?.state === "UNCALIBRATED" || controller?.state === "ERROR") && <button
-            className="calibrate-shortcut"
-            disabled={Boolean(active) || (!controller.connected && controller.state !== "ERROR") || controllerBusy}
-            onClick={() => void calibrate()}
-          >校准</button>}
-        </div>
-      </header>
+      {statusTarget ? createPortal(statusControls, statusTarget) : statusControls}
 
       {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
 
