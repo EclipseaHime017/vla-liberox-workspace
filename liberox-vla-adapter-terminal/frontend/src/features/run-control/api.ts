@@ -70,7 +70,7 @@ export const createTrainingDataset = (body: {
   name: string; task_id: string; selection: DatasetSelection;
   validation_fraction: number; split_seed: number; success_consecutive_steps: number;
   include_post_success?: boolean;
-}) => api<TrainingDataset>("/api/training-datasets", {
+}) => api<OfflineJob>("/api/training-datasets", {
   method: "POST", body: JSON.stringify(body),
 });
 
@@ -78,7 +78,7 @@ export const deriveTrainingDataset = (parentId: string, body: {
   name: string; selection: DatasetSelection; validation_fraction: number;
   split_seed: number; success_consecutive_steps: number;
   include_post_success?: boolean;
-}) => api<TrainingDataset>(`/api/training-datasets/${encodeURIComponent(parentId)}/derive`, {
+}) => api<OfflineJob>(`/api/training-datasets/${encodeURIComponent(parentId)}/derive`, {
   method: "POST", body: JSON.stringify(body),
 });
 
@@ -94,7 +94,7 @@ export const listTrainingDatasets = (taskId?: string, taskIds?: string[]) => {
   const query = taskQuery(taskId, taskIds);
   return api<TrainingDataset[]>("/api/training-datasets" + (query.size ? `?${query}` : ""));
 };
-export const verifyTrainingDataset = (id: string) => api<TrainingDataset>(
+export const verifyTrainingDataset = (id: string) => api<OfflineJob>(
   `/api/training-datasets/${encodeURIComponent(id)}/verify`, { method: "POST" },
 );
 
@@ -142,9 +142,9 @@ export const enqueueTraining = (datasetId: string, parameters: Record<string, un
   });
 export const getTrainingQueue = () => api<import("./types").TrainingQueueState>("/api/training-queue");
 export const getEvaluationQueue = () => api<import("./types").EvaluationQueueState>("/api/evaluations/queue");
-export const enqueueEvaluation = (config: EvaluationConfig, scheduleSha256: string) =>
+export const enqueueEvaluation = (config: EvaluationConfig, scheduleSha256: string, policyContentSha256: string) =>
   api<OfflineJob>("/api/evaluations/queue", {
-    method: "POST", body: JSON.stringify({ ...config, schedule_sha256: scheduleSha256 }),
+    method: "POST", body: JSON.stringify({ ...config, schedule_sha256: scheduleSha256, policy_content_sha256: policyContentSha256 }),
   });
 export const getTensorBoard = () => api<TensorBoardStatus>("/api/tensorboard");
 export const startTensorBoard = () => api<TensorBoardStatus>(

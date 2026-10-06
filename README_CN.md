@@ -1,12 +1,12 @@
 # LIBERO-X × VLA-Adapter Terminal
 
-当前版本：**v0.6.0**
+当前版本：**v0.7.0**
 
 本版主要内容：
 
-1. 融合 Stage 与 RynnValue 奖励，通过 α、κ 配置相加或 chunk-based 相乘的 Final Reward。
-2. 统一数据集评价配置，支持复用已有输出重算 Final Reward 或串行执行 All，保护原始评价与历史训练。
-3. 详情分别显示 Original Final Reward 三组件和融合后的 Final Reward，训练不再单独选择奖励类型。
+1. 接入官方 π₀.₅-LIBERO，支持独立环境推理、动作专家／全量微调和 BC/IQL 训练。
+2. 统一仿真、数据处理、评价、训练和测试工作队列，避免资源竞态；人工接管仍需空闲资源并显式启动。
+3. 加强模型身份与数据完整性校验，修复历史会话恢复及训练兼容问题，避免错误使用其他模型。
 
 这是一个面向 Franka/LIBERO-X 的本机仿真、VLA 评测、轨迹回溯、SpaceMouse / FACTR 人工接管与数据管理终端。UI 按「任务 → 难度 → 提示词」提供五个任务族：原有三个任务的 LEVEL1–4 官方变体，以及两个 LEVEL1 长程组合任务，暂不开放 LEVEL5；下文保留 LEVEL1 黑碗任务作为 CLI 配置示例。实体控制器能力仍需在连接对应硬件后验收。
 
@@ -1157,11 +1157,53 @@ IQL 后者还决定何时启用 advantage 权重，BC 则始终等权。不要�
 
 模型配置独立于 BC/IQL。在训练页依次选择「基础模型 → 训练方法」，再展开「模型训练配置」及对应方法的高级参数：
 
-- **Backbone 适配方式**：冻结 / LoRA / 全量微调，三选一，避免“冻结但又开启 LoRA”的歧义。
-- **Action head / Proprio projector**：分别选择训练或冻结；全部冻结会拒绝开始训练。
+- **VLA-Adapter Backbone 适配方式**：冻结 / LoRA / 全量微调，三选一，避免“冻结但又开启 LoRA”的歧义。
+- **VLA-Adapter Action head / Proprio projector**：分别选择训练或冻结；全部冻结会拒绝开始训练。
 - **LoRA**：仅选择该方式时显示 rank、alpha、dropout。参照 [VLA-Adapter 官方 finetune](https://github.com/OpenHelix-Team/VLA-Adapter/blob/main/vla-scripts/finetune.py)，默认 rank=32、alpha=64、dropout=0、Gaussian 初始化、`all-linear`，同时训练 action queries。这里的 Backbone 包含视觉塔、多模态投影、语言模型和 action queries，不仅是 Qwen；Proprio projector 是独立组件。
 
-目前模型目录只注册已支持的 `vla_adapter`（Object-Pro），不会把尚未适配的 foundation model 显示成可用模型。`models.py` 管理轻量能力注册与配置、按模型选择前向后端；`model_adaptation.py` 管理冻结、LoRA、参数范围与 Backbone 保存。前端配置请求不加载 Torch 或模型，模型设置不会改变 reward、BC loss 或 IQL 更新顺序。
+模型目录支持 `vla_adapter`（Object-Pro）和 `pi05`（官方 π₀.₅-LIBERO）。`models.py` 管理轻量能力注册、配置与后端分发；各模型后端负责自身动作目标、冻结范围和权重保存。配置查询不加载 Torch 或模型；切换模型不改变 reward、Replay 边界或 IQL 的 Q/V 更新，但 actor 使用各模型适用的监督目标（VLA-Adapter 为 masked L1，π₀.₅ 为 masked flow-matching MSE）。
+
+**π₀.₅-LIBERO**：配置见 [`configs/models/pi05.yaml`](vla-adapter-rynn-iql/configs/models/pi05.yaml)，[安装与使用](vla-adapter-rynn-iql/README.md#π₀₅-libero)。先在独立 `pi05` 环境安装并转换官方权重，再在仿真策略或训练基础模型中选择 π₀.₅；未安装、权重缺失或身份不匹配时明确失败，不回退到 VLA-Adapter。
+
+- 默认动作专家微调：冻结 PaliGemma 视觉语言主干，训练 action expert、动作输入/输出投影和时间 MLP；不虚构独立的 proprio projector。
+- 全量微调：训练整个 π₀.₅；首版不提供 PyTorch LoRA，也不修改 `server` 分支的多卡实现。本机 24 GB 实测在 AdamW 状态分配阶段显存不足，需要更大显存设备，不会自动退回冻结模式。
+- BC 使用等权 flow loss；IQL 使用当前算法产生的 detached advantage weight 加权同一 flow loss。这是平台的 π₀.₅ actor 扩展，不宣称为 OpenPI 官方 IQL 复现。
+- 官方模型内部仍预测 10 步、32 维；平台对外提供前 8 步、7 维动作，保留原 8 步 replay 与短 chunk 实际长度。训练时仅监督实际有效步的前 7 维，不把补齐值当标签。相机方向、状态和归一化遵循官方 LIBERO 输入，无 VLA 夹爪翻转。
+- 推理进程只在选中模型时启动，并受现有任务资源队列管理；切换模型释放旧进程。每个回合将仿真 seed 传入该进程控制 flow sampling，不继承训练 seed。权重与 normalization 的哈希随训练、导出和评测记录固定。
+
+在工作区根目录完成一次安装与权重转换，不升级原 `vla-liberox` 环境：
+
+```bash
+conda create -n pi05 python=3.11 pip -y
+conda run -n pi05 python -m pip install uv
+conda run --no-capture-output -n pi05 python vla-adapter-rynn-iql/scripts/setup_pi05.py
+conda run --no-capture-output -n pi05 python vla-adapter-rynn-iql/scripts/prepare_pi05.py
+```
+
+安装器固定 OpenPI commit、Transformers 替换文件和支持 Blackwell 的 PyTorch 2.7.1 CUDA 12.8 构建，并检查依赖一致性。转换默认采用官方 BF16，下载约 11.6 GiB，另生成约 6.8 GiB 权重；还需为环境、转换中间产物和训练 checkpoint 预留空间。转换会大量使用主机 RAM，本机约 32 GB 内存验收时使用了 swap；`--precision float32` 需要更多主机内存。转换目录默认是 `weights/pi05_libero_torch`，已存在时拒绝覆盖。
+
+重启 UI 后，仿真策略选择「π₀.₅ · LIBERO」，训练页选择同名基础模型和 BC/IQL，再设置动作专家或全量微调。模型预设在 `configs/models/pi05.yaml`，相对路径以该文件所在目录解析；`environment: pi05` 对应独立环境。部署训练后的 overlay 时，需要连同**同一份已转换的基础权重、normalization 和 `pi05_identity.json`**一起复制，不能用另一次转换结果代替。
+
+终端流水线修改 `vla-adapter-rynn-iql/configs/terminal_pipeline.yaml` 的相关字段，其余数据选择参数保留：
+
+```yaml
+base_config: ./training/iql.yaml  # BC 改为 ./training/bc.yaml
+environments:
+  prepare: vla-liberox
+  annotate: rynnvalue-reward
+  train: pi05
+overrides:
+  model:
+    family: pi05
+    backbone: frozen  # frozen: 动作专家；full: 全量
+```
+
+```bash
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train_terminal.py \
+  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml
+```
+
+IQL 复用有效评价，BC 自动跳过奖励相关阶段。2026-10-06 在 RTX 5090 Laptop 24 GB 上完成基础／导出模型推理、BC/IQL 各一次更新及 checkpoint 恢复、16 步 LIBERO-X 仿真；batch=1 动作专家训练峰值 allocated 显存约 11.1 GiB。这些仅为功能验收，不代表收敛、任务成功率或稳定吞吐。
 
 YAML 使用顶层 `model`，同时适用于 `training/iql.yaml` 与 `training/bc.yaml`；终端流水线使用 `overrides.model`。旧 `vla.freeze_backbone` 仍兼容，无新配置时 true 对应 frozen、false 对应 full；新 `model.backbone` 优先。默认配置如下，IQL 的双 Q、value 和 target 仍独立训练：
 
@@ -1615,7 +1657,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-liberox python -m pytest -q
 
 ### 4.9 在 Web UI 中创建数据集、标注与训练
 
-LIBERO Studio 已把 CLI 的 prepare、RynnValue 轨迹评价、奖励派生和 IQL 训练编排为可恢复的后台任务，但仍保持两个 Conda 环境隔离：prepare/奖励派生/训练运行于 `vla-liberox`，只有 4B 模型评价运行于 `rynnvalue-reward`。浏览器不会接收或执行任意配置路径/命令；后端只根据表单白名单生成并保存 `effective_config.yaml`。
+LIBERO Studio 将 prepare、轨迹评价、奖励派生和 BC/IQL 训练编排为后台任务，依赖保持隔离：prepare/奖励派生/VLA-Adapter 训练运行于 `vla-liberox`，π₀.₅ 训练与模型推理运行于 `pi05`，两种评价器分别使用 `rynnvalue-reward` 和 `robometer-reward`。浏览器不会接收或执行任意配置路径/命令；后端只根据表单白名单生成并保存 `effective_config.yaml`。
 
 使用流程如下：
 
@@ -1637,7 +1679,7 @@ LIBERO Studio 已把 CLI 的 prepare、RynnValue 轨迹评价、奖励派生和 
 
 TensorBoard 按需由平台用 `vla-liberox` 启动并覆盖所有受管训练目录，固定访问 `http://127.0.0.1:6006/`。它不占用 GPU 任务锁，可与仿真并存；若端口被其他服务占用，页面会明确报错而不会结束那个进程。
 
-需要 GPU 的仿真、模型评价、训练和批量测试共享跨进程 GPU 文件锁；直接启动的冲突请求返回 `409`，已注册的训练与测试则等待资源并按共同注册顺序串行执行。开始这些离线 GPU 任务前平台会卸载驻留 VLA，完成后不自动重载，下一次仿真按需加载。Final Reward 重算不加载模型、不占用 GPU 锁，仍受后台任务调度保护。后台任务使用独立进程组，PID、心跳、日志与状态均落盘，所以 UI 后端重启不会主动终止它。TensorBoard 是只读进程，不占用 GPU 锁。
+推理仿真、数据集处理、模型评价、训练和批量测试共用后端工作队列，按注册顺序串行执行并共享跨进程资源锁。队列仍显示在训练、测试等任务页面底部，不设置独立侧栏页面。人工接管不进入队列，资源忙时明确拒绝，不会在无人确认时自动启动。Final Reward 重算不加载模型，仍参与队列互斥，避免与训练或数据修改并发。需要切换到离线 GPU 作业时卸载驻留模型，之后按需加载。独立后台进程的 PID、心跳、日志与状态落盘，UI 后端重启不会主动终止它；依赖后端内存执行的仿真／本地任务中断后需要重新注册。TensorBoard 为只读进程，不占资源锁。
 
 平台持久化目录为：
 

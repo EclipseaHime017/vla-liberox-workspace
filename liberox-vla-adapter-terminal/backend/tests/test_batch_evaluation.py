@@ -197,6 +197,7 @@ def test_effective_yaml_is_strict_and_schedule_is_frozen(tmp_path: Path):
         },
         "policy_snapshot": {
             "policy_id": "base", "label": "Base", "base_checkpoint": "repo/model",
+            "family": "vla_adapter", "content_sha256": "a" * 64, "base_revision": "b" * 40,
             "stats_key": "libero_object", "manifest": None, "action_head": None,
             "proprio_projector": None, "training_step": None,
             "compatibility_sha256": None,
@@ -236,6 +237,7 @@ def test_setup_failure_persists_terminal_manifest(tmp_path: Path, monkeypatch):
         },
         "policy_snapshot": {
             "policy_id": "base", "label": "Base", "base_checkpoint": "model",
+            "family": "vla_adapter", "content_sha256": "a" * 64, "base_revision": "b" * 40,
             "stats_key": "stats", "manifest": None, "action_head": None,
             "proprio_projector": None, "training_step": None,
             "compatibility_sha256": None,

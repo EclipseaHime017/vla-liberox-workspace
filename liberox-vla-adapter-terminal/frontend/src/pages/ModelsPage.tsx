@@ -55,8 +55,10 @@ export function ModelsPage() {
         <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd><dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
         {detail.model_config && <dl className="model-properties">
           <dt>Backbone</dt><dd>{{ frozen: "冻结", lora: "LoRA", full: "全量微调" }[detail.model_config.backbone]}</dd>
-          <dt>Action head</dt><dd>{detail.model_config.action_head === "train" ? "训练" : "冻结"}</dd>
-          <dt>Proprio projector</dt><dd>{detail.model_config.proprio_projector === "train" ? "训练" : "冻结"}</dd>
+          {detail.model_config.family === "pi05" ? <><dt>动作专家</dt><dd>{detail.kind === "base" ? "官方预训练权重" : "Flow-matching 微调"}</dd></> : <>
+            <dt>Action head</dt><dd>{detail.model_config.action_head === "train" ? "训练" : "冻结"}</dd>
+            <dt>Proprio projector</dt><dd>{detail.model_config.proprio_projector === "train" ? "训练" : "冻结"}</dd>
+          </>}
           {detail.model_config.backbone === "lora" && detail.model_config.lora && <>
             <dt>LoRA 参数</dt><dd>rank {detail.model_config.lora.rank} · alpha {detail.model_config.lora.alpha} · dropout {detail.model_config.lora.dropout}</dd>
           </>}

@@ -17,10 +17,11 @@ from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, load_train_config
 from vla_rynn_iql.training import TrainingCancelled, request_training_stop, train
 from vla_rynn_iql.runtime import run_cuda_stage
 from vla_rynn_iql.methods import training_method
+from vla_rynn_iql.models import model_config
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Post-train VLA-Adapter with IQL or behavior cloning")
+    parser = argparse.ArgumentParser(description="Post-train the selected model with IQL or behavior cloning")
     parser.add_argument("--config", type=Path, default=DEFAULT_TRAIN_CONFIG)
     parser.add_argument(
         "--result-file", type=Path,
@@ -32,7 +33,10 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: request_training_stop())
     signal.signal(signal.SIGINT, lambda *_: request_training_stop())
     try:
-        policy = run_cuda_stage(f"VLA-Adapter {training_method(config.raw).name.upper()} post-training", lambda: train(config))
+        policy = run_cuda_stage(
+            f"{model_config(config.raw)['family']} {training_method(config.raw).name.upper()} post-training",
+            lambda: train(config),
+        )
     except TrainingCancelled:
         return 130
     print(policy)

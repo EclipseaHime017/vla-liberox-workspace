@@ -45,6 +45,8 @@ h2 { font-size: 16px; letter-spacing: -.01em; }
 .controller-state.red .pulse { background: #ff453a; }
 .error-banner { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 16px; padding: 12px 14px; border: 1px solid rgba(215,0,21,.18); border-radius: 12px; background: #fff1f2; color: #a50011; }
 .error-banner button { border: 0; background: transparent; }
+.warning-banner { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 12px 14px; border: 1px solid #ead4a4; border-radius: 12px; background: #fff9e8; color: #855b09; }
+.warning-banner button { margin-left: auto; border: 0; background: transparent; color: inherit; }
 
 .surface, .info-card, .panel, .path-card { background: var(--surface); border: 1px solid rgba(0,0,0,.075); box-shadow: var(--shadow); backdrop-filter: blur(22px) saturate(150%); }
 .metadata-grid { display: grid; grid-template-columns: 1.5fr .55fr 2fr 1fr 1fr; gap: 10px; margin-bottom: 16px; }

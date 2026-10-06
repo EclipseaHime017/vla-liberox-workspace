@@ -46,6 +46,9 @@ class FakeTaskCatalog:
 
 
 class FakePolicyCatalog:
+    def select(self, policy_id):
+        return self.entry(policy_id)
+
     def refresh(self):
         pass
 
@@ -63,6 +66,7 @@ class FakePolicyCatalog:
             proprio_projector=None,
             training_step=None,
             compatibility_sha256=None,
+            base_revision="a" * 40,
         )
 
 
@@ -82,6 +86,7 @@ class FakeManager:
 def make_service(tmp_path: Path) -> OfflineJobService:
     project_root = tmp_path / "dataset-root" / "projects" / "test"
     config = SimpleNamespace(
+        dataset_root=tmp_path / "dataset-root",
         project_root=project_root,
         catalog_path=tmp_path / "dataset-root" / "catalog.sqlite3",
         project_id="test",

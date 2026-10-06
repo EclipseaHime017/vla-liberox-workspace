@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -18,6 +20,13 @@ class ModelDefinition:
 MODELS = {
     "vla_adapter": ModelDefinition("vla_adapter", "VLA-Adapter · Object-Pro",
                                    "vla_rynn_iql.vla_adapter", ("frozen", "lora", "full")),
+    "pi05": ModelDefinition("pi05", "π₀.₅ · LIBERO", "vla_rynn_iql.pi05", ("frozen", "full")),
+}
+PI05_DEFAULT_MODEL = {
+    "family": "pi05", "backbone": "frozen",
+    "base_checkpoint": str(Path(__file__).resolve().parents[3] / "weights/pi05_libero_torch"),
+    "stats_key": "physical-intelligence/libero", "environment": "pi05",
+    "base_revision": None, "num_inference_steps": 10,
 }
 DEFAULT_MODEL = {
     "family": "vla_adapter", "backbone": "frozen", "action_head": "train",
@@ -37,6 +46,25 @@ def model_config(raw: dict[str, Any]) -> dict[str, Any]:
     supplied = raw.get("model", {})
     if not isinstance(supplied, dict):
         raise TypeError("model must be a mapping")
+    if supplied.get("family") == "pi05":
+        unknown = supplied.keys() - PI05_DEFAULT_MODEL.keys()
+        if unknown:
+            raise ValueError(f"Unknown π₀.₅ model keys: {sorted(unknown)}")
+        result = {**PI05_DEFAULT_MODEL, **supplied}
+        if result["backbone"] not in MODELS["pi05"].backbone_modes:
+            raise ValueError("π₀.₅ supports frozen VLM/action expert training or full fine-tuning; not LoRA")
+        for key in ("base_checkpoint", "environment"):
+            if not isinstance(result[key], str) or not result[key].strip():
+                raise ValueError(f"model.{key} must be a non-empty string")
+        if re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", result["environment"]) is None:
+            raise ValueError("model.environment must be a Conda environment name")
+        if result["stats_key"] != PI05_DEFAULT_MODEL["stats_key"]:
+            raise ValueError("π₀.₅-LIBERO requires its own physical-intelligence/libero normalization assets")
+        if result["base_revision"] is not None and re.fullmatch(r"[0-9a-f]{64}", str(result["base_revision"])) is None:
+            raise ValueError("model.base_revision must be a π₀.₅ identity SHA256 or null")
+        if type(result["num_inference_steps"]) is not int or not 1 <= result["num_inference_steps"] <= 100:
+            raise ValueError("model.num_inference_steps must be in 1..100")
+        return result
     unknown = supplied.keys() - DEFAULT_MODEL.keys()
     if unknown:
         raise ValueError(f"Unknown model keys: {sorted(unknown)}")
@@ -85,22 +113,29 @@ def model_signature(raw: dict[str, Any]) -> dict[str, Any]:
     settings = model_config(raw)
     # Checkpoint/stats identity is already stored separately in checkpoint metadata.
     for key in ("base_checkpoint", "stats_key", "use_pro_version"):
-        settings.pop(key)
+        settings.pop(key, None)
     if settings["backbone"] != "lora":
-        settings.pop("lora")
+        settings.pop("lora", None)
+    settings.pop("environment", None)
+    settings.pop("base_revision", None)
     return settings
 
 
 def model_parameters(raw: dict[str, Any]) -> dict[str, Any]:
     settings = model_config(raw)
     return {name: settings[path[0]] if len(path) == 1 else settings[path[0]][path[1]]
-            for name, path in MODEL_PARAMETER_PATHS.items()}
+            for name, path in MODEL_PARAMETER_PATHS.items() if path[0] in settings}
 
 
 def apply_model_parameters(raw: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
     settings = model_config(raw)
+    family = parameters.get("model_family", settings["family"])
+    if family != settings["family"]:
+        settings = model_config({"model": {"family": family}})
     for name, path in MODEL_PARAMETER_PATHS.items():
         if name in parameters:
+            if path[0] not in settings:
+                raise ValueError(f"{name} is not supported by {family}")
             if len(path) == 1:
                 settings[path[0]] = parameters[name]
             else:

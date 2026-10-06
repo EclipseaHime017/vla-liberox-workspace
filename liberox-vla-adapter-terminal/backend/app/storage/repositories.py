@@ -245,9 +245,7 @@ class OfflineJobRepository:
 
     def queue_ids(self, *, kind: str | None = None, pending_only: bool = False) -> list[str]:
         """All pending runs plus a bounded recent history, in registration order."""
-        if kind not in {None, "training", "evaluation"}:
-            raise ValueError("Unsupported queue kind")
-        kind_filter = "kind IN ('training','evaluation')" if kind is None else "kind=?"
+        kind_filter = "1=1" if kind is None else "kind=?"
         parameters = (self.project_id,) if kind is None else (self.project_id, kind)
         with connect(self.database_path) as database:
             if pending_only:

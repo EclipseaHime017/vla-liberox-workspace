@@ -59,15 +59,26 @@ class ActionDataset(Dataset):
             if transitions:
                 next_agent = policy_view(agent_raw[end], episode["observation_orientation"])
                 next_wrist = policy_view(wrist_raw[end], episode["observation_orientation"])
-        proprio = normalize_with_stats(proprio_from_trajectory(trajectory), self.proprio_stats)
+        raw_proprio = proprio_from_trajectory(trajectory)
+        if self.action_stats.get("codec") == "openpi_quantile":
+            from .pi05 import normalize
+            proprio = normalize(raw_proprio, self.proprio_stats)
+            encoded_actions = normalize(trajectory["env_action"][start:end], self.action_stats)
+        else:
+            proprio = normalize_with_stats(raw_proprio, self.proprio_stats)
+            encoded_actions = env_to_dataset_actions(trajectory["env_action"][start:end], self.action_stats)
         actions = np.zeros((self.manifest["action_horizon"], self.manifest["action_dim"]), dtype=np.float32)
         action_mask = np.zeros(self.manifest["action_horizon"], dtype=bool)
-        actions[:length] = env_to_dataset_actions(trajectory["env_action"][start:end], self.action_stats)
+        actions[:length] = encoded_actions
+        raw_actions = np.zeros_like(actions)
+        raw_actions[:length] = trajectory["env_action"][start:end]
         action_mask[:length] = True
         # The selected replay endpoint is terminal in either mode. Reward arrays
         # retain full-recording indices and never need a model re-evaluation.
         terminal = end == replay_end_step(episode, self.include_post_success)
         sample = {
+            "raw_proprio": torch.from_numpy(raw_proprio[start].astype(np.float32)),
+            "raw_actions": torch.from_numpy(raw_actions),
             "proprio": torch.from_numpy(proprio[start]),
             "actions": torch.from_numpy(actions),
             "action_mask": torch.from_numpy(action_mask),

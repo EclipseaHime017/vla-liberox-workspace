@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from backend.app.services.trajectory_evaluation_service import (
     EVALUATION_SCHEMA_VERSION,
@@ -43,6 +44,8 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
         gripper_qpos=np.zeros((3, 2), np.float32),
     )
     np.savez_compressed(observations, agentview_image=np.zeros((3, 2, 2, 3), np.uint8))
+    source_manifest = episode.parent.parent / "run.json"
+    source_manifest.write_text(json.dumps({"id": "run-1", "task": "pick"}))
     annotation = tmp_path / "cache.npz"
     np.savez_compressed(
         annotation,
@@ -63,6 +66,8 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
             "run_id": "run-1", "trajectory_path": str(trajectory),
             "trajectory_sha256": sha(trajectory),
             "observations_sha256": sha(observations),
+            "observations_path": str(observations), "source_manifest": str(source_manifest),
+            "source_manifest_sha256": sha(source_manifest), "prompt": "pick",
         }],
     }), encoding="utf-8")
     rewards = tmp_path / "rewards.json"
@@ -117,3 +122,16 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
             "accumulate_primitive_steps": False,
             "description": None,
     }
+    assert service.exists(run)
+    original = observations.read_bytes()
+    observations.write_bytes(original + b"changed")
+    assert not service.exists(run)
+    saved = (episode / SIDECAR_NAME).read_bytes()
+    with pytest.raises(ValueError, match="Source changed"):
+        service.bind(prepared, rewards, overwrite=True)
+    assert (episode / SIDECAR_NAME).read_bytes() == saved
+    observations.write_bytes(original)
+    assert service.exists(run)
+    source_manifest.write_text(json.dumps({"id": "run-1", "task": "different"}))
+    assert not service.exists(run)
+    assert not TrajectoryEvaluationService(Runs(run), tmp_path).exists(run)

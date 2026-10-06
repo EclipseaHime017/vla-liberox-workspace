@@ -10,6 +10,11 @@ from .models import TrainingRunRequest
 router = APIRouter(prefix="/api", tags=["offline-jobs"])
 
 
+@router.get("/work-queue")
+async def work_queue(request: Request):
+    return await run_in_threadpool(offline_job_service(request)._job_queue)
+
+
 @router.get("/jobs")
 async def jobs(request: Request):
     return offline_job_service(request).list()
@@ -45,7 +50,7 @@ async def stop(job_id: str, request: Request):
 @router.get("/training/defaults")
 async def defaults(
     request: Request, dataset_id: str | None = Query(default=None), reward_source: str | None = Query(default=None),
-    algorithm: str = "iql", model_family: str | None = Query(default=None),
+    algorithm: str = "iql", model_family: str | None = None,
 ):
     try:
         return await run_in_threadpool(offline_job_service(request).defaults, dataset_id, reward_source, algorithm, model_family)

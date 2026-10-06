@@ -58,9 +58,9 @@ export function useEvaluationQueue(onChanged: () => void, onError: (message: str
     return () => { current = false; alive.current = false; window.clearTimeout(timer); };
   }, []);
 
-  const register = async (config: EvaluationConfig, hash: string) => {
+  const register = async (config: EvaluationConfig, hash: string, policyHash: string) => {
     mutation.current += 1;
-    const next = await enqueueEvaluation(config, hash);
+    const next = await enqueueEvaluation(config, hash, policyHash);
     mutation.current += 1;
     if (!alive.current) return;
     statuses.current.set(next.id, next.status);

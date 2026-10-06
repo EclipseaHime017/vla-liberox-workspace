@@ -236,7 +236,7 @@ describe("dataset evaluation configuration", () => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
     vi.mocked(api.previewTrainingDataset).mockResolvedValue({ task_id: "task", eligible_count: 1, selected_count: 1,
       action_count: 16, chunk_count: 2, categories: {}, run_ids: ["run"], runs: [] });
-    vi.mocked(api.createTrainingDataset).mockResolvedValue({ id: "frozen", annotation_status: "NOT_STARTED" } as TrainingDataset);
+    vi.mocked(api.createTrainingDataset).mockResolvedValue({ id: "freeze-job", kind: "dataset", status: "QUEUED", parameters: {} } as Awaited<ReturnType<typeof api.createTrainingDataset>>);
     render(<DatasetPage />);
     fireEvent.click(await screen.findByRole("button", { name: "打包训练数据集" }));
     fireEvent.click(screen.getByRole("button", { name: "创建训练数据集" }));

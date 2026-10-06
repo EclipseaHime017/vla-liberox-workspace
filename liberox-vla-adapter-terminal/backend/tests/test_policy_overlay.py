@@ -104,6 +104,7 @@ def test_provider_switches_components_and_restores_base(tmp_path: Path):
     catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
     provider = object.__new__(VLAAdapterPolicyProvider)
     provider.runtime = SimpleNamespace(torch=torch)
+    provider.catalog = catalog
     provider.components = SimpleNamespace(
         action_head=torch.nn.Linear(2, 2),
         proprio_projector=torch.nn.Linear(2, 2),
@@ -138,6 +139,35 @@ def test_provider_revalidates_overlay_at_load_boundary(tmp_path: Path):
     (manifest.parent / "action_head.pt").write_bytes(b"changed-after-draft")
     with pytest.raises(ValueError, match="hash mismatch"):
         provider.load(8, "trained")
+
+
+def test_same_id_replaced_weights_reload_but_frozen_identity_refuses(tmp_path):
+    manifest = _overlay(tmp_path)
+    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    provider = object.__new__(VLAAdapterPolicyProvider)
+    provider.runtime = SimpleNamespace(torch=torch)
+    provider.catalog = catalog
+    provider.components = SimpleNamespace(action_head=torch.nn.Linear(2, 2), proprio_projector=torch.nn.Linear(2, 2))
+    provider.cfg = SimpleNamespace(num_open_loop_steps=8)
+    provider._lock = threading.RLock()
+    provider._apply_policy(catalog.entry("trained"))
+    identity = catalog.entry("trained").content_sha256
+    before = provider.components.action_head.weight.detach().clone()
+    raw = yaml.safe_load(manifest.read_text())
+    raw["label"] = "renamed"
+    manifest.write_text(yaml.safe_dump(raw))
+    catalog.refresh()
+    assert catalog.entry("trained").content_sha256 == identity
+    action = manifest.parent / "action_head.pt"
+    torch.save(torch.nn.Linear(2, 2).state_dict(), action)
+    raw["component_sha256"]["action_head"] = _sha(action)
+    manifest.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="weights have changed"):
+        provider.load(8, "trained", expected_content_sha256=identity)
+    assert torch.equal(provider.components.action_head.weight, before)
+    provider.load(8, "trained")
+    assert not torch.equal(provider.components.action_head.weight, before)
+    assert provider.current_policy_entry.content_sha256 != identity
 
 
 def test_policy_management_renames_copies_and_deletes_overlay(tmp_path: Path):
@@ -226,7 +256,7 @@ def test_switching_adapted_backbones_reloads_base_but_frozen_overlays_reuse_it(t
     from backend.app.policies import vla_adapter
     path = _adapted_overlay(tmp_path)
     _overlay(tmp_path, "head-only")
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, BASE, STATS)
     initial = SimpleNamespace(model=torch.nn.Linear(2, 2), action_head=torch.nn.Linear(2, 2),
                               proprio_projector=torch.nn.Linear(2, 2))
     loads = []
@@ -238,7 +268,8 @@ def test_switching_adapted_backbones_reloads_base_but_frozen_overlays_reuse_it(t
     monkeypatch.setattr(vla_adapter.direct, "load_policy_runtime", lambda *_: None)
     monkeypatch.setattr(vla_adapter.direct, "build_model", build)
     monkeypatch.setattr(vla_adapter, "replace", lambda cfg, **kwargs: cfg)
-    provider = VLAAdapterPolicyProvider(SimpleNamespace(torch=torch), SimpleNamespace(), catalog)
+    monkeypatch.setattr(vla_adapter, "checkpoint_view", lambda _: SimpleNamespace(name=str(tmp_path), cleanup=lambda: None))
+    provider = VLAAdapterPolicyProvider(SimpleNamespace(torch=torch), SimpleNamespace(checkpoint=BASE, use_pro_version=None), catalog)
     provider.load(8, "base")
     provider.load(8, "head-only")
     assert len(loads) == 1

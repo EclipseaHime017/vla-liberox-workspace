@@ -54,6 +54,8 @@ class PolicyManagementService:
                 ("action_head", entry.action_head),
                 ("proprio_projector", entry.proprio_projector),
                 ("backbone", entry.backbone),
+                ("actor", entry.actor),
+                ("base_identity", entry.base_identity),
             )
             if path is not None
         ]
@@ -87,9 +89,9 @@ class PolicyManagementService:
         return result
 
     def _assert_mutable(self, policy_id: str) -> tuple[Any, Path]:
-        if policy_id == "base":
-            raise ConflictError("The base model is read-only", code="BASE_POLICY_READ_ONLY")
         entry = self._entry(policy_id)
+        if entry.is_base:
+            raise ConflictError("The base model is read-only", code="BASE_POLICY_READ_ONLY")
         assert entry.manifest is not None
         directory = entry.manifest.parent
         root = self.catalog.registry.resolve()
@@ -152,7 +154,7 @@ class PolicyManagementService:
             suffix += 1
         temporary = Path(tempfile.mkdtemp(prefix=".policy-copy-", dir=root))
         try:
-            for component in (entry.action_head, entry.proprio_projector, entry.backbone):
+            for component in (entry.action_head, entry.proprio_projector, entry.backbone, entry.actor, entry.base_identity):
                 if component is None:
                     continue
                 shutil.copy2(component, temporary / component.name)
@@ -177,6 +179,9 @@ class PolicyManagementService:
             raise ValueError("confirm_policy_id must exactly match policy_id")
         _, directory = self._assert_mutable(policy_id)
         self._assert_idle(policy_id)
+        provider = getattr(self.manager, "provider", None)
+        if provider is not None and getattr(provider, "current_policy_id", None) == policy_id:
+            provider.unload()
         latest = self.catalog.registry.resolve() / "latest"
         if latest.is_symlink() and latest.resolve(strict=False) == directory.resolve():
             latest.unlink()

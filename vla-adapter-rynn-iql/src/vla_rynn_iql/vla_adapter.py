@@ -358,3 +358,39 @@ def overlay_public(path: Path) -> dict[str, Any]:
         "base_checkpoint": policy.base_checkpoint, "stats_key": policy.stats_key,
         "training_step": policy.training_step, "manifest": str(policy.path),
     }
+
+
+def actor_losses(components, batch, device):
+    prediction = predict_batch(components, batch, device)
+    error = (prediction.float() - batch["actions"].to(device).float()).abs()
+    valid = batch["action_mask"].to(device).float().unsqueeze(-1).expand_as(error)
+    losses = (error * valid).sum((1, 2)) / valid.sum((1, 2)).clamp_min(1.0)
+    return losses, prediction
+
+
+def trainable_parameters(components):
+    from .model_adaptation import trainable_parameters as parameters
+    return parameters(components)
+
+
+def parameter_counts(components):
+    from .model_adaptation import parameter_counts as counts
+    return counts(components)
+
+
+def save_actor(components, settings, directory):
+    import torch
+    from .model_adaptation import save_backbone
+    for name in ("action_head", "proprio_projector"):
+        torch.save({key: value.detach().cpu() for key, value in getattr(components, name).state_dict().items()},
+                   directory / f"{name}.pt")
+    save_backbone(components, settings, directory)
+
+
+def restore_actor(components, settings, directory):
+    import torch
+    from .model_adaptation import restore_backbone
+    restore_backbone(components, settings, directory)
+    for name in ("action_head", "proprio_projector"):
+        getattr(components, name).load_state_dict(
+            torch.load(directory / f"{name}.pt", map_location="cpu", weights_only=True), strict=True)

@@ -100,6 +100,12 @@ class _DraftCatalog:
 
 
 class _PolicyCatalog:
+    def select(self, policy_id):
+        return self.entry(policy_id)
+
+    def refresh(self):
+        pass
+
     def entry(self, policy_id):
         if policy_id not in {"base", "overlay"}:
             raise ValueError(policy_id)
@@ -109,6 +115,7 @@ class _PolicyCatalog:
             base_checkpoint="VLA-Adapter/LIBERO-Object-Pro",
             manifest=None if policy_id == "base" else Path("/registry/overlay/policy.yaml"),
             compatibility_sha256=None if policy_id == "base" else "compat",
+            content_sha256=policy_id + "-weights",
         )
 
 
@@ -135,6 +142,7 @@ def test_draft_does_not_create_output_until_start(tmp_path: Path):
         task_id=None,
         policy_id="base",
         initial_jpeg=None,
+        expected_policy_content_sha256=None,
         seed=None,
         init_state_index=0,
         disabled_policy_cameras=None,
@@ -182,7 +190,7 @@ def test_branch_inherits_parent_policy(tmp_path: Path):
     manager.ui_config = SimpleNamespace(output_root=tmp_path)
     manager.catalog = _DraftCatalog()
     manager.policy_catalog = _PolicyCatalog()
-    manager._persist_effective_config = lambda _record: None
+    manager._persist_effective_config = lambda _record, _policy: None
     record = manager._new_record(
         kind="branch",
         max_steps=50,
@@ -194,6 +202,7 @@ def test_branch_inherits_parent_policy(tmp_path: Path):
             "trajectory": "/tmp/source.npz",
             "task_id": "LEVEL1::task_a",
             "policy_id": "overlay",
+            "policy_content_sha256": "overlay-weights",
         },
         resume_step=10,
     )

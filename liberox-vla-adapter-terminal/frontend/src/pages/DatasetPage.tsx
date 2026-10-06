@@ -188,8 +188,8 @@ export function DatasetPage() {
       include_post_success: includePostSuccess,
     };
     try {
-      if (parentId) await deriveTrainingDataset(parentId, body);
-      else await createTrainingDataset({ ...body, task_id: taskId });
+      setAnnotationJob(parentId ? await deriveTrainingDataset(parentId, body)
+        : await createTrainingDataset({ ...body, task_id: taskId }));
       setBuilder(false); setPreview(null); await refresh();
     } catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }

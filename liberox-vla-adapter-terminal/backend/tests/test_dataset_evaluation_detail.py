@@ -87,13 +87,14 @@ def test_context_requires_membership_and_ready_version(tmp_path):
         attach_dataset_context(copy.deepcopy(result), service, "a", "v1")
 
 
-def test_unannotated_dataset_uses_independent_global_evaluations(tmp_path):
+def test_unannotated_dataset_reuses_global_models_without_global_stage(tmp_path):
     result, service, datasets, _ = fixture(tmp_path)
     datasets["a"]["reward_version_id"] = None
     datasets["a"]["evaluation_versions"] = []
     detail = attach_dataset_context(result, service, "a", None)
     assert detail["dataset_context"]["status"] == "GLOBAL_FALLBACK"
-    assert detail["reward_evaluations"]["stage"]["reward_config"]["stage_exponent"] == 4
+    assert "stage" not in detail["reward_evaluations"]
+    assert "stage" not in detail["evaluation_sources"]
     assert detail["rynnvalue_evaluation"] == {"global": True}
 
 

@@ -14,6 +14,7 @@ from .methods import training_method
 class TrainingAlgorithm(Protocol):
     def update(self, batch: dict, step: int) -> tuple[Any, dict[str, float]]: ...
     def actor_loss(self, prediction: torch.Tensor, batch: dict, context: Any) -> torch.Tensor: ...
+    def weight_actor_losses(self, losses: torch.Tensor, context: Any) -> torch.Tensor: ...
     def checkpoint(self) -> dict: ...
     def restore(self, state: dict) -> None: ...
 
@@ -31,6 +32,9 @@ class BehaviorCloning:
 
     def checkpoint(self) -> dict:
         return {}
+
+    def weight_actor_losses(self, losses: torch.Tensor, context: Any) -> torch.Tensor:
+        return losses.mean()
 
     def restore(self, state: dict) -> None:
         if state:
@@ -69,6 +73,11 @@ class ImplicitQLearning:
 
     def checkpoint(self) -> dict:
         return self.agent.checkpoint()
+
+    def weight_actor_losses(self, losses: torch.Tensor, context: Any) -> torch.Tensor:
+        if context.shape != losses.shape:
+            raise ValueError("Actor losses and IQL weights must have one value per sample")
+        return (losses * context.detach().float()).mean()
 
     def restore(self, state: dict) -> None:
         self.agent.restore(state)

@@ -21,6 +21,7 @@ from test_evaluation_api import evaluation_request, make_service
 def request_for(service, **changes):
     request = evaluation_request(**changes)
     request["schedule_sha256"] = service.preview_evaluation(request)["schedule_sha256"]
+    request["policy_content_sha256"] = service.preview_evaluation(request)["policy_content_sha256"]
     return request
 
 
@@ -35,7 +36,7 @@ def queue(tmp_path, monkeypatch):
     service = make_service(tmp_path)
     launched = []
 
-    def spawn(payload):
+    def spawn(payload, *, lease=None):
         launched.append(payload["id"])
         path, current = service._load_job(payload["id"])
         current.update(status="RUNNING", pid=os.getpid())
@@ -125,7 +126,7 @@ def test_shared_training_and_evaluation_fifo(queue):
     assert [item["id"] for item in service.training_queue()["jobs"]] == [middle["id"]]
 
 
-@pytest.mark.parametrize("resource", ["simulation", "draft", "controller", "gpu"])
+@pytest.mark.parametrize("resource", ["simulation", "controller", "gpu"])
 def test_busy_resources_wait_without_rejecting_registration(queue, resource):
     service, launched = queue
     if resource == "simulation":
@@ -148,7 +149,7 @@ def test_restart_dispatches_without_browser(queue):
     item = service.enqueue_evaluation(request_for(service))
     restored = OfflineJobService(service.ui_config, service.manager, service.datasets)
     ready = threading.Event()
-    restored._spawn_job = lambda payload: (service._spawn_job(payload), ready.set())[0]
+    restored._spawn_job = lambda payload, **kwargs: (service._spawn_job(payload, **kwargs), ready.set())[0]
     restored.start_training_queue()
     try:
         assert ready.wait(5)
@@ -178,7 +179,7 @@ def test_exception_after_spawn_does_not_overwrite_live_child(queue, monkeypatch)
     first, second = [service.enqueue_evaluation(request_for(service)) for _ in range(2)]
     spawn = service._spawn_job
 
-    def running_then_error(payload):
+    def running_then_error(payload, **_):
         spawn(payload)
         raise OSError("launcher record failed after spawn")
 

@@ -28,7 +28,7 @@ from ..core.exceptions import ConflictError
 from ..storage.files import atomic_write_json, atomic_write_yaml
 from ..storage.repositories import EvaluationRepository, OfflineJobRepository
 from .dataset_reward_versions import DatasetRewardVersions, macro_only_reward
-from .training_queue import TrainingQueue
+from .work_queue import WorkQueue
 from .inherited_reward_inputs import offline_module
 
 
@@ -104,7 +104,7 @@ def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool
     return {"action_count": action_count, "chunk_count": chunk_count}
 
 
-class OfflineJobService(TrainingQueue, DatasetRewardVersions):
+class OfflineJobService(WorkQueue, DatasetRewardVersions):
     def __init__(
         self, ui_config: Any, manager: Any, datasets: Any,
         trajectory_evaluations: Any | None = None,
@@ -113,6 +113,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
     ):
         self.ui_config = ui_config
         self.manager = manager
+        self._local_tasks = {}
         self.datasets = datasets
         self.trajectory_evaluations = trajectory_evaluations
         self.robometer_evaluations = robometer_evaluations
@@ -183,7 +184,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
 
     def defaults(self, dataset_id: str | None = None, reward_source: str | None = None,
                  algorithm: str = "iql", model_family: str | None = None) -> dict[str, Any]:
-        self._validate_training_parameters({"algorithm": algorithm, **({"model_family": model_family} if model_family else {})}, self.training_models)
+        self._validate_training_parameters({"algorithm": algorithm, **({"model_family": model_family} if model_family is not None else {})}, self.training_models)
         raw = self._load_base_config(algorithm, model_family)
         if algorithm == "bc":
             # No reward lookup or lazy global-evaluation job may run for BC.
@@ -331,7 +332,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             "environments": {
                 "prepare": self.ui_config.train_environment,
                 "annotation": self.ui_config.reward_environment,
-                "training": self.ui_config.train_environment,
+                "training": raw["model"].get("environment", self.ui_config.train_environment),
             },
             "checkpoints": self.available_checkpoints(dataset_id),
         }
@@ -376,6 +377,12 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
 
     def _reconcile(self, job_id: str) -> dict[str, Any]:
         path, job = self._load_job(job_id)
+        if job.get("executor") == "local":
+            if job["status"] in {*ACTIVE_JOB_STATES, "QUEUED"} and job_id not in self._local_tasks:
+                job.update(status="FAILED", completed_at=_utc_now(),
+                           error="Backend restarted; register this local task again")
+                self._save_work(job)
+            return job
         process_id = job.get("pid") or job.get("launcher_pid")
         created = datetime.fromisoformat(job.get("dispatched_at") or job["created_at"])
         missing_process = (
@@ -603,7 +610,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             except (OSError, ValueError, KeyError, TypeError):
                 self.repository.fail_unreadable_job(identifier)
                 continue
-            if job["status"] in ACTIVE_JOB_STATES and job.get("parameters", {}).get("requires_gpu", True):
+            if job["status"] in ACTIVE_JOB_STATES:
                 return True
         return False
 
@@ -630,22 +637,15 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         active = getattr(self.manager, "active_session_id", None)
         if active is not None:
             raise ConflictError("A simulation is active", code="SIMULATION_ACTIVE")
-        if getattr(self.manager, "draft", None) is not None:
-            raise ConflictError("Cancel the simulation draft first", code="SIMULATION_DRAFT_ACTIVE")
         controller = self.manager.controller_status()
-        if controller.get("state") in {"CALIBRATING", "ARMED"}:
+        factr = getattr(self.manager, "factr_controller", None)
+        controllers = [controller, *([factr.status()] if factr is not None else [])]
+        if any(item.get("state") in {"CALIBRATING", "ARMED"} for item in controllers):
             raise ConflictError("The controller is calibrating or armed", code="CONTROLLER_BUSY")
         # Close the in-process race between the last conflict check and
         # publication of the STARTING job manifest. SimulationManager's guard
         # observes this reservation immediately.
         self.launch_reserved = True
-        provider = getattr(self.manager, "provider", None)
-        try:
-            if provider is not None:
-                provider.unload()
-        except Exception:
-            self.launch_reserved = False
-            raise
 
     def _new_job(
         self,
@@ -656,7 +656,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         config_path: Path,
         output_path: Path,
         parameters: dict[str, Any],
-        queued: bool = False,
+        queued: bool = True,
     ) -> dict[str, Any]:
         now = _utc_now()
         job_id = config_path.parent.name
@@ -686,21 +686,24 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         atomic_write_json(job_dir / "job.json", payload)
         self.repository.upsert(payload, job_dir / "job.json")
         if queued:
+            self._wake_training_queue()
             return self._public_job(payload)
         return self._spawn_job(payload)
 
-    def _spawn_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _spawn_job(self, payload: dict[str, Any], *, lease=None) -> dict[str, Any]:
         job_dir = self.jobs_root / payload["id"]
         runner = Path(__file__).resolve().parents[1] / "workers" / "offline_job_runner.py"
         try:
             process = subprocess.Popen(
                 [sys.executable, str(runner), "--job-dir", str(job_dir),
-                 "--dataset-root", str(self.ui_config.dataset_root)],
+                 "--dataset-root", str(self.ui_config.dataset_root),
+                 *([] if lease is None else ["--resource-lock-fd", str(lease.stream.fileno())])],
                 cwd=str(self.ui_config.offline_rl_root),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                pass_fds=() if lease is None else (lease.stream.fileno(),),
             )
         except Exception as exc:
             payload.update(
@@ -803,16 +806,12 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
                     "skipped_by_evaluator": skipped_by_evaluator,
                     "message": "All selected trajectories already have reusable evaluations",
                 }
-            self._prepare_launch()
-            try:
-                job = self._launch_trajectory_evaluation(
-                    task_id=task_id, requested_run_ids=requested,
-                    selected_by_evaluator=selected_by_evaluator,
-                    skipped_by_evaluator=skipped_by_evaluator,
-                    evaluators=evaluators, overwrite=overwrite,
-                )
-            finally:
-                self.launch_reserved = False
+            job = self._launch_trajectory_evaluation(
+                task_id=task_id, requested_run_ids=requested,
+                selected_by_evaluator=selected_by_evaluator,
+                skipped_by_evaluator=skipped_by_evaluator,
+                evaluators=evaluators, overwrite=overwrite,
+            )
             return {
                 "kind": "trajectory_evaluation",
                 "status": job["status"],
@@ -1186,13 +1185,9 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             self._validate_training_parameters(parameters, self.training_models)
             dataset = self.datasets.require_ready_for_training(dataset_id)
             version, normalized = self.training_inputs(dataset, parameters)
-            self._prepare_launch()
-            try:
-                return self._launch_training(
-                    dataset_id, dataset, normalized, reward_version=version,
-                )
-            finally:
-                self.launch_reserved = False
+            return self._launch_training(
+                dataset_id, dataset, normalized, reward_version=version, queued=True,
+            )
 
     def training_inputs(self, dataset: dict, parameters: dict) -> tuple[dict | None, dict]:
         """Bind only the inputs consumed by the selected training method."""
@@ -1218,6 +1213,10 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         include_post_success = dataset.get("include_post_success", True)
         raw["data"]["include_post_success"] = include_post_success
         raw["model"] = self.training_models.apply_model_parameters(raw, parameters)
+        if raw["model"]["family"] == "pi05":
+            assets = offline_module(self.ui_config.offline_rl_root, "pi05_assets")
+            identity = assets.checkpoint_identity(Path(raw["model"]["base_checkpoint"]))
+            raw["model"]["base_revision"] = assets.identity_digest(identity)
         source = None
         if algorithm == "iql":
             raw["reward"].setdefault("final_normalization", "none")
@@ -1293,8 +1292,8 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         scripts = self.ui_config.offline_rl_root / "scripts"
         stages = [
             {
-                "id": "train", "label": f"VLA-Adapter {algorithm.upper()} 后训练",
-                "environment": self.ui_config.train_environment,
+                "id": "train", "label": f"{self.training_models.MODELS[raw['model']['family']].label} {algorithm.upper()} 后训练",
+                "environment": raw["model"].get("environment", self.ui_config.train_environment),
                 "argv": ["python", str(scripts / ("train_iql.py" if algorithm == "iql" else "train.py")),
                          "--config", str(config_path)],
                 "cwd": str(self.ui_config.offline_rl_root),
@@ -1413,8 +1412,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             "bddl_path": str(bddl_path.resolve()),
             "init_path": str(init_path.resolve()),
         }
-        self.manager.policy_catalog.refresh()
-        policy = self.manager.policy_catalog.entry(policy_id)
+        policy = self.manager.policy_catalog.select(policy_id)
         policy_snapshot = {
             "policy_id": policy.policy_id,
             "label": policy.label,
@@ -1426,9 +1424,16 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             if policy.proprio_projector is None else str(policy.proprio_projector),
             "training_step": policy.training_step,
             "compatibility_sha256": policy.compatibility_sha256,
+            "family": policy.family,
+            "content_sha256": policy.content_sha256,
+            "base_revision": policy.base_revision,
         }
         if policy.backbone is not None:
             policy_snapshot["backbone"] = str(policy.backbone)
+        if policy.family == "pi05":
+            policy_snapshot["model_config"] = policy.model_config
+            policy_snapshot["actor"] = str(policy.actor) if policy.actor else None
+            policy_snapshot["base_identity"] = str(policy.base_identity) if policy.base_identity else None
         return task_snapshot, policy_snapshot
 
     def preview_evaluation(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -1491,6 +1496,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
         ]
         return {
             **preview,
+            "policy_content_sha256": policy_snapshot["content_sha256"],
             "config": {
                 "task_id": task_snapshot["task_id"],
                 "policy_id": policy_snapshot["policy_id"],
@@ -1515,11 +1521,7 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
     def start_evaluation(self, request: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             preview = self.preview_evaluation(request)
-            self._prepare_launch()
-            try:
-                return self._launch_evaluation(preview)
-            finally:
-                self.launch_reserved = False
+            return self._launch_evaluation(preview, queued=True)
 
     def _launch_evaluation(self, preview: dict[str, Any], *, queued: bool = False) -> dict[str, Any]:
         evaluation_id = (
@@ -2014,8 +2016,27 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
             fcntl.flock(dispatch_lock.fileno(), fcntl.LOCK_EX)
             return self._stop_job(job_id)
 
-    def _stop_job(self, job_id: str) -> dict[str, Any]:
+    def _stop_job(self, job_id: str, *, shutdown: bool = False) -> dict[str, Any]:
         path, job = self._load_job(job_id)
+        if job.get("executor") == "local":
+            if job["kind"] == "publication" and not shutdown and job["status"] in {*ACTIVE_JOB_STATES, "QUEUED"}:
+                raise ConflictError("评价结果正在同步，不能单独取消；请等待同步完成。", code="WORK_NOT_CANCELABLE")
+            task = self._local_tasks.get(job_id)
+            if job["status"] == "QUEUED":
+                if task is not None:
+                    task[1].cancel()
+                    if task[2] is not None:
+                        task[2]()
+                    self._local_tasks.pop(job_id, None)
+                job.update(status="CANCELED", stage="canceled", completed_at=_utc_now())
+            elif job["status"] in ACTIVE_JOB_STATES:
+                if task is None or task[2] is None:
+                    raise ConflictError("此数据操作已开始，须等待原子写入完成。", code="WORK_NOT_CANCELABLE")
+                job.update(status="STOPPING", stage_label="正在安全停止")
+                task[2]()
+            self._save_work(job)
+            self._wake_training_queue()
+            return job
         if job["status"] == "QUEUED":
             job.update(status="CANCELED", stage="canceled", stage_label="已取消排队", completed_at=_utc_now())
             atomic_write_json(path, job)
@@ -2182,8 +2203,17 @@ class OfflineJobService(TrainingQueue, DatasetRewardVersions):
     def close(self) -> None:
         # Offline jobs and TensorBoard intentionally survive a UI backend restart.
         self.close_training_queue()
-        executor = getattr(self, "_binding_executor", None)
-        if executor is not None:
-            # Cancel queued publishers; unfinished jobs will be rediscovered on
-            # restart. Let an in-flight atomic publication finish before exit.
-            executor.shutdown(wait=True, cancel_futures=True)
+        with self.lock:
+            tasks = list(self._local_tasks.items())
+            for identifier, (_, future, cancel) in tasks:
+                _, job = self._load_job(identifier)
+                if job["status"] == "QUEUED":
+                    self._stop_job(identifier, shutdown=True)
+                elif not future.done() and cancel is not None:
+                    cancel()
+        for _, (_, future, _) in tasks:
+            if not future.cancelled():
+                try:
+                    future.result()
+                except Exception:
+                    pass

@@ -1,0 +1,16 @@
+# Official π₀.₅-LIBERO PyTorch conversion; dependencies live in a separate environment.
+model:
+  family: pi05
+  base_checkpoint: ../../../weights/pi05_libero_torch
+  stats_key: physical-intelligence/libero
+  environment: pi05
+  # frozen: train action expert/projections, keep PaliGemma frozen. full: train all.
+  backbone: frozen
+  # UI jobs pin this digest at registration; direct CLI resolves it at startup.
+  base_revision: null
+  num_inference_steps: 10
+data:
+  # Replay geometry stays independent of OpenPI's native horizon 10 / padded dim 32.
+  action_horizon: 8
+  action_dim: 7
+  proprio_dim: 8

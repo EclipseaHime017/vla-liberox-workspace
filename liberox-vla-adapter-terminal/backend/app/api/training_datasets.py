@@ -41,10 +41,10 @@ async def preview(body: DatasetPreviewRequest, request: Request):
         raise http_error(exc) from exc
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=202)
 async def create(body: CreateTrainingDatasetRequest, request: Request):
     try:
-        dataset = await run_in_threadpool(training_dataset_service(request).create,
+        parameters = dict(
             name=body.name, task_id=body.task_id,
             selection=body.selection.model_dump(),
             validation_fraction=body.validation_fraction,
@@ -52,22 +52,21 @@ async def create(body: CreateTrainingDatasetRequest, request: Request):
             success_consecutive_steps=body.success_consecutive_steps,
             include_post_success=body.include_post_success,
         )
-        return dataset
+        return await run_in_threadpool(offline_job_service(request).enqueue_dataset, parameters)
     except Exception as exc:
         raise http_error(exc) from exc
 
 
-@router.post("/{dataset_id}/derive", status_code=201)
+@router.post("/{dataset_id}/derive", status_code=202)
 async def derive(dataset_id: str, body: DeriveTrainingDatasetRequest, request: Request):
     try:
-        dataset = await run_in_threadpool(training_dataset_service(request).derive,
-            dataset_id, name=body.name, selection=body.selection.model_dump(),
+        parameters = dict(name=body.name, selection=body.selection.model_dump(),
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
             success_consecutive_steps=body.success_consecutive_steps,
             **({} if body.include_post_success is None else {"include_post_success": body.include_post_success}),
         )
-        return dataset
+        return await run_in_threadpool(offline_job_service(request).enqueue_dataset, parameters, parent_id=dataset_id)
     except Exception as exc:
         raise http_error(exc) from exc
 
@@ -109,10 +108,12 @@ async def training_options(dataset_id: str, body: DatasetTrainingOptionsRequest,
         raise http_error(exc) from exc
 
 
-@router.post("/{dataset_id}/verify")
+@router.post("/{dataset_id}/verify", status_code=202)
 async def verify(dataset_id: str, request: Request):
     try:
-        return await run_in_threadpool(training_dataset_service(request).verify, dataset_id)
+        job, _ = offline_job_service(request).submit_local("verification",
+            lambda: training_dataset_service(request).verify(dataset_id), dataset_id=dataset_id)
+        return job
     except Exception as exc:
         raise http_error(exc) from exc
 

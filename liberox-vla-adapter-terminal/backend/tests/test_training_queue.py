@@ -31,7 +31,7 @@ def queued_jobs(tmp_path, monkeypatch):
     jobs._prepare_launch = OfflineJobService._prepare_launch.__get__(jobs)
     launched = []
 
-    def spawn(payload):
+    def spawn(payload, *, lease=None):
         launched.append(payload["id"])
         path, current = jobs._load_job(payload["id"])
         current.update(status="RUNNING", pid=os.getpid())
@@ -107,7 +107,7 @@ def test_cancel_waiting_job_is_local_and_current_stop_does_not_touch_queue(queue
     assert launched == [first["id"], last["id"]]
 
 
-@pytest.mark.parametrize("resource", ["simulation", "draft", "gpu", "controller"])
+@pytest.mark.parametrize("resource", ["simulation", "gpu", "controller"])
 def test_resources_pause_dispatch_without_failing_job(queued_jobs, resource):
     jobs, dataset, _, launched = queued_jobs
     item = jobs.enqueue_training(dataset["id"], {})
@@ -133,7 +133,7 @@ def test_queue_survives_service_restart_and_needs_no_browser_polling(queued_jobs
     restored.lock = threading.RLock()
     started = threading.Event()
     spawn = jobs._spawn_job
-    restored._spawn_job = lambda payload: (spawn(payload), started.set())[0]
+    restored._spawn_job = lambda payload, **kwargs: (spawn(payload, **kwargs), started.set())[0]
     restored.start_training_queue()
     try:
         assert started.wait(5)
@@ -151,7 +151,7 @@ def test_long_wait_uses_dispatch_timestamp_and_queued_dataset_cannot_be_deleted(
     atomic_write_json(path, payload)
     with pytest.raises(ConflictError, match="active background job"):
         jobs.delete_dataset(dataset["id"], dataset["id"], force=True)
-    jobs._spawn_job = lambda payload: payload  # Slow process start with no PID yet.
+    jobs._spawn_job = lambda payload, **_: payload  # Slow process start with no PID yet.
     jobs._dispatch_training_queue()
     assert jobs.get(item["id"])["status"] == "STARTING"
 

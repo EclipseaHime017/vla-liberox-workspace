@@ -100,17 +100,26 @@ class TrajectoryEvaluationService:
         episode = self._episode_dir(run)
         sidecar, values = episode / SIDECAR_NAME, episode / VALUES_NAME
         trajectory = episode / "trajectory.npz"
-        paths = (sidecar, values, trajectory)
+        observations = episode / "trajectory_observations.npz"
+        payload = self._load_status(run)
+        saved = (payload or {}).get("episode") or {}
+        manifest = storage_path(saved["source_manifest"]) if saved.get("source_manifest") else episode.parent.parent / "run.json"
+        paths = (sidecar, values, trajectory, observations, manifest)
         fingerprint = self._fingerprint(paths)
         cache_key = str(run.get("id"))
         cached = self._validation_cache.get(cache_key)
         if cached is not None and cached[0] == fingerprint:
             return cached[1]
-        payload = self._load_status(run)
         if payload is None:
             self._validation_cache[cache_key] = (fingerprint, None)
             return None
-        if payload.get("trajectory_sha256") != _sha256(trajectory) or payload.get("values_sha256") != _sha256(values):
+        source_hash = payload.get("source_manifest_sha256", saved.get("source_manifest_sha256"))
+        if (payload.get("trajectory_sha256") != _sha256(trajectory)
+                or not observations.is_file() or observations.is_symlink()
+                or payload.get("observations_sha256") != _sha256(observations)
+                or not source_hash or not manifest.is_file()
+                or source_hash != _sha256(manifest)
+                or payload.get("values_sha256") != _sha256(values)):
             self._validation_cache[cache_key] = (fingerprint, None)
             return None
         try:
@@ -250,6 +259,12 @@ class TrajectoryEvaluationService:
             if raw_trajectory.is_symlink():
                 raise ValueError(f"Symlink trajectories cannot be evaluated: {run_id}")
             trajectory = raw_trajectory.resolve()
+            for path_key, hash_key in (("trajectory_path", "trajectory_sha256"),
+                                       ("observations_path", "observations_sha256"),
+                                       ("source_manifest", "source_manifest_sha256")):
+                path = storage_path(episode[path_key])
+                if path.is_symlink() or _sha256(path) != episode.get(hash_key):
+                    raise ValueError(f"Source changed since Prepare: {run_id} ({path_key})")
             episode_dir = trajectory.parent
             sidecar = episode_dir / SIDECAR_NAME
             destination = episode_dir / VALUES_NAME
@@ -288,8 +303,10 @@ class TrajectoryEvaluationService:
                 "schema_version": EVALUATION_SCHEMA_VERSION,
                 "run_id": run_id,
                 "evaluated_at": _utc_now(),
-                "trajectory_sha256": _sha256(trajectory),
+                "trajectory_sha256": episode["trajectory_sha256"],
                 "observations_sha256": episode.get("observations_sha256"),
+                "source_manifest_sha256": episode["source_manifest_sha256"],
+                "prompt": episode["prompt"],
                 "source_key": reward.get("source_key"),
                 "values_file": VALUES_NAME,
                 "values_sha256": _sha256(destination),

@@ -96,12 +96,16 @@ def test_branch_progress_starts_at_resume_step(tmp_path: Path):
     manager = object.__new__(SimulationManager)
     manager.ui_config = SimpleNamespace(output_root=tmp_path)
     manager.catalog = FakeCatalog()
+    manager._policy_entry = lambda _: SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base",
+        manifest=None, compatibility_sha256=None, content_sha256="a" * 64,
+        family="vla_adapter", stats_key="libero_object")
     record = manager._new_record(
         kind="branch",
         max_steps=300,
         open_loop_steps=1,
         parent={
             "id": "root",
+            "policy_content_sha256": "a" * 64,
             "root_session_id": "root",
             "trajectory": "/tmp/source.npz",
             "task_id": TASK_ID,
@@ -259,12 +263,16 @@ def test_branch_source_is_physical_and_survives_parent_deletion(tmp_path: Path):
     manager.ui_config = SimpleNamespace(output_root=tmp_path)
     manager.spacemouse_config = None
     manager.catalog = FakeCatalog()
+    manager._policy_entry = lambda _: SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base",
+        manifest=None, compatibility_sha256=None, content_sha256="a" * 64,
+        family="vla_adapter", stats_key="libero_object")
     record = manager._new_record(
         kind="branch",
         max_steps=1,
         open_loop_steps=1,
         parent={
             "id": "parent",
+            "policy_content_sha256": "a" * 64,
             "root_session_id": "parent",
             "trajectory": str(source),
             "task_id": TASK_ID,

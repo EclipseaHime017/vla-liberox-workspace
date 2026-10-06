@@ -49,6 +49,13 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [deleteReferences, setDeleteReferences] = useState<Array<{ id: string; name: string }>>([]);
   const [error, setError] = useState("");
+  const [warning, setWarning] = useState("");
+  const reportFailure = (reason: unknown) => {
+    if (reason instanceof ApiError && typeof reason.detail === "object" && reason.detail
+        && "severity" in reason.detail && reason.detail.severity === "warning") {
+      setWarning(reason.message); setError("");
+    } else setError(String(reason));
+  };
   const [busy, setBusy] = useState(false);
   const websocket = useRef<WebSocket | null>(null);
   const trajectoryVideo = useRef<HTMLVideoElement | null>(null);
@@ -350,14 +357,14 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
         }),
       });
       setDraft(synchronized);
-      if (!synchronized.preview_ready) return;
+      if (synchronized.preview_status === "ERROR") return;
       const session = await api<Session>("/api/draft/start", { method: "POST" });
       setDraft(null);
       setSessions((current) => [session, ...current]);
       setSessionTaskFilter(session.task_id ? scopeForTask(bootstrap?.task_catalog ?? [], session.task_id) : ALL_TASK_SCOPE);
       setSelectedId(session.id);
       setSelectedStep(0);
-    } catch (reason) { setError(String(reason)); }
+    } catch (reason) { reportFailure(reason); }
     finally { setBusy(false); }
   };
 
@@ -417,7 +424,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       setSelectedId(session.id);
       setSelectedStep(session.current_step);
     } catch (reason) {
-      setError(String(reason));
+      reportFailure(reason);
     } finally { setBusy(false); }
   };
 
@@ -507,7 +514,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
   const displayPolicy = draft
     ? bootstrap.policy_catalog.find((policy) => policy.policy_id === draft.policy_id)
     : selected
-      ? bootstrap.policy_catalog.find((policy) => policy.policy_id === selected.policy_id)
+      ? undefined
       : bootstrap.policy_catalog.find((policy) => policy.policy_id === "base");
   const displaySeed = draft?.seed ?? selected?.seed ?? bootstrap.config.seed;
   const displayInitStateIndex = draft?.init_state_index ?? selected?.init_state_index ?? 0;
@@ -551,9 +558,10 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       {statusTarget ? createPortal(statusControls, statusTarget) : statusControls}
 
       {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
+      {warning && <div className="warning-banner" role="alert"><strong>WARN</strong><span>{warning}</span><button onClick={() => setWarning("")}>关闭</button></div>}
 
       <section className="metadata-grid">
-        <Info label="策略模型" value={displayPolicy?.label ?? selected?.policy_label ?? bootstrap.model.policy_label} note={displayPolicy?.base_checkpoint ?? bootstrap.model.checkpoint} />
+        <Info label="策略模型" value={displayPolicy?.label ?? selected?.policy_label ?? bootstrap.model.policy_label} note={selected && !draft ? (selected.policy_base_checkpoint ?? "历史记录未保存模型路径") : (displayPolicy?.base_checkpoint ?? bootstrap.model.checkpoint)} />
         <Info label="任务难度" value={displayTask.level} />
         <Info label="任务提示词" value={displayTask.prompt} />
         <Info label="计算设备" value={formatComputeDevice(bootstrap.model.gpu)} />

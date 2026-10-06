@@ -257,6 +257,7 @@ class EvaluationRequest(StrictModel):
 
 class EvaluationQueueRequest(EvaluationRequest):
     schedule_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    policy_content_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class DeleteEvaluationRequest(StrictModel):

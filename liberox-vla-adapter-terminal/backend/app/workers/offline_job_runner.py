@@ -31,7 +31,7 @@ def utc_now() -> str:
 
 
 class Runner:
-    def __init__(self, job_dir: Path):
+    def __init__(self, job_dir: Path, resource_lock_fd: int | None = None):
         self.job_dir = job_dir.resolve()
         self.job_path = self.job_dir / "job.json"
         self.log_path = self.job_dir / "job.log"
@@ -39,6 +39,7 @@ class Runner:
         self.stop = threading.Event()
         self.child: subprocess.Popen[str] | None = None
         self.payload = json.loads(self.job_path.read_text(encoding="utf-8"))
+        self.resource_lock_fd = resource_lock_fd
 
     def persist(self, **changes: Any) -> None:
         with self.lock:
@@ -78,7 +79,9 @@ class Runner:
         signal.signal(signal.SIGTERM, self.signal)
         signal.signal(signal.SIGINT, self.signal)
         lock_stream = None
-        if self.payload.get("requires_gpu", True):
+        if self.resource_lock_fd is not None:
+            lock_stream = os.fdopen(self.resource_lock_fd, "a+")
+        else:
             gpu_lock_path = Path(self.payload["gpu_lock_path"])
             gpu_lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_stream = gpu_lock_path.open("a+")
@@ -158,9 +161,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--job-dir", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--resource-lock-fd", type=int)
     args = parser.parse_args()
     with storage_lease(args.dataset_root):
-        return Runner(args.job_dir).run()
+        return Runner(args.job_dir, args.resource_lock_fd).run()
 
 
 if __name__ == "__main__":

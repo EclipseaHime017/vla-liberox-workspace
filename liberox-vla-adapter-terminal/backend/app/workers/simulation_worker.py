@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -40,8 +41,11 @@ from ..domain.run import (
     utc_now,
 )
 from ..evaluation.libero_evaluator import LiberoEvaluator
-from ..policies.vla_adapter import VLAAdapterPolicyProvider
+from ..policies.router import PolicyProvider
+from ..policies.pi05_catalog import configured_model
 from ..policies.catalog import PolicyCatalog
+from ..core.exceptions import ConflictError
+from ..services.work_resources import ResourceLease
 from ..recording.episode_recorder import EpisodeRecorderFactory
 from ..services.controller_service import SpaceMouseControllerService
 from ..services.task_catalog import ConfiguredTaskCatalog
@@ -119,7 +123,16 @@ class PreviewService:
                         target, state, task_id, revision = self.states.get_nowait()
                     except queue.Empty:
                         break
+                resource = None
+                self.manager._frame_lock.acquire()
                 try:
+                    work_queue = getattr(self.manager, "work_queue", None)
+                    if work_queue is not None:
+                        if isinstance(target, SimulationSession):
+                            if not target.resource_owned:
+                                continue
+                        else:
+                            resource = ResourceLease(work_queue.gpu_lock_path)
                     bddl, _ = self.manager.catalog.paths(task_id)
                     # LEVEL5 prompt variants share the same LEVEL4 scene.
                     target_context = (str(bddl), int(target.seed))
@@ -162,6 +175,14 @@ class PreviewService:
                             target.preview_ready = True
                             target.preview_error = None
                             target.preview_event.set()
+                except ConflictError:
+                    if isinstance(target, SimulationDraft) and self.manager.draft is target:
+                        self.stop_event.wait(0.2)
+                        # A retry must never evict a newer session's first frame.
+                        try:
+                            self.states.put_nowait((target, state, task_id, revision))
+                        except queue.Full:
+                            pass
                 except Exception as exc:
                     LOGGER.exception("Preview frame failed for %s", target.id)
                     message = f"{type(exc).__name__}: {exc}"
@@ -180,6 +201,10 @@ class PreviewService:
                         self.manager.simulator.close(env)
                         env = None
                         env_context = None
+                finally:
+                    if resource is not None:
+                        resource.close()
+                    self.manager._frame_lock.release()
                 last_render = time.monotonic()
         except Exception as exc:
             LOGGER.exception("Preview service failed")
@@ -212,8 +237,9 @@ class SimulationManager:
             self.ui_config.policy_registry,
             str(self.eval_config.checkpoint),
             self.eval_config.stats_key,
+            pi05_model=configured_model(self.ui_config.offline_rl_root),
         )
-        self.provider = VLAAdapterPolicyProvider(
+        self.provider = PolicyProvider(
             self.runtime, self.eval_config, self.policy_catalog
         )
         try:
@@ -308,6 +334,14 @@ class SimulationManager:
                     managed = False
                 item["managed"] = managed
                 item["legacy"] = not managed
+                if managed and item.get("status") in ACTIVE_STATES:
+                    interrupted = {"status": "ERROR", "error": "Backend interrupted before completion",
+                                   "stopped_reason": "backend_interrupted", "completed_at": utc_now()}
+                    persisted = json.loads(manifest.read_text(encoding="utf-8"))
+                    persisted.update(interrupted)
+                    atomic_write_json(manifest, persisted)
+                    item.update(interrupted)
+                    self.repository.upsert(item, directory)
                 task_id = item.get("task_id")
                 if task_id is not None:
                     try:
@@ -490,6 +524,7 @@ class SimulationManager:
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
         policy_id: str = "base",
         task_id: str | None = None,
+        expected_policy_content_sha256: str | None = None,
         parent: dict[str, Any] | None = None,
         resume_step: int | None = None,
         control_mode: str = "policy",
@@ -525,7 +560,19 @@ class SimulationManager:
         task_id = task_id or self.catalog.default_task_id
         self.catalog.initial_state(task_id, init_state_index)
         task = self.catalog.metadata(task_id)
-        policy = self._policy_entry(policy_id)
+        if parent is not None and control_mode == "manual":
+            policy = SimpleNamespace(
+                policy_id=policy_id, label=parent.get("policy_label"),
+                base_checkpoint=parent.get("policy_base_checkpoint"), manifest=parent.get("policy_overlay"),
+                compatibility_sha256=parent.get("policy_compatibility_sha256"),
+                content_sha256=parent.get("policy_content_sha256"),
+            )
+        else:
+            policy = self._policy_entry(policy_id)
+            if expected_policy_content_sha256 is not None:
+                self._check_policy_identity(policy, expected_policy_content_sha256)
+            if parent is not None:
+                self._check_policy_identity(policy, parent.get("policy_content_sha256"))
         session_id = uuid.uuid4().hex[:12]
         now = datetime.now()
         stamp = now.strftime("%Y-%m-%d_%H%M%S")
@@ -551,6 +598,7 @@ class SimulationManager:
             policy_base_checkpoint=policy.base_checkpoint,
             policy_overlay=None if policy.manifest is None else str(policy.manifest),
             policy_compatibility_sha256=policy.compatibility_sha256,
+            policy_content_sha256=getattr(policy, "content_sha256", None),
             task_id=task_id,
             task_level=task["level"],
             task_name=task["task_name"],
@@ -580,17 +628,17 @@ class SimulationManager:
             state_count=0 if resume_step is None else resume_step + 1,
             action_count=0 if resume_step is None else resume_step,
         )
-        self._persist_effective_config(record)
+        self._persist_effective_config(record, policy)
         return record
 
     def _claim(self, record: SimulationSession) -> None:
         gpu_guard = getattr(self, "gpu_guard", None)
-        if gpu_guard is not None:
+        if gpu_guard is not None and not record.resource_owned:
             gpu_guard()
         with self.lock:
             if any(self.controller_status(name)["state"] == "CALIBRATING" for name in ("spacemouse", "factr")):
                 raise RuntimeError("Cannot start a simulation during controller calibration")
-            if self.draft is not None:
+            if self.draft is not None and not record.resource_owned:
                 raise RuntimeError("Cancel or start the current draft before creating a session")
             if self.active_session_id is not None:
                 active = self.sessions.get(self.active_session_id)
@@ -625,17 +673,103 @@ class SimulationManager:
     def _policy_entry(self, policy_id: str):
         catalog = getattr(self, "policy_catalog", None)
         if catalog is not None:
-            return catalog.entry(policy_id)
+            try:
+                return catalog.select(policy_id)
+            except ValueError as exc:
+                raise ConflictError("所选策略模型已删除或不可用；仍可回放及人工接管，请重新选择模型后推理。",
+                                    code="POLICY_UNAVAILABLE", context={"severity": "warning"}) from exc
         if policy_id != "base":
             raise ValueError(f"Unknown policy_id: {policy_id}")
         checkpoint = str(getattr(getattr(self, "eval_config", None), "checkpoint", "unknown"))
         return SimpleNamespace(
             policy_id="base", label="VLA-Adapter · Object-Pro（基础模型）",
             base_checkpoint=checkpoint, manifest=None,
-            compatibility_sha256=None,
+            compatibility_sha256=None, family="vla_adapter",
+            stats_key=getattr(getattr(self, "eval_config", None), "stats_key", None),
         )
 
+    @staticmethod
+    def _check_policy_identity(policy, expected: str | None) -> None:
+        if expected is None:
+            raise ConflictError("旧记录未保存可验证的模型身份；可人工接管，但不能确认原模型并重新推理。",
+                                code="POLICY_IDENTITY_UNVERIFIED", context={"severity": "warning"})
+        if getattr(policy, "content_sha256", None) != expected:
+            raise ConflictError("原策略模型权重已改变；可人工接管，请重新选择模型创建仿真。",
+                                code="POLICY_CHANGED", context={"severity": "warning"})
+
     def _start_record(self, record: SimulationSession) -> dict[str, Any]:
+        coordinator = getattr(self, "work_queue", None)
+        if coordinator is not None:
+            def execute():
+                record.resource_owned = True
+                try:
+                    if self.active_session_id != record.id:
+                        self._claim(record)
+                    record.status = "LOADING"
+                    if record.parent_session_id:
+                        parent = self.get_public(record.parent_session_id)
+                        self._copy_branch_source(record, parent)
+                        self._install_resume_preview(record, parent)
+                    self._run_session(record)
+                    if record.error:
+                        raise RuntimeError(record.error)
+                except Exception as exc:
+                    record.error = str(exc)
+                    record.status = "ERROR"
+                    record.completed_at = utc_now()
+                    self._persist_manifest(record)
+                    raise
+                finally:
+                    with self._frame_lock:
+                        record.resource_owned = False
+                    with self.lock:
+                        if self.active_session_id == record.id:
+                            self.active_session_id = None
+            if record.control_mode == "manual":
+                lease = coordinator.immediate_lease()
+                record.resource_owned = True
+                try:
+                    self._claim(record)
+                except Exception:
+                    record.resource_owned = False
+                    lease.close()
+                    raise
+                def manual():
+                    try:
+                        execute()
+                    finally:
+                        lease.close()
+                        coordinator._wake_training_queue()
+                record.thread = threading.Thread(target=manual, daemon=True, name=f"manual-{record.id}")
+                try:
+                    record.thread.start()
+                except Exception:
+                    record.resource_owned = False
+                    lease.close()
+                    with self.lock:
+                        self.active_session_id = None
+                    record.status = "ERROR"
+                    record.error = "Cannot start manual control worker"
+                    self._persist_manifest(record)
+                    raise
+            else:
+                def cancel_record():
+                    record.stop_event.set()
+                    if record.status == "QUEUED":
+                        record.status = "ERROR"
+                        record.error = "Queued simulation canceled"
+                        record.completed_at = utc_now()
+                        self._persist_manifest(record)
+                with coordinator.lock, self.lock:
+                    record.status = "QUEUED"
+                    self.sessions[record.id] = record
+                    job, _ = coordinator.submit_local("simulation", execute,
+                        parameters={"session_id": record.id, "parent_run_id": record.parent_session_id,
+                                    "policy_id": record.policy_id, "policy_content_sha256": record.policy_content_sha256},
+                        cancel=cancel_record)
+                    record.work_job_id = job["id"]
+                    self._persist_manifest(record)
+            return record.public(safe_artifacts(record.output_dir))
         self._claim(record)
         record.thread = threading.Thread(
             target=self._run_session,
@@ -653,6 +787,7 @@ class SimulationManager:
         task_id: str | None = None,
         policy_id: str = "base",
         initial_jpeg: bytes | None = None,
+        expected_policy_content_sha256: str | None = None,
         seed: int | None = None,
         init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
@@ -663,6 +798,7 @@ class SimulationManager:
             open_loop_steps=open_loop_steps,
             task_id=task_id,
             policy_id=policy_id,
+            expected_policy_content_sha256=expected_policy_content_sha256,
             seed=seed,
             init_state_index=init_state_index,
             disabled_policy_cameras=disabled_policy_cameras,
@@ -718,7 +854,7 @@ class SimulationManager:
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         gpu_guard = getattr(self, "gpu_guard", None)
-        if gpu_guard is not None:
+        if gpu_guard is not None and getattr(self, "work_queue", None) is None:
             gpu_guard()
         seed = self.eval_config.seed if seed is None else seed
         disabled_policy_cameras = tuple(
@@ -744,6 +880,7 @@ class SimulationManager:
                 disabled_policy_cameras=disabled_policy_cameras,
                 policy_id=policy.policy_id,
                 policy_label=policy.label,
+                policy_content_sha256=getattr(policy, "content_sha256", None),
             )
             self.draft = draft
             public = self._draft_public(draft)
@@ -802,8 +939,11 @@ class SimulationManager:
             draft.seed = next_seed
             draft.init_state_index = next_init_state_index
             draft.disabled_policy_cameras = next_disabled_cameras
+            policy_changed = draft.policy_id != policy.policy_id
             draft.policy_id = policy.policy_id
             draft.policy_label = policy.label
+            if policy_changed:
+                draft.policy_content_sha256 = getattr(policy, "content_sha256", None)
             if preview_changed:
                 draft.preview_revision += 1
                 draft.preview_status = "PREPARING"
@@ -836,7 +976,9 @@ class SimulationManager:
             if self.draft is None:
                 raise KeyError("draft")
             draft = self.draft
-            if draft.preview_status != "READY" or draft.latest_jpeg is None:
+            if getattr(self, "policy_catalog", None) is not None:
+                self._check_policy_identity(self._policy_entry(draft.policy_id), draft.policy_content_sha256)
+            if (draft.preview_status != "READY" or draft.latest_jpeg is None) and getattr(self, "work_queue", None) is None:
                 raise RuntimeError("Draft preview must be ready before starting")
             self.draft = None
         try:
@@ -845,6 +987,7 @@ class SimulationManager:
                 draft.open_loop_steps,
                 task_id=draft.task_id,
                 policy_id=draft.policy_id,
+                expected_policy_content_sha256=draft.policy_content_sha256,
                 initial_jpeg=draft.latest_jpeg,
                 seed=draft.seed,
                 init_state_index=draft.init_state_index,
@@ -950,6 +1093,8 @@ class SimulationManager:
             control_frame=control_frame,
         )
         try:
+            if getattr(self, "work_queue", None) is not None:
+                return self._start_record(record)
             self._copy_branch_source(record, parent)
             self._install_resume_preview(record, parent)
             self._claim(record)
@@ -966,6 +1111,12 @@ class SimulationManager:
         return record.public(safe_artifacts(record.output_dir))
 
     def stop(self, session_id: str) -> dict[str, Any]:
+        with self.lock:
+            queued = self.sessions.get(session_id)
+            work_id = queued.work_job_id if queued is not None and queued.status == "QUEUED" else None
+        if work_id:
+            self.work_queue.stop(work_id)
+            return self.get_public(session_id)
         with self.lock:
             record = self.sessions.get(session_id)
             if record is None:
@@ -1077,9 +1228,13 @@ class SimulationManager:
             record.latest_jpeg = content
             record.latest_frame_version += 1
 
-    def _persist_effective_config(self, record: SimulationSession) -> None:
+    def _persist_effective_config(self, record: SimulationSession, policy=None) -> None:
         """Write the immutable run inputs once, before the worker starts."""
         eval_config = getattr(self, "eval_config", None)
+        if record.control_mode != "policy":
+            policy = None
+        elif policy is None:
+            policy = self._policy_entry(record.policy_id)
         atomic_write_yaml(
             record.output_dir / "config.yaml",
             {
@@ -1093,13 +1248,14 @@ class SimulationManager:
                     "init_state_index": record.init_state_index,
                 },
                 "policy": {
-                    "provider": "vla_adapter",
+                    "provider": policy.family if policy is not None else None,
                     "policy_id": record.policy_id,
                     "label": record.policy_label,
                     "base_checkpoint": record.policy_base_checkpoint,
                     "overlay": record.policy_overlay,
                     "compatibility_sha256": record.policy_compatibility_sha256,
-                    "stats_key": getattr(eval_config, "stats_key", None),
+                    "content_sha256": record.policy_content_sha256,
+                    "stats_key": policy.stats_key if policy is not None else None,
                 },
                 "simulation": {
                     "max_steps": record.max_steps,
@@ -1155,6 +1311,7 @@ class SimulationManager:
                 "policy_base_checkpoint": record.policy_base_checkpoint,
                 "policy_overlay": record.policy_overlay,
                 "policy_compatibility_sha256": record.policy_compatibility_sha256,
+                "policy_content_sha256": record.policy_content_sha256,
                 "current_step": record.current_step,
                 "max_steps": record.max_steps,
                 "open_loop_steps": record.open_loop_steps,
@@ -1241,6 +1398,7 @@ class SimulationManager:
                 "policy_base_checkpoint", manifest.get("checkpoint")
             ),
             "policy_overlay": manifest.get("policy_overlay"),
+            "policy_content_sha256": manifest.get("policy_content_sha256"),
             "policy_compatibility_sha256": manifest.get(
                 "policy_compatibility_sha256"
             ),
@@ -1281,8 +1439,8 @@ class SimulationManager:
             "action_count": action_count,
             "policy_queries": int(result.get("policy_queries", manifest.get("policy_queries", 0)) or 0),
             "success": bool(result.get("success", False)),
-            "error": result.get("error", manifest.get("error")),
-            "stopped_reason": result.get("stopped_reason"),
+            "error": manifest.get("error") or result.get("error"),
+            "stopped_reason": result.get("stopped_reason") or manifest.get("stopped_reason"),
             "measured_control_hz": timing.get(
                 "measured_control_hz", manifest.get("measured_control_hz")
             ),
@@ -1496,7 +1654,8 @@ class SimulationManager:
                 model_was_loaded = self.provider.loaded
                 model_load_started = time.monotonic()
                 try:
-                    self.provider.load(record.open_loop_steps, record.policy_id)
+                    self.provider.load(record.open_loop_steps, record.policy_id,
+                                       expected_content_sha256=record.policy_content_sha256)
                 finally:
                     with self.lock:
                         record.preparation_timing["model_load_seconds"] = (
@@ -1509,6 +1668,8 @@ class SimulationManager:
                 set_seed = getattr(self.runtime, "set_seed_everywhere", None)
                 if callable(set_seed):
                     set_seed(seed)
+                if hasattr(self.provider, "seed"):
+                    self.provider.seed(seed)
             if record.kind == "original":
                 initial_state = self.catalog.initial_state(
                     record.task_id, record.init_state_index
@@ -1532,6 +1693,7 @@ class SimulationManager:
                     float(source_metadata.get("control_hz", self.eval_config.control_hz)),
                 )
 
+            recorder.policy_action_codec = "libero_env_v1" if record.control_mode == "policy" and self.provider.metadata().get("provider") == "pi05" else "vla_adapter_v1"
             session_config = replace(
                 self.eval_config,
                 max_steps=record.max_steps,
@@ -1869,7 +2031,7 @@ class SimulationManager:
         restore_error: float | None,
     ) -> dict[str, Any]:
         bddl, _ = self.catalog.paths(record.task_id)
-        provider_metadata = self.provider.metadata()
+        provider_metadata = self.provider.metadata() if record.control_mode == "policy" else {}
         return {
             "session_id": record.id,
             "parent_session_id": record.parent_session_id,
@@ -1899,7 +2061,7 @@ class SimulationManager:
             "task_name": record.task_name,
             "level": record.task_level,
             "bddl": str(bddl),
-            "checkpoint": str(self.eval_config.checkpoint)
+            "checkpoint": record.policy_base_checkpoint
             if record.control_mode == "policy"
             else None,
             "policy_id": record.policy_id,
@@ -1907,6 +2069,7 @@ class SimulationManager:
             "policy_base_checkpoint": record.policy_base_checkpoint,
             "policy_overlay": record.policy_overlay,
             "policy_compatibility_sha256": record.policy_compatibility_sha256,
+            "policy_content_sha256": record.policy_content_sha256,
             "policy_device": provider_metadata["model_device"]
             if record.control_mode == "policy"
             else None,
@@ -2039,7 +2202,8 @@ class SimulationManager:
             raise ValueError("Trajectory task is not available in the UI catalog")
         if not 0 <= step < len(trajectory["sim_state"]):
             raise IndexError(step)
-        with self._frame_lock:
+        coordinator = getattr(self, "work_queue", None)
+        with self._frame_lock, (ResourceLease(coordinator.gpu_lock_path) if coordinator is not None else nullcontext()):
             if self._frame_env is None or self._frame_task_id != task_id:
                 if self._frame_env is not None:
                     self.simulator.close(self._frame_env)
@@ -2086,6 +2250,17 @@ class SimulationManager:
         return path
 
     def delete_session(self, session_id: str, confirm_session_id: str) -> None:
+        coordinator = getattr(self, "work_queue", None)
+        with coordinator.lock if coordinator is not None else nullcontext():
+            if coordinator is not None:
+                for identifier in coordinator.repository.queue_ids(pending_only=True):
+                    _, job = coordinator._load_job(identifier)
+                    parameters = job.get("parameters", {})
+                    if session_id in parameters.get("run_ids", []) or parameters.get("parent_run_id") == session_id:
+                        raise ConflictError("轨迹被待完成的工作任务引用，不能删除。", code="RUN_QUEUED")
+            return self._delete_session(session_id, confirm_session_id)
+
+    def _delete_session(self, session_id: str, confirm_session_id: str) -> None:
         if confirm_session_id != session_id:
             raise ValueError("confirm_session_id must exactly match the session id")
         with self.lock:

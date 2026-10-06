@@ -71,7 +71,6 @@ class StorageMaintenance:
         # Stop dispatch and wait for in-flight sidecar publication before moving.
         try:
             jobs.close()
-            jobs._binding_executor = None
             with worker.lock:
                 if worker.active_session_id is not None:
                     raise RuntimeError("仿真仍在运行，无法修复存储目录")

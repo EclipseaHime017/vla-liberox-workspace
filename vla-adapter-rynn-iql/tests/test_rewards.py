@@ -251,6 +251,8 @@ def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
                 "run_id": episode["run_id"],
                 "trajectory_sha256": episode["trajectory_sha256"],
                 "observations_sha256": episode["observations_sha256"],
+                "source_manifest_sha256": episode["source_manifest_sha256"],
+                "prompt": episode["prompt"],
                 "values_sha256": sha256_file(values_path),
                 "annotator": {
                     "model": reward_cfg["model"],
@@ -339,7 +341,7 @@ def test_tampered_reward_cache_is_recomputed(configured):
     assert second.calls > 0
 
 
-def test_reward_cache_is_reused_across_dataset_versions(configured, tmp_path):
+def test_reward_cache_is_reused_across_dataset_versions(configured, tmp_path, monkeypatch):
     prepare_dataset(configured)
     first = CountingAnnotator()
     annotate_manifest(configured, first)
@@ -381,6 +383,18 @@ def test_reward_cache_is_reused_across_dataset_versions(configured, tmp_path):
     second = CountingAnnotator()
     annotate_manifest(second_config, second)
     assert second.calls == 0
+    # A different package can seed official per-trajectory outputs without
+    # loading a model even when its own cache is empty.
+    import shutil
+    from vla_rynn_iql import rewards
+    parent_index = Path(configured.section("paths")["work_dir"]) / "annotations/annotation_manifest.json"
+    child_index = Path(second_config.section("paths")["work_dir"]) / "annotations/annotation_manifest.json"
+    shutil.copyfile(parent_index, child_index)
+    second_config.raw["paths"]["annotation_cache"] = str(tmp_path / "empty-cache")
+    def unexpected(_):
+        raise AssertionError("Compatible output reuse must not construct RynnValue")
+    monkeypatch.setattr(rewards, "RynnValueAnnotator", unexpected)
+    annotate_manifest(second_config, reuse_only=True)
 
 
 def test_sparse_reward_uses_only_debounced_terminal(configured):

@@ -119,6 +119,7 @@ def compose_config(path: Path, *, method: str | None = None,
     if not isinstance(training_override, dict):
         raise TypeError("overrides.training must be a mapping")
     requested_method = method or training_override.get("method")
+    family = family or (overrides or {}).get("model", {}).get("family")
     # Choose the method before reading its entry or inherited dependencies.
     layers = [migrate_fields(layer) for layer in _source_layers(path, method=requested_method)]
     if overrides:
@@ -162,7 +163,10 @@ def compose_config(path: Path, *, method: str | None = None,
             raise ValueError(f"{kind} preset contains unrelated sections: {sorted(preset.keys() - allowed[kind])}")
         result = merge_config(result, preset)
     for layer in layers[pivot:]:
-        result = merge_config(result, {key: value for key, value in layer.items() if key != "presets"})
+        values = {key: value for key, value in layer.items() if key != "presets"}
+        if family and values.get("model", {}).get("family", family) != family:
+            values.pop("model")
+        result = merge_config(result, values)
     if method is not None:
         result.setdefault("training", {})["method"] = method
     if family is not None:

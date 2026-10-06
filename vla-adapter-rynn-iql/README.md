@@ -1,13 +1,14 @@
 # VLA-Adapter RynnValue IQL
 
-Standalone offline post-training for the Franka VLA-Adapter policy. RynnValue
-is a frozen offline reward annotator; the deployed policy remains
-`VLA-Adapter/LIBERO-Object-Pro` with configurable model adaptation.
+Standalone offline post-training for Franka policies: VLA-Adapter Object-Pro
+and official π₀.₅-LIBERO, with independent model and method configuration.
+RynnValue is a frozen offline reward annotator, not the deployed policy.
 
 ## Training methods: IQL and BC
 
-The default remains IQL. Set `training.method: bc` for equal-weight masked-L1
-behavior cloning on **all selected training replay chunks**. Dataset selection
+The default remains IQL. Set `training.method: bc` for equal-weight behavior
+cloning on **all selected training replay chunks**: masked L1 for VLA-Adapter,
+or masked flow MSE for π₀.₅. Dataset selection
 belongs to the data layer: BC does not filter successful demonstrations, alter
 branch deduplication, or independently filter post-success actions. It never loads rewards, Q/V,
 RynnValue, Robometer or Stage annotations.
@@ -77,8 +78,8 @@ an explicit legacy `overrides.training.method` still takes precedence when prese
 ## Model configuration (shared by IQL and BC)
 
 The UI offers a foundation-model selector and an expandable model-training panel,
-separate from the algorithm controls. Currently only VLA-Adapter Object-Pro is
-registered; unsupported model families fail validation rather than using a fallback.
+separate from the algorithm controls. VLA-Adapter Object-Pro and official π₀.₅-LIBERO
+are registered; unsupported model families fail validation rather than using a fallback.
 
 ```yaml
 model:
@@ -92,7 +93,85 @@ model:
 Use `overrides.model` with the terminal pipeline. The default preserves the previous
 frozen-backbone behavior. The legacy `vla.freeze_backbone` boolean remains readable;
 an explicit canonical `model.backbone` takes precedence. All-frozen actors are rejected.
-Model selection does not change BC/IQL objectives, rewards, update order or sampling.
+Model selection preserves rewards, update order and sampling. Actor supervision is
+backend-specific: masked action L1 for VLA-Adapter, masked flow MSE for π₀.₅.
+
+### π₀.₅-LIBERO
+
+Uses [official OpenPI](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479),
+configuration `pi05_libero` and `gs://openpi-assets/checkpoints/pi05_libero`.
+PyTorch code, Transformers patches and normalization assets are verified before loading.
+The installer selects PyTorch 2.7.1's official CUDA 12.8 build for Blackwell support.
+Keep the model stack separate from `vla-liberox`; do not upgrade its Transformers installation.
+From the workspace root:
+
+```bash
+conda create -n pi05 python=3.11 pip -y
+conda run -n pi05 python -m pip install uv
+conda run --no-capture-output -n pi05 python vla-adapter-rynn-iql/scripts/setup_pi05.py
+conda run --no-capture-output -n pi05 python vla-adapter-rynn-iql/scripts/prepare_pi05.py
+```
+
+These are explicit installation/download commands, not UI startup actions. Conversion
+uses the official BF16 default (recorded in checkpoint identity); `--precision float32`
+is available on hosts with sufficient memory. Conversion requires substantial host
+memory and disk space. It refuses to overwrite an existing
+checkpoint and writes `weights/pi05_libero_torch/pi05_identity.json`, binding the weights
+and `assets/physical-intelligence/libero/norm_stats.json`. Both weights and upstream source
+are Git-ignored. Conversion failures keep a diagnostic temporary directory.
+
+The shared model preset is `configs/models/pi05.yaml`. Restart the UI after changing it.
+Select **π₀.₅ · LIBERO** in simulation or training. The training scope is either `frozen`
+(train the action expert, action projections and time MLP; freeze PaliGemma) or `full`.
+OpenPI training gradient checkpointing is enabled. No π₀.₅ PyTorch LoRA is offered.
+Full fine-tuning may exceed workstation GPU memory; no automatic CPU fallback or
+silent freezing is performed. Expert-only throughput and memory require measurement
+on the target GPU.
+
+Local acceptance (2026-10-06, RTX 5090 Laptop 24 GB, BF16 base, batch 1):
+expert-only BC and IQL each completed an update, checkpoint resume and exported-policy
+inference, with approximately 11.1 GiB peak allocated GPU memory. A 16-step LIBERO-X
+simulation also passed. Full fine-tuning passed forward/backward but ran out of memory
+while allocating AdamW state; it requires a larger-memory training device. These short
+checks establish functional compatibility, not task success rate or steady-state throughput.
+
+For the existing terminal pipeline, keep the chosen BC/IQL training entry and set:
+
+```yaml
+base_config: ./training/iql.yaml  # or ./training/bc.yaml
+environments:
+  prepare: vla-liberox
+  annotate: rynnvalue-reward
+  train: pi05
+overrides:
+  model:
+    family: pi05
+    backbone: frozen
+```
+
+Run the orchestrator from the workspace root; it starts the model-specific child environment:
+
+```bash
+conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train_terminal.py \
+  --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml
+```
+
+BC averages valid native flow losses; IQL multiplies each per-sample loss by its detached
+advantage weight. This actor objective is a platform extension, not official OpenPI IQL.
+The critic algorithm is unchanged. Replay remains `(8,7,8)`, while the official model
+retains native horizon 10 and padded action dimension 32. Only valid recorded timesteps
+and the first seven action coordinates are supervised. No reward reannotation is needed
+to switch model families. Flow MSE is not reported as action L1.
+
+Schema-4 π₀.₅ overlays contain `actor.pt`, the verified base identity and model settings.
+They require the **same converted base checkpoint and normalization files**, including
+on another device. Resume restores trainable parameters, optimizer and RNG state and
+rejects changed base assets. UI inference and queued evaluation use an owned subprocess
+in the configured model environment; simulator dependencies stay in `vla-liberox`.
+The standalone legacy `evaluate.py` entry remains VLA-Adapter-only; use the UI evaluation
+queue for π₀.₅. Native predictions are retained as raw actions, with bounded OSC commands
+recorded as executed actions, using an explicit per-action codec through export/import.
+Each simulation/evaluation seed is forwarded to the π₀.₅ worker for reproducible flow noise.
 
 LoRA follows [VLA-Adapter's fine-tuning setup](https://github.com/OpenHelix-Team/VLA-Adapter/blob/main/vla-scripts/finetune.py):
 all linear layers, Gaussian initialization, plus trainable action queries. It uses
@@ -244,8 +323,9 @@ The LIBERO Studio UI can generate `data.selection_manifest` automatically from
 an immutable, single-task dataset version. In that mode prepare does not scan
 the rest of `dataset-root`: it verifies and imports exactly the listed members,
 hashes, segment boundaries, and frozen train/validation split. The UI runs
-prepare/training with `vla-liberox` and annotation with `rynnvalue-reward`; it
-does not merge either dependency stack or pass browser-provided shell commands.
+prepare with `vla-liberox`, training with `vla-liberox` or `pi05` according to the
+selected model, and annotation with the evaluator's own environment; it does not
+merge dependency stacks or pass browser-provided shell commands.
 
 Creating or deriving a dataset freezes membership and splits, without model
 evaluation. Expand its configuration to generate Final Reward from saved inputs,

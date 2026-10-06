@@ -784,6 +784,15 @@ def _reusable_official_sidecar(
         or payload.get("values_sha256") != sha256_file(values)
     ):
         return None
+    saved = payload.get("episode") or {}
+    saved_prompt = payload.get("prompt", saved.get("prompt"))
+    saved_manifest = payload.get("source_manifest_sha256", saved.get("source_manifest_sha256"))
+    if saved_prompt is None and saved_manifest is None:
+        return None
+    if saved_prompt is not None and saved_prompt != episode.get("prompt"):
+        return None
+    if saved_manifest is not None and saved_manifest != episode.get("source_manifest_sha256"):
+        return None
     annotator_metadata = payload.get("annotator")
     official_metadata = payload.get("official_outputs")
     if not isinstance(annotator_metadata, dict) or not isinstance(official_metadata, dict):
@@ -862,7 +871,7 @@ def annotate_manifest(
     work_dir = Path(config.section("paths")["work_dir"])
     annotation_dir = work_dir / "annotations"
     annotation_dir.mkdir(parents=True, exist_ok=True)
-    previous_manifest = None
+    previous_manifests = []
     for previous_manifest_path in (
         annotation_dir / "annotation_manifest.json",
         work_dir / "rewards" / "reward_manifest.json",
@@ -871,23 +880,19 @@ def annotate_manifest(
             candidate = json.loads(previous_manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if candidate.get("dataset_sha256") == manifest["dataset_sha256"]:
-            previous_manifest = candidate
-            break
-    if (
-        not isinstance(previous_manifest, dict)
-        or previous_manifest.get("dataset_sha256") != manifest["dataset_sha256"]
-    ):
-        previous_manifest = None
+        if isinstance(candidate, dict):
+            previous_manifests.append(candidate)
     cache_dir = Path(config.section("paths")["annotation_cache"])
     cache_dir.mkdir(parents=True, exist_ok=True)
     index: list[dict[str, Any]] = []
     for episode in manifest["episodes"]:
         reusable = None
         if annotator is None and not overwrite:
-            reusable = _reusable_manifest_entry(
-                episode, reward_cfg, previous_manifest,
-            ) or _reusable_official_sidecar(episode, reward_cfg)
+            for candidate in previous_manifests:
+                reusable = _reusable_manifest_entry(episode, reward_cfg, candidate)
+                if reusable is not None:
+                    break
+            reusable = reusable or _reusable_official_sidecar(episode, reward_cfg)
         episode_annotator_metadata = (
             reusable[2] if reusable is not None else live_annotator().metadata
         )

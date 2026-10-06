@@ -14,7 +14,7 @@ from typing import Any
 
 
 TERMINAL_STATES = frozenset({"COMPLETED", "ERROR"})
-ACTIVE_STATES = frozenset({"LOADING", "READY", "RUNNING", "STOPPING", "POSTPROCESSING"})
+ACTIVE_STATES = frozenset({"QUEUED", "LOADING", "READY", "RUNNING", "STOPPING", "POSTPROCESSING"})
 
 
 def utc_now() -> str:
@@ -38,6 +38,9 @@ class SimulationSession:
     policy_base_checkpoint: str | None = None
     policy_overlay: str | None = None
     policy_compatibility_sha256: str | None = None
+    policy_content_sha256: str | None = None
+    work_job_id: str | None = None
+    resource_owned: bool = field(default=False, repr=False)
     task_id: str = ""
     task_level: str | None = None
     task_name: str | None = None
@@ -117,6 +120,8 @@ class SimulationSession:
             "policy_base_checkpoint": self.policy_base_checkpoint,
             "policy_overlay": self.policy_overlay,
             "policy_compatibility_sha256": self.policy_compatibility_sha256,
+            "policy_content_sha256": self.policy_content_sha256,
+            "work_job_id": self.work_job_id,
             "manual_source": self.manual_source,
             "controller_id": self.manual_source,
             "controller_status": self.controller_status,
@@ -177,6 +182,7 @@ class SimulationDraft:
     disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
     policy_label: str | None = None
+    policy_content_sha256: str | None = None
     preview_status: str = "PREPARING"
     preview_revision: int = 1
     error: str | None = None

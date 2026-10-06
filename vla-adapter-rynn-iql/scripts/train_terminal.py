@@ -416,7 +416,7 @@ def main() -> int:
 
         train_result = run_dir / "train_result.json"
         runner.stage(
-            "train", f"VLA-Adapter {method.name.upper()} post-training", config.environments["train"],
+            "train", f"{raw['model']['family']} {method.name.upper()} post-training", config.environments["train"],
             "train.py", effective_path,
             ["--result-file", str(train_result)],
         )

@@ -86,7 +86,7 @@ export function RunConfigForm(props: Props) {
         <p>关闭后仅将该 VLA 输入槽替换为黑帧；预览和录像仍保存原图，且至少保留一个输入。</p>
       </fieldset>
       <div className="button-row">
-        <Button className="primary" disabled={!canStartDraft(props.draft.preview_ready, props.active, props.busy)} onClick={props.onStart}>开始仿真</Button>
+        <Button className="primary" disabled={!canStartDraft(props.draft.preview_status !== "ERROR", props.active, props.busy)} onClick={props.onStart}>开始仿真</Button>
         <Button disabled={props.active || props.busy} onClick={props.onCancel}>取消草稿</Button>
       </div>
     </>}

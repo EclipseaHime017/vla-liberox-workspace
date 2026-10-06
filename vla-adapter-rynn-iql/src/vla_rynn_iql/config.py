@@ -284,7 +284,7 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     for name, expected in (("action_horizon", 8), ("action_dim", 7), ("proprio_dim", 8)):
         _number(data, name, low=1, integer=True)
         if data[name] != expected:
-            raise ValueError(f"data.{name} must match the current VLA-Adapter value {expected}")
+            raise ValueError(f"data.{name} must match the platform replay value {expected}")
     _number(data, "control_hz", low=1)
     if float(data["control_hz"]) != 20.0:
         raise ValueError("Version 1 requires data.control_hz=20")

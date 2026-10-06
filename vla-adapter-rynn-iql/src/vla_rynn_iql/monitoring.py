@@ -11,7 +11,7 @@ from typing import Any, Iterable
 ACTION_NAMES = ("dx", "dy", "dz", "drx", "dry", "drz", "gripper")
 
 TENSORBOARD_GROUPS = {
-    "loss": ("q_loss", "value_loss", "actor_loss"),
+    "loss": ("q_loss", "value_loss", "actor_loss", "actor_flow_mse"),
     "value": ("q_mean", "value_mean", "advantage_mean"),
     "iql": ("advantage_weight_mean",),
     "optimization": (

@@ -48,6 +48,9 @@ def full_reward(jobs, dataset, source="stage", exponent=2):
         "dataset_sha256": "prepared", "reward_config": recipe, "episodes": [{
             "run_id": "run", "reward_path": str(arrays), "annotation_path": str(arrays),
             "reward_sha256": digest(arrays), "annotation_sha256": digest(arrays)}]}
+    if source == "stage":
+        snapshot = json.loads(Path(raw["data"]["stage_annotations_manifest"]).read_text())
+        index["episodes"][0]["stage_annotation_sha256"] = snapshot["annotations"]["run"]["annotation_sha256"]
     (rewards / "reward_manifest.json").write_text(json.dumps(index))
     version = seal(job["output_path"] / "version.json")
     jobs.datasets.update_version(dataset["id"], version)
@@ -105,6 +108,10 @@ def test_global_pin_is_independent_of_dataset_evaluation_and_copies_exact_arrays
     bind_reward_snapshot(Path(version["prepared_manifest_path"]), Path(version["reward_manifest_path"]))
     target = jobs.datasets.create(name="global fallback", task_id="LEVEL1::pick",
         selection={"mode": "manual", "run_ids": ["run"]})
+    raw = yaml.safe_load(Path(version["config_path"]).read_text())
+    snapshot = json.loads(Path(raw["data"]["stage_annotations_manifest"]).read_text())
+    jobs.datasets.stage_labels.save(jobs.datasets._load(target["id"])[1], "run",
+                                    snapshot["annotations"]["run"], origin="global_copy")
     defaults = jobs.defaults(target["id"], "stage")
     assert defaults["reward_version"] is None
     assert defaults["reward_availability"] == {"ready": True, "origin": "global", "missing_run_ids": [], "errors": [], "pending": False}

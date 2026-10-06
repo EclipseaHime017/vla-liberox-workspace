@@ -29,7 +29,7 @@ from .io import atomic_json, sha256_file, stable_hash
 from .algorithms import TrainingAlgorithm, build_algorithm
 from .methods import actor_lr_warmup, training_method
 from .models import model_backend, model_config, model_signature
-from .model_adaptation import export_backbone, parameter_counts, restore_backbone, save_backbone, trainable_parameters
+from .model_adaptation import export_backbone
 from .monitoring import (
     ACTION_NAMES,
     TrainingProgressReporter,
@@ -220,10 +220,6 @@ def _actor_lr(step: int, total: int, peak: float, final: float, warmup: int) -> 
     return final + 0.5 * (peak - final) * (1.0 + math.cos(math.pi * min(1.0, progress)))
 
 
-def _state_dict_cpu(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    return {key: value.detach().cpu() for key, value in module.state_dict().items()}
-
-
 def _save_checkpoint(
     directory: Path,
     step: int,
@@ -237,9 +233,7 @@ def _save_checkpoint(
 ) -> Path:
     target = directory / f"step_{step:08d}"
     target.mkdir(parents=True, exist_ok=True)
-    torch.save(_state_dict_cpu(components.action_head), target / "action_head.pt")
-    torch.save(_state_dict_cpu(components.proprio_projector), target / "proprio_projector.pt")
-    save_backbone(components, model_config(config.raw), target)
+    model_backend(config.raw).save_actor(components, model_config(config.raw), target)
     torch.save({
         "schema_version": 2, "step": step, "algorithm": training_method(config.raw).name,
         "algorithm_state": algorithm.checkpoint(),
@@ -253,6 +247,7 @@ def _save_checkpoint(
         "schema_version": 2, "step": step, "config_sha256": config.digest,
         "algorithm": training_method(config.raw).name,
         "model_config": model_signature(config.raw),
+        "model_identity": getattr(components, "identity", None),
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
@@ -279,12 +274,20 @@ def _publish_overlay(
 ) -> Path:
     method = training_method(config.raw).name
     prefix = "rynn-iql" if method == "iql" else method
+    if model_config(config.raw)["family"] != "vla_adapter":
+        prefix = f"{model_config(config.raw)['family']}-{prefix}"
     policy_id = f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     target = registry / policy_id
     target.mkdir(parents=True, exist_ok=False)
-    shutil.copy2(checkpoint / "action_head.pt", target / "action_head.pt")
-    shutil.copy2(checkpoint / "proprio_projector.pt", target / "proprio_projector.pt")
-    adapted = export_backbone(components, model_config(config.raw), target)
+    settings = model_config(config.raw)
+    native_artifacts = None
+    if settings["family"] == "vla_adapter":
+        shutil.copy2(checkpoint / "action_head.pt", target / "action_head.pt")
+        shutil.copy2(checkpoint / "proprio_projector.pt", target / "proprio_projector.pt")
+        adapted = export_backbone(components, settings, target)
+    else:
+        native_artifacts = model_backend(config.raw).export_actor(components, settings, target)
+        adapted = False
     compatibility = {
         "base_checkpoint": config.section("model")["base_checkpoint"],
         "stats_key": components.stats_key,
@@ -312,13 +315,18 @@ def _publish_overlay(
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "training_step": step,
-        "component_sha256": {
+        "component_sha256": native_artifacts["component_sha256"] if native_artifacts else {
             "action_head": sha256_file(target / "action_head.pt"),
             "proprio_projector": sha256_file(target / "proprio_projector.pt"),
             **({"backbone": sha256_file(target / "backbone.pt")} if adapted else {}),
         },
         "compatibility_sha256": stable_hash(compatibility),
     }
+    if native_artifacts:
+        for key in ("backbone", "action_head", "proprio_projector"):
+            payload.pop(key)
+        payload.update(native_artifacts, schema_version=4)
+        payload["label"] = f"π₀.₅ · {payload['label']}"
     temporary = target / ".policy.yaml.tmp"
     temporary.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     os.replace(temporary, target / "policy.yaml")
@@ -372,17 +380,7 @@ def _restore_checkpoint(
     }
     if mismatches:
         raise ValueError(f"Resume checkpoint is incompatible: {mismatches}")
-    restore_backbone(components, model_config(config.raw), checkpoint)
-    components.action_head.load_state_dict(
-        torch.load(checkpoint / "action_head.pt", map_location="cpu", weights_only=True),
-        strict=True,
-    )
-    components.proprio_projector.load_state_dict(
-        torch.load(
-            checkpoint / "proprio_projector.pt", map_location="cpu", weights_only=True
-        ),
-        strict=True,
-    )
+    model_backend(config.raw).restore_actor(components, model_config(config.raw), checkpoint)
     trainer = torch.load(
         checkpoint / "trainer.pt", map_location=device, weights_only=False
     )
@@ -390,7 +388,7 @@ def _restore_checkpoint(
     actor_optimizer.load_state_dict(trainer["actor_optimizer"])
     torch.set_rng_state(trainer["torch_rng"].cpu())
     if torch.cuda.is_available() and trainer.get("cuda_rng") is not None:
-        torch.cuda.set_rng_state_all(trainer["cuda_rng"])
+        torch.cuda.set_rng_state_all([state.cpu() for state in trainer["cuda_rng"]])
     np.random.set_state(trainer["numpy_rng"])
     random.setstate(trainer["python_rng"])
     data_generator.set_state(trainer["data_rng"].cpu())
@@ -414,6 +412,9 @@ def train(config: LoadedConfig) -> Path:
         torch.cuda.set_device(device)
     LOG.info("Loading prepared replay for %s", method.name.upper())
     manifest = load_manifest(config)
+    for key in ("action_horizon", "action_dim", "proprio_dim"):
+        if key in manifest and manifest[key] != config.section("data")[key]:
+            raise ValueError(f"Prepared replay {key} does not match the selected model configuration")
     reward_index = load_reward_index(config) if method.requires_rewards else None
     reward_hash = reward_manifest_digest(reward_index) if reward_index is not None else None
     reward_mode = ("cumulative_primitive_steps" if config.section("reward")["accumulate_primitive_steps"]
@@ -424,15 +425,15 @@ def train(config: LoadedConfig) -> Path:
     LOG.info("Loading policy model: %s", model_signature(config.raw))
     component_load_started = time.monotonic()
     components = backend.load_components(config)
-    LOG.info("VLA components loaded in %.2f s", time.monotonic() - component_load_started)
+    LOG.info("Policy components loaded in %.2f s", time.monotonic() - component_load_started)
     dataset = (ReplayDataset(config, components.action_stats, components.proprio_stats, "train",
                              reward_index=reward_index) if method.requires_transitions else
                ActionDataset(config, components.action_stats, components.proprio_stats, "train"))
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
     agent = build_algorithm(config, device)
-    actor_parameters = trainable_parameters(components)
-    counts = parameter_counts(components)
+    actor_parameters = backend.trainable_parameters(components)
+    counts = backend.parameter_counts(components)
     print(f"MODEL ready | config={model_signature(config.raw)} | parameters={counts}", flush=True)
     # Paper Table 9 / official pi-rl policy optimizer.  In particular, do not
     # inherit AdamW's default 0.01 weight decay.
@@ -477,6 +478,7 @@ def train(config: LoadedConfig) -> Path:
         "algorithm": method.name,
         "model_config": model_config(config.raw),
         "model_parameters": counts,
+        "model_identity": getattr(components, "identity", None),
         "code_version": _code_version(),
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
@@ -562,13 +564,13 @@ def train(config: LoadedConfig) -> Path:
                                "action_mask", "reward", "bootstrap_mask", "chunk_length"}
             }
             context, algorithm_metrics = agent.update(critic_batch, step)
-            prediction = backend.predict_batch(components, batch, device)
-            actor_loss = agent.actor_loss(prediction, critic_batch, context)
+            losses, prediction = backend.actor_losses(components, batch, device)
+            actor_loss = agent.weight_actor_losses(losses, context)
             action_metrics = _action_diagnostics(
                 prediction,
                 critic_batch["actions"],
                 critic_batch["action_mask"],
-            )
+            ) if prediction is not None else {"actor_flow_mse": float(losses.detach().mean())}
             (actor_loss / accumulation).backward()
             actor_loss_value = float(actor_loss.detach())
             actor_grad_norm = None
@@ -586,12 +588,10 @@ def train(config: LoadedConfig) -> Path:
                     group["lr"] = current_actor_lr
                 actor_optimizer.step()
                 actor_optimizer.zero_grad(set_to_none=True)
-                action_head_parameter_norm = _module_parameter_norm(
-                    components.action_head
-                )
-                proprio_projector_parameter_norm = _module_parameter_norm(
-                    components.proprio_projector
-                )
+                if hasattr(components, "action_head"):
+                    action_head_parameter_norm = _module_parameter_norm(components.action_head)
+                if hasattr(components, "proprio_projector"):
+                    proprio_projector_parameter_norm = _module_parameter_norm(components.proprio_projector)
             metric = {
                 "step": step + 1, "algorithm": method.name,
                 **algorithm_metrics,

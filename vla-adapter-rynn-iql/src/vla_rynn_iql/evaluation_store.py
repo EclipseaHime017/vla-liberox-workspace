@@ -57,6 +57,15 @@ def valid_bound_evaluation(episode: dict[str, Any]) -> dict[str, Any] | None:
     payload = _load_json(sidecar)
     if payload is None:
         return None
+    saved = payload.get("episode") or {}
+    for key in ("prompt", "source_manifest_sha256"):
+        if payload.get(key, saved.get(key)) != episode.get(key) or episode.get(key) is None:
+            return None
+    for path_key, hash_key in (("observations_path", "observations_sha256"),
+                               ("source_manifest", "source_manifest_sha256")):
+        path = storage_path(episode[path_key])
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != episode.get(hash_key):
+            return None
     if (
         payload.get("schema_version") not in COMPATIBLE_SIDECAR_SCHEMA_VERSIONS
         or payload.get("run_id") != episode.get("run_id")
@@ -144,6 +153,12 @@ def bind_reward_manifest(
         episode = episodes.get(run_id)
         if episode is None:
             raise ValueError(f"Reward entry has no prepared episode: {run_id}")
+        for path_key, hash_key in (("trajectory_path", "trajectory_sha256"),
+                                   ("observations_path", "observations_sha256"),
+                                   ("source_manifest", "source_manifest_sha256")):
+            path = storage_path(episode[path_key])
+            if path.is_symlink() or sha256_file(path) != episode.get(hash_key):
+                raise ValueError(f"Source changed since Prepare: {run_id} ({path_key})")
         existing = valid_bound_evaluation(episode)
         if (
             existing is not None
@@ -182,6 +197,9 @@ def bind_reward_manifest(
             "evaluated_at": _utc_now(),
             "trajectory_sha256": sha256_file(trajectory),
             "observations_sha256": episode.get("observations_sha256"),
+            "source_manifest_sha256": episode["source_manifest_sha256"],
+            "prompt": episode["prompt"],
+            "episode": episode,
             "source_key": reward.get("source_key"),
             "values_file": VALUES_NAME,
             "values_sha256": sha256_file(destination),

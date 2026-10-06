@@ -2,12 +2,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CollectPage from "./CollectPage";
 import App from "../app/App";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import { getController, getControllers } from "../features/run-control/controller";
 import { sessionWebSocket } from "../api/websocket";
 import type { Bootstrap, ControllerStatus, Session } from "../features/run-control/types";
 
-vi.mock("../api/client", () => ({ api: vi.fn(), ApiError: class extends Error {} }));
+vi.mock("../api/client", async (original) => ({ ...await original<typeof import("../api/client")>(), api: vi.fn() }));
 vi.mock("../features/run-control/controller", async (importOriginal) => ({
   ...await importOriginal<typeof import("../features/run-control/controller")>(),
   getController: vi.fn(), getControllers: vi.fn(),
@@ -70,6 +70,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("collection controller integration", () => {
+  it("shows missing historical model as WARN without falling back to base", async () => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (path.endsWith("/branches")) throw new ApiError(409, { severity: "warning" }, "原策略模型已删除");
+      return original(path, options);
+    });
+    render(<CollectPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "从此帧重新推理" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始二次推理" }));
+    const warning = await screen.findByRole("alert");
+    expect(warning.className).toContain("warning-banner");
+    expect(warning.textContent).toContain("WARN");
+    expect(warning.textContent).toContain("原策略模型已删除");
+    expect(vi.mocked(api).mock.calls.filter(([path]) => path.endsWith("/branches"))).toHaveLength(1);
+  });
   it("shows live status in the top bar without remounting the console when navigating", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     vi.mocked(api).mockImplementation(async (path, options) => path === "/api/sessions"

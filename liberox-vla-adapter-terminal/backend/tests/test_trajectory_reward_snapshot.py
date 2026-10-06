@@ -9,6 +9,7 @@ import numpy as np
 
 from backend.app.services import trajectory_reward_snapshot as snapshots
 from backend.app.services.offline_job_service import OfflineJobService
+from backend.app.storage.repositories import OfflineJobRepository
 from test_dataset_evaluation_detail import digest, global_fixture
 from test_dataset_reward_versions import setup_jobs
 
@@ -141,11 +142,20 @@ def test_robometer_global_overwrite_never_changes_training_reward(tmp_path):
     assert snapshots.read_reward_snapshot(result["run"])["metadata"] == first["metadata"]
 
 
-def test_completed_results_publish_in_single_background_queue(tmp_path):
+def publication_jobs(tmp_path):
     jobs = object.__new__(OfflineJobService)
     jobs.jobs_root = tmp_path
+    jobs.project_root = tmp_path
+    jobs.gpu_lock_path = tmp_path / ".gpu-task.lock"
     jobs.lock = threading.RLock()
-    jobs.repository = SimpleNamespace(upsert=lambda *_: None)
+    jobs._local_tasks = {}
+    jobs.repository = OfflineJobRepository(tmp_path / "jobs.sqlite", "test")
+    jobs._prepare_launch = lambda: None
+    return jobs
+
+
+def test_completed_results_publish_in_single_background_queue(tmp_path):
+    jobs = publication_jobs(tmp_path)
     entered, release = threading.Event(), threading.Event()
     calls = []
 
@@ -161,11 +171,13 @@ def test_completed_results_publish_in_single_background_queue(tmp_path):
     for identity in ("first", "second"):
         path = tmp_path / identity / "job.json"
         path.parent.mkdir()
-        record = {"schema_version": 1, "id": identity, "kind": "annotation", "status": "COMPLETED"}
+        record = {"schema_version": 1, "id": identity, "kind": "trajectory_evaluation", "status": "COMPLETED",
+                  "created_at": "2026-01-01T00:00:00Z"}
         path.write_text(json.dumps(record))
         records.append(record)
     try:
         jobs._schedule_result_binding(records[0])
+        jobs._dispatch_training_queue()
         assert entered.wait(3)
         jobs._schedule_result_binding(records[0])
         jobs._schedule_result_binding(records[1])
@@ -183,13 +195,11 @@ def test_completed_results_publish_in_single_background_queue(tmp_path):
 
 
 def test_binding_error_keeps_diagnostic_job_status(tmp_path):
-    jobs = object.__new__(OfflineJobService)
-    jobs.jobs_root = tmp_path
-    jobs.lock = threading.RLock()
-    jobs.repository = SimpleNamespace(upsert=lambda *_: None)
+    jobs = publication_jobs(tmp_path)
     path = tmp_path / "job" / "job.json"
     path.parent.mkdir()
-    record = {"schema_version": 1, "id": "job", "kind": "annotation", "status": "COMPLETED"}
+    record = {"schema_version": 1, "id": "job", "kind": "trajectory_evaluation", "status": "COMPLETED",
+              "created_at": "2026-01-01T00:00:00Z"}
     path.write_text(json.dumps(record))
 
     def fail(_):
@@ -197,6 +207,7 @@ def test_binding_error_keeps_diagnostic_job_status(tmp_path):
 
     jobs._bind_completed_result = fail
     jobs._schedule_result_binding(record)
+    jobs._dispatch_training_queue()
     jobs._binding_workers["job"].result(timeout=3)
     jobs.close()
     _, final = jobs._load_job("job")

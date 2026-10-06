@@ -80,6 +80,8 @@ class TrajectoryRecorder:
     action_sources: list[str] = field(default_factory=list)
     inference_query_steps: list[int] = field(default_factory=list)
     inference_action_chunks: list[np.ndarray] = field(default_factory=list)
+    policy_action_codec: str = "vla_adapter_v1"
+    action_codecs: list[str] = field(default_factory=list)
 
     def _append_state(self, env: Any, observation: dict[str, Any]) -> None:
         position = _copy_vector(observation["robot0_eef_pos"], (3,), "robot0_eef_pos")
@@ -118,6 +120,7 @@ class TrajectoryRecorder:
         self.rewards.append(float(reward))
         self.dones.append(bool(done))
         self.action_sources.append(str(action_source))
+        self.action_codecs.append(self.policy_action_codec if action_source in {"policy", "policy_requery"} else "libero_env_v1")
         self._append_state(env, observation)
 
     def record_inference(self, query_step: int, action_chunk: Any) -> None:
@@ -153,6 +156,8 @@ class TrajectoryRecorder:
         recorder.rewards = [float(value) for value in trajectory["reward"][action_slice]]
         recorder.dones = [bool(value) for value in trajectory["done"][action_slice]]
         recorder.action_sources = [str(value) for value in trajectory["action_source"][action_slice]]
+        codecs = trajectory.get("action_codec", np.full(len(trajectory["env_action"]), "vla_adapter_v1"))
+        recorder.action_codecs = [str(value) for value in codecs[action_slice]]
         inference_keys = {
             "inference_query_step",
             "inference_chunk_offset",
@@ -193,7 +198,7 @@ class TrajectoryRecorder:
         )
         if any(len(series) != state_count for series in state_series):
             raise ValueError("Trajectory state arrays have inconsistent lengths")
-        action_series = (self.raw_actions, self.rewards, self.dones, self.action_sources)
+        action_series = (self.raw_actions, self.rewards, self.dones, self.action_sources, self.action_codecs)
         if any(len(series) != action_count for series in action_series):
             raise ValueError("Trajectory action arrays have inconsistent lengths")
         if state_count != action_count + 1:
@@ -242,6 +247,7 @@ class TrajectoryRecorder:
             "reward": np.asarray(self.rewards, dtype=np.float32),
             "done": np.asarray(self.dones, dtype=np.bool_),
             "action_source": np.asarray(self.action_sources, dtype=np.str_),
+            "action_codec": np.asarray(self.action_codecs, dtype=np.str_),
             "inference_query_step": np.asarray(self.inference_query_steps, dtype=np.int64),
             "inference_chunk_offset": np.asarray(inference_offsets, dtype=np.int64),
             "inference_action": inference_actions,
@@ -369,6 +375,7 @@ def _write_csv(csv_path: Path, trajectory: dict[str, np.ndarray]) -> None:
         "action_drz",
         "action_gripper",
         "action_source",
+        "action_codec",
         "reward",
         "done",
     ]
@@ -417,6 +424,7 @@ def _write_csv(csv_path: Path, trajectory: dict[str, np.ndarray]) -> None:
                         "action_drz": float(action[5]),
                         "action_gripper": float(action[6]),
                         "action_source": str(trajectory["action_source"][index]),
+                        "action_codec": str(trajectory["action_codec"][index]) if "action_codec" in trajectory else "vla_adapter_v1",
                         "reward": float(trajectory["reward"][index]),
                         "done": bool(trajectory["done"][index]),
                     }

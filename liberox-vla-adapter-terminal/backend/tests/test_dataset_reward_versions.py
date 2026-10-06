@@ -12,6 +12,7 @@ import yaml
 
 from backend.app.core.exceptions import ConflictError
 from backend.app.services.offline_job_service import OfflineJobService
+from backend.app.storage.repositories import OfflineJobRepository
 from backend.app.workers.finalize_reward_version import seal
 from test_training_platform import make_run, service
 
@@ -26,6 +27,10 @@ def setup_jobs(tmp_path):
     jobs = object.__new__(OfflineJobService)
     jobs.datasets = datasets
     jobs.lock = threading.RLock()
+    jobs._local_tasks = {}
+    jobs.project_root = tmp_path
+    jobs.gpu_lock_path = tmp_path / ".gpu-task.lock"
+    jobs.repository = OfflineJobRepository(tmp_path / "jobs.sqlite", "test")
     jobs.jobs_root = tmp_path / "jobs"
     jobs.training_root = tmp_path / "training"
     jobs.cache_root = tmp_path / "cache"
@@ -36,7 +41,7 @@ def setup_jobs(tmp_path):
                 "annotation_sha256": "label"}})
     jobs.ui_config = SimpleNamespace(offline_rl_root=WORKSPACE / "vla-adapter-rynn-iql",
         robometer_root=WORKSPACE / "vla-adapter-robometer", train_environment="vla-liberox",
-        reward_environment="rynnvalue-reward", robometer_environment="robometer-reward")
+        reward_environment="rynnvalue-reward", robometer_environment="robometer-reward", dataset_root=tmp_path)
     jobs._prepare_launch = lambda: None
     jobs._new_job = lambda **kwargs: kwargs
     jobs.available_checkpoints = lambda _: []
@@ -205,10 +210,17 @@ def test_freeze_and_derive_api_do_not_start_evaluation(tmp_path, monkeypatch):
     request = Request({"type": "http", "app": app})
     body = {"name": "new", "task_id": "LEVEL1::pick", "selection": {"mode": "manual", "run_ids": ["run"]}}
     created = asyncio.run(api.create(CreateTrainingDatasetRequest(**body), request))
-    assert created["reward_version_id"] is None and created["evaluation_versions"] == []
+    assert created["status"] == "QUEUED" and created["kind"] == "dataset"
+    future = jobs._local_tasks[created["id"]][1]
+    jobs._dispatch_training_queue()
+    dataset_result = future.result(3)
+    assert dataset_result["reward_version_id"] is None and dataset_result["evaluation_versions"] == []
     derived = asyncio.run(api.derive(dataset["id"], DeriveTrainingDatasetRequest(**{
         "name": "derived", "selection": body["selection"]}), request))
-    assert derived["reward_version_id"] is None
+    assert derived["status"] == "QUEUED"
+    future = jobs._local_tasks[derived["id"]][1]
+    jobs._dispatch_training_queue()
+    assert future.result(3)["reward_version_id"] is None
 
 
 def test_hidden_recipe_parameters_are_pinned_not_taken_from_new_base(tmp_path):

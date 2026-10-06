@@ -5,7 +5,7 @@ import threading
 import uuid
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 
 from ..storage.files import atomic_write_json
@@ -14,11 +14,12 @@ from .dataset_transfer import export_dataset
 
 
 class DatasetExportService:
-    def __init__(self, datasets, config):
+    def __init__(self, datasets, config, coordinator=None):
         self.datasets, self.config = datasets, config
         self.root = config.offline_rl_root.parent / "dataset-exports"
         self.lock = threading.RLock()
-        self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-export")
+        self.coordinator = coordinator
+        self.worker = None if coordinator is not None else ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-export")
         self.active = False
         self.closed = False
         self.latest: dict[str, dict] = {}
@@ -37,7 +38,7 @@ class DatasetExportService:
     @contextmanager
     def mutation_guard(self):
         """Dataset deletion must not remove active export inputs or legacy results."""
-        with self.lock:
+        with (self.coordinator.lock if self.coordinator is not None else nullcontext()), self.lock:
             if self.active:
                 raise RuntimeError("数据集正在导出，请完成后再删除或修复存储")
             yield
@@ -62,7 +63,18 @@ class DatasetExportService:
             self.latest[dataset_id] = state
             self.active = True
             try:
-                self.worker.submit(self._run, state)
+                if self.coordinator is not None:
+                    job, future = self.coordinator.submit_local("export", lambda: self._run(state), dataset_id=dataset_id)
+                    state["work_job_id"] = job["id"]
+                    def finished(done):
+                        if done.cancelled():
+                            with self.lock:
+                                state.update(status="CANCELED")
+                                self.active = False
+                                atomic_write_json(self.root / ".jobs" / f"{identifier}.json", state)
+                    future.add_done_callback(finished)
+                else:
+                    self.worker.submit(self._run, state)
             except Exception as exc:
                 self.active = False
                 state.update(status="FAILED", error=str(exc))
@@ -88,6 +100,7 @@ class DatasetExportService:
                 update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
             except OSError:
                 logging.getLogger(__name__).exception("Cannot persist failed dataset export")
+            raise
         finally:
             with self.lock:
                 self.active = False
@@ -95,4 +108,5 @@ class DatasetExportService:
     def close(self):
         with self.lock:
             self.closed = True
-        self.worker.shutdown(wait=True)
+        if self.worker is not None:
+            self.worker.shutdown(wait=True)

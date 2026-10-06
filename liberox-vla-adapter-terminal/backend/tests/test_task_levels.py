@@ -86,7 +86,8 @@ def test_level5_attribute_key_and_invalid_records(tmp_path):
 def test_level5_identity_persisted_in_run_branch_and_batch_evaluation(tmp_path, monkeypatch):
     catalog, _, _, scene = make_catalog(tmp_path, monkeypatch)
     task_id = f"LEVEL5::{scene}::L5-2"
-    policy = SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base",
+    policy = SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base", family="vla_adapter",
+        content_sha256="a" * 64, base_revision="b" * 40,
         manifest=None, compatibility_sha256=None, stats_key="stats",
         action_head=None, proprio_projector=None, backbone=None, model_config=None, training_step=None)
     manager = object.__new__(SimulationManager)
@@ -94,7 +95,7 @@ def test_level5_identity_persisted_in_run_branch_and_batch_evaluation(tmp_path, 
     manager.eval_config = SimpleNamespace(seed=0, disabled_policy_cameras=(), control_hz=20)
     manager.ui_config = SimpleNamespace(output_root=tmp_path / "runs", project_id="test")
     manager._policy_entry = lambda _: policy
-    manager.policy_catalog = SimpleNamespace(refresh=lambda: None, entry=lambda _: policy)
+    manager.policy_catalog = SimpleNamespace(refresh=lambda: None, entry=lambda _: policy, select=lambda _: policy)
     record = manager._new_record(kind="original", max_steps=16, open_loop_steps=8,
         task_id=task_id, seed=19, init_state_index=2)
     config = yaml.safe_load((record.output_dir / "config.yaml").read_text())
@@ -104,6 +105,7 @@ def test_level5_identity_persisted_in_run_branch_and_batch_evaluation(tmp_path, 
     branch = manager._new_record(kind="branch", max_steps=16, open_loop_steps=8,
         task_id=catalog.default_task_id, seed=0, resume_step=3,
         parent={"id": record.id, "trajectory": "source.npz", "task_id": task_id,
+            "policy_content_sha256": policy.content_sha256,
             "policy_id": "base", "seed": 19, "init_state_index": 2})
     assert branch.task_id == task_id and branch.task_prompt == record.task_prompt
     assert branch.seed == 19 and branch.init_state_index == 2
@@ -138,7 +140,7 @@ def test_preview_reuses_physical_scene_between_language_variants():
         return object()
 
     manager = SimpleNamespace(
-        eval_config=object(), lock=threading.RLock(),
+        eval_config=object(), lock=threading.RLock(), _frame_lock=threading.Lock(),
         ui_config=SimpleNamespace(preview_fps=100, preview_width=4, preview_height=4, jpeg_quality=85),
         catalog=SimpleNamespace(paths=lambda task_id: (Path("other" if task_id == "other" else "shared"), Path("init"))),
         simulator=SimpleNamespace(create=create, close=closed.append, restore=lambda *_: None,

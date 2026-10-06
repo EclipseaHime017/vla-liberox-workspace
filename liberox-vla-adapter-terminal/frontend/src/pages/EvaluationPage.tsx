@@ -214,7 +214,7 @@ export function EvaluationPage() {
   const begin = async () => {
     if (busy || !preview || !previewInput.current) return;
     setBusy(true); setError("");
-    try { await tests.register(previewInput.current, preview.schedule_sha256); }
+    try { await tests.register(previewInput.current, preview.schedule_sha256, preview.policy_content_sha256); }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };

@@ -78,6 +78,7 @@ def test_tensorboard_groups_metrics_and_skips_missing_values():
         {
             "step": 12,
             "actor_loss": 0.4,
+            "actor_flow_mse": 0.2,
             "actor_grad_norm": None,
             "action_head_parameter_norm": 4.2,
             "actor_l1_gripper": 0.2,
@@ -85,6 +86,7 @@ def test_tensorboard_groups_metrics_and_skips_missing_values():
         },
     )
     assert ("loss/actor_loss", 0.4, 12) in writer.scalars
+    assert ("loss/actor_flow_mse", 0.2, 12) in writer.scalars
     assert ("action_l1/actor_l1_gripper", 0.2, 12) in writer.scalars
     assert (
         "gripper/actor_gripper_target_close_fraction", 0.3, 12

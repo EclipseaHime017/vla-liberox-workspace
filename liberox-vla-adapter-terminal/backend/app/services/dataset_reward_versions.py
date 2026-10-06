@@ -7,7 +7,6 @@ import json
 import math
 import shutil
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -212,15 +211,9 @@ class DatasetRewardVersions:
                     **({"exponent": parameters["stage_exponent"], "nonpositive": True}
                        if source in {"final", "all"} else {}),
                 )
-            gpu = source in {"rynnvalue", "robometer", "all"}
-            if gpu:
-                self._prepare_launch()
-            try:
-                if source == "all":
-                    return self._launch_all_rewards(dataset, parameters, snapshot)
-                return self._launch_reward_version(dataset, parameters, snapshot)
-            finally:
-                self.launch_reserved = False
+            if source == "all":
+                return self._launch_all_rewards(dataset, parameters, snapshot)
+            return self._launch_reward_version(dataset, parameters, snapshot)
 
     def _launch_reward_version(self, dataset: dict, parameters: dict, snapshot: dict | None,
                                *, deferred: bool = False, annotation_input: Path | None = None) -> dict:
@@ -440,15 +433,14 @@ class DatasetRewardVersions:
                     atomic_write_json(final_path, final)
                     self.repository.upsert(final, final_path)
 
-            executor = getattr(self, "_binding_executor", None)
-            if executor is None:
-                executor = self._binding_executor = ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="trajectory-result-bind")
             # A service restart may discover many completed historical jobs.
             # Serialize disk work instead of launching one hashing thread each.
             for key in [key for key, future in workers.items() if future.done()]:
                 del workers[key]
-            workers[job["id"]] = executor.submit(bind)
+            _, workers[job["id"]] = self.submit_local(
+                "publication", bind, dataset_id=job.get("dataset_id"),
+                parameters={"source_job_id": job["id"]}, created_at=job["created_at"],
+            )
 
     def schedule_first_reward_snapshot(self, run: dict) -> None:
         """Queue legacy global initialization; detail requests never wait for IO."""
@@ -463,11 +455,10 @@ class DatasetRewardVersions:
             key = f"trajectory:{run['id']}"
             if key in workers and not workers[key].done():
                 return
-            executor = getattr(self, "_binding_executor", None)
-            if executor is None:
-                executor = self._binding_executor = ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="trajectory-result-bind")
-            workers[key] = executor.submit(ensure_first_reward_snapshot, dict(run), self.datasets)
+            _, workers[key] = self.submit_local(
+                "publication", lambda: ensure_first_reward_snapshot(dict(run), self.datasets),
+                parameters={"run_ids": [run["id"]]},
+            )
 
     def _first_dataset_result(self, run_id: str, source: str) -> dict | None:
         candidates = []

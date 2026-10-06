@@ -30,7 +30,7 @@ export type PolicyInfo = {
   algorithm?: "iql" | "bc" | null;
   model_config?: {
     family: string; backbone: "frozen" | "lora" | "full";
-    action_head: "train" | "frozen"; proprio_projector: "train" | "frozen";
+    action_head?: "train" | "frozen"; proprio_projector?: "train" | "frozen";
     lora?: { rank: number; alpha: number; dropout: number };
   } | null;
   policy_id: string;
@@ -307,7 +307,7 @@ export type TrainingDataset = {
 };
 
 export type OfflineJob = {
-  id: string; kind: "annotation" | "trajectory_evaluation" | "training" | "evaluation";
+  id: string; kind: "annotation" | "trajectory_evaluation" | "training" | "evaluation" | "simulation" | "dataset" | "verification" | "export" | "publication";
   status: "QUEUED" | "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
   dataset_id: string | null; created_at: string; started_at: string | null; completed_at: string | null;
   stage: string; stage_label: string; error: string | null; output_path: string;
@@ -393,6 +393,7 @@ export type EvaluationAggregate = {
 };
 
 export type EvaluationPreview = {
+  policy_content_sha256: string;
   config: EvaluationConfig;
   schedule: EvaluationScheduleItem[];
   schedule_sha256: string;

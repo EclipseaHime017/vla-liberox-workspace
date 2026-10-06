@@ -23,6 +23,7 @@ const bootstrap = {
 } as Bootstrap;
 const config = { task_id: "task-a", policy_id: "base", trials: 100, max_steps: 300, open_loop_steps: 8, realtime: true, init_state_indices: null, base_seed: 7, seed_count: null, schedule_seed: 7 };
 const preview: EvaluationPreview = {
+  policy_content_sha256: "b".repeat(64),
   config, schedule: [{ trial_index: 0, init_state_index: 0, seed: 7 }],
   schedule_sha256: "a".repeat(64), init_state_counts: { "0": 34, "1": 33, "2": 33 },
   seed_counts: { "7": 3 }, combination_counts: {}, estimated_duration_seconds: 1500,
@@ -101,7 +102,7 @@ describe("evaluation page", () => {
     fireEvent.click(screen.getByRole("button", { name: "预览调度" }));
     await waitFor(() => expect(start.disabled).toBe(false));
     fireEvent.click(start);
-    await waitFor(() => expect(mocks.enqueueEvaluation).toHaveBeenCalledWith(config, preview.schedule_sha256));
+    await waitFor(() => expect(mocks.enqueueEvaluation).toHaveBeenCalledWith(config, preview.schedule_sha256, preview.policy_content_sha256));
     expect(await screen.findByText("测试监视器 eval-active:QUEUED")).toBeTruthy();
   });
 

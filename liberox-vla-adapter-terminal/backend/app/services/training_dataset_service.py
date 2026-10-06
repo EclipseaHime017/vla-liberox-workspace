@@ -468,6 +468,7 @@ class TrainingDatasetService:
         success_consecutive_steps: int = 5,
         include_post_success: bool = True,
         parent_dataset_id: str | None = None,
+        resolved_run_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
             raise ValueError("name must contain 1..100 characters")
@@ -481,7 +482,8 @@ class TrainingDatasetService:
             raise TypeError("include_post_success must be boolean")
         if parent_dataset_id is not None:
             self.get(parent_dataset_id)
-        resolved = self.preview(task_id, selection)
+        resolved = self.preview(task_id, selection if resolved_run_ids is None else
+                                {**selection, "mode": "manual", "run_ids": resolved_run_ids})
         dataset_id = f"ds_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         directory = self.root / dataset_id
         with self.lock:

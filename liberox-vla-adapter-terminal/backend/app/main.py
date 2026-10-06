@@ -71,7 +71,6 @@ def create_app(
                     app.state.trajectory_evaluation_service,
                     app.state.robometer_evaluation_service,
                 )
-                app.state.dataset_export_service = DatasetExportService(app.state.training_dataset_service, ui_config)
                 app.state.offline_job_service = OfflineJobService(
                     ui_config, worker, app.state.training_dataset_service,
                     app.state.trajectory_evaluation_service,
@@ -79,6 +78,9 @@ def create_app(
                     stage_annotations=app.state.stage_annotation_service,
                 )
                 worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
+                worker.work_queue = app.state.offline_job_service
+                app.state.dataset_export_service = DatasetExportService(
+                    app.state.training_dataset_service, ui_config, app.state.offline_job_service)
                 app.state.offline_job_service.start_training_queue()
             else:
                 app.state.dataset_export_service = None
@@ -95,13 +97,17 @@ def create_app(
                     await asyncio.to_thread(exports.close)
                 offline = getattr(app.state, "offline_job_service", None)
                 if offline is not None:
-                    offline.close()
+                    # Physical output must stop before waiting for CUDA/local jobs.
+                    factr = getattr(worker, "factr_controller", None)
+                    if factr is not None:
+                        await asyncio.to_thread(factr.close)
+                    await asyncio.to_thread(offline.close)
                 if owned:
                     await asyncio.to_thread(app.state.run_service.close)
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="0.6.0",
+        version="0.7.0",
         lifespan=lifespan,
     )
     app.state.storage_maintenance = maintenance

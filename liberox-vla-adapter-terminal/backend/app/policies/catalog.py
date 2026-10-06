@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,12 @@ def _stable_hash(value: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def checkpoint_digest(root: Path, hash_file=_sha256) -> str:
+    return _stable_hash({str(path.relative_to(root)): hash_file(path)
+        for path in sorted(root.rglob("*")) if path.is_file()
+        and path.suffix in {".json", ".safetensors", ".pt", ".bin", ".py"}})
+
+
 @dataclass(frozen=True)
 class PolicyEntry:
     policy_id: str
@@ -67,6 +73,20 @@ class PolicyEntry:
     algorithm: str = "iql"
     backbone: Path | None = None
     model_config: dict[str, Any] | None = None
+    component_sha256: dict[str, str] = field(default_factory=dict)
+    base_revision: str | None = None
+    family: str = "vla_adapter"
+    actor: Path | None = None
+    base_identity: Path | None = None
+
+    @property
+    def content_sha256(self) -> str:
+        return _stable_hash({
+            "family": self.family, "base_checkpoint": self.base_checkpoint,
+            "stats_key": self.stats_key, "model_config": self.model_config,
+            "component_sha256": self.component_sha256,
+            "base_revision": self.base_revision,
+        })
 
     @property
     def is_base(self) -> bool:
@@ -83,6 +103,9 @@ class PolicyEntry:
             "model_config": self.model_config,
             "training_step": self.training_step,
             "compatibility_sha256": self.compatibility_sha256,
+            "family": self.family,
+            "content_sha256": self.content_sha256,
+            "base_revision": self.base_revision,
         }
 
 
@@ -96,14 +119,48 @@ class PolicyCatalog:
         "component_sha256", "compatibility_sha256",
     }
 
-    def __init__(self, registry: Path, base_checkpoint: str, stats_key: str):
+    def __init__(self, registry: Path, base_checkpoint: str, stats_key: str, *, base_revision: str | None = None,
+                 pi05_model: dict | None = None):
         self.registry = registry.expanduser().resolve()
         self.base_checkpoint = str(base_checkpoint)
         self.stats_key = str(stats_key)
+        self.base_revision = base_revision
+        self.pi05_model = pi05_model
+        self._pi05_revisions: dict[str, str] = {}
         self._entries: dict[str, PolicyEntry] = {}
         self._errors: dict[str, str] = {}
         self._hash_cache: dict[tuple[str, int, int, int, int], str] = {}
         self.refresh()
+
+    def select(self, policy_id: str) -> PolicyEntry:
+        """Resolve a base revision only on explicit selection, never list/poll."""
+        self.refresh()
+        selected = self.entry(policy_id)
+        if selected.family == "pi05":
+            from .pi05_catalog import assets
+            identity = assets().checkpoint_identity(Path(selected.base_checkpoint), self._component_sha256)
+            revision = assets().identity_digest(identity)
+            if selected.base_identity is not None:
+                import json
+                if json.loads(selected.base_identity.read_text()) != identity:
+                    raise ValueError("π₀.₅ overlay requires different base weights or normalization assets")
+            self._pi05_revisions[selected.base_checkpoint] = revision
+            self.refresh()
+            return self.entry(policy_id)
+        base = Path(self.base_checkpoint).expanduser()
+        if base.is_dir():
+            self.base_revision = checkpoint_digest(base, self._component_sha256)
+        elif self.base_revision is None:
+            from huggingface_hub import HfApi, try_to_load_from_cache
+            cached = try_to_load_from_cache(self.base_checkpoint, "config.json")
+            revision = Path(cached).parent.name if isinstance(cached, str) else None
+            if revision is None or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+                revision = HfApi().model_info(self.base_checkpoint, timeout=10).sha
+            if not revision or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+                raise ValueError("Cannot resolve an immutable base checkpoint revision")
+            self.base_revision = revision
+        self.refresh()
+        return self.entry(policy_id)
 
     def _component_sha256(self, path: Path) -> str:
         stat = path.stat()
@@ -128,9 +185,18 @@ class PolicyCatalog:
                 proprio_projector=None,
                 training_step=None,
                 compatibility_sha256=None,
+                base_revision=self.base_revision,
             )
         }
         errors: dict[str, str] = {}
+        if self.pi05_model is not None:
+            entries["pi05-libero-base"] = PolicyEntry(
+                policy_id="pi05-libero-base", label="π₀.₅ · LIBERO（基础模型）",
+                base_checkpoint=self.pi05_model["base_checkpoint"], stats_key=self.pi05_model["stats_key"],
+                manifest=None, action_head=None, proprio_projector=None, training_step=None,
+                compatibility_sha256=None, model_config=self.pi05_model, family="pi05",
+                base_revision=self._pi05_revisions.get(self.pi05_model["base_checkpoint"]),
+            )
         if self.registry.is_dir():
             for directory in sorted(self.registry.iterdir()):
                 if not directory.is_dir() or directory.is_symlink():
@@ -152,6 +218,9 @@ class PolicyCatalog:
 
     def _load(self, manifest: Path) -> PolicyEntry:
         raw = yaml.load(manifest.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
+        if isinstance(raw, dict) and raw.get("schema_version") == 4:
+            from .pi05_catalog import load_overlay
+            return load_overlay(self, manifest, raw)
         required = self.REQUIRED | ({"algorithm"} if isinstance(raw, dict) and raw.get("schema_version") in (2, 3) else set())
         if isinstance(raw, dict) and raw.get("schema_version") == 3:
             required |= {"backbone", "model_config"}
@@ -248,6 +317,8 @@ class PolicyCatalog:
             algorithm=algorithm,
             backbone=component("backbone") if raw.get("backbone") else None,
             model_config=raw.get("model_config"),
+            component_sha256=dict(hashes),
+            base_revision=self.base_revision,
         )
 
     def entry(self, policy_id: str) -> PolicyEntry:

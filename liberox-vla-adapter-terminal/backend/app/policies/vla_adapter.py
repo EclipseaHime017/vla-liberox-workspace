@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from collections import OrderedDict
 from dataclasses import replace
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import numpy as np
 import eval_pickplace_direct as direct
 
 from .catalog import PolicyCatalog, PolicyEntry
+from .checkpoint_view import checkpoint_view
 
 
 class VLAAdapterPolicyProvider:
@@ -31,6 +33,7 @@ class VLAAdapterPolicyProvider:
         self.catalog = catalog
         self.current_policy_id: str | None = None
         self.current_policy_entry: PolicyEntry | None = None
+        self._checkpoint_view = None
         self._base_action_head: OrderedDict[str, Any] | None = None
         self._base_proprio_projector: OrderedDict[str, Any] | None = None
         self._lock = threading.RLock()
@@ -73,10 +76,14 @@ class VLAAdapterPolicyProvider:
         self.components.proprio_projector.eval()
         if hasattr(self.components, "model"):
             self.components.model.eval()
+        self.catalog.refresh()
+        if self.catalog.entry(entry.policy_id).content_sha256 != entry.content_sha256:
+            raise ValueError("Policy weights changed during loading; select the model again")
         self.current_policy_id = entry.policy_id
         self.current_policy_entry = entry
 
-    def load(self, open_loop_steps: int, policy_id: str = "base") -> None:
+    def load(self, open_loop_steps: int, policy_id: str = "base", *,
+             expected_content_sha256: str | None = None) -> None:
         with self._lock:
             # Re-validate manifests and component hashes at the actual load
             # boundary. A file removed or modified after draft creation must
@@ -84,17 +91,28 @@ class VLAAdapterPolicyProvider:
             if hasattr(self, "catalog"):
                 self.catalog.refresh()
             entry = self.catalog.entry(policy_id) if hasattr(self, "catalog") else None
+            if entry is not None and Path(entry.base_checkpoint).expanduser().is_dir():
+                entry = self.catalog.select(policy_id)
+            if expected_content_sha256 is not None and (
+                entry is None or entry.content_sha256 != expected_content_sha256
+            ):
+                raise ValueError("Selected policy weights have changed; select the model again")
             previous = getattr(self, "current_policy_entry", None)
-            if self.loaded and policy_id != getattr(self, "current_policy_id", "base") and (
+            changed = (entry is not None and (previous is None or
+                       previous.content_sha256 != entry.content_sha256))
+            if self.loaded and changed and (
                 (previous is not None and previous.backbone is not None)
                 or (entry is not None and entry.backbone is not None)
+                or previous is None
+                or (previous.base_checkpoint, previous.base_revision, previous.stats_key)
+                   != (entry.base_checkpoint, entry.base_revision, entry.stats_key)
             ):
                 # No full base snapshot on GPU/CPU: reload across adapted backbones.
                 # Frozen-backbone overlays keep the existing lightweight switch.
                 self.unload()
             if self.loaded:
                 self.cfg.num_open_loop_steps = open_loop_steps
-                if policy_id != getattr(self, "current_policy_id", "base"):
+                if changed:
                     if entry is None:
                         raise ValueError(f"Unknown policy_id: {policy_id}")
                     try:
@@ -102,21 +120,32 @@ class VLAAdapterPolicyProvider:
                     except Exception:
                         self.unload()
                         raise
+                self.current_policy_id = policy_id
+                self.current_policy_entry = entry
                 return
             direct.load_policy_runtime(self.runtime)
+            self._checkpoint_view = checkpoint_view(entry)
             load_config = replace(
                 self.eval_config,
+                checkpoint=self._checkpoint_view.name,
+                stats_key=entry.stats_key,
+                use_pro_version=("Pro" in entry.base_checkpoint
+                                 if self.eval_config.use_pro_version is None else self.eval_config.use_pro_version),
                 open_loop_steps=open_loop_steps,
                 trials=1,
                 headless=True,
             )
-            self.cfg, self.components = direct.build_model(self.runtime, load_config)
+            try:
+                self.cfg, self.components = direct.build_model(self.runtime, load_config)
+            except BaseException:
+                self.unload()
+                raise
             self._base_action_head = self._cpu_state(self.components.action_head)
             self._base_proprio_projector = self._cpu_state(
                 self.components.proprio_projector
             )
             self.current_policy_id = "base"
-            self.current_policy_entry = self.catalog.entry("base")
+            self.current_policy_entry = entry if entry.is_base else self.catalog.entry("base")
             if policy_id != "base":
                 if entry is None:
                     raise ValueError(f"Unknown policy_id: {policy_id}")
@@ -134,6 +163,10 @@ class VLAAdapterPolicyProvider:
             self.current_policy_entry = None
             self._base_action_head = None
             self._base_proprio_projector = None
+            view = getattr(self, "_checkpoint_view", None)
+            if view is not None:
+                view.cleanup()
+                self._checkpoint_view = None
             torch = getattr(self.runtime, "torch", None)
             if torch is not None and torch.cuda.is_available():
                 torch.cuda.empty_cache()

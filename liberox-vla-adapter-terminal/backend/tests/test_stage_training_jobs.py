@@ -183,8 +183,9 @@ def test_training_launch_and_recovery_use_real_catalog(tmp_path, monkeypatch, so
 
     monkeypatch.setattr("backend.app.services.offline_job_service.subprocess.Popen", launch)
     result = jobs.start_training(dataset["id"], {"reward_source": source})
+    assert result["status"] == "QUEUED" and not spawned
+    jobs._dispatch_training_queue()
     assert len(spawned) == 1
-    assert result["status"] == "STARTING"
     assert jobs.launch_reserved is False
     annotation_id = version["id"]
     path = jobs.jobs_root / result["id"] / "job.json"

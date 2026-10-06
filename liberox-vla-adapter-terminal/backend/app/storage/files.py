@@ -136,6 +136,7 @@ def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
                     "policy_base_checkpoint", metadata.get("checkpoint")
                 ),
                 "policy_overlay": metadata.get("policy_overlay"),
+                "policy_content_sha256": metadata.get("policy_content_sha256"),
                 "policy_compatibility_sha256": metadata.get(
                     "policy_compatibility_sha256"
                 ),

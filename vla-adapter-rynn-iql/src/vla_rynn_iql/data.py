@@ -327,6 +327,7 @@ def _materialize_export(run_dir: Path, cache_dir: Path) -> tuple[Path, Path]:
         eef_position=eef_position, eef_axis_angle=eef_axis_angle,
         gripper_qpos=gripper_qpos, raw_action=raw_action, env_action=env_action,
         reward=reward, done=done, action_source=action_source,
+        action_codec=np.asarray([r.get("action_codec") or "vla_adapter_v1" for r in action_rows]),
     )
 
     try:
@@ -427,12 +428,19 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
             raise ValueError(f"env_action exceeds normalized OSC_POSE range [-1, 1]: {trajectory}")
         sources = [str(value) for value in arrays["action_source"]]
         policy_mask = np.asarray([value in {"policy", "policy_requery"} for value in sources])
+        codecs = arrays.get("action_codec", np.full(recorded_action_count, "vla_adapter_v1"))
+        if codecs.shape != (recorded_action_count,) or not np.isin(codecs, ["vla_adapter_v1", "libero_env_v1"]).all():
+            raise ValueError(f"Unknown or invalid action codec: {trajectory}")
         if np.any(policy_mask):
             raw_action = np.asarray(arrays["raw_action"], dtype=np.float32)[policy_mask]
             executed = env_action[policy_mask]
-            if not np.allclose(raw_action[:, :6], executed[:, :6], rtol=0.0, atol=1e-5):
+            native = codecs[policy_mask] == "libero_env_v1"
+            expected_axes = raw_action[:, :6].copy()
+            expected_axes[native] = np.clip(expected_axes[native], -1, 1)
+            if not np.allclose(expected_axes, executed[:, :6], rtol=0.0, atol=1e-5):
                 raise ValueError(f"Policy action round-trip mismatch in OSC axes: {trajectory}")
             expected_gripper = -np.sign(2.0 * raw_action[:, 6] - 1.0)
+            expected_gripper[native] = np.clip(raw_action[native, 6], -1, 1)
             if not np.array_equal(expected_gripper, executed[:, 6]):
                 raise ValueError(f"Policy gripper round-trip mismatch: {trajectory}")
         done = np.asarray(arrays["done"], dtype=bool)
