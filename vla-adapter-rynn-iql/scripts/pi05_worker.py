@@ -6,6 +6,7 @@ import base64
 import contextlib
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -15,7 +16,13 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
+def configure_inference_logging():
+    # Worker-local: silence dependency INFO even if a library sets its own level.
+    logging.disable(logging.INFO)
+
+
 def main():
+    configure_inference_logging()
     output = sys.stdout
 
     def reply(value):
