@@ -85,23 +85,21 @@ def test_defaults_and_launch_use_independent_training_entries(tmp_path, monkeypa
 
 
 def test_sealed_reward_does_not_override_selected_model(tmp_path, monkeypatch):
+    from dataclasses import replace
     from backend.app.services.inherited_reward_inputs import offline_module
     jobs, dataset = setup_jobs(tmp_path)
     version = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="sparse"))
     sealed = Path(version["config_path"]).read_bytes()
-    sources = offline_module(jobs.ui_config.offline_rl_root, "config_sources")
-    original = sources.read_source
+    registry = offline_module(jobs.ui_config.offline_rl_root, "base_models")
+    base = tmp_path / "new-base"
+    base.mkdir()
+    (base / "config.json").write_text("{}")
+    (base / "model.safetensors").write_bytes(b"test")
 
-    def presets(path):
-        value = original(path)
-        if path.name == "vla_adapter.yaml":
-            value["model"]["base_checkpoint"] = "/new/base/checkpoint"
-        return value
-
-    monkeypatch.setattr(sources, "read_source", presets)
+    monkeypatch.setitem(registry.BASE_MODELS, "base", replace(registry.BASE_MODELS["base"], checkpoint=str(base)))
     job = jobs.start_training(dataset["id"], {"model_family": "vla_adapter"})
     raw = yaml.safe_load(job["config_path"].read_text())
-    assert raw["model"]["base_checkpoint"] == "/new/base/checkpoint"
+    assert raw["model"]["base_checkpoint"] == str(base)
     assert raw["reward"]["version_id"] == version["id"]
     assert Path(version["config_path"]).read_bytes() == sealed
 
@@ -137,9 +135,13 @@ def test_model_selection_is_pinned_independently_of_algorithm_and_rewards(tmp_pa
         "model_lora_rank": 8, "model_lora_alpha": 16, "model_lora_dropout": .1,
     })
     raw = yaml.safe_load(result["config_path"].read_text())
-    assert raw["model"] == result["parameters"]["model"] == {
+    assert raw["model"] == result["parameters"]["model"]
+    assert raw["model"]["base_id"] == "base"
+    assert len(raw["model"]["base_revision"]) == 40
+    assert raw["model"]["contract"]["io"]["action_dim"] == 7
+    assert {key: value for key, value in raw["model"].items() if key not in {"base_id", "base_revision", "contract"}} == {
         "base_checkpoint": "VLA-Adapter/LIBERO-Object-Pro", "stats_key": "libero_object", "use_pro_version": True,
-        "family": "vla_adapter", "backbone": "lora", "action_head": "frozen",
+        "family": "vla_adapter", "environment": "vla-liberox", "backbone": "lora", "action_head": "frozen",
         "proprio_projector": "frozen", "lora": {"rank": 8, "alpha": 16, "dropout": .1}}
     assert "vla" not in raw
     if algorithm == "iql":

@@ -12,7 +12,8 @@
 /Robometer/
 /RynnValue/
 /OpenPI/
-/weights/
+/models/*
+!/models/.gitkeep
 /third_party/FACTR_Teleop/
 /third_party/factr-runtime/
 /tmp/

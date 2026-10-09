@@ -864,9 +864,9 @@ def validate_observation(obs: dict) -> None:
     proprio = proprio_from_obs(obs)
     if proprio.shape != (8,):
         raise ValueError(f"Expected 8-D proprio, got {proprio.shape}")
-    LOGGER.info("agentview_image: %s", obs["agentview_image"].shape)
-    LOGGER.info("robot0_eye_in_hand_image: %s", obs["robot0_eye_in_hand_image"].shape)
-    LOGGER.info("proprio: %s", proprio.shape)
+    LOGGER.debug("agentview_image: %s", obs["agentview_image"].shape)
+    LOGGER.debug("robot0_eye_in_hand_image: %s", obs["robot0_eye_in_hand_image"].shape)
+    LOGGER.debug("proprio: %s", proprio.shape)
 
 
 def build_model(runtime: SimpleNamespace, args: EvalConfig):

@@ -1,6 +1,6 @@
 # LIBERO-X Local Data Studio
 
-Current release: **v0.7.0**
+Current release: **v0.7.2**
 
 Release highlights: official π₀.₅-LIBERO inference and BC/IQL post-training,
 a unified work queue, and stricter model identity and dataset integrity checks.
@@ -20,12 +20,12 @@ longer-horizon composite tasks.
 - Three cascading selectors resolve task purpose → difficulty → exact prompt, covering 15 physical scenes; the same hierarchy filters sessions, datasets, training datasets and test history. The new LEVEL1 tasks place a yellow bowl inside an open drawer and close it, or turn off the stove and sort two bowls into the drainer. Purpose groups are explicitly configured in `ui_config.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
 - Run drafts can choose a simulation seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact. Simulation, dataset selection/split, training and test-schedule seeds have distinct roles. Changing the simulation seed does not select a new benchmark init state or inherit the training RNG.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) supports BC/IQL with model-specific adaptation and objectives; it preserves recorded data and publishes hash-checked overlays to `policy-registry/`.
-- π₀.₅-LIBERO: official OpenPI runs in an isolated `pi05` environment, with BF16 checkpoint conversion, action-expert or full-model tuning, and strict base/normalization identity checks. See [installation and configuration](vla-adapter-rynn-iql/README.md#π₀₅-libero). VLA-Adapter remains available; missing or changed models never silently select another policy.
-- Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#49-在-web-ui-中创建数据集标注与训练).
+- π₀.₅-LIBERO: official OpenPI runs in an isolated `pi05` environment, with BF16 checkpoint conversion, action-expert or full-model tuning, and strict base/normalization identity checks. See [installation and configuration](README_CN.md#23-π₀₅). VLA-Adapter remains available; missing or changed models never silently select another policy.
+- Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#34-评价与打包数据集).
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
 - Unified work queue: inference simulations, dataset processing, annotation, training and testing share FIFO scheduling and a cross-process resource lease. Manual takeover is never queued and requires free resources. Detached jobs persist across backend restarts; interrupted in-process tasks must be registered again. Each training job pins its configuration, model and rewards; UI checkpoint resume is hidden while CLI resume remains available.
-- Branch separation: `main` owns PC collection, GUI, single-GPU training and portable dataset/evaluation exports. The `server` branch alone owns the full-screen terminal, multi-GPU DDP + ZeRO-1 training, mmap cache and distributed checkpoints. Shared data contracts and training algorithms flow from `main` to `server`; server-specific execution does not merge back into `main`. See [transfer and branch instructions](README_CN.md#449-pc-数据迁移与服务器分支).
-- Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage §4.4.2](README_CN.md#442-annotate-与-reward-materialize-的边界).
+- Branch separation: `main` owns PC collection, GUI, single-GPU training and portable dataset/evaluation exports. The `server` branch alone owns the full-screen terminal, multi-GPU DDP + ZeRO-1 training, mmap cache and distributed checkpoints. Shared data contracts and training algorithms flow from `main` to `server`; server-specific execution does not merge back into `main`. See [transfer and branch instructions](RUN_COMMANDS.md).
+- Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage](README_CN.md#34-评价与打包数据集).
 - Batch testing: preview a deterministic init-state/seed schedule, then register independent policy tests in a persistent FIFO queue. Tests share the training dispatcher and GPU lock; canceling a waiting test or stopping the current test leaves subsequent tasks intact.
 
 ## Repository layout
@@ -197,7 +197,7 @@ dual-camera reconstruction and dataset export use the shared recording pipeline.
 Normal completion retains compensation; errors disable it and save partial data.
 SpaceMouse remains an installed `pyspacemouse` dependency, not a vendored checkout.
 Do not run GUI, CLI or upstream demos against the same serial port concurrently.
-See [the Chinese guide](README_CN.md#361-factr-franka-校准手动重力补偿与无-vla-测试)
+See [the Chinese guide](README_CN.md#26-人工控制器可选)
 and [official source](https://github.com/JasonJZLiu/FACTR_Teleop).
 
 ## Batch policy testing
@@ -258,7 +258,7 @@ does not perform online exploration or modify the upstream VLA-Adapter source.
 Reuse `vla-liberox` for dataset preparation, simulation and VLA-Adapter training.
 RynnValue uses `rynnvalue-reward`, Robometer uses `robometer-reward`, and π₀.₅ uses
 `pi05`; do not merge their dependency stacks. The following commands use VLA-Adapter. After
-following the installation steps in the [standalone trainer guide](vla-adapter-rynn-iql/README.md),
+following the installation steps in the [standalone trainer guide](README_CN.md#2-环境配置),
 run from the workspace root:
 
 ```bash
@@ -270,8 +270,6 @@ conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/materialize_rewards
   --config vla-adapter-rynn-iql/configs/training/iql.yaml
 conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
   --config vla-adapter-rynn-iql/configs/training/iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
-  --config vla-adapter-rynn-iql/configs/inference.yaml
 ```
 
 The default profile pins the RynnValue source commit and 4B model snapshot,
@@ -280,14 +278,13 @@ on a 16 GB GPU. A dataset containing only failures is accepted for integration
 testing with an explicit warning, but is not evidence that offline training will
 improve task success.
 
-IQL training writes TensorBoard events beside the raw `metrics.jsonl` log. Run
-`tensorboard --logdir vla-adapter-rynn-iql/outputs/training` to compare runs;
-existing JSONL-only runs can be imported with
-`vla-adapter-rynn-iql/scripts/metrics_to_tensorboard.py`.
+Use the platform's Test page to evaluate trained models. IQL training writes
+TensorBoard events beside the raw `metrics.jsonl` log. Run
+`tensorboard --logdir vla-adapter-rynn-iql/outputs/training` to compare runs.
 
 ## Robometer trajectory evaluation
 
-The independent [Robometer evaluator](vla-adapter-robometer/README.md) adds the
+The independent [Robometer evaluator](README_CN.md#25-robometer) adds the
 official `Robometer-4B-LIBERO` single-trajectory progress and success
 probability outputs to existing episodes. In the data page, RynnValue and
 Robometer may be selected independently or run sequentially in one GPU job.
@@ -299,7 +296,7 @@ time-aligned comparison with normalized RynnValue remaining time.
 Robometer uses the separate `robometer-reward` Conda environment. Its pinned
 model/source revisions, CUDA device, BF16 mode, 3 Hz evaluation rate, four-frame
 prefix protocol and batch-size tuning are documented in the
-[evaluator configuration guide](vla-adapter-robometer/README.md#configuration).
+[evaluator configuration guide](README_CN.md#25-robometer).
 
 ### References
 

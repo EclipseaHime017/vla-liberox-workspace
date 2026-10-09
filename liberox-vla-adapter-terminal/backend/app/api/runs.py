@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..domain.run import TERMINAL_STATES
 from .dependencies import http_error, service
-from .models import CreateBranchRequest, DeleteSessionRequest
+from .models import CreateBranchRequest, DeleteSessionRequest, DraftRequest
 
 router = APIRouter(prefix="/api", tags=["runs"])
 
@@ -24,6 +24,14 @@ async def bootstrap(request: Request):
 @router.get("/sessions")
 @router.get("/runs")
 async def runs(request: Request): return service(request).list_runs()
+
+@router.post("/sessions", status_code=201)
+async def create_session(body: DraftRequest, request: Request):
+    """Queue a recorded policy rollout without changing the UI draft."""
+    try:
+        return await run_in_threadpool(service(request).create_original, **body.model_dump())
+    except Exception as exc:
+        raise http_error(exc) from exc
 
 @router.get("/sessions/{run_id}")
 async def run(run_id: str, request: Request):

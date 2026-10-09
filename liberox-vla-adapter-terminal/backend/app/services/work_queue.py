@@ -68,6 +68,8 @@ class WorkQueue:
             if not future.set_running_or_notify_cancel():
                 return
             result = callback()
+            if payload["kind"] == "dataset" and isinstance(result, dict):
+                payload["result"] = {"dataset_id": result["id"]}
             payload.update(status="COMPLETED", stage="completed")
         except BaseException as exc:
             error = exc

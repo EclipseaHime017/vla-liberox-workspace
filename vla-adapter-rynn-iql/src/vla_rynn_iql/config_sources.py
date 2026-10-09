@@ -112,9 +112,8 @@ def compose_config(path: Path, *, method: str | None = None,
                    family: str | None = None, overrides: dict | None = None,
                    overrides_path: Path | None = None) -> dict:
     from .methods import METHODS
-    from .models import MODELS
+    from .models import MODELS, model_preset
 
-    root = Path(__file__).resolve().parents[2] / "configs"
     training_override = (overrides or {}).get("training", {})
     if not isinstance(training_override, dict):
         raise TypeError("overrides.training must be a mapping")
@@ -149,7 +148,13 @@ def compose_config(path: Path, *, method: str | None = None,
     if family is not None:
         if not isinstance(family, str) or family not in MODELS:
             raise ValueError(f"Unknown model.family: {family}")
-        presets["model"] = str(root / "models" / f"{family}.yaml")
+        base_id = raw.get("model", {}).get("base_id")
+        if base_id is not None and raw.get("model", {}).get("family", family) == family:
+            from .base_models import base_model
+            base = base_model(base_id)
+            if base.family != family:
+                raise ValueError("Base model conflicts with the selected model family")
+        presets["model"] = str(MODELS[family].config_path)
     # Inherited runtime defaults < model/reward defaults < run/CLI overrides.
     # The first preset declaration marks the composition boundary.
     pivot = next((index for index, layer in enumerate(layers) if "presets" in layer), 0)
@@ -158,7 +163,7 @@ def compose_config(path: Path, *, method: str | None = None,
         result = merge_config(result, layer)
     allowed = {"model": {"model", "data"}, "reward": {"reward"}}
     for kind, source in presets.items():
-        preset = read_source(Path(source))
+        preset = model_preset(Path(source)) if kind == "model" else read_source(Path(source))
         if preset.keys() - allowed[kind]:
             raise ValueError(f"{kind} preset contains unrelated sections: {sorted(preset.keys() - allowed[kind])}")
         result = merge_config(result, preset)
@@ -185,9 +190,11 @@ def migrate_fields(raw: dict) -> dict:
         training.setdefault(key, iql.pop(key))
     if result.get("schema_version") == 1 and training.get("method", "iql") == "iql":
         training.setdefault("actor_lr_warmup_steps", None)
-    legacy, model = result.get("vla", {}), result.setdefault("model", {})
+    legacy, model = result.pop("vla", {}), result.setdefault("model", {})
     if not isinstance(legacy, dict) or not isinstance(model, dict):
         raise TypeError("vla and model must be mappings")
+    if legacy.keys() - {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"}:
+        raise ValueError("Invalid legacy vla configuration")
     for key in ("base_checkpoint", "stats_key", "use_pro_version"):
         if key in legacy:
             model.setdefault(key, legacy[key])

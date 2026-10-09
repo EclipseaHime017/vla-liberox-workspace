@@ -36,7 +36,7 @@ export function ModelConfigPanel({ models, parameters, onChange }: Props) {
           <label>LoRA dropout<input type="number" min={0} max={0.99} step={0.01} value={Number(parameters.model_lora_dropout ?? 0)} onChange={(event) => onChange("model_lora_dropout", Number(event.target.value))} /></label>
         </>}
       </div>
-      <p className="model-training-hint">{pi05 ? "使用官方 π₀.₅-LIBERO 与独立 pi05 环境；BC 优化 flow-matching，IQL 对同一损失进行优势加权。全量微调需要更大显存。" : backbone === "frozen"
+      <p className="model-training-hint">{pi05 ? "使用所选 π₀.₅ 基础权重及其归一化数据，运行于独立 pi05 环境；BC 优化 flow-matching，IQL 对同一损失进行优势加权。全量微调需要更大显存。" : backbone === "frozen"
         ? "保持 Backbone 不变，按所选范围训练动作组件。"
         : backbone === "lora"
           ? "使用 VLA-Adapter 的 all-linear LoRA，并训练 action queries；基础权重保持冻结。"

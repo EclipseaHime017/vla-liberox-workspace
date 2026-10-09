@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException, Request
@@ -18,6 +19,27 @@ from backend.app.main import (
 )
 from backend.app.api.models import TrainingRunRequest, TrajectoryEvaluationRequest
 from backend.app.services.offline_job_service import OfflineJobService
+
+
+def test_direct_recorded_simulation_preserves_ui_draft_and_forwards_model():
+    from fastapi import FastAPI
+    from backend.app.api.runs import create_session
+
+    draft = object()
+    calls = []
+    def create_original(**kwargs):
+        calls.append(kwargs)
+        return {"id": "new-run", "work_job_id": "queued-job", "status": "QUEUED"}
+    manager = SimpleNamespace(draft=draft, create_original=create_original)
+    app = FastAPI()
+    app.state.manager = manager
+    body = DraftRequest(task_id="LEVEL1::fixture", policy_id="registered-variant",
+                        max_steps=40, open_loop_steps=8, seed=0, init_state_index=0)
+    result = asyncio.run(create_session(body, Request({"type": "http", "app": app})))
+    assert result["status"] == "QUEUED"
+    assert result["work_job_id"] == "queued-job"
+    assert calls == [body.model_dump()]
+    assert manager.draft is draft
 
 
 class FakeManager:

@@ -17,12 +17,12 @@ from .io import atomic_json
 from .vla_adapter import load_components, load_overlay
 
 
-def _training_view(config: LoadedConfig, base_checkpoint: str, stats_key: str) -> LoadedConfig:
+def _training_view(config: LoadedConfig, base_checkpoint: str, stats_key: str, settings=None) -> LoadedConfig:
     ev, paths = config.section("evaluation"), config.section("paths")
     return LoadedConfig(config.path, {
         "paths": {"vla_adapter_root": paths["vla_adapter_root"]},
-        "model": {"family": "vla_adapter", "base_checkpoint": base_checkpoint, "stats_key": stats_key,
-                  "use_pro_version": True, "backbone": "frozen"},
+        "model": {**(settings or {}), "family": "vla_adapter", "base_checkpoint": base_checkpoint, "stats_key": stats_key,
+                  "use_pro_version": True, "backbone": (settings or {}).get("backbone", "frozen")},
         "training": {"seed": ev["seed"]},
     })
 
@@ -138,7 +138,7 @@ def evaluate(config: LoadedConfig) -> Path:
     initial_states = torch.load(init_path, map_location="cpu", weights_only=False)
     summary: dict[str, Any] = {"schema_version": 1, "task": prompt, "policies": {}}
     for policy_name, overlay_path in policies:
-        training_config = _training_view(config, overlay.base_checkpoint, overlay.stats_key)
+        training_config = _training_view(config, overlay.base_checkpoint, overlay.stats_key, overlay.model_config)
         components = load_components(training_config, overlay_path, training=False)
         components.cfg.num_open_loop_steps = int(ev["open_loop_steps"])
         policy_dir = output / policy_name

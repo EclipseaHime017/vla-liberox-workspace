@@ -45,20 +45,6 @@ CONFIG_KEYS = frozenset(
 TASK_KEYS = frozenset(
     {"task_id", "level", "task_name", "prompt", "bddl_path", "init_path"}
 )
-POLICY_KEYS = frozenset(
-    {
-        "policy_id",
-        "label",
-        "base_checkpoint",
-        "stats_key",
-        "manifest",
-        "action_head",
-        "proprio_projector",
-        "training_step",
-        "compatibility_sha256",
-        "family", "content_sha256", "base_revision",
-    }
-)
 ROOT_KEYS = frozenset(
     {
         "schema_version",
@@ -447,22 +433,8 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     if Path(evaluation_id).name != evaluation_id or ".." in evaluation_id:
         raise ValueError("evaluation_id is unsafe")
     task = _validate_exact_mapping(root["task_snapshot"], TASK_KEYS, "task_snapshot")
-    policy_keys = POLICY_KEYS | ({"backbone"} if "backbone" in root["policy_snapshot"] else set())
-    if root["policy_snapshot"].get("family") == "pi05":
-        policy_keys |= {"model_config", "actor", "base_identity"}
-    policy = _validate_exact_mapping(root["policy_snapshot"], policy_keys, "policy_snapshot")
-    if policy["family"] not in {"vla_adapter", "pi05"} or re.fullmatch(r"[0-9a-f]{64}", str(policy["content_sha256"])) is None:
-        raise ValueError("Unsupported or unverified policy snapshot; register the evaluation again")
-    if policy["family"] == "pi05":
-        from ..policies.pi05_catalog import PROJECT
-        from ..services.inherited_reward_inputs import offline_module
-        settings = offline_module(PROJECT, "models").model_config({"model": policy["model_config"]})
-        if settings["family"] != "pi05" or settings["base_checkpoint"] != policy["base_checkpoint"] or settings["stats_key"] != policy["stats_key"]:
-            raise ValueError("π₀.₅ snapshot model settings conflict with its identity")
-        if policy["action_head"] is not None or policy["proprio_projector"] is not None:
-            raise ValueError("π₀.₅ snapshots cannot contain VLA-Adapter artifacts")
-    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(policy["base_revision"])) is None:
-        raise ValueError("Base checkpoint revision must be immutable; register the evaluation again")
+    from ..policies.snapshots import validate_snapshot
+    policy = validate_snapshot(root["policy_snapshot"])
     config = _validate_exact_mapping(root["config"], CONFIG_KEYS, "config")
     _strict_string(task["task_id"], "task_snapshot.task_id")
     _strict_string(task["level"], "task_snapshot.level")
@@ -517,36 +489,6 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     allowed_cameras = {"agentview", "robot0_eye_in_hand"}
     if set(cameras) - allowed_cameras or len(cameras) >= len(allowed_cameras):
         raise ValueError("config.disabled_policy_cameras must leave one VLA camera enabled")
-    if policy_id in {"base", "pi05-libero-base"}:
-        if (policy["family"] == "pi05") != (policy_id == "pi05-libero-base"):
-            raise ValueError("Base policy ID does not match its model family")
-        if policy.get("actor") is not None or policy.get("base_identity") is not None:
-            raise ValueError("Base policy cannot contain a π₀.₅ overlay")
-        if policy.get("backbone") is not None:
-            raise ValueError("Base policy cannot contain a backbone overlay")
-        for key in (
-            "manifest", "action_head", "proprio_projector", "training_step",
-            "compatibility_sha256",
-        ):
-            if policy[key] is not None:
-                raise ValueError(f"Base policy snapshot must set {key} to null")
-    else:
-        artifacts = ("manifest", "actor", "base_identity") if policy["family"] == "pi05" else ("manifest", "action_head", "proprio_projector")
-        for key in artifacts + (("backbone",) if "backbone" in policy else ()):
-            component = Path(
-                _strict_string(policy[key], f"policy_snapshot.{key}")
-            ).expanduser()
-            if not component.is_absolute() or not component.is_file() or component.is_symlink():
-                raise FileNotFoundError(
-                    f"policy_snapshot.{key} is not a safe existing absolute file"
-                )
-            policy[key] = str(component.resolve())
-        _strict_int(policy["training_step"], "policy_snapshot.training_step", 1)
-        compatibility = _strict_string(
-            policy["compatibility_sha256"], "policy_snapshot.compatibility_sha256"
-        )
-        if re.fullmatch(r"[0-9a-f]{64}", compatibility) is None:
-            raise ValueError("policy_snapshot.compatibility_sha256 must be SHA256")
     indices = config["init_state_indices"]
     expected = build_schedule(
         trials=config["trials"],
@@ -737,8 +679,8 @@ def run_evaluation(
         # state guard. A missing dependency or invalid snapshot can never leave
         # the durable manifest stuck in STARTING.
         import eval_pickplace_direct as direct
-        from backend.app.policies.catalog import PolicyCatalog
-        from backend.app.policies.vla_adapter import VLAAdapterPolicyProvider
+        from backend.app.policies.snapshots import catalog_from_snapshot
+        from backend.app.policies.router import PolicyProvider
         from backend.app.simulators.libero_x import LiberoXSimulator
 
         workspace_root = Path(__file__).resolve().parents[4]
@@ -769,46 +711,8 @@ def run_evaluation(
         init_states = direct.load_initial_states(runtime, Path(task["init_path"]))
         if max(config["init_state_indices"]) >= len(init_states):
             raise ValueError("Configured init_state_index exceeds the task state count")
-        manifest = policy.get("manifest")
-        registry = (
-            Path(manifest).resolve().parent.parent
-            if manifest
-            else result_path.parent / ".empty-policy-registry"
-        )
-        catalog = PolicyCatalog(
-            registry, policy["base_checkpoint"], policy["stats_key"], base_revision=policy["base_revision"],
-            **({"pi05_model": policy["model_config"]} if policy["family"] == "pi05" else {}),
-        )
-        entry = catalog.select(policy["policy_id"]) if policy["family"] == "pi05" else catalog.entry(policy["policy_id"])
-        if entry.content_sha256 != policy["content_sha256"]:
-            raise ValueError("Selected policy weights changed after evaluation registration")
-        if manifest and policy["family"] == "pi05":
-            if entry.actor != Path(policy["actor"]).resolve() or entry.base_identity != Path(policy["base_identity"]).resolve():
-                raise ValueError("π₀.₅ snapshot does not match its validated registry entry")
-        elif manifest:
-            expected_components = (
-                Path(manifest).resolve(),
-                Path(policy["action_head"]).resolve(),
-                Path(policy["proprio_projector"]).resolve(),
-                policy["training_step"],
-                policy["compatibility_sha256"],
-                Path(policy["backbone"]).resolve() if policy.get("backbone") else None,
-            )
-            actual_components = (
-                entry.manifest,
-                entry.action_head,
-                entry.proprio_projector,
-                entry.training_step,
-                entry.compatibility_sha256,
-                entry.backbone,
-            )
-            if actual_components != expected_components:
-                raise ValueError("Policy snapshot does not match the validated registry entry")
-        if policy["family"] == "pi05":
-            from ..policies.router import PolicyProvider
-            provider = PolicyProvider(runtime, eval_config, catalog)
-        else:
-            provider = VLAAdapterPolicyProvider(runtime, eval_config, catalog)
+        catalog = catalog_from_snapshot(policy, result_path.parent / ".empty-policy-registry")
+        provider = PolicyProvider(runtime, eval_config, catalog)
         record["status"] = "RUNNING"
         record["started_at"] = utc_now()
         load_started = time.monotonic()

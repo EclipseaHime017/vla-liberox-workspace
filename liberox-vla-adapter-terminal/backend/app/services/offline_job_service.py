@@ -183,9 +183,12 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         return config.load_train_config(self.base_config_path, method=algorithm or "iql", family=model_family).raw
 
     def defaults(self, dataset_id: str | None = None, reward_source: str | None = None,
-                 algorithm: str = "iql", model_family: str | None = None) -> dict[str, Any]:
+                 algorithm: str = "iql", model_family: str | None = None,
+                 model_base_id: str | None = None) -> dict[str, Any]:
         self._validate_training_parameters({"algorithm": algorithm, **({"model_family": model_family} if model_family is not None else {})}, self.training_models)
         raw = self._load_base_config(algorithm, model_family)
+        if model_base_id is not None:
+            raw["model"] = self.training_models.apply_model_parameters(raw, {"model_base_id": model_base_id})
         if algorithm == "bc":
             # No reward lookup or lazy global-evaluation job may run for BC.
             if dataset_id:
@@ -904,7 +907,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             if not (checkout / "robometer" / "__init__.py").is_file():
                 raise FileNotFoundError(
                     "Official Robometer checkout is unavailable; install it as documented in "
-                    f"{self.ui_config.robometer_root / 'README.md'}"
+                    f"{self.ui_config.robometer_root.parent / 'README_CN.md'} (Robometer setup)"
                 )
             config_path = job_dir / "robometer_config.yaml"
             atomic_write_yaml(config_path, robo)
@@ -1213,10 +1216,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         include_post_success = dataset.get("include_post_success", True)
         raw["data"]["include_post_success"] = include_post_success
         raw["model"] = self.training_models.apply_model_parameters(raw, parameters)
-        if raw["model"]["family"] == "pi05":
-            assets = offline_module(self.ui_config.offline_rl_root, "pi05_assets")
-            identity = assets.checkpoint_identity(Path(raw["model"]["base_checkpoint"]))
-            raw["model"]["base_revision"] = assets.identity_digest(identity)
+        raw["model"] = offline_module(self.ui_config.offline_rl_root, "model_assets").pin_model(raw["model"])
         source = None
         if algorithm == "iql":
             raw["reward"].setdefault("final_normalization", "none")
@@ -1413,28 +1413,8 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "init_path": str(init_path.resolve()),
         }
         policy = self.manager.policy_catalog.select(policy_id)
-        policy_snapshot = {
-            "policy_id": policy.policy_id,
-            "label": policy.label,
-            "base_checkpoint": policy.base_checkpoint,
-            "stats_key": policy.stats_key,
-            "manifest": None if policy.manifest is None else str(policy.manifest),
-            "action_head": None if policy.action_head is None else str(policy.action_head),
-            "proprio_projector": None
-            if policy.proprio_projector is None else str(policy.proprio_projector),
-            "training_step": policy.training_step,
-            "compatibility_sha256": policy.compatibility_sha256,
-            "family": policy.family,
-            "content_sha256": policy.content_sha256,
-            "base_revision": policy.base_revision,
-        }
-        if policy.backbone is not None:
-            policy_snapshot["backbone"] = str(policy.backbone)
-        if policy.family == "pi05":
-            policy_snapshot["model_config"] = policy.model_config
-            policy_snapshot["actor"] = str(policy.actor) if policy.actor else None
-            policy_snapshot["base_identity"] = str(policy.base_identity) if policy.base_identity else None
-        return task_snapshot, policy_snapshot
+        from ..policies.snapshots import snapshot
+        return task_snapshot, snapshot(policy)
 
     def preview_evaluation(self, request: dict[str, Any]) -> dict[str, Any]:
         """Validate an evaluation and return its deterministic frozen schedule."""
@@ -1749,7 +1729,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "policy_label": policy.get("label"),
             "base_checkpoint": policy.get("base_checkpoint"),
             "overlay_id": None
-            if policy.get("policy_id") == "base" else policy.get("policy_id"),
+            if policy.get("manifest") is None else policy.get("policy_id"),
             "training_step": policy.get("training_step"),
             "compatibility_sha256": policy.get("compatibility_sha256"),
             "output_path": str(path.parent.resolve()),

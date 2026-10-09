@@ -1,16 +1,40 @@
-# Official π₀.₅-LIBERO PyTorch conversion; dependencies live in a separate environment.
-model:
-  family: pi05
-  base_checkpoint: ../../../weights/pi05_libero_torch
-  stats_key: physical-intelligence/libero
-  environment: pi05
-  # frozen: train action expert/projections, keep PaliGemma frozen. full: train all.
+schema_version: 1
+model_name: pi05
+label: π₀.₅
+adapter: pi05
+default_variant: pi05-libero-base
+backbone_modes: [frozen, full]
+defaults:
+  # frozen trains the action expert/projections; full trains all components.
   backbone: frozen
-  # UI jobs pin this digest at registration; direct CLI resolves it at startup.
+  environment: pi05
   base_revision: null
   num_inference_steps: 10
-data:
-  # Replay geometry stays independent of OpenPI's native horizon 10 / padded dim 32.
-  action_horizon: 8
-  action_dim: 7
+io:
+  cameras: [agentview, robot0_eye_in_hand]
+  image_size: 224
+  image_orientation: rotate_180
+  proprio: eef_position_axis_angle_gripper
   proprio_dim: 8
+  native_action_horizon: 10
+  padded_action_dim: 32
+  action_dim: 7
+  replay_horizon: 8
+  control_hz: 20
+  action_codec: libero_env_v1
+architecture:
+  config_name: pi05_libero
+  discrete_state_input: false
+variants:
+  pi05-libero-base:
+    label: π₀.₅ · LIBERO
+    source: gs://openpi-assets/checkpoints/pi05_libero
+    revision: null
+    checkpoint: ../../../models/pi05_libero_torch
+    stats_key: physical-intelligence/libero
+  pi05-liberox-base:
+    label: π₀.₅ · LIBERO-X
+    source: Adam-YAN/pi05-liberox-base
+    revision: 4664e4725d2e72c3a8af8b09adfda41eaf74514c
+    checkpoint: ../../../models/pi05_liberox_torch
+    stats_key: meituan/LIBERO-X

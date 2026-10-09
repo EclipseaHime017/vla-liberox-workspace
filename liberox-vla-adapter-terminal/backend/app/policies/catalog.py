@@ -11,6 +11,8 @@ from typing import Any
 
 import yaml
 
+from .registry import model_module
+
 
 ACTION_HORIZON = 8
 ACTION_DIM = 7
@@ -53,12 +55,6 @@ def _stable_hash(value: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def checkpoint_digest(root: Path, hash_file=_sha256) -> str:
-    return _stable_hash({str(path.relative_to(root)): hash_file(path)
-        for path in sorted(root.rglob("*")) if path.is_file()
-        and path.suffix in {".json", ".safetensors", ".pt", ".bin", ".py"}})
-
-
 @dataclass(frozen=True)
 class PolicyEntry:
     policy_id: str
@@ -78,15 +74,31 @@ class PolicyEntry:
     family: str = "vla_adapter"
     actor: Path | None = None
     base_identity: Path | None = None
+    parent: dict | None = None
+
+    @property
+    def settings(self) -> dict:
+        raw = {**(self.model_config or {}), "family": self.family,
+               "base_checkpoint": self.base_checkpoint, "stats_key": self.stats_key}
+        return model_module("models").model_config({"model": raw})
 
     @property
     def content_sha256(self) -> str:
-        return _stable_hash({
+        settings = self.model_config
+        if self.family == "pi05" and settings is not None:
+            settings = dict(settings)
+            # Legacy LIBERO recordings predate the explicit base selector.
+            if settings.get("base_id") == "pi05-libero-base":
+                settings.pop("base_id")
+        value = {
             "family": self.family, "base_checkpoint": self.base_checkpoint,
-            "stats_key": self.stats_key, "model_config": self.model_config,
+            "stats_key": self.stats_key, "model_config": settings,
             "component_sha256": self.component_sha256,
             "base_revision": self.base_revision,
-        })
+        }
+        if self.parent is not None:
+            value["parent"] = self.parent
+        return _stable_hash(value)
 
     @property
     def is_base(self) -> bool:
@@ -100,7 +112,9 @@ class PolicyEntry:
             "stats_key": self.stats_key,
             "kind": "base" if self.is_base else "rynn_iql_overlay",
             "algorithm": None if self.is_base else self.algorithm,
-            "model_config": self.model_config,
+            "model_config": self.settings,
+            "parent_model_id": self.parent["id"] if self.parent else self.settings["base_id"],
+            "io": model_module("base_models").model_contract(self.settings)["io"],
             "training_step": self.training_step,
             "compatibility_sha256": self.compatibility_sha256,
             "family": self.family,
@@ -110,7 +124,7 @@ class PolicyEntry:
 
 
 class PolicyCatalog:
-    """Validate manifests without importing the independent training system."""
+    """Read model registrations and validate policy manifests without loading weights."""
 
     REQUIRED = {
         "schema_version", "policy_id", "label", "base_checkpoint", "stats_key",
@@ -119,14 +133,12 @@ class PolicyCatalog:
         "component_sha256", "compatibility_sha256",
     }
 
-    def __init__(self, registry: Path, base_checkpoint: str, stats_key: str, *, base_revision: str | None = None,
-                 pi05_model: dict | None = None):
+    def __init__(self, registry: Path, *, base_models: dict[str, dict],
+                 base_revisions: dict[str, str] | None = None):
         self.registry = registry.expanduser().resolve()
-        self.base_checkpoint = str(base_checkpoint)
-        self.stats_key = str(stats_key)
-        self.base_revision = base_revision
-        self.pi05_model = pi05_model
-        self._pi05_revisions: dict[str, str] = {}
+        self.base_models = base_models
+        self._revisions = {(base_id, base_models[base_id]["base_checkpoint"]): revision
+                           for base_id, revision in (base_revisions or {}).items()}
         self._entries: dict[str, PolicyEntry] = {}
         self._errors: dict[str, str] = {}
         self._hash_cache: dict[tuple[str, int, int, int, int], str] = {}
@@ -138,27 +150,29 @@ class PolicyCatalog:
         selected = self.entry(policy_id)
         if selected.family == "pi05":
             from .pi05_catalog import assets
-            identity = assets().checkpoint_identity(Path(selected.base_checkpoint), self._component_sha256)
+            identity = assets().checkpoint_identity(Path(selected.base_checkpoint), self._component_sha256,
+                base_id=selected.settings["base_id"], parent=selected.parent,
+                contract=model_module("base_models").model_contract(selected.settings))
             revision = assets().identity_digest(identity)
             if selected.base_identity is not None:
                 import json
                 if json.loads(selected.base_identity.read_text()) != identity:
                     raise ValueError("π₀.₅ overlay requires different base weights or normalization assets")
-            self._pi05_revisions[selected.base_checkpoint] = revision
+            pinned = selected.parent["revision"] if selected.parent else selected.settings.get("base_revision")
+            if pinned is not None and pinned != revision:
+                raise ValueError("Selected model parent weights have changed")
+            if selected.parent is None:
+                self._revisions[(selected.settings["base_id"], selected.base_checkpoint)] = revision
             self.refresh()
             return self.entry(policy_id)
-        base = Path(self.base_checkpoint).expanduser()
-        if base.is_dir():
-            self.base_revision = checkpoint_digest(base, self._component_sha256)
-        elif self.base_revision is None:
-            from huggingface_hub import HfApi, try_to_load_from_cache
-            cached = try_to_load_from_cache(self.base_checkpoint, "config.json")
-            revision = Path(cached).parent.name if isinstance(cached, str) else None
-            if revision is None or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-                revision = HfApi().model_info(self.base_checkpoint, timeout=10).sha
-            if not revision or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-                raise ValueError("Cannot resolve an immutable base checkpoint revision")
-            self.base_revision = revision
+        settings = selected.settings
+        pinned = selected.parent["revision"] if selected.parent else settings.get("base_revision")
+        if pinned is None and not Path(selected.base_checkpoint).expanduser().is_dir():
+            pinned = selected.base_revision
+        revision = model_module("checkpoint_assets").resolve_revision(
+            selected.base_checkpoint, pinned, self._component_sha256)
+        if selected.parent is None:
+            self._revisions[(settings["base_id"], selected.base_checkpoint)] = revision
         self.refresh()
         return self.entry(policy_id)
 
@@ -174,28 +188,20 @@ class PolicyCatalog:
         return digest
 
     def refresh(self) -> None:
-        entries = {
-            "base": PolicyEntry(
-                policy_id="base",
-                label="VLA-Adapter · Object-Pro（基础模型）",
-                base_checkpoint=self.base_checkpoint,
-                stats_key=self.stats_key,
-                manifest=None,
-                action_head=None,
-                proprio_projector=None,
-                training_step=None,
-                compatibility_sha256=None,
-                base_revision=self.base_revision,
-            )
-        }
+        entries = {}
         errors: dict[str, str] = {}
-        if self.pi05_model is not None:
-            entries["pi05-libero-base"] = PolicyEntry(
-                policy_id="pi05-libero-base", label="π₀.₅ · LIBERO（基础模型）",
-                base_checkpoint=self.pi05_model["base_checkpoint"], stats_key=self.pi05_model["stats_key"],
+        for base_id, supplied in self.base_models.items():
+            base = model_module("base_models").base_model(base_id)
+            settings = model_module("models").model_config({"model": supplied})
+            if settings["base_id"] != base_id or settings["family"] != base.family:
+                raise ValueError("Base policy ID conflicts with its model configuration")
+            entries[base_id] = PolicyEntry(
+                policy_id=base_id, label=f"{base.label}（基础模型）",
+                base_checkpoint=settings["base_checkpoint"], stats_key=settings["stats_key"],
                 manifest=None, action_head=None, proprio_projector=None, training_step=None,
-                compatibility_sha256=None, model_config=self.pi05_model, family="pi05",
-                base_revision=self._pi05_revisions.get(self.pi05_model["base_checkpoint"]),
+                # Preserve the identity of existing default-base recordings.
+                compatibility_sha256=None, model_config=None if base_id == "base" else settings, family=base.family,
+                base_revision=settings.get("base_revision") or self._revisions.get((base_id, settings["base_checkpoint"])),
             )
         if self.registry.is_dir():
             for directory in sorted(self.registry.iterdir()):
@@ -218,9 +224,10 @@ class PolicyCatalog:
 
     def _load(self, manifest: Path) -> PolicyEntry:
         raw = yaml.load(manifest.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
+        raw, parent = model_module("model_artifacts").decode_child(raw)
         if isinstance(raw, dict) and raw.get("schema_version") == 4:
             from .pi05_catalog import load_overlay
-            return load_overlay(self, manifest, raw)
+            return load_overlay(self, manifest, raw, parent=parent)
         required = self.REQUIRED | ({"algorithm"} if isinstance(raw, dict) and raw.get("schema_version") in (2, 3) else set())
         if isinstance(raw, dict) and raw.get("schema_version") == 3:
             required |= {"backbone", "model_config"}
@@ -248,12 +255,23 @@ class PolicyCatalog:
             raise ValueError(f"Policy directory must match policy_id {policy_id!r}")
         if not isinstance(label, str) or not label.strip():
             raise ValueError(f"Policy label must be a non-empty string: {manifest}")
-        if raw["base_checkpoint"] != self.base_checkpoint:
+        supplied_settings = raw.get("model_config") or {}
+        if (supplied_settings.get("base_checkpoint", raw["base_checkpoint"]) != raw["base_checkpoint"]
+                or raw["stats_key"] not in {supplied_settings.get("stats_key", raw["stats_key"]),
+                                           f"{supplied_settings.get('stats_key')}_no_noops"}):
+            raise ValueError("Overlay model configuration conflicts with its manifest")
+        settings = model_module("models").model_config({"model": {**supplied_settings,
+            "base_checkpoint": raw["base_checkpoint"], "stats_key": raw["stats_key"]}})
+        configured = self.base_models.get(settings["base_id"])
+        expected_checkpoint = parent["checkpoint"] if parent else (
+            configured["base_checkpoint"] if configured else settings["base_checkpoint"])
+        if raw["base_checkpoint"] != expected_checkpoint:
             raise ValueError(
                 f"Overlay {policy_id} uses {raw['base_checkpoint']!r}; "
-                f"UI is configured for {self.base_checkpoint!r}"
+                f"its parent is configured for {expected_checkpoint!r}"
             )
-        allowed_stats = {self.stats_key, f"{self.stats_key}_no_noops"}
+        parent_stats = parent["stats_key"] if parent else (configured["stats_key"] if configured else settings["stats_key"])
+        allowed_stats = {parent_stats, f"{parent_stats}_no_noops"}
         if raw["stats_key"] not in allowed_stats:
             raise ValueError(f"Overlay {policy_id} has incompatible stats_key")
         dimensions = (raw["action_horizon"], raw["action_dim"], raw["proprio_dim"])
@@ -318,7 +336,8 @@ class PolicyCatalog:
             backbone=component("backbone") if raw.get("backbone") else None,
             model_config=raw.get("model_config"),
             component_sha256=dict(hashes),
-            base_revision=self.base_revision,
+            base_revision=parent["revision"] if parent else settings.get("base_revision") or self._revisions.get((settings["base_id"], raw["base_checkpoint"])),
+            parent=parent,
         )
 
     def entry(self, policy_id: str) -> PolicyEntry:

@@ -17,6 +17,7 @@ from vla_rynn_iql.config import PROJECT_ROOT, load_train_config
 from vla_rynn_iql.data import prepare_dataset
 from vla_rynn_iql.iql import weighted_masked_l1
 from vla_rynn_iql.models import apply_model_parameters, model_config, model_parameters
+from vla_rynn_iql.base_models import base_model
 from vla_rynn_iql.replay import ActionDataset
 
 
@@ -26,7 +27,7 @@ def test_model_family_configuration_is_independent(method, tmp_path):
     raw = load_train_config(path, family="pi05").raw
     assert raw["model"]["family"] == "pi05"
     assert raw["data"]["action_horizon"] == 8
-    assert set(model_parameters(raw)) == {"model_family", "model_backbone"}
+    assert set(model_parameters(raw)) == {"model_family", "model_backbone", "model_base_id"}
     assert "lora" not in raw["model"] and "proprio_projector" not in raw["model"]
     saved = tmp_path / "vla.yaml"
     saved.write_text(yaml.safe_dump(load_train_config(path).raw))
@@ -59,6 +60,129 @@ def test_flow_mask_and_detached_iql_weights():
         pi05.masked_flow_losses(errors, torch.zeros(2, 8, dtype=torch.bool))
 
 
+@pytest.mark.parametrize("method", ["bc", "iql"])
+def test_liberox_base_uses_same_backend_with_independent_identity(method, tmp_path):
+    path = PROJECT_ROOT / f"configs/training/{method}.yaml"
+    original = load_train_config(path, family="pi05").raw
+    override = {"model": {"family": "pi05", "base_id": "pi05-liberox-base"}}
+    selected = load_train_config(path, overrides=override).raw
+    base = base_model("pi05-liberox-base")
+    assert selected["model"]["base_checkpoint"] == base.checkpoint
+    assert selected["model"]["stats_key"] == "meituan/LIBERO-X"
+    assert selected["model"]["family"] == "pi05"
+    for section in ("data", "training", "iql", "bc", "reward"):
+        assert selected[section] == original[section]
+    assert apply_model_parameters(original, {"model_base_id": base.id}) == selected["model"]
+    assert apply_model_parameters(selected, {"model_base_id": "pi05-libero-base"}) == original["model"]
+    saved = tmp_path / "sealed.yaml"
+    saved.write_text(yaml.safe_dump(selected))
+    assert load_train_config(saved).raw == selected
+    for parameters in ({"model_family": "vla_adapter", "model_base_id": base.id},
+                       {"model_family": "pi05", "model_base_id": "unknown"}):
+        with pytest.raises(ValueError):
+            apply_model_parameters({}, parameters)
+    with pytest.raises(ValueError, match="normalization"):
+        model_config({"model": {**selected["model"], "stats_key": "physical-intelligence/libero"}})
+
+
+def test_pi05_load_uses_selected_base_normalization(monkeypatch, tmp_path):
+    from dataclasses import dataclass
+    from vla_rynn_iql.models import base_model_config
+
+    requested = {}
+    @dataclass(frozen=True)
+    class Model:
+        dtype: str = "float32"
+        pytorch_compile_mode: str | None = "default"
+        action_horizon: int = 10
+        action_dim: int = 32
+        discrete_state_input: bool = False
+
+        def load_pytorch(self, cfg, path):
+            requested["model_repo"] = cfg.data.repo_id
+            return torch.nn.Linear(1, 1)
+
+    @dataclass(frozen=True)
+    class Data:
+        repo_id: str = "physical-intelligence/libero"
+
+        def create(self, assets_dirs, model):
+            empty = SimpleNamespace(inputs=[], outputs=[])
+            return SimpleNamespace(asset_id=self.repo_id, use_quantile_norm=True,
+                                   data_transforms=empty, model_transforms=empty)
+
+    @dataclass(frozen=True)
+    class Config:
+        model: Model = Model()
+        data: Data = Data()
+        assets_dirs: str = "assets"
+
+    def stats(root, key):
+        requested["norm_key"] = key
+        value = SimpleNamespace(q01=np.zeros(8), q99=np.ones(8))
+        return {"actions": value, "state": value}
+    transforms = SimpleNamespace(compose=lambda values: values,
+                                 Normalize=lambda *a, **k: None, Unnormalize=lambda *a, **k: None)
+    configs = SimpleNamespace(get_config=lambda name: Config())
+    monkeypatch.setitem(sys.modules, "openpi", SimpleNamespace(transforms=transforms))
+    monkeypatch.setitem(sys.modules, "openpi.training", SimpleNamespace(config=configs,
+                         checkpoints=SimpleNamespace(load_norm_stats=stats)))
+    monkeypatch.setattr(pi05, "verify_runtime", lambda: None)
+    monkeypatch.setattr(pi05, "configure_model", lambda *a, **k: None)
+    monkeypatch.setattr(pi05, "checkpoint_identity", lambda root, **kw: {
+        "config_name": "pi05_libero", "files": {"assets/meituan/LIBERO-X/norm_stats.json": "test"}})
+    settings = base_model_config("pi05-liberox-base")
+    raw = {"model": settings, "training": {"device": "cpu", "dtype": "bfloat16"}}
+    result = pi05.load_components(SimpleNamespace(raw=raw, section=raw.__getitem__), training=False)
+    from vla_rynn_iql.base_models import model_contract
+    settings["contract"] = model_contract(settings)
+    settings["stats_key"] = "unbound/stats"
+    with pytest.raises(ValueError, match="not bound"):
+        pi05.load_components(SimpleNamespace(raw=raw, section=raw.__getitem__), training=False)
+    assert requested == {"model_repo": "meituan/LIBERO-X", "norm_key": "meituan/LIBERO-X"}
+    assert result.stats_key == "meituan/LIBERO-X"
+
+
+def test_liberox_conversion_pins_source_and_copies_its_own_stats(tmp_path, monkeypatch):
+    import importlib.util
+    from vla_rynn_iql import pi05_assets
+
+    spec = importlib.util.spec_from_file_location("prepare_pi05", PROJECT_ROOT / "scripts/prepare_pi05.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    base = base_model("pi05-liberox-base")
+    source, output = tmp_path / "source", tmp_path / "converted"
+    norm = source / base.norm_file
+    norm.parent.mkdir(parents=True)
+    norm.write_text('{"stats": "liberox"}')
+    calls = []
+    def download(repo, revision, **kwargs):
+        kwargs["revision"] = revision
+        calls.append((repo, kwargs))
+        return source
+    def convert(command, check):
+        assert command[command.index("--config-name") + 1] == "pi05_libero"
+        destination = Path(command[command.index("--output-path") + 1])
+        (destination / "model.safetensors").write_bytes(b"test-conversion")
+    monkeypatch.setattr(pi05, "verify_runtime", lambda: None)
+    monkeypatch.setattr(script.subprocess, "run", convert)
+    monkeypatch.setitem(sys.modules, "openpi", SimpleNamespace(__file__=str(tmp_path / "openpi/src/openpi/__init__.py")))
+    monkeypatch.setitem(sys.modules, "openpi.shared.download", SimpleNamespace(maybe_download=lambda _: pytest.fail("wrong source")))
+    from vla_rynn_iql import model_storage
+    monkeypatch.setattr(model_storage, "download_repository", download)
+    monkeypatch.setattr(sys, "argv", ["prepare_pi05.py", "--base-model", base.id, "--output", str(output)])
+    script.main()
+    assert calls == [(base.source, {"revision": base.revision, "allow_patterns": ["params/**", base.norm_file]})]
+    identity = pi05_assets.checkpoint_identity(output, base_id=base.id)
+    assert identity["source_revision"] == base.revision
+    assert identity["conversion_precision"] == "bfloat16"
+    assert (output / base.norm_file).read_text() == norm.read_text()
+    assert not (output / pi05_assets.base_model("pi05-libero-base").norm_file).exists()
+    with pytest.raises(SystemExit, match="Refusing to overwrite"):
+        script.main()
+    assert len(calls) == 1
+
+
 def test_vla_objective_is_numerically_unchanged(monkeypatch):
     prediction = torch.randn(3, 8, 7, requires_grad=True)
     batch = {"actions": torch.randn_like(prediction),
@@ -79,7 +203,7 @@ def test_native_flow_actions_use_official_float32_dtype(monkeypatch):
         assert actions.dtype == torch.float32
         assert actions.shape == (1, 10, 32)
         return actions.square()
-    components = SimpleNamespace(input_transform=transform, model=model)
+    components = SimpleNamespace(input_transform=transform, model=model, settings={"family": "pi05"})
     batch = {"prompt": ["place the bowl"], "raw_actions": torch.ones(1, 8, 7),
              "agent_image": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
              "wrist_image": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),

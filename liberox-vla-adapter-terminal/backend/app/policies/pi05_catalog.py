@@ -7,20 +7,14 @@ from pathlib import Path
 
 from ..services.inherited_reward_inputs import offline_module
 from .catalog import PolicyEntry, _stable_hash
-
-PROJECT = Path(__file__).resolve().parents[4] / "vla-adapter-rynn-iql"
+from .registry import PROJECT
 
 
 def assets():
     return offline_module(PROJECT, "pi05_assets")
 
 
-def configured_model(root: Path = PROJECT):
-    config = offline_module(root, "config")
-    return config.load_train_config(root / "configs/training/bc.yaml", family="pi05").raw["model"]
-
-
-def load_overlay(catalog, manifest: Path, raw: dict) -> PolicyEntry:
+def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEntry:
     required = (catalog.REQUIRED - {"action_head", "proprio_projector"}) | {
         "family", "algorithm", "model_config", "actor", "base_identity"}
     if set(raw) != required or raw["family"] != "pi05" or raw["algorithm"] not in {"bc", "iql"}:
@@ -60,10 +54,12 @@ def load_overlay(catalog, manifest: Path, raw: dict) -> PolicyEntry:
             raise ValueError(f"π₀.₅ artifact hash mismatch: {key}")
         paths[key] = value.resolve()
     identity = json.loads(paths["base_identity"].read_text())
+    if parent is not None and assets().identity_digest(identity) != parent["revision"]:
+        raise ValueError("π₀.₅ child identity conflicts with its parent")
     return PolicyEntry(
         policy_id=raw["policy_id"], label=raw["label"], base_checkpoint=raw["base_checkpoint"],
         stats_key=raw["stats_key"], manifest=manifest.resolve(), action_head=None,
         proprio_projector=None, training_step=raw["training_step"],
         compatibility_sha256=raw["compatibility_sha256"], algorithm=raw["algorithm"],
         model_config=settings, component_sha256=raw["component_sha256"], family="pi05",
-        base_revision=assets().identity_digest(identity), **paths)
+        base_revision=assets().identity_digest(identity), parent=parent, **paths)

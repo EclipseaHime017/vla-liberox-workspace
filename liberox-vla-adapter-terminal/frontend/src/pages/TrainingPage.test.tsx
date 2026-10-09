@@ -63,6 +63,36 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("dataset-pinned training reward", () => {
+  it("switches base checkpoints within pi05 and submits the selected identity", async () => {
+    const bases = ["pi05-libero-base", "pi05-liberox-base"].map((id) => ({ id, label: id, source: id }));
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (_dataset, _source, algorithm, family, baseId) => ({
+      ...defaults, algorithm: algorithm ?? "iql",
+      models: [...defaults.models!, { id: "pi05", label: "π₀.₅", backbone_modes: ["frozen", "full"], bases }],
+      model: family === "pi05" ? { model_family: "pi05", model_base_id: baseId ?? bases[0].id,
+        model_backbone: "frozen" } : defaults.model,
+    }));
+    render(<TrainingPage />);
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("基础模型"), { target: { value: bases[0].id } });
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "final", "iql", "pi05", bases[0].id));
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("微调范围"), { target: { value: "full" } });
+    fireEvent.change(screen.getByLabelText("基础模型"), { target: { value: bases[1].id } });
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "final", "iql", "pi05", bases[1].id));
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    expect((screen.getByLabelText("微调范围") as HTMLSelectElement).value).toBe("frozen");
+    fireEvent.change(screen.getByLabelText("训练方法"), { target: { value: "bc" } });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(start);
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
+      algorithm: "bc", model_family: "pi05", model_base_id: bases[1].id, model_backbone: "frozen",
+    })));
+    const sent = vi.mocked(api.enqueueTraining).mock.calls.at(-1)![1];
+    expect(sent).not.toHaveProperty("model_lora_rank");
+    expect(sent).not.toHaveProperty("model_action_head");
+  });
+
   it("orders model, method and configuration and loads independent method defaults", async () => {
     vi.mocked(api.getTrainingDefaults).mockImplementation(async (_dataset, _source, algorithm) => ({
       ...defaults,
@@ -79,7 +109,7 @@ describe("dataset-pinned training reward", () => {
     fireEvent.change(method, { target: { value: "bc" } });
     await waitFor(() => expect((screen.getByLabelText("Policy LR warmup") as HTMLInputElement).value).toBe("11"));
     expect((screen.getByLabelText("Policy peak LR") as HTMLInputElement).value).toBe("0.0002");
-    expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", undefined, "bc", "vla_adapter");
+    expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", undefined, "bc", "vla_adapter", undefined);
     fireEvent.change(method, { target: { value: "iql" } });
     await waitFor(() => expect((screen.getByLabelText("Policy LR warmup") as HTMLInputElement).value).toBe("22"));
     expect((screen.getByLabelText("Policy peak LR") as HTMLInputElement).value).toBe("0.0004");
@@ -128,7 +158,7 @@ describe("dataset-pinned training reward", () => {
     expect(Array.from(reward.options, (option) => option.text)).toEqual(["Final Reward", "RynnValue"]);
     fireEvent.change(screen.getByLabelText("训练步数"), { target: { value: "77" } });
     fireEvent.change(reward, { target: { value: "rynnvalue" } });
-    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue", "iql", "vla_adapter"));
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue", "iql", "vla_adapter", undefined));
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     expect((screen.getByLabelText("Discount ratio γ") as HTMLInputElement).value).toBe("0.87");
     fireEvent.click(start);
@@ -167,7 +197,7 @@ describe("dataset-pinned training reward", () => {
     const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "rynnvalue" } });
-    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue", "iql", "vla_adapter"));
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue", "iql", "vla_adapter", undefined));
     expect((start as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(start);
     expect(api.enqueueTraining).not.toHaveBeenCalled();
@@ -205,7 +235,7 @@ describe("dataset-pinned training reward", () => {
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "注册训练任务" }).hasAttribute("disabled")).toBe(true));
     fireEvent.change(screen.getByLabelText("训练方法"), { target: { value: "bc" } });
-    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenCalledWith("unready", undefined, "bc", "vla_adapter"));
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenCalledWith("unready", undefined, "bc", "vla_adapter", undefined));
     await waitFor(() => expect(screen.getByRole("button", { name: "注册训练任务" }).hasAttribute("disabled")).toBe(false));
     expect(screen.queryByLabelText("Discount ratio γ")).toBeNull();
     expect(screen.queryByLabelText("训练奖励")).toBeNull();
@@ -357,7 +387,7 @@ describe("dataset-pinned training reward", () => {
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     expect(screen.getByText(/使用逐轨迹全局结果/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "rynnvalue" } });
-    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue", "iql", "vla_adapter"));
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("ready", "rynnvalue", "iql", "vla_adapter", undefined));
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(start);
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
@@ -376,7 +406,7 @@ describe("dataset-pinned training reward", () => {
     const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "unready" } });
-    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("unready", "final", "iql", "vla_adapter"));
+    await waitFor(() => expect(api.getTrainingDefaults).toHaveBeenLastCalledWith("unready", "final", "iql", "vla_adapter", undefined));
     expect((start as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("冻结数据集"), { target: { value: "ready" } });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));

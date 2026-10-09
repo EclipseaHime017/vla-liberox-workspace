@@ -12,7 +12,7 @@ import yaml
 
 from .methods import COMMON_TRAINING_KEYS, training_method
 from .models import model_config
-from .config_sources import UniqueKeyLoader, compose_config, read_source
+from .config_sources import UniqueKeyLoader, compose_config, migrate_fields, read_source
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -181,8 +181,7 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG, *, method: str | None =
 
 def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     """Normalize legacy keys once; consumers see only their own canonical section."""
-    import copy
-    raw = copy.deepcopy(raw)
+    raw = migrate_fields(raw)
     path = path.expanduser().resolve()
     if raw.get("schema_version") not in (1, 2):
         raise ValueError("Only schema_version=1 or 2 is supported")
@@ -195,21 +194,20 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raise ValueError(f"Unknown training keys: {sorted(unknown)}")
     training.setdefault("method", "iql")
     method = training_method(raw)
-    legacy_iql = raw.setdefault("iql", {})
-    if not isinstance(legacy_iql, dict):
+    iql = raw.setdefault("iql", {})
+    if not isinstance(iql, dict):
         raise TypeError("iql must be a mapping")
-    unknown = set(legacy_iql) - set(TRAIN_SCHEMA["iql"]) - COMMON_TRAINING_KEYS
+    unknown = set(iql) - set(TRAIN_SCHEMA["iql"])
     if unknown:
         raise ValueError(f"Unknown config.iql keys: {sorted(unknown)}")
     common_defaults = (read_source(PROJECT_ROOT / "configs" / "runtime.yaml")["training"]
-                       if COMMON_TRAINING_KEYS - training.keys() - legacy_iql.keys() else {})
+                       if COMMON_TRAINING_KEYS - training.keys() else {})
     for key in COMMON_TRAINING_KEYS:
         if key not in training:
-            training[key] = legacy_iql[key] if key in legacy_iql else common_defaults[key]
-        legacy_iql.pop(key, None)
+            training[key] = common_defaults[key]
     if training.get("actor_lr_warmup_steps") is None:
         # Compatibility only: old IQL configs tied actor LR warmup to critic warmup.
-        training["actor_lr_warmup_steps"] = (legacy_iql.get("critic_warmup_steps", 1000)
+        training["actor_lr_warmup_steps"] = (iql.get("critic_warmup_steps", 1000)
                                             if method.name == "iql" else 1000)
     _number(training, "actor_lr_warmup_steps", low=0, integer=True)
     raw.setdefault("bc", {})
@@ -218,7 +216,6 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raw["reward"] = {}
     raw.setdefault("reward", {})
     raw["model"] = model_config(raw)
-    raw.pop("vla", None)
     raw["schema_version"] = 2
     # Canonicalize old boolean configs. Explicit contradictory choices fail fast.
     if method.requires_rewards and isinstance(raw.get("reward"), dict):

@@ -10,7 +10,8 @@ def test_selection_pins_base_and_loader_cannot_mutate_source(tmp_path):
     base.mkdir()
     (base / "config.json").write_text('{"model_type":"example"}')
     (base / "model.safetensors").write_bytes(b"model")
-    catalog = PolicyCatalog(tmp_path / "registry", str(base), "stats")
+    catalog = PolicyCatalog(tmp_path / "registry", base_models={
+        "base": {"base_checkpoint": str(base), "stats_key": "stats"}})
     entry = catalog.select("base")
     with checkpoint_view(entry) as view:
         copied = Path(view) / "config.json"
@@ -30,5 +31,6 @@ def test_listing_does_not_resolve_or_download_remote_model(tmp_path, monkeypatch
     def network_forbidden(*_, **__):
         raise AssertionError("list requested network")
     monkeypatch.setattr(huggingface_hub.HfApi, "model_info", network_forbidden)
-    catalog = PolicyCatalog(tmp_path, "owner/not-downloaded", "stats")
+    catalog = PolicyCatalog(tmp_path, base_models={
+        "base": {"base_checkpoint": "owner/not-downloaded", "stats_key": "stats"}})
     assert catalog.list_policies()[0]["base_revision"] is None

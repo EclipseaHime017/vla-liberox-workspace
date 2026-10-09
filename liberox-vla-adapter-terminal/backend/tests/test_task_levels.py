@@ -89,7 +89,8 @@ def test_level5_identity_persisted_in_run_branch_and_batch_evaluation(tmp_path, 
     policy = SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base", family="vla_adapter",
         content_sha256="a" * 64, base_revision="b" * 40,
         manifest=None, compatibility_sha256=None, stats_key="stats",
-        action_head=None, proprio_projector=None, backbone=None, model_config=None, training_step=None)
+        action_head=None, proprio_projector=None, backbone=None, model_config=None, training_step=None,
+        settings={"family": "vla_adapter", "base_id": "base", "base_checkpoint": "base", "stats_key": "stats"})
     manager = object.__new__(SimulationManager)
     manager.catalog = catalog
     manager.eval_config = SimpleNamespace(seed=0, disabled_policy_cameras=(), control_hz=20)

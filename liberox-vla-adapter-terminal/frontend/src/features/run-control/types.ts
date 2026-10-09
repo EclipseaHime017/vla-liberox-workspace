@@ -447,7 +447,8 @@ export type EvaluationFilters = {
 
 export type TrainingDefaults = {
   algorithm?: "iql" | "bc";
-  models?: Array<{ id: string; label: string; backbone_modes: string[] }>;
+  models?: Array<{ id: string; label: string; backbone_modes: string[];
+    bases?: Array<{ id: string; label: string; source: string }> }>;
   model?: Record<string, number | string | boolean | null>;
   reward_availability?: {
     message?: string;

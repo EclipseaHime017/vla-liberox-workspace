@@ -115,17 +115,9 @@ def test_adapted_backbone_checkpoint_resume_and_merged_export(tmp_path, mode):
             restore_backbone(resumed, settings, tmp_path)
 
 
-def test_model_config_compatibility_and_strict_validation(configured):
-    raw = copy.deepcopy(configured.raw)
-    raw.pop("model")
-    assert model_config(raw)["backbone"] == "frozen"
-    raw["vla"] = {"freeze_backbone": False}
-    assert model_config(raw)["backbone"] == "full"
-    raw["model"] = {"backbone": "lora", "lora": {"rank": 4}}
-    configured.path.write_text(yaml.safe_dump(raw))
-    loaded = load_train_config(configured.path)
-    assert loaded.section("model")["lora"]["rank"] == 4
-    assert "vla" not in loaded.raw
+def test_model_config_strict_validation():
+    with pytest.raises(ValueError, match="configuration boundary"):
+        model_config({"vla": {"freeze_backbone": False}})
     for invalid in ({"family": "unknown"}, {"backbone": "unknown"}, {"typo": 1},
                     {"action_head": False}, {"lora": {"rank": True}}, {"lora": {"dropout": float("nan")}},
                     {"lora": {"dropout": 1}}, {"lora": {"typo": 3}},
@@ -179,6 +171,8 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
     initial.model.norm_stats = {config.section("model")["stats_key"]: {"action": _stats(7), "proprio": _stats(8)}}
     c = copy.deepcopy(initial)
     c.stats_key = config.section("model")["stats_key"]
+    from vla_rynn_iql.model_artifacts import parent_snapshot
+    c.parent = parent_snapshot(config.section("model"), "a" * 40)
     configure_components(c, config.section("model"), training=True)
     optimizer = torch.optim.AdamW(trainable_parameters(c), lr=.01)
     predict(c).square().mean().backward()
@@ -189,6 +183,8 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
     overlay_path = _publish_overlay(checkpoint, tmp_path / "registry", 1, config, c,
                                    {"dataset_sha256": "d" * 64}, None)
     overlay = vla_adapter.load_overlay(overlay_path)
+    assert yaml.safe_load(overlay_path.read_text())["schema_version"] == 5
+    assert overlay.parent == c.parent
     vla_adapter.validate_overlay(overlay, config.section("model")["base_checkpoint"], c.stats_key)
     assert (overlay.backbone is not None) == (mode != "frozen")
     module = types.ModuleType("experiments.robot.libero.run_libero_eval")
@@ -199,6 +195,8 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
     module.initialize_model = initialize
     monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(vla_adapter, "_add_vla_path", lambda _: None)
+    monkeypatch.setattr(vla_adapter, "resolve_revision", lambda *_: "a" * 40)
+    monkeypatch.setattr(vla_adapter, "checkpoint_view", lambda *_: SimpleNamespace(name=str(tmp_path), cleanup=lambda: None))
     loaded = vla_adapter.load_components(config, overlay_path, training=False)
     torch.testing.assert_close(predict(loaded), expected, atol=1e-6, rtol=1e-5)
     assert not any(parameter.requires_grad for parameter in loaded.model.parameters())

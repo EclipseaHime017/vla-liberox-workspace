@@ -129,8 +129,7 @@ class VLAAdapterPolicyProvider:
                 self.eval_config,
                 checkpoint=self._checkpoint_view.name,
                 stats_key=entry.stats_key,
-                use_pro_version=("Pro" in entry.base_checkpoint
-                                 if self.eval_config.use_pro_version is None else self.eval_config.use_pro_version),
+                use_pro_version=entry.settings["use_pro_version"],
                 open_loop_steps=open_loop_steps,
                 trials=1,
                 headless=True,
@@ -144,9 +143,9 @@ class VLAAdapterPolicyProvider:
             self._base_proprio_projector = self._cpu_state(
                 self.components.proprio_projector
             )
-            self.current_policy_id = "base"
-            self.current_policy_entry = entry if entry.is_base else self.catalog.entry("base")
-            if policy_id != "base":
+            self.current_policy_id = entry.policy_id if entry.is_base else None
+            self.current_policy_entry = entry if entry.is_base else None
+            if not entry.is_base:
                 if entry is None:
                     raise ValueError(f"Unknown policy_id: {policy_id}")
                 try:
@@ -213,7 +212,7 @@ class VLAAdapterPolicyProvider:
             entry = self.catalog.entry(policy_id)
         return {
             "provider": "vla_adapter",
-            "checkpoint": str(self.eval_config.checkpoint),
+            "checkpoint": entry.base_checkpoint if entry else str(self.eval_config.checkpoint),
             "loaded": self.loaded,
             "gpu": gpu,
             "model_device": model_device,

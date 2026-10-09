@@ -28,7 +28,7 @@ _COLUMNS = {"runs": ("run_path",), "training_datasets": ("manifest_path",),
 def _legacy_processes():
     """Conservative compatibility guard for consumers predating storage leases."""
     consumers = {"run_ui.py", "train.py", "train_iql.py", "train_terminal.py", "prepare_dataset.py",
-                 "materialize_rewards.py", "annotate_rewards.py", "run_pipeline.py",
+                 "materialize_rewards.py", "annotate_rewards.py",
                  "evaluate_trajectories.py"}
     for proc in Path("/proc").glob("[0-9]*"):
         if proc.name == str(os.getpid()):

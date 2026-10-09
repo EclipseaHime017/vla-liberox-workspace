@@ -42,7 +42,7 @@ from ..domain.run import (
 )
 from ..evaluation.libero_evaluator import LiberoEvaluator
 from ..policies.router import PolicyProvider
-from ..policies.pi05_catalog import configured_model
+from ..policies.registry import configured_models
 from ..policies.catalog import PolicyCatalog
 from ..core.exceptions import ConflictError
 from ..services.work_resources import ResourceLease
@@ -235,9 +235,7 @@ class SimulationManager:
         )
         self.policy_catalog = PolicyCatalog(
             self.ui_config.policy_registry,
-            str(self.eval_config.checkpoint),
-            self.eval_config.stats_key,
-            pi05_model=configured_model(self.ui_config.offline_rl_root),
+            base_models=configured_models(self.ui_config.offline_rl_root),
         )
         self.provider = PolicyProvider(
             self.runtime, self.eval_config, self.policy_catalog

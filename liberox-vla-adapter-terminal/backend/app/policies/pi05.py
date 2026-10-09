@@ -13,6 +13,7 @@ import threading
 import numpy as np
 
 from .pi05_catalog import PROJECT
+from .registry import model_module
 
 
 class Pi05PolicyProvider:
@@ -74,6 +75,7 @@ class Pi05PolicyProvider:
             threading.Thread(target=receive, daemon=True).start()
             try:
                 ready = self._send({"model": entry.model_config, "owner_pid": os.getpid(),
+                    "parent": entry.parent,
                     "base_revision": entry.base_revision, "content_sha256": entry.content_sha256,
                     "actor": str(entry.actor) if entry.actor else None,
                     "actor_sha256": entry.component_sha256.get("actor")}, timeout=600)
@@ -111,10 +113,11 @@ class Pi05PolicyProvider:
             np.savez(buffer, **images)
             result = self._send({"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(), "prompt": prompt})
             actions = np.asarray(result["actions"], dtype=np.float32)
-            if actions.shape != (10, 7) or not np.isfinite(actions).all():
+            contract = model_module("base_models").model_contract(self.current_policy_entry.settings)["io"]
+            if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
                 self.unload()
                 raise ValueError("Invalid π₀.₅ action chunk")
-            return actions[:8]
+            return actions[:contract["replay_horizon"]]
 
     def process_action(self, action):
         action = np.asarray(action, dtype=np.float32)
@@ -141,10 +144,11 @@ class Pi05PolicyProvider:
 
     def metadata(self):
         entry = self.current_policy_entry
+        contract = model_module("base_models").model_contract(entry.settings if entry else {"family": "pi05"})["io"]
         return {"provider": "pi05", "loaded": self.loaded, "gpu": "cuda:0 (π₀.₅ worker)",
                 "model_device": "cuda:0" if self.loaded else None,
                 "checkpoint": entry.base_checkpoint if entry else None,
                 "policy_id": self.current_policy_id, "policy_label": entry.label if entry else "π₀.₅ · LIBERO",
-                "model_switching": True, "action_codec": "libero_env_v1",
-                "action_schema": {"size": 7, "range": [-1, 1], "units": "normalized OSC_POSE command",
-                                  "predicted_chunk_size": 8, "native_action_horizon": 10}}
+                "model_switching": True, "action_codec": contract["action_codec"],
+                "action_schema": {"size": contract["action_dim"], "range": [-1, 1], "units": "normalized OSC_POSE command",
+                                  "predicted_chunk_size": contract["replay_horizon"], "native_action_horizon": contract["native_action_horizon"]}}

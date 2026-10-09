@@ -17,6 +17,7 @@ from backend.app.services.policy_management_service import PolicyManagementServi
 
 BASE = "VLA-Adapter/LIBERO-Object-Pro"
 STATS = "libero_object_no_noops"
+BASE_MODELS = {"base": {"base_checkpoint": BASE, "stats_key": "libero_object"}}
 
 
 def _sha(path: Path) -> str:
@@ -66,7 +67,7 @@ def _overlay(root: Path, policy_id: str = "trained") -> Path:
 
 def test_policy_catalog_validates_and_lists_overlay(tmp_path: Path):
     _overlay(tmp_path)
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     policies = catalog.list_policies()
     assert [item["policy_id"] for item in policies] == ["base", "trained"]
     assert catalog.entry("trained").stats_key == STATS
@@ -80,7 +81,7 @@ def test_bc_overlay_and_legacy_iql_are_both_discoverable(tmp_path: Path):
     raw = yaml.safe_load(path.read_text())
     raw.update(schema_version=2, algorithm="bc", reward_sha256=None)
     path.write_text(yaml.safe_dump(raw))
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     assert catalog.entry("bc-test").public()["algorithm"] == "bc"
     assert catalog.entry("legacy-iql").public()["algorithm"] == "iql"
     raw["reward_sha256"] = "e" * 64
@@ -93,7 +94,7 @@ def test_bc_overlay_and_legacy_iql_are_both_discoverable(tmp_path: Path):
 def test_policy_catalog_rejects_component_tampering(tmp_path: Path):
     manifest = _overlay(tmp_path)
     (manifest.parent / "action_head.pt").write_bytes(b"tampered")
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     assert [item["policy_id"] for item in catalog.list_policies()] == ["base"]
     with pytest.raises(ValueError, match="hash mismatch"):
         catalog.entry("trained")
@@ -101,7 +102,7 @@ def test_policy_catalog_rejects_component_tampering(tmp_path: Path):
 
 def test_provider_switches_components_and_restores_base(tmp_path: Path):
     manifest = _overlay(tmp_path)
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     provider = object.__new__(VLAAdapterPolicyProvider)
     provider.runtime = SimpleNamespace(torch=torch)
     provider.catalog = catalog
@@ -125,7 +126,7 @@ def test_provider_switches_components_and_restores_base(tmp_path: Path):
 
 def test_provider_revalidates_overlay_at_load_boundary(tmp_path: Path):
     manifest = _overlay(tmp_path)
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     provider = object.__new__(VLAAdapterPolicyProvider)
     provider.runtime = SimpleNamespace(torch=torch)
     provider.catalog = catalog
@@ -143,7 +144,7 @@ def test_provider_revalidates_overlay_at_load_boundary(tmp_path: Path):
 
 def test_same_id_replaced_weights_reload_but_frozen_identity_refuses(tmp_path):
     manifest = _overlay(tmp_path)
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     provider = object.__new__(VLAAdapterPolicyProvider)
     provider.runtime = SimpleNamespace(torch=torch)
     provider.catalog = catalog
@@ -172,7 +173,7 @@ def test_same_id_replaced_weights_reload_but_frozen_identity_refuses(tmp_path):
 
 def test_policy_management_renames_copies_and_deletes_overlay(tmp_path: Path):
     _overlay(tmp_path)
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     manager = SimpleNamespace(
         policy_catalog=catalog, active_session_id=None, draft=None,
     )
@@ -194,7 +195,7 @@ def test_queued_overlay_mutations_are_locked_and_rejected(tmp_path: Path):
     from contextlib import contextmanager
 
     manifest = _overlay(tmp_path)
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     manager = SimpleNamespace(policy_catalog=catalog, active_session_id=None, draft=None)
     held = False
 
@@ -238,7 +239,7 @@ def _adapted_overlay(root, policy_id="adapted"):
 
 def test_adapted_policy_copy_contains_backbone_and_validates_hash(tmp_path):
     path = _adapted_overlay(tmp_path)
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     manager = SimpleNamespace(policy_catalog=catalog, active_session_id=None, draft=None)
     service = PolicyManagementService(manager)
     detail = service.detail("adapted")
@@ -256,7 +257,7 @@ def test_switching_adapted_backbones_reloads_base_but_frozen_overlays_reuse_it(t
     from backend.app.policies import vla_adapter
     path = _adapted_overlay(tmp_path)
     _overlay(tmp_path, "head-only")
-    catalog = PolicyCatalog(tmp_path, BASE, STATS)
+    catalog = PolicyCatalog(tmp_path, base_models={"base": {"base_checkpoint": BASE, "stats_key": STATS}})
     initial = SimpleNamespace(model=torch.nn.Linear(2, 2), action_head=torch.nn.Linear(2, 2),
                               proprio_projector=torch.nn.Linear(2, 2))
     loads = []
@@ -293,7 +294,7 @@ def test_adapted_overlay_cannot_silently_omit_backbone(tmp_path, invalid):
     payload["backbone"] = invalid
     payload["component_sha256"].pop("backbone")
     path.write_text(yaml.safe_dump(payload))
-    catalog = PolicyCatalog(tmp_path, BASE, "libero_object")
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
     with pytest.raises(ValueError, match="backbone"):
         catalog.entry("adapted")
 

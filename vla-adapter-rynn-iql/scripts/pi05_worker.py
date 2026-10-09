@@ -49,10 +49,12 @@ def main():
             from vla_rynn_iql import pi05
             from vla_rynn_iql.io import sha256_file
             from vla_rynn_iql.pi05_assets import identity_digest
+            from vla_rynn_iql.base_models import model_contract
             settings = request["model"]
             config = SimpleNamespace(raw={"model": settings}, section=lambda key: {
                 "training": {"device": "cuda:0", "dtype": "bfloat16"}, "model": settings}[key])
-            components = pi05.load_components(config, training=False)
+            components = pi05.load_components(config, training=False, parent=request.get("parent"))
+            contract = model_contract(settings)["io"]
             if identity_digest(components.identity) != request["base_revision"]:
                 raise ValueError("Selected π₀.₅ base identity changed before loading")
             if request.get("actor"):
@@ -77,7 +79,7 @@ def main():
             observation["prompt"] = request["prompt"]
             with contextlib.redirect_stdout(sys.stderr):
                 actions = policy.infer(observation)["actions"]
-            if actions.shape != (10, 7) or not np.isfinite(actions).all():
+            if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
                 raise ValueError(f"π₀.₅ returned invalid actions: {actions.shape}")
             reply({"actions": actions.tolist()})
     except Exception as exc:

@@ -7,7 +7,6 @@ import math
 import os
 import random
 import threading
-import shutil
 import subprocess
 import time
 import uuid
@@ -25,11 +24,11 @@ from torch.utils.data import default_collate
 
 from .config import LoadedConfig, reward_source
 from .data import load_manifest, training_replay_policy
-from .io import atomic_json, sha256_file, stable_hash
+from .io import atomic_json, stable_hash
 from .algorithms import TrainingAlgorithm, build_algorithm
 from .methods import actor_lr_warmup, training_method
 from .models import model_backend, model_config, model_signature
-from .model_adaptation import export_backbone
+from .base_models import model_contract
 from .monitoring import (
     ACTION_NAMES,
     TrainingProgressReporter,
@@ -38,7 +37,6 @@ from .monitoring import (
 )
 from .replay import ActionDataset, ReplayDataset
 from .rewards import load_reward_index, reward_manifest_digest
-from .vla_adapter import ACTION_DIM, ACTION_HORIZON, PROPRIO_DIM
 
 
 LOG = logging.getLogger(__name__)
@@ -248,6 +246,7 @@ def _save_checkpoint(
         "algorithm": training_method(config.raw).name,
         "model_config": model_signature(config.raw),
         "model_identity": getattr(components, "identity", None),
+        "model_parent": getattr(components, "parent", None),
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
@@ -280,53 +279,36 @@ def _publish_overlay(
     target = registry / policy_id
     target.mkdir(parents=True, exist_ok=False)
     settings = model_config(config.raw)
-    native_artifacts = None
-    if settings["family"] == "vla_adapter":
-        shutil.copy2(checkpoint / "action_head.pt", target / "action_head.pt")
-        shutil.copy2(checkpoint / "proprio_projector.pt", target / "proprio_projector.pt")
-        adapted = export_backbone(components, settings, target)
-    else:
-        native_artifacts = model_backend(config.raw).export_actor(components, settings, target)
-        adapted = False
+    parent = getattr(components, "parent", None)
+    if parent is not None:
+        settings.update(base_revision=parent["revision"], stats_key=parent["stats_key"],
+                        contract=parent["contract"])
+    native_artifacts = model_backend(config.raw).export_actor(components, settings, target, checkpoint=checkpoint)
+    io = model_contract(settings)["io"]
     compatibility = {
         "base_checkpoint": config.section("model")["base_checkpoint"],
         "stats_key": components.stats_key,
-        "action_horizon": ACTION_HORIZON,
-        "action_dim": ACTION_DIM,
-        "proprio_dim": PROPRIO_DIM,
+        "action_horizon": io["replay_horizon"],
+        "action_dim": io["action_dim"],
+        "proprio_dim": io["proprio_dim"],
     }
     reward_label = {None: "", "rynnvalue": "RynnValue", "sparse": "Sparse", "stage": "Stage-based", "final": "Final Reward"}[
         reward_source(config.section("reward")) if training_method(config.raw).requires_rewards else None
     ]
     payload = {
-        "schema_version": 3,
         "algorithm": method,
-        "model_config": model_config(config.raw),
-        "backbone": "backbone.pt" if adapted else None,
+        "model_config": settings,
         "policy_id": policy_id,
         "label": f"{reward_label} IQL · step {step}" if method == "iql" else f"BC · step {step}",
-        "base_checkpoint": config.section("model")["base_checkpoint"],
-        "stats_key": components.stats_key,
-        "action_head": "action_head.pt",
-        "proprio_projector": "proprio_projector.pt",
-        "action_horizon": ACTION_HORIZON,
-        "action_dim": ACTION_DIM,
-        "proprio_dim": PROPRIO_DIM,
+        **compatibility,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "training_step": step,
-        "component_sha256": native_artifacts["component_sha256"] if native_artifacts else {
-            "action_head": sha256_file(target / "action_head.pt"),
-            "proprio_projector": sha256_file(target / "proprio_projector.pt"),
-            **({"backbone": sha256_file(target / "backbone.pt")} if adapted else {}),
-        },
+        **native_artifacts,
         "compatibility_sha256": stable_hash(compatibility),
     }
-    if native_artifacts:
-        for key in ("backbone", "action_head", "proprio_projector"):
-            payload.pop(key)
-        payload.update(native_artifacts, schema_version=4)
-        payload["label"] = f"π₀.₅ · {payload['label']}"
+    if parent is not None:
+        payload.update(schema_version=5, family=settings["family"], parent=parent)
     temporary = target / ".policy.yaml.tmp"
     temporary.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     os.replace(temporary, target / "policy.yaml")
@@ -351,6 +333,8 @@ def _restore_checkpoint(
     checkpoint = checkpoint.expanduser().resolve()
     metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
     method = training_method(config.raw).name
+    if metadata.get("model_parent") is not None and metadata["model_parent"] != getattr(components, "parent", None):
+        raise ValueError("Resume checkpoint uses a different parent model")
     if metadata.get("algorithm", "iql") != method:
         raise ValueError("Resume checkpoint uses a different training method")
     previous_model = model_signature({"model": metadata.get("model_config", {})})
@@ -479,6 +463,7 @@ def train(config: LoadedConfig) -> Path:
         "model_config": model_config(config.raw),
         "model_parameters": counts,
         "model_identity": getattr(components, "identity", None),
+        "model_parent": getattr(components, "parent", None),
         "code_version": _code_version(),
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],

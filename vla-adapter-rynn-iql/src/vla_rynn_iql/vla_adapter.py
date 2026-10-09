@@ -13,6 +13,9 @@ from PIL import Image
 from .config import LoadedConfig, UniqueKeyLoader
 from .io import sha256_file, stable_hash
 from .models import model_config
+from .base_models import model_contract
+from .model_artifacts import parent_snapshot, decode_child
+from .checkpoint_assets import resolve_revision, checkpoint_view
 
 
 ACTION_HORIZON = 8
@@ -81,6 +84,8 @@ class VLAComponents:
     stats_key: str
     action_stats: dict[str, Any]
     proprio_stats: dict[str, Any]
+    parent: dict | None = None
+    checkpoint_holder: Any = None
 
 
 def _add_vla_path(config: LoadedConfig) -> None:
@@ -98,20 +103,32 @@ def load_components(
     _add_vla_path(config)
     from experiments.robot.libero.run_libero_eval import GenerateConfig, initialize_model
 
-    vla_cfg = config.section("model")
+    vla_cfg = model_config(config.raw)
+    policy = load_overlay(overlay) if overlay is not None else None
+    if policy is not None and policy.parent is not None:
+        if (vla_cfg["base_checkpoint"] != policy.base_checkpoint or
+                policy.stats_key not in {vla_cfg["stats_key"], f"{vla_cfg['stats_key']}_no_noops"}):
+            raise ValueError("Requested model differs from the overlay parent")
+        vla_cfg = dict(policy.model_config)
+    contract = model_contract(vla_cfg)
+    revision = resolve_revision(vla_cfg["base_checkpoint"], vla_cfg.get("base_revision"))
+    holder = checkpoint_view(vla_cfg["base_checkpoint"], revision)
     cfg = GenerateConfig(
-        pretrained_checkpoint=vla_cfg["base_checkpoint"],
+        pretrained_checkpoint=holder.name,
         task_suite_name=vla_cfg["stats_key"],
-        use_l1_regression=True, use_minivlm=True, num_images_in_input=2,
+        use_l1_regression=True, use_minivlm=True, num_images_in_input=len(contract["io"]["cameras"]),
         use_proprio=True, use_film=False, use_pro_version=True,
-        load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=ACTION_HORIZON,
+        load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=contract["io"]["native_action_horizon"],
         seed=int(config.section("training")["seed"]), phase="Inference",
     )
-    model, action_head, proprio_projector, _, processor = initialize_model(cfg)
+    try:
+        model, action_head, proprio_projector, _, processor = initialize_model(cfg)
+    except BaseException:
+        holder.cleanup()
+        raise
     stats_key = resolve_stats_key(model.norm_stats, vla_cfg["stats_key"])
     cfg.unnorm_key = stats_key
-    if overlay is not None:
-        policy = load_overlay(overlay)
+    if policy is not None:
         validate_overlay(policy, vla_cfg["base_checkpoint"], stats_key)
         import torch
         if policy.backbone is not None:
@@ -123,8 +140,11 @@ def load_components(
         proprio_projector=proprio_projector, processor=processor,
         stats_key=stats_key, action_stats=model.norm_stats[stats_key]["action"],
         proprio_stats=model.norm_stats[stats_key]["proprio"],
+        parent=policy.parent if policy is not None and policy.parent is not None else parent_snapshot(
+            {**vla_cfg, "stats_key": stats_key}, revision, contract=contract),
+        checkpoint_holder=holder,
     )
-    configure_components(components, model_config(config.raw), training=training)
+    configure_components(components, vla_cfg, training=training)
     return components
 
 
@@ -273,11 +293,13 @@ class PolicyOverlay:
     compatibility_sha256: str
     backbone: Path | None = None
     model_config: dict[str, Any] | None = None
+    parent: dict | None = None
 
 
 def load_overlay(path: Path) -> PolicyOverlay:
     path = path.expanduser().resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+    raw, parent = decode_child(raw)
     required = {"schema_version", "policy_id", "label", "base_checkpoint", "stats_key",
                 "action_head", "proprio_projector", "action_horizon", "action_dim",
                 "proprio_dim", "dataset_sha256", "reward_sha256", "training_step",
@@ -321,7 +343,7 @@ def load_overlay(path: Path) -> PolicyOverlay:
         int(raw["action_horizon"]), int(raw["action_dim"]), int(raw["proprio_dim"]),
         str(raw["dataset_sha256"]), raw["reward_sha256"], int(raw["training_step"]),
         dict(hashes), str(raw["compatibility_sha256"]),
-        component("backbone") if raw.get("backbone") else None, raw.get("model_config"),
+        component("backbone") if raw.get("backbone") else None, raw.get("model_config"), parent,
     )
 
 
@@ -394,3 +416,16 @@ def restore_actor(components, settings, directory):
     for name in ("action_head", "proprio_projector"):
         getattr(components, name).load_state_dict(
             torch.load(directory / f"{name}.pt", map_location="cpu", weights_only=True), strict=True)
+
+
+def export_actor(components, settings, directory, *, checkpoint):
+    import shutil
+    from .model_adaptation import export_backbone
+    artifacts = {name: f"{name}.pt" for name in ("action_head", "proprio_projector")}
+    for name in artifacts.values():
+        shutil.copy2(checkpoint / name, directory / name)
+    adapted = export_backbone(components, settings, directory)
+    if adapted:
+        artifacts["backbone"] = "backbone.pt"
+    return {"schema_version": 3, "backbone": None, **artifacts,
+            "component_sha256": {name: sha256_file(directory / file) for name, file in artifacts.items()}}

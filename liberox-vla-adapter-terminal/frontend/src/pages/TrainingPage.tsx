@@ -47,7 +47,8 @@ export function TrainingPage() {
   const [algorithm, setAlgorithm] = useState<"iql" | "bc">("iql");
   const isBC = algorithm === "bc";
   const [modelFamily, setModelFamily] = useState("vla_adapter");
-  const appliedSelection = useRef({ family: "vla_adapter", algorithm: "iql" });
+  const [modelBaseId, setModelBaseId] = useState("");
+  const appliedSelection = useRef({ family: "vla_adapter", baseId: "", algorithm: "iql" });
   const [rewardSource, setRewardSource] = useState<"final" | "rynnvalue">("final");
   const [rewardRevision, setRewardRevision] = useState(0);
   const [showDatasetConfig, setShowDatasetConfig] = useState(false);
@@ -70,7 +71,7 @@ export function TrainingPage() {
   const taskIdRef = useRef(JSON.stringify(taskScope));
   const refreshRequest = useRef(0);
   taskIdRef.current = JSON.stringify(taskScope);
-  const requestedDefaultsKey = JSON.stringify([datasetId, rewardSource, rewardRevision, algorithm, modelFamily]);
+  const requestedDefaultsKey = JSON.stringify([datasetId, rewardSource, rewardRevision, algorithm, modelFamily, modelBaseId]);
 
   useEffect(() => {
     void Promise.all([getBootstrap(), getTrainingDefaults(), listOfflineJobs(), getTensorBoard()])
@@ -140,13 +141,13 @@ export function TrainingPage() {
     if (!bootstrap) { setDefaultsLoading(false); return; }
     let current = true;
     setDefaultsLoading(true);
-    void getTrainingDefaults(datasetId || undefined, isBC ? undefined : rewardSource, algorithm, modelFamily).then((next) => {
+    void getTrainingDefaults(datasetId || undefined, isBC ? undefined : rewardSource, algorithm, modelFamily, modelBaseId || undefined).then((next) => {
       if (!current) return;
       setDefaults(next);
       setDefaultsKey(requestedDefaultsKey);
-      const selectionChanged = appliedSelection.current.family !== modelFamily || appliedSelection.current.algorithm !== algorithm;
-      const sameModel = appliedSelection.current.family === modelFamily;
-      appliedSelection.current = { family: modelFamily, algorithm };
+      const sameModel = appliedSelection.current.family === modelFamily && appliedSelection.current.baseId === modelBaseId;
+      const selectionChanged = !sameModel || appliedSelection.current.algorithm !== algorithm;
+      appliedSelection.current = { family: modelFamily, baseId: modelBaseId, algorithm };
       setParameters((current) => {
         if (selectionChanged) {
           const modelEdits = sameModel ? Object.fromEntries(Object.entries(current).filter(([key]) => key.startsWith("model_"))) : {};
@@ -170,7 +171,7 @@ export function TrainingPage() {
     }).catch((reason) => { if (current) setDefaultsError(String(reason)); })
       .finally(() => { if (current) setDefaultsLoading(false); });
     return () => { current = false; };
-  }, [datasetId, rewardSource, rewardRevision, algorithm, modelFamily, bootstrap]);
+  }, [datasetId, rewardSource, rewardRevision, algorithm, modelFamily, modelBaseId, bootstrap]);
   const rewardReady = Boolean(datasetId && defaultsKey === requestedDefaultsKey && (
     defaults?.reward_availability?.ready ?? (defaults?.reward_version
       && defaults.reward_version.evaluator === rewardSource && !defaults.reward_version.legacy
@@ -251,8 +252,17 @@ export function TrainingPage() {
       <section className="surface training-config">
         <div className="panel-title"><strong>训练配置</strong><span>{defaults?.environments.training ?? "vla-liberox"}</span></div>
         <div className="training-form">
-          <label>基础模型<select value={modelFamily} onChange={(event) => setModelFamily(event.target.value)}>
-            {(defaults?.models ?? []).map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+          <label>基础模型<select value={String(modelBaseId || defaults?.model?.model_base_id || modelFamily)} onChange={(event) => {
+            const selected = defaults?.models?.find((model) => model.id === event.target.value
+              || model.bases?.some((base) => base.id === event.target.value));
+            if (selected) {
+              setModelFamily(selected.id);
+              setModelBaseId(selected.bases?.find((base) => base.id === event.target.value)?.id ?? "");
+            }
+          }}>
+            {(defaults?.models ?? []).flatMap((model) => model.bases?.length
+              ? model.bases.map((base) => <option key={base.id} value={base.id}>{base.label}</option>)
+              : [<option key={model.id} value={model.id}>{model.label}</option>])}
           </select></label>
           <label>训练方法<select value={algorithm} onChange={(event) => { setAlgorithm(event.target.value as "iql" | "bc"); setShowDatasetConfig(false); }}>
             <option value="iql">IQL · 奖励加权后训练</option><option value="bc">BC · 等权行为克隆</option>

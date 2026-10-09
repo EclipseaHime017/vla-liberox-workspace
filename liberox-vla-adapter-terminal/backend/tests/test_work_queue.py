@@ -68,6 +68,14 @@ def test_cancel_queued_calls_owner_and_never_executes(jobs):
     assert jobs.get(job["id"])["status"] == "CANCELED"
 
 
+def test_dataset_job_persists_exact_created_id_without_full_manifest(jobs):
+    dataset = {"id": "new-dataset", "members": [{"run_id": "owned"}]}
+    job, done = jobs.submit_local("dataset", lambda: dataset)
+    jobs._dispatch_training_queue()
+    assert done.result(3) == dataset
+    assert jobs.get(job["id"])["result"] == {"dataset_id": "new-dataset"}
+
+
 def test_failure_and_persistence_failure_release_slot(jobs, monkeypatch):
     def fail():
         raise ValueError("bad source")
@@ -134,7 +142,7 @@ def test_simulation_queues_but_manual_only_runs_immediately(jobs, tmp_path):
     manager.work_queue = jobs
     manager.sessions = {}
     manager.active_session_id = None
-    manager.draft = None
+    draft = manager.draft = SimpleNamespace(id="existing-draft")
     manager.controller_status = lambda *_: {"state": "READY"}
     manager._persist_manifest = lambda _: None
     manager._run_session = lambda record: setattr(record, "status", "COMPLETED")
@@ -150,6 +158,8 @@ def test_simulation_queues_but_manual_only_runs_immediately(jobs, tmp_path):
     done = jobs._local_tasks[simulation.work_job_id][1]
     jobs._dispatch_training_queue()
     done.result(3)
+    assert manager.draft is draft
+    manager.draft = None
     manager._start_record(manual)
     manual.thread.join(3)
     assert manual.status == "COMPLETED" and manual.work_job_id is None

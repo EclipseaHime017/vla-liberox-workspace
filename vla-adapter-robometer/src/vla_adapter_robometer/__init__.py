@@ -1,3 +1,3 @@
 """Official Robometer trajectory evaluation adapter for LIBERO-X."""
 
-__version__ = "0.7.0"
+__version__ = "0.7.2"

@@ -25,6 +25,7 @@ class RunService:
             return {"runs": len(runs), "successes": successes, "success_rate": successes / len(runs) if runs else 0.0, "tasks": []}
         return method()
     def get_run(self, run_id): return self.worker.get_public(run_id)
+    def create_original(self, **kwargs): return self.worker.create_original(**kwargs)
     def stop(self, run_id): return self.worker.stop(run_id)
     def create_branch(self, run_id, *args, **kwargs): return self.worker.create_branch(run_id, *args, **kwargs)
     def delete(self, run_id, confirmation): return self.worker.delete_session(run_id, confirmation)

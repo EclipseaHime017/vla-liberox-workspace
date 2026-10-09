@@ -13,6 +13,9 @@ import torch
 
 from .io import atomic_json, sha256_file
 from .models import model_config
+from .base_models import model_contract
+from .model_artifacts import parent_snapshot
+from .model_storage import configure_openpi_cache, local_model_directory
 from .pi05_assets import IDENTITY_FILE, OPENPI_COMMIT, checkpoint_identity, identity_digest
 
 
@@ -26,9 +29,11 @@ class Components:
     action_stats: dict
     proprio_stats: dict
     stats_key: str = "physical-intelligence/libero"
+    parent: dict | None = None
 
 
 def verify_runtime() -> None:
+    configure_openpi_cache()
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     try:
         import openpi
@@ -53,25 +58,30 @@ def verify_runtime() -> None:
             raise RuntimeError("OpenPI's required Transformers patches are missing or changed; rerun setup_pi05.py")
 
 
-def load_components(config, *, training: bool = True) -> Components:
+def load_components(config, *, training: bool = True, parent: dict | None = None) -> Components:
     verify_runtime()
     from openpi.training import config as configs
     from openpi.training import checkpoints
     from openpi import transforms
 
     settings = model_config(config.raw)
-    root = Path(settings["base_checkpoint"])
-    identity = checkpoint_identity(root)
+    contract = model_contract(settings)
+    root = local_model_directory(settings["base_checkpoint"])
+    identity = checkpoint_identity(root, base_id=settings["base_id"], parent=parent, contract=contract)
     if settings["base_revision"] is not None and settings["base_revision"] != identity_digest(identity):
         raise ValueError("π₀.₅ base weights/normalization changed after training registration")
-    cfg = configs.get_config("pi05_libero")
-    cfg = dataclasses.replace(cfg, model=dataclasses.replace(
-        cfg.model, dtype=config.section("training")["dtype"], pytorch_compile_mode=None))
+    cfg = configs.get_config(identity["config_name"])
+    cfg = dataclasses.replace(cfg, data=dataclasses.replace(cfg.data, repo_id=settings["stats_key"]), model=dataclasses.replace(
+        cfg.model, dtype=config.section("training")["dtype"], pytorch_compile_mode=None,
+        action_horizon=contract["io"]["native_action_horizon"], action_dim=contract["io"]["padded_action_dim"],
+        discrete_state_input=contract["architecture"]["discrete_state_input"]))
+    data = cfg.data.create(cfg.assets_dirs, cfg.model)
+    if f"assets/{data.asset_id}/norm_stats.json" not in identity["files"]:
+        raise ValueError("Requested normalization is not bound to the selected model identity")
+    stats = checkpoints.load_norm_stats(root / "assets", data.asset_id)
     model = cfg.model.load_pytorch(cfg, str(root / "model.safetensors"))
     configure_model(model, settings, training=training)
     model.to(config.section("training")["device"])
-    data = cfg.data.create(cfg.assets_dirs, cfg.model)
-    stats = checkpoints.load_norm_stats(root / "assets", data.asset_id)
     inputs = transforms.compose([
         *data.data_transforms.inputs,
         transforms.Normalize(stats, use_quantiles=data.use_quantile_norm),
@@ -87,7 +97,8 @@ def load_components(config, *, training: bool = True) -> Components:
         value = stats[name]
         return {"q01": np.asarray(value.q01).tolist(), "q99": np.asarray(value.q99).tolist(),
                 "codec": "openpi_quantile"}
-    return Components(model, inputs, outputs, identity, settings, norm_dict("actions"), norm_dict("state"))
+    return Components(model, inputs, outputs, identity, settings, norm_dict("actions"), norm_dict("state"),
+                      settings["stats_key"], parent or parent_snapshot(settings, identity_digest(identity)))
 
 
 def configure_model(model, settings, *, training=True):
@@ -122,8 +133,9 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
     from torch.utils._pytree import tree_map
 
     samples = []
+    io = model_contract(components.settings)["io"]
     for index, prompt in enumerate(batch["prompt"]):
-        actions = np.zeros((10, 7), dtype=np.float32)
+        actions = np.zeros((io["native_action_horizon"], io["action_dim"]), dtype=np.float32)
         actions[:batch["raw_actions"].shape[1]] = batch["raw_actions"][index].numpy()
         samples.append(components.input_transform({
             "observation/image": batch["agent_image"][index].numpy(),
@@ -135,7 +147,7 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
     # Quantile statistics can promote NumPy actions to float64; OpenPI trains with float32 actions.
     inputs["actions"] = inputs["actions"].to(dtype=torch.float32)
     errors = components.model(Observation.from_dict(inputs), inputs["actions"])
-    return masked_flow_losses(errors, batch["action_mask"]), None
+    return masked_flow_losses(errors, batch["action_mask"], io["action_dim"]), None
 
 
 def trainable_parameters(components):
@@ -169,9 +181,9 @@ def restore_actor(components, settings, directory):
             params[name].copy_(value)
 
 
-def export_actor(components, settings, directory):
+def export_actor(components, settings, directory, *, checkpoint=None):
     # Keep the exact base identity: expert-only exports contain deltas, not a substitute base model.
     save_actor(components, settings, directory)
-    return {"family": "pi05", "actor": "actor.pt", "base_identity": IDENTITY_FILE,
+    return {"schema_version": 4, "family": "pi05", "actor": "actor.pt", "base_identity": IDENTITY_FILE,
             "component_sha256": {"actor": sha256_file(directory / "actor.pt"),
                                  "base_identity": sha256_file(directory / IDENTITY_FILE)}}

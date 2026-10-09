@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from vla_rynn_iql import config_sources
-from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, PROJECT_ROOT, load_train_config
+from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG, PROJECT_ROOT, load_train_config, validate_train_config
 from vla_rynn_iql.methods import COMMON_TRAINING_KEYS
 
 
@@ -101,16 +101,21 @@ def test_relative_paths_follow_declaring_file_and_overrides(tmp_path):
     assert raw["paths"]["output_dir"] == str(tmp_path / "output")
 
 
-def test_old_flat_config_keeps_numeric_settings_and_new_snapshot_is_self_contained(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backbone", ["frozen", "full"])
+def test_old_flat_config_keeps_numeric_settings_and_new_snapshot_is_self_contained(tmp_path, monkeypatch, backbone):
     canonical = load_train_config().raw
+    canonical["model"]["backbone"] = backbone
     legacy = copy.deepcopy(canonical)
     legacy["schema_version"] = 1
     legacy["vla"] = {key: legacy["model"].pop(key) for key in ("base_checkpoint", "stats_key", "use_pro_version")}
-    legacy["vla"]["freeze_backbone"] = True
+    legacy["vla"]["freeze_backbone"] = legacy["model"].pop("backbone") == "frozen"
     for key in COMMON_TRAINING_KEYS:
         legacy["iql"][key] = legacy["training"].pop(key)
-    raw = load_train_config(write(tmp_path / "legacy.yaml", legacy)).raw
+    path = write(tmp_path / "legacy.yaml", legacy)
+    raw = load_train_config(path).raw
     assert raw == canonical
+    assert validate_train_config(legacy, path).raw == canonical
+    assert "vla" in legacy  # Migration must not mutate caller-owned configuration.
     assert not COMMON_TRAINING_KEYS & raw["iql"].keys()
     snapshot = write(tmp_path / "effective.yaml", raw)
     monkeypatch.setattr(config_sources, "read_source", lambda *_: pytest.fail("snapshot read presets"))
@@ -135,6 +140,12 @@ def test_rejects_cycles_unknown_keys_and_cross_layer_parameters(tmp_path):
         load_train_config(run)
     write(run, {"extends": str(DEFAULT_TRAIN_CONFIG), "training": {"critic_lr": 1}})
     with pytest.raises(ValueError, match="Unknown training"):
+        load_train_config(run)
+    write(run, {"extends": str(DEFAULT_TRAIN_CONFIG), "vla": {"typo": True}})
+    with pytest.raises(ValueError, match="Invalid legacy vla"):
+        load_train_config(run)
+    write(run, {"extends": str(DEFAULT_TRAIN_CONFIG), "vla": {"freeze_backbone": "false"}})
+    with pytest.raises(TypeError, match="freeze_backbone"):
         load_train_config(run)
 
 

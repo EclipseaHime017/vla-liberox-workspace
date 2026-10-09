@@ -178,7 +178,8 @@ def test_aggregation_counts_errors_in_denominator_and_groups_results():
     assert result["first_success_step_mean"] == 8
 
 
-def test_effective_yaml_is_strict_and_schedule_is_frozen(tmp_path: Path):
+@pytest.mark.parametrize("base_id", ["base", "pi05-libero-base", "pi05-liberox-base"])
+def test_effective_yaml_is_strict_and_schedule_is_frozen(tmp_path: Path, base_id):
     bddl = tmp_path / "task.bddl"
     init = tmp_path / "task.init"
     bddl.write_text("task", encoding="utf-8")
@@ -212,6 +213,12 @@ def test_effective_yaml_is_strict_and_schedule_is_frozen(tmp_path: Path):
         "schedule": preview["schedule"],
         "schedule_sha256": preview["schedule_sha256"],
     }
+    if base_id != "base":
+        from backend.app.policies.registry import configured_models
+        settings = configured_models()[base_id]
+        payload["policy_snapshot"].update(policy_id=base_id, family="pi05", model_config=settings,
+                                          base_checkpoint=settings["base_checkpoint"], stats_key=settings["stats_key"],
+                                          base_revision="b" * 64, actor=None, base_identity=None)
     path = tmp_path / "effective.yaml"
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     assert load_effective_config(path)["evaluation_id"] == "eval-1"
