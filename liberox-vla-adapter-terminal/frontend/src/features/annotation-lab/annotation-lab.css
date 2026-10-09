@@ -1,0 +1,53 @@
+.annotation-lab { font-size: 15px; }
+.annotation-lab .panel-title { min-height: 56px; }
+.annotation-lab .panel-title strong { font-size: 19px; }
+.annotation-lab .panel-title span { font: inherit; font-size: 13px; }
+.lab-body { padding: 18px 22px; }
+.lab-body p { margin: 10px 0; line-height: 1.6; }
+.annotation-lab td, .annotation-lab th { font-size: 13px; }
+.lab-options { display: flex; align-items: end; gap: 14px; flex-wrap: wrap; padding: 18px 22px; }
+.lab-body > .lab-options { padding: 0; }
+.lab-options label, .lab-video label { display: grid; gap: 8px; min-width: 150px; }
+.annotation-lab select, .annotation-lab input:not([type=checkbox]):not([type=range]) { padding: 11px 14px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); color: var(--text); width: 100%; min-width: 0; }
+.lab-options input { max-width: 150px; }
+.annotation-lab button { border-radius: 11px; }
+.annotation-lab .table-pagination { padding: 16px 22px; flex-wrap: wrap; }
+.annotation-lab .task-hierarchy { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.annotation-lab .task-hierarchy label { display: grid; gap: 8px; }
+.lab-result details { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.lab-result summary { cursor: pointer; font-weight: 600; }
+.lab-stages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 30px; padding-left: 24px; }
+.lab-stages p { margin: 7px 0; color: var(--muted); }
+.lab-result-grid { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(320px, 1.2fr); gap: 22px; margin-top: 18px; align-items: start; }
+.lab-result-grid > div { min-width: 0; }
+.lab-video video { width: 100%; max-height: 460px; border-radius: 14px; background: #1d1d1f; }
+.lab-video label { margin-top: 12px; }
+.lab-video input { width: 100%; accent-color: var(--blue); }
+.lab-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.lab-result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; padding: 12px; background: var(--surface-muted); border-radius: 10px; font-size: 13px; }
+.lab-evidence { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 18px; }
+.lab-evidence > div { display: flex; gap: 14px; overflow-x: auto; align-items: start; }
+.lab-evidence > div > div { flex: 0 0 220px; }
+.lab-evidence figure { margin: 8px 0; }
+.lab-evidence img { width: 100%; border-radius: 10px; }
+.lab-evidence figcaption { color: var(--muted); margin-top: 4px; }
+@media (max-width: 950px) { .lab-result-grid, .lab-stages, .annotation-lab .task-hierarchy { grid-template-columns: 1fr; } }
+.lab-goal, .lab-plan { margin: 16px 0; padding: 18px; border: 1px solid var(--border, #e5e7eb); border-radius: 18px; }
+
+.lab-time-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 14px; }
+.lab-goal-selector { display: grid; gap: 8px; margin-top: 18px; }
+.lab-goal-timeline { position: relative; height: 30px; margin: 20px 0 8px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.annotation-lab .lab-goal-timeline button { position: absolute; height: 100%; min-height: 0; padding: 0; border: 0; border-radius: 0; }
+.lab-region-legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); }
+.lab-region-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.lab-region-legend i { width: 12px; height: 12px; border-radius: 4px; }
+.annotation-lab .lab-region-confirmed { background: #d8efdf; color: #236b3d; }
+.annotation-lab .lab-region-uncertain { background: #fff0c1; color: #866419; }
+.annotation-lab .lab-region-outside { background: #d4d7dd; color: #565d68; }
+.annotation-lab .lab-region-pending { background: var(--surface); opacity: 1; }
+.lab-region-list { display: grid; gap: 10px; margin-top: 16px; max-height: 410px; overflow-y: auto; }
+.lab-region-card { padding: 12px 14px; border-radius: 12px; }
+.lab-region-card strong { font-size: 14px; font-weight: 600; }
+.lab-window-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.annotation-lab .lab-window-links button { min-height: 30px; padding: 5px 10px; font-size: 13px; background: var(--surface); }
+.lab-window-links button[aria-pressed=true] { box-shadow: inset 0 0 0 2px var(--blue); }

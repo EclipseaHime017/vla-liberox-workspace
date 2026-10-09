@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "author": "assistant_visual_review",
+  "purpose": "Evaluation-only reference intervals; never passed to the annotator or written to formal stage labels",
+  "limitations": "Visual judgments from original agentview and wrist observations, not simulator ground truth; uncertain boundaries remain intervals",
+  "recordings": [
+    {
+      "run_id": "364ad127c5ac",
+      "split": "development",
+      "task": "place the black bowl on the flat stove",
+      "hz": 20,
+      "source_hashes": {
+        "trajectory": "4ff9df1c67ebb787b3ce23072fbdff42c61fd6d898f4c8c877ae35a7d47c94b7",
+        "observations": "6f146fb488026dc9e8fb2fa5eda1063c37bd0fc81586a8b19b71aced4529a9f5",
+        "manifest": "5e28244ace1cfc5ee2b8b4bbd3c09078702c939911b966f70243516813818cec"
+      },
+      "events": [
+        {"name": "grasp_and_lift", "start_step": 56, "end_step": 100,
+         "evidence_steps": [48, 56, 60, 68, 72, 80, 96, 100, 120],
+         "note": "Gripper engages the patterned-interior bowl; by the later frames it moves with the gripper away from its initial table position. Exact support separation is occluded. Independent visual recheck widened the upper bound from 80 to 100; the interval is uncertainty about completion time, not a claim that every included frame is already lifted."},
+        {"name": "supported_placement_and_release", "start_step": 216, "end_step": 228,
+         "evidence_steps": [188, 196, 204, 216, 220, 222, 224, 226, 228, 240],
+         "note": "Bowl is at the stove earlier; gripper withdraws and separates from the supported bowl over this interval. Environment done is not the release label."}
+      ],
+      "regressions": [],
+      "note": "Reviewed whole-trajectory coarse samples and finer local images around the two events; no observed drop, not proof that no brief event exists between inspected frames."
+    },
+    {
+      "run_id": "6d106a62d168",
+      "split": "development",
+      "task": "place the black bowl on the flat stove",
+      "hz": 20,
+      "source_hashes": {
+        "trajectory": "9d4aec817cb5e9c43db9801e98fd785ebeabfb78360bacc16aca42a22ab8f9a6",
+        "observations": "035cdeef0e1b233eb08b559ce711f6bb5ed7679d298840130a8ca050ac933032",
+        "manifest": "4cc341826ec10174a6592b5aa8d2e77357b5709e30a0f0de7d6aff842b808db5"
+      },
+      "events": [],
+      "regressions": [],
+      "evidence_steps": [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 290, 300],
+      "note": "The target patterned-interior bowl remains on the table. The gripper approaches a different dark object near the stove. No target grasp/lift or target placement completion observed."
+    },
+    {
+      "run_id": "9245258a5f41",
+      "split": "validation_after_design_freeze",
+      "task": "place the yellow bowl in the bottom drawer of the white cabinet and close the drawer",
+      "hz": 20,
+      "source_hashes": {
+        "trajectory": "8f4147ce29866026d64452d2dbd81c2e6833f26a79bd517d5df4ada35fa5419b",
+        "observations": "0818ae1847c37d362bc09f0f7f2539558d26d22b8d3ba89d975e78ec85b55b89",
+        "manifest": "e93cc31ffb6fa911ce4d7ba4105240332308b1aea9b723a9158a1747da6de0d6"
+      },
+      "initial_conditions": [{"name": "bottom_drawer_open", "step": 0, "state": "met"}],
+      "events": [
+        {"name": "grasp_and_lift", "start_step": 352, "end_step": 432,
+         "evidence_steps": [300, 344, 352, 360, 368, 376, 384, 392, 408, 416, 432, 448, 456, 500],
+         "note": "Gripper engages the yellow bowl and it moves with the hand toward the drawer. Lift-off is partly occluded; independent visual recheck widened the upper bound from 408 to 432. This is uncertainty about completion time, not a claim that initial contact equals lift-off."},
+        {"name": "supported_placement_and_release", "start_step": 838, "end_step": 856,
+         "evidence_steps": [780, 820, 832, 838, 844, 850, 856, 862, 880, 900],
+         "note": "Bowl is inside the open drawer; the gripper opens/withdraws while the bowl remains supported in the drawer."},
+        {"name": "drawer_closed_after_placement", "start_step": 1552, "end_step": 1560,
+         "evidence_steps": [1480, 1520, 1536, 1544, 1552, 1560, 1580, 1600, 1700, 2000],
+         "note": "Drawer front moves into the cabinet and the visible gap closes; boundary judged from images, not copied from the environment success index."}
+      ],
+      "regressions": [],
+      "note": "Reviewed full recording at coarse intervals and denser local images after freezing the current design; the task occurred in older development rounds, so this is not a historically unseen task. No confirmed regression in inspected images; unsampled brief events remain unverified."
+    }
+  ]
+}

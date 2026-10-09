@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-08",
+  "reviewer": "assistant_visual_review",
+  "limitations": "Development comparison on one previously inspected trajectory, not a blinded human benchmark or independent generalization test. Reviewers inspected two-view start/middle/end sheets before scoring their assigned variant; root reviewed key evidence. Adjacent chunks are correlated. No rating or reference fact was passed to the VLM.",
+  "baseline_data_root": "tmp/chunk-caption-probe",
+  "data_root": "tmp/chunk-caption-success-full",
+  "reference_file": "chunk_probe_review.json",
+  "rating_definitions": {
+    "A": "Substantially correct and informative about visible action, object and interaction; tolerates tiny movements described as stationary.",
+    "P": "Partly correct or generic; omits meaningful motion/state but does not make a major unsupported event claim.",
+    "W": "Clearly wrong object/action/contact claim, invented interaction, or explicit denial of clear movement."
+  },
+  "protocol": {
+    "run_id": "364ad127c5ac",
+    "action_count": 500,
+    "control_hz": 20,
+    "chunk_size": 8,
+    "chunk_count": 63,
+    "output_scope": "Current chunk only, at most 40 English words; 128 new-token limit.",
+    "context_dual": "Both cameras, all original observations from max(0, end-40) through end; no future frames.",
+    "video_main": "Main camera only, all original observations from start through end.",
+    "changes": "Only diagnostic execution scope was extended; model, preprocessing, prompt and decoding unchanged."
+  },
+  "ratings": {
+    "video_dual": "AAPWWWWPWWWWWWWWWWWWWPWPWWWWWWWWWWWWWWWWWWWWWWWWWWWWPPPPPPPPPPP",
+    "context_dual": "AAPWPPWPPPWWWWWWWWWWWWPPPPAPPPPPAAAAAAAAAAAAWAPPPPPPPPPPPPWPWWP",
+    "video_main": "AAWWWWWPWWWWWPWWWWWWWPWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWAAAAAAAAAAA"
+  },
+  "critical_action_ranges": [
+    {
+      "start": 80,
+      "end": 104,
+      "description": "Clear synchronized lift."
+    },
+    {
+      "start": 104,
+      "end": 192,
+      "description": "Transport and lowering toward stove."
+    },
+    {
+      "start": 216,
+      "end": 232,
+      "description": "Gripper withdraws while bowl remains on stove."
+    }
+  ],
+  "phase_ranges": [
+    {
+      "start": 0,
+      "end": 80
+    },
+    {
+      "start": 80,
+      "end": 192
+    },
+    {
+      "start": 192,
+      "end": 216
+    },
+    {
+      "start": 216,
+      "end": 256
+    },
+    {
+      "start": 256,
+      "end": 344
+    },
+    {
+      "start": 344,
+      "end": 416
+    },
+    {
+      "start": 416,
+      "end": 500
+    }
+  ],
+  "notes": {
+    "context_dual": "A gains concentrate on stable supported-bowl states (256–352), plus correct wrist movement without bowl displacement at 360–368. Lift/transport still often called static on table; release omitted. 464 incorrectly says task has not begun; 480/488 incorrectly say black bowl absent.",
+    "video_main": "All A ratings are initial and final near-static windows (0–16 and 416–500). Clear lift and release still missed; many unsupported holding claims after release. P at 56, 104, 168 avoids overclaiming contact or small movement.",
+    "boundary_handling": "Do not use occluded contact at 56–80 or 192–216 as exact grasp/release truth; no hard keyframe localization scored."
+  },
+  "audit": {
+    "calls_this_invocation": 126,
+    "elapsed_seconds": 281.2107524359999,
+    "all_outputs_nonempty": true,
+    "word_limit_exceeded": 0,
+    "token_limit_hits": 0,
+    "sources_unchanged": true,
+    "source_hashes_match_old_experiment": true,
+    "shared_config_identical": true,
+    "model_metadata_identical_except_script_hash": true,
+    "repeated_probe_captions_identical": {
+      "context_dual": 17,
+      "video_main": 17
+    },
+    "repeated_probe_steps_prompts_grids_and_tokens_identical": true,
+    "code_changes": "Added --runs and --full-trajectory selection only.",
+    "script_sha256": "34f7e59ef36eb70f7cadfa32ff3b4fff99bf84b06cace1d86e186c5e50886921"
+  },
+  "timings": {
+    "video_dual": {
+      "total_seconds": 75.683,
+      "mean_seconds": 1.201,
+      "peak_allocated_gib": 9.03
+    },
+    "context_dual": {
+      "total_seconds": 218.354,
+      "mean_seconds": 3.466,
+      "peak_allocated_gib": 11.163
+    },
+    "video_main": {
+      "total_seconds": 55.717,
+      "mean_seconds": 0.884,
+      "peak_allocated_gib": 8.693
+    }
+  }
+}

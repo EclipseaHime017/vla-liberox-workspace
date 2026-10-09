@@ -13,6 +13,10 @@
 /RynnValue/
 /OpenPI/
 /weights/
+/evaluator/*
+!/evaluator/.gitkeep
+!/evaluator/README.md
+/keyframe-annotation/outputs/
 /third_party/FACTR_Teleop/
 /third_party/factr-runtime/
 /tmp/

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "reviewer": "assistant_visual_review",
+  "limitations": "Not simulator truth or a blinded human benchmark. Independent assistants inspected the two-view start/middle/end sheets before reading captions; root reviewed evidence and conclusions. Small movements and occluded contacts receive partial credit. These are two development trajectories, not independent task-generalization trials.",
+  "rating_definitions": {
+    "A": "Substantially correct and informative about visible action, object and interaction; tolerates tiny movements described as stationary.",
+    "P": "Partly correct or generic; omits meaningful motion/state but does not make a major unsupported event claim.",
+    "W": "Clearly wrong object/action/contact claim, invented interaction, or explicit denial of clear movement."
+  },
+  "data_root": "tmp/chunk-caption-probe",
+  "recordings": {
+    "364ad127c5ac": {
+      "baseline_starts": "0,8,...,496",
+      "baseline_ratings": "AAPWWWWPWWWWWWWWWWWWWPWPWWWWWWWWWWWWWWWWWWWWWWWWWWWWPPPPPPPPPPP",
+      "contrast_starts": [0,24,48,64,80,96,112,144,168,192,208,224,240,280,360,440,496],
+      "ratings": {
+        "video_main": "AWWWWWWWPWWWWWWAA",
+        "images_dual": "AWWPWWWWPWWWWWWAA",
+        "context_dual": "AWWPWWWWWPAPPAAPP",
+        "neutral_dual": "AWWPWWWWPPPWWWWPP"
+      },
+      "visual_reference": [
+        {"chunks": [0,1], "description": "空爪高处轻微调整，碗仍在桌上。"},
+        {"chunks": [2,6], "description": "空爪向碗下降接近；48–56接触处开始遮挡，碗未离桌。"},
+        {"chunks": [7,8], "description": "近接停留，夹持是否稳定不明确。"},
+        {"chunks": [9,9], "description": "末段开始碗爪同步上移，起提过渡。"},
+        {"chunks": [10,12], "description": "同步抬碗离开桌面，随后抬升趋缓。"},
+        {"chunks": [13,19], "description": "已持碗向炉盘平移、对准并逐渐降低。"},
+        {"chunks": [20,23], "description": "持碗下放到炉盘附近，底部支撑接触部分遮挡。"},
+        {"chunks": [24,26], "description": "碗低位基本静止于炉盘，夹持与承托转换不宜断言。"},
+        {"chunks": [27,28], "description": "爪上退、碗不随动，释放分离证据清楚。"},
+        {"chunks": [29,31], "description": "空爪移到碗右上方，碗留在炉盘上。"},
+        {"chunks": [32,42], "description": "空爪悬停，碗持续静止受炉盘支撑，无新抓取。"},
+        {"chunks": [43,51], "description": "空爪开始并继续向右上方移开，碗不动。"},
+        {"chunks": [52,62], "description": "空爪远离碗基本悬停，目标碗仍在炉盘；绿色碗未被抓取。"}
+      ]
+    },
+    "6d106a62d168": {
+      "baseline_starts": "0,8,...,296",
+      "baseline_ratings": "APPWPWWWWWWWWWWWWWWAWWWAAAAAAAAAWAWAAW",
+      "contrast_starts": [0,24,48,72,96,120,144,168,192,216,240,264,296],
+      "ratings": {
+        "video_main": "AWWWAAAWAAAAA",
+        "images_dual": "AWWWAAAWAAAAA",
+        "context_dual": "AWWPAAAWAAAAA",
+        "neutral_dual": "AWWWAAAWAAAAA"
+      },
+      "visual_reference": [
+        {"chunks": [0,1], "description": "夹爪高处微调，未接触桌上物体。"},
+        {"chunks": [2,10], "description": "向炉旁另一深色带柄物体逐渐靠近下降，目标碗一直留桌。"},
+        {"chunks": [11,19], "description": "夹爪在深色物体近处低位微调/停留，接触受遮挡，未见物体提起。"},
+        {"chunks": [20,20], "description": "夹爪明显上撤，深色物体和目标碗均留在桌上。"},
+        {"chunks": [21,23], "description": "再次降低接近深色物体，未见目标碗被持有。"},
+        {"chunks": [24,37], "description": "深色物体附近悬停/微调，无确认的抓起、运输、放置。"}
+      ]
+    }
+  },
+  "exploratory_failure_hallucinations": {
+    "minimal": {"invented_event_starts": [0,24,72,96,120,144,168,192,216,296], "holding_only_starts": []},
+    "compare": {"invented_event_starts": [0,24,48,72,96,120,144,168,192,216,240,264,296], "holding_only_starts": []},
+    "endpoints": {"invented_event_starts": [0,24,48,72,96,120,144,168,192,216,240,264,296], "holding_only_starts": []},
+    "wide": {"invented_event_starts": [0,24,72,96,168,192], "holding_only_starts": [120,144]}
+  }
+}

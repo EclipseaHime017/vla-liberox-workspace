@@ -2,6 +2,7 @@ export type AppRoute =
   | "collect"
   | "runs"
   | "dataset"
+  | "annotation-lab"
   | "training"
   | "evaluation"
   | "settings";

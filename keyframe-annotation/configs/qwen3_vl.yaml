@@ -1,0 +1,16 @@
+model_id: Qwen/Qwen3-VL-4B-Instruct
+revision: ebb281ec70b05090aa6165b016eac8ec08e71b17
+environment: keyframe-vlm
+cache_dir: ../../evaluator/keyframe-vlm
+device: cuda:0
+local_files_only: true
+seed: 7
+mode: localize
+cameras: [agentview_image, wrist_image]
+coarse_fps: 5.0
+max_coarse_samples: 600
+window_seconds: 2.0
+max_new_tokens: 1024
+repetition_penalty: 1.05
+image_max_pixels: 262144
+success_consecutive_steps: 5

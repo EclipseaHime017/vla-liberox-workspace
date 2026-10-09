@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-08",
+  "reviewer": "assistant_visual_review",
+  "limitations": "Same development trajectory and A/P/W rubric as chunk_success_full_review.json. Assistant scoring with root cross-check, not a blinded human benchmark. Adjacent chunks are correlated. No visual reference or score was supplied to the VLM.",
+  "data_root": "tmp/chunk-caption-success-context-main",
+  "reference_file": "chunk_probe_review.json",
+  "comparison_file": "chunk_success_full_review.json",
+  "protocol": {
+    "run_id": "364ad127c5ac",
+    "variant": "context_main",
+    "action_count": 500,
+    "control_hz": 20,
+    "chunk_size": 8,
+    "chunk_count": 63,
+    "input": "Only agentview_image; all original observations from max(0, end-40) through end; at most 2 seconds, no future frames.",
+    "output_scope": "Current chunk only, same prompt as context_dual, at most 40 English words; 128 new-token limit."
+  },
+  "ratings": "AAWWWWWWWWWWWWWWWAWWWPPPPPAWWWWWWWWWWWWWWWWWPWWWWWWWAAWWAAPPWPP",
+  "counts": {
+    "A": 8,
+    "P": 10,
+    "W": 45
+  },
+  "critical_action_ranges": [
+    {
+      "start": 80,
+      "end": 104
+    },
+    {
+      "start": 104,
+      "end": 192
+    },
+    {
+      "start": 216,
+      "end": 232
+    }
+  ],
+  "critical_action_counts": {
+    "A": 1,
+    "P": 3,
+    "W": 12
+  },
+  "notes": {
+    "improvement": "136–144 correctly describes a held bowl moving down toward the stove, not yet placed.",
+    "failures": "48 and 144 invent placement/release. 216–232 misses actual disengagement. 256–344 repeatedly invents holding. 360/368 mistake empty-gripper retreat for lifting the bowl. 432/440 claim bowl not visible; 480 claims bowl off stove.",
+    "borderline": "168–208 receives P rather than forcing an exact occluded contact state; 352 receives P for some adjustment information with an unsupported intended next action.",
+    "consistency": "408 remains W like video_main at the same time: explicitly stationary arm contradicts visible retreat. 464, 472, 488, 496 receive P for generic static-scene descriptions that omit target-bowl location; do not count them as concrete final-state recognition."
+  },
+  "audit": {
+    "calls_this_invocation": 63,
+    "elapsed_seconds": 124.00797914699797,
+    "sources_unchanged": true,
+    "source_hashes_match_previous_experiments": true,
+    "config_identical": true,
+    "model_metadata_identical_except_script_hash": true,
+    "prompts_and_steps_identical_to_context_dual": 63,
+    "one_camera_grid_per_call": true,
+    "outputs_nonempty": true,
+    "word_limit_exceeded": 0,
+    "token_limit_hits": 0,
+    "script_sha256": "a178ed51aca77caddb4f184a9fd3816c58076b6bd8a46d2deaa2f92c73cc2085"
+  },
+  "timing": {
+    "total_seconds": 119.76425650999226,
+    "mean_seconds": 1.9010199446030518,
+    "peak_allocated_gib": 9.762882709503174
+  }
+}

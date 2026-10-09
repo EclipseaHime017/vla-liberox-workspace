@@ -14,6 +14,14 @@ from .work_resources import ResourceLease
 
 
 class WorkQueue:
+    def enqueue_external(self, *, kind, config_path, output_path, parameters, stages):
+        """Register a validated standalone worker without reward/training hooks."""
+        with self.lock:
+            if config_path.parent.parent.resolve() != self.jobs_root.resolve():
+                raise ValueError("External job config must belong to the queue job directory")
+            return self._new_job(kind=kind, dataset_id=None, stages=stages,
+                config_path=config_path, output_path=output_path, parameters=parameters)
+
     def enqueue_dataset(self, parameters, *, parent_id=None):
         parameters = dict(parameters)
         if parent_id is not None:

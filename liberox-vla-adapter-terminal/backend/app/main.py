@@ -14,7 +14,7 @@ import eval_pickplace_direct as direct
 
 from .api import (
     controller, datasets, drafts, evaluations, offline_jobs, policies, runs,
-    training_datasets, websocket,
+    training_datasets, websocket, annotation_lab,
 )
 from .api.models import (
     CreateBranchRequest,
@@ -31,6 +31,7 @@ from .services.training_dataset_service import TrainingDatasetService
 from .services.trajectory_evaluation_service import TrajectoryEvaluationService
 from .services.robometer_evaluation_service import RobometerEvaluationService
 from .services.stage_annotation_service import StageAnnotationService
+from .services.annotation_lab_service import AnnotationLabService
 from .services.storage_maintenance import StorageMaintenance, StorageRequestGate
 from .workers.simulation_worker import SimulationManager
 
@@ -81,6 +82,8 @@ def create_app(
                 worker.work_queue = app.state.offline_job_service
                 app.state.dataset_export_service = DatasetExportService(
                     app.state.training_dataset_service, ui_config, app.state.offline_job_service)
+                app.state.annotation_lab_service = AnnotationLabService(
+                    app.state.run_service, ui_config.project_root, app.state.offline_job_service)
                 app.state.offline_job_service.start_training_queue()
             else:
                 app.state.dataset_export_service = None
@@ -89,6 +92,7 @@ def create_app(
                 app.state.robometer_evaluation_service = None
                 app.state.offline_job_service = None
                 app.state.stage_annotation_service = None
+                app.state.annotation_lab_service = None
             try:
                 yield
             finally:
@@ -121,6 +125,7 @@ def create_app(
     app.include_router(offline_jobs.router)
     app.include_router(policies.router)
     app.include_router(websocket.router)
+    app.include_router(annotation_lab.router)
 
     @app.get("/api/build-info", tags=["diagnostics"])
     async def build_info():
