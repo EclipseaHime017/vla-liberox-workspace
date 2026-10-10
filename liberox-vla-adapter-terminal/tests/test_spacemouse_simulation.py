@@ -25,9 +25,9 @@ def test_exclusive_commands_step_real_osc_and_save_complete_partial_trajectory(t
     import eval_pickplace_direct as direct
 
     root = Path(__file__).resolve().parents[2]
-    monkeypatch.syspath_prepend(str(root / "LIBERO-X"))
+    monkeypatch.syspath_prepend(str(root / "third_party" / "LIBERO-X"))
     runtime = direct.load_runtime()
-    bddl, init_path = direct.resolve_task(root / "LIBERO-X", "LEVEL1",
+    bddl, init_path = direct.resolve_task(root / "third_party" / "LIBERO-X", "LEVEL1",
         "EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove")
     state = direct.load_initial_states(runtime, init_path)[0]
     env = direct.make_env(runtime, bddl, 64, 25, 20, 0, "vla_views", 128, 64, True)

@@ -153,7 +153,15 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         return offline_module(self.ui_config.offline_rl_root, "models")
 
     def evaluator_capabilities(self) -> dict[str, dict[str, Any]]:
-        checkout = self.ui_config.robometer_root.parent / "Robometer"
+        config_path = self.ui_config.robometer_root / "configs" / "robometer_evaluation.yaml"
+        try:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            checkout = (config_path.parent / config["paths"]["robometer_root"]).resolve()
+        except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
+            return {
+                "rynnvalue": {"available": True, "reason": None},
+                "robometer": {"available": False, "reason": f"Invalid Robometer config: {exc}"},
+            }
         checkout_ready = (checkout / "robometer" / "__init__.py").is_file()
         environment_ready = False
         try:

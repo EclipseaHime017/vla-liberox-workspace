@@ -1,4 +1,4 @@
-# Install VLA-Adapter itself first. Do not install LIBERO-X/requirements.txt in the same environment.
+# Install VLA-Adapter itself first. Do not install third_party/LIBERO-X/requirements.txt in the same environment.
 imageio[ffmpeg]
 numpy==1.26.4
 opencv-python==4.11.0.86

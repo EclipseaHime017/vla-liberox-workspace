@@ -27,12 +27,19 @@ vla-liberox-workspace/
 │       ├── datasets/                # 打包的训练数据集
 │       └── training/                # 网页创建的训练结果
 ├── dataset-exports/                 # 导出的数据集
-├── VLA-Adapter/                     # 以下为安装时下载的上游代码
-├── LIBERO-X/
-├── OpenPI/
-├── RynnValue/
-└── Robometer/
+├── docs/                            # 使用指南、模型接口与启动指令
+├── logs/                            # 本地开发记录、调研及测试报告（不提交）
+└── third_party/                     # 上游源码及其隔离运行环境（不提交）
+    ├── VLA-Adapter/
+    ├── LIBERO-X/
+    ├── OpenPI/
+    ├── RynnValue/
+    ├── Robometer/                   # 按需安装
+    ├── FACTR_Teleop/
+    └── factr-runtime/
 ```
+
+[快速启动](docs/RUN_COMMANDS.md) · [模型注册](docs/Model.md) · [第三方依赖与旧目录迁移](docs/DEPENDENCIES.md)
 
 网页操作由后端执行，仿真、评价、训练和测试共用一个工作队列。模型权重、采集数据和训练结果不随 Git 上传；`models/` 会保留目录占位。
 
@@ -51,10 +58,11 @@ git lfs install
 git clone https://github.com/EclipseaHime017/vla-liberox-workspace.git
 cd vla-liberox-workspace
 
-git clone https://github.com/OpenHelix-Team/VLA-Adapter.git
-git -C VLA-Adapter checkout 23fa0c9c159e2aa04341cdd3e924f44061311060
-git clone https://github.com/meituan/LIBERO-X.git
-git -C LIBERO-X checkout f528726421c7211d8eb05fe48e9e5e2535ccc813
+mkdir -p third_party
+git clone https://github.com/OpenHelix-Team/VLA-Adapter.git third_party/VLA-Adapter
+git -C third_party/VLA-Adapter checkout 23fa0c9c159e2aa04341cdd3e924f44061311060
+git clone https://github.com/meituan/LIBERO-X.git third_party/LIBERO-X
+git -C third_party/LIBERO-X checkout f528726421c7211d8eb05fe48e9e5e2535ccc813
 ```
 
 ### 2.2 平台与 VLA-Adapter
@@ -66,10 +74,10 @@ conda create -n vla-liberox python=3.10.16 pip -y
 conda activate vla-liberox
 conda install -c conda-forge 'nodejs>=22.12,<23' -y
 
-python -m pip install -e ./VLA-Adapter
+python -m pip install -e ./third_party/VLA-Adapter
 python -m pip install packaging ninja
-python -m pip install -e ./LIBERO-X --no-deps
-python -m pip install -e ./LIBERO-X/packages/openpi-client
+python -m pip install -e ./third_party/LIBERO-X --no-deps
+python -m pip install -e ./third_party/LIBERO-X/packages/openpi-client
 python -m pip install -r liberox-vla-adapter-terminal/requirements-sim.txt
 python -m pip install -r liberox-vla-adapter-terminal/requirements-ui.txt
 python -m pip install -r vla-adapter-rynn-iql/requirements-train.txt
@@ -80,13 +88,13 @@ python -m pip install --upgrade \
   --index-url https://download.pytorch.org/whl/cu128
 python -m pip install numpy==1.26.4 setuptools==69.5.1
 
-git -C VLA-Adapter apply ../liberox-vla-adapter-terminal/patches/vla_adapter_hf_local_autoclass.patch
+git -C third_party/VLA-Adapter apply ../../liberox-vla-adapter-terminal/patches/vla_adapter_hf_local_autoclass.patch
 
 npm --prefix liberox-vla-adapter-terminal/frontend ci
 npm --prefix liberox-vla-adapter-terminal/frontend run build
 ```
 
-这里使用支持 RTX 50 系列的 CUDA 12.8 PyTorch 包，需要匹配的 NVIDIA 驱动。不要再安装 `LIBERO-X/requirements.txt`，它会替换当前环境的依赖。无需安装 FlashAttention。
+这里使用支持 RTX 50 系列的 CUDA 12.8 PyTorch 包，需要匹配的 NVIDIA 驱动。不要再安装 `third_party/LIBERO-X/requirements.txt`，它会替换当前环境的依赖。无需安装 FlashAttention。
 
 默认模型为 `VLA-Adapter/LIBERO-Object-Pro`。第一次加载时自动下载到 `models/VLA-Adapter-LIBERO-Object-Pro/`，以后直接复用。模型配置位于 `vla-adapter-rynn-iql/configs/models/vla_adapter.yaml`。
 
@@ -94,7 +102,7 @@ npm --prefix liberox-vla-adapter-terminal/frontend run build
 
 ### 2.3 π₀.₅
 
-π₀.₅ 使用独立的 `pi05` 环境。下面的安装脚本会下载 OpenPI 并安装所需依赖。
+π₀.₅ 使用独立的 `pi05` 环境。下面的安装脚本会下载 OpenPI 到 `third_party/OpenPI/` 并安装所需依赖。
 
 ```bash
 conda create -n pi05 python=3.11 pip -y
@@ -122,8 +130,8 @@ conda run --no-capture-output -n pi05 \
 需要 RynnValue 轨迹评价时安装；仅使用 BC 训练不需要它。
 
 ```bash
-git clone https://github.com/alibaba-damo-academy/RynnValue.git
-git -C RynnValue checkout 10e0d333f5f3811d0d130587e50f1faf48da49e5
+git clone https://github.com/alibaba-damo-academy/RynnValue.git third_party/RynnValue
+git -C third_party/RynnValue checkout 10e0d333f5f3811d0d130587e50f1faf48da49e5
 
 conda create -n rynnvalue-reward python=3.10 pip -y
 conda run -n rynnvalue-reward python -m pip install \
@@ -134,15 +142,15 @@ conda run -n rynnvalue-reward \
   python vla-adapter-rynn-iql/scripts/verify_reward_environment.py
 ```
 
-首次评价自动下载 `Alibaba-DAMO-Academy/RynnValue-4B`。评价默认配置在 `vla-adapter-rynn-iql/configs/reward.yaml`；平台使用的环境名称在 `configs/ui_config.yaml`。不需要执行 `pip install -e ./RynnValue`。
+首次评价自动下载 `Alibaba-DAMO-Academy/RynnValue-4B`。评价默认配置在 `vla-adapter-rynn-iql/configs/reward.yaml`；平台使用的环境名称在 `configs/ui_config.yaml`。不需要执行 `pip install -e ./third_party/RynnValue`。
 
 ### 2.5 Robometer
 
 需要 Robometer 进度和成功概率评价时安装。
 
 ```bash
-git clone https://github.com/robometer/robometer.git Robometer
-git -C Robometer checkout 352d160389daa964788de1ec933d1925f3a6de4f
+git clone https://github.com/robometer/robometer.git third_party/Robometer
+git -C third_party/Robometer checkout 352d160389daa964788de1ec933d1925f3a6de4f
 
 conda create -n robometer-reward python=3.10 pip -y
 conda run -n robometer-reward python -m pip install \
@@ -151,7 +159,7 @@ conda run -n robometer-reward python -m pip install \
 conda run -n robometer-reward python -m pip install \
   xformers==0.0.32.post2 --index-url https://download.pytorch.org/whl/cu128
 conda run -n robometer-reward python -m pip install \
-  -c vla-adapter-robometer/constraints-robometer.txt -e './Robometer[robometer]'
+  -c vla-adapter-robometer/constraints-robometer.txt -e './third_party/Robometer[robometer]'
 conda run -n robometer-reward python -m pip install -e ./vla-adapter-robometer
 conda run -n robometer-reward \
   python vla-adapter-robometer/scripts/verify_environment.py
@@ -266,4 +274,4 @@ python vla-adapter-rynn-iql/scripts/train_terminal.py \
   --config vla-adapter-rynn-iql/configs/terminal_pipeline.yaml
 ```
 
-确认终端显示的执行计划后输入 `y` 开始。无人值守运行时加 `--yes`。多卡服务器训练使用独立的 `server` 分支，启动命令见 [RUN_COMMANDS.md](RUN_COMMANDS.md)。
+确认终端显示的执行计划后输入 `y` 开始。无人值守运行时加 `--yes`。多卡服务器训练使用独立的 `server` 分支，启动命令见 [快速启动指令](docs/RUN_COMMANDS.md)。

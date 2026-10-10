@@ -1,7 +1,7 @@
-# This repository stores only the LIBERO-X VLA terminal source code.
+# Platform source, configuration and user documentation are versioned.
 # Upstream checkouts and generated experiment data stay local.
-/LIBERO-X/
-/VLA-Adapter/
+/third_party/*
+!/third_party/.gitkeep
 /dataset-root/
 /training-datasets/
 /runs/
@@ -9,18 +9,15 @@
 !/policy-registry/.gitkeep
 /vla-adapter-rynn-iql/outputs/
 /vla-adapter-robometer/outputs/
-/Robometer/
-/RynnValue/
-/OpenPI/
 /models/*
 !/models/.gitkeep
-/third_party/FACTR_Teleop/
-/third_party/factr-runtime/
+/evaluator/*
+!/evaluator/.gitkeep
 /tmp/
 /annotation-cache/
 
 # Local development notes are not distributed with the source repository.
-/docs/
+/logs/
 
 # Python
 **/__pycache__/

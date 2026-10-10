@@ -24,7 +24,7 @@ longer-horizon composite tasks.
 - Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#34-评价与打包数据集).
 - Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
 - Unified work queue: inference simulations, dataset processing, annotation, training and testing share FIFO scheduling and a cross-process resource lease. Manual takeover is never queued and requires free resources. Detached jobs persist across backend restarts; interrupted in-process tasks must be registered again. Each training job pins its configuration, model and rewards; UI checkpoint resume is hidden while CLI resume remains available.
-- Branch separation: `main` owns PC collection, GUI, single-GPU training and portable dataset/evaluation exports. The `server` branch alone owns the full-screen terminal, multi-GPU DDP + ZeRO-1 training, mmap cache and distributed checkpoints. Shared data contracts and training algorithms flow from `main` to `server`; server-specific execution does not merge back into `main`. See [transfer and branch instructions](RUN_COMMANDS.md).
+- Branch separation: `main` owns PC collection, GUI, single-GPU training and portable dataset/evaluation exports. The `server` branch alone owns the full-screen terminal, multi-GPU DDP + ZeRO-1 training, mmap cache and distributed checkpoints. Shared data contracts and training algorithms flow from `main` to `server`; server-specific execution does not merge back into `main`. See [transfer and branch instructions](docs/RUN_COMMANDS.md).
 - Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage](README_CN.md#34-评价与打包数据集).
 - Batch testing: preview a deterministic init-state/seed schedule, then register independent policy tests in a persistent FIFO queue. Tests share the training dispatcher and GPU lock; canceling a waiting test or stopping the current test leaves subsequent tasks intact.
 
@@ -38,7 +38,9 @@ vla-liberox-workspace/
 ├── dataset-root/                  # recorded source data (Git-ignored)
 ├── dataset-exports/               # self-contained dataset runs exports (Git-ignored)
 ├── policy-registry/               # immutable policy overlays (Git-ignored)
-├── docs/                          # local development notes (Git-ignored)
+├── docs/                          # user guides and platform interfaces
+├── logs/                          # local development notes (Git-ignored)
+├── third_party/                   # upstream source checkouts (Git-ignored)
 └── README_CN.md                   # complete Chinese setup and operating guide
 ```
 
@@ -74,7 +76,7 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 
 On a new checkout, run `npm ci` once in `liberox-vla-adapter-terminal/frontend/`. The launcher fingerprints the frontend sources, prints the exact build command before running it, and automatically rebuilds the Git-ignored `frontend/dist` after later pulls. Run `npm run build` there for a manual source-only rebuild, or `npm ci && npm run build` after `package-lock.json` changes. Neither `npm run build` nor `npm test` installs or upgrades dependencies.
 
-Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup, operation and data management. Development notes under `docs/` stay local and are not distributed with the repository.
+Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup, operation and data management. Project guides live in [docs/](docs/); local development notes live in Git-ignored `logs/`. See [third-party layout and migration](docs/DEPENDENCIES.md).
 
 ## FACTR calibration and manual gravity compensation
 

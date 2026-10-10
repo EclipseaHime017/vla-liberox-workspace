@@ -17,12 +17,13 @@ from vla_rynn_iql.pi05_assets import OPENPI_COMMIT
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--openpi-root", type=Path, default=PROJECT.parent / "OpenPI")
+    parser.add_argument("--openpi-root", type=Path, default=PROJECT.parent / "third_party" / "OpenPI")
     args = parser.parse_args()
     if sys.version_info[:2] != (3, 11) or Path(sys.prefix).name != "pi05":
         raise SystemExit("Run this installer in a NEW dedicated Conda environment named pi05, with Python 3.11")
     root = args.openpi_root.expanduser().resolve()
     if not root.exists():
+        root.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "https://github.com/Physical-Intelligence/openpi.git", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "checkout", "--detach", OPENPI_COMMIT], check=True)
     commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()

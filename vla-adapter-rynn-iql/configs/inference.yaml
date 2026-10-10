@@ -1,7 +1,7 @@
 schema_version: 1
 paths:
-  vla_adapter_root: ../../VLA-Adapter
-  libero_x_root: ../../LIBERO-X
+  vla_adapter_root: ../../third_party/VLA-Adapter
+  libero_x_root: ../../third_party/LIBERO-X
   output_dir: ../outputs/evaluation
 policy:
   overlay: ../../policy-registry/latest/policy.yaml

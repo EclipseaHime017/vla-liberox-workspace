@@ -48,7 +48,7 @@ def test_default_catalog_adds_two_level1_composite_tasks_without_changing_existi
         reads.append(path)
         return np.zeros((10, 5))
     monkeypatch.setattr(tasks_module.direct, "load_initial_states", load_states)
-    catalog = ConfiguredTaskCatalog(SimpleNamespace(parse_bddl_file=parse), root / "LIBERO-X",
+    catalog = ConfiguredTaskCatalog(SimpleNamespace(parse_bddl_file=parse), root / "third_party" / "LIBERO-X",
                                    default, config.additional_tasks, config.task_families)
     entries = catalog.list_tasks()
     assert len(entries) == 15

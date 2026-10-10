@@ -1,6 +1,6 @@
 # Paths are resolved relative to this file, so the command can run from any directory.
-vla_root: ../VLA-Adapter
-liberox_root: ../LIBERO-X
+vla_root: ../third_party/VLA-Adapter
+liberox_root: ../third_party/LIBERO-X
 output: ../runs/liberox_pickplace_l1
 
 # Hugging Face repository ID, or an explicit local path beginning with ./, ../, ~, or /.

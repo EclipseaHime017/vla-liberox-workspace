@@ -17,9 +17,9 @@ paths:
   work_dir: ../outputs/work
   output_dir: ../outputs/training
   annotation_cache: ../outputs/annotation-cache
-  vla_adapter_root: ../../VLA-Adapter
-  libero_x_root: ../../LIBERO-X
-  rynnvalue_root: ../../RynnValue
+  vla_adapter_root: ../../third_party/VLA-Adapter
+  libero_x_root: ../../third_party/LIBERO-X
+  rynnvalue_root: ../../third_party/RynnValue
   policy_registry: ../../policy-registry
 data:
   project_id: libero_x_vla
