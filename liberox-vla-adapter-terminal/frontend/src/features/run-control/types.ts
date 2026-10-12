@@ -308,12 +308,25 @@ export type TrainingDataset = {
   automatic_evaluation_error?: string;
 };
 
+export type DatasetIntegrityReport = {
+  dataset_id: string; dataset_name: string; checked_at: string; member_count: number;
+  integrity_status: "HEALTHY" | "BROKEN"; integrity_error: string | null;
+  sources: Array<{
+    source: RewardSource | "keyframes";
+    global: IntegrityCounts; dataset: IntegrityCounts; effective: IntegrityCounts;
+    inherited: number;
+    issues: Array<{ run_id: string; scope: "global" | "dataset" | "effective"; error: string }>;
+  }>;
+};
+type IntegrityCounts = { total: number; ready: number; missing: number; invalid: number };
+
 export type OfflineJob = {
   id: string; kind: "annotation" | "trajectory_evaluation" | "training" | "evaluation" | "simulation" | "dataset" | "verification" | "export" | "publication";
   status: "QUEUED" | "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
   dataset_id: string | null; created_at: string; started_at: string | null; completed_at: string | null;
   stage: string; stage_label: string; error: string | null; output_path: string;
   warning?: string | null;
+  result?: { dataset_id?: string; verification?: DatasetIntegrityReport };
   parameters: Record<string, unknown>; log_size: number;
   metrics?: Record<string, number | string | null>;
   training_summary?: Record<string, unknown>;

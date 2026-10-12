@@ -90,7 +90,7 @@ export function DatasetPage() {
       .then(([nextDatasets, jobs]) => {
         if (request !== listRequest.current) return;
         setDatasets(nextDatasets);
-        const active = jobs.find((job) => ["annotation", "trajectory_evaluation"].includes(job.kind) && ["STARTING", "RUNNING", "STOPPING"].includes(job.status));
+        const active = jobs.find((job) => ["annotation", "trajectory_evaluation", "verification"].includes(job.kind) && ["QUEUED", "STARTING", "RUNNING", "STOPPING"].includes(job.status));
         if (active) setAnnotationJob(active);
       })
       .finally(() => { if (request === listRequest.current) setDatasetsLoading(false); });

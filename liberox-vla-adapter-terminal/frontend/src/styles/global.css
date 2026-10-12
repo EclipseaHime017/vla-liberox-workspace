@@ -298,6 +298,12 @@ td code { font-size: 11px; }
 .detail-evaluation-context .evaluation-current-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin: 0; }
 .detail-evaluation-context .reward-parameter-chips > span { padding: 4px 8px; }
 .dataset-integrity-error { grid-column: 1 / -1; color: var(--danger) !important; }
+.dataset-integrity-result { padding: 16px 20px; }
+.dataset-integrity-table { overflow-x: auto; }
+.dataset-integrity-table table { width: 100%; border-collapse: collapse; text-align: left; }
+.dataset-integrity-table th, .dataset-integrity-table td { padding: 12px 8px; border-bottom: 1px solid var(--line); }
+.dataset-integrity-result details { padding: 8px 0; }
+.dataset-integrity-result li { margin: 6px 0; overflow-wrap: anywhere; }
 .job-monitor-card { min-height: 310px; display: flex; flex-direction: column; }
 .job-status-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 18px; padding: 11px 15px; border-bottom: 1px solid var(--line); font-size: 10px; color: var(--muted); }
 .job-status-strip span:first-child { margin-right: auto; }

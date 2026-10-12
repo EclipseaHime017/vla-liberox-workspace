@@ -24,7 +24,7 @@ def _digest(value: dict) -> str:
 
 
 class DatasetStageAnnotations:
-    """Copy once, including missing labels; never silently follow a later global edit.
+    """Copy available labels once; unresolved members can inherit later globals.
 
     Callers hold the dataset service lock. The export reader uses persist=False
     to resolve legacy labels without modifying source data.
@@ -100,10 +100,10 @@ class DatasetStageAnnotations:
             if (value.get("schema_version") != 1 or value.get("dataset_id") != dataset["id"]
                     or value.get("dataset_sha256") != dataset["dataset_sha256"]
                     or not isinstance(value.get("annotations"), dict)
-                    or set(value["annotations"]) != {m["run_id"] for m in dataset["members"]}
+                    or not set(value["annotations"]) <= {m["run_id"] for m in dataset["members"]}
                     or any(not isinstance(entry, dict) for entry in value["annotations"].values())):
                 raise ValueError("Dataset Stage annotation identity mismatch")
-            return value
+            return self._fill_missing(dataset, value, persist=persist)
         entries = self._historical(dataset)
         if entries is None:
             parent_entries = {}
@@ -123,8 +123,23 @@ class DatasetStageAnnotations:
                     entries[run_id] = self._global(member)
         value = {"schema_version": 1, "dataset_id": dataset["id"],
                  "dataset_sha256": dataset["dataset_sha256"], "annotations": entries}
-        if persist:
-            atomic_write_json(path, value)
+        return self._fill_missing(dataset, value, persist=persist, new=True)
+
+    def _fill_missing(self, dataset: dict, value: dict, *, persist: bool, new: bool = False) -> dict:
+        changed = new
+        for member in dataset["members"]:
+            run_id = member["run_id"]
+            entry = value["annotations"].get(run_id, {})
+            # An explicit empty keyframe list is a saved annotation, not a gap.
+            # Corrupt owned/historical labels remain errors, never hidden by fallback.
+            if entry.get("annotation") is None and (
+                    not entry.get("error") or entry.get("origin") in {"missing", "global_copy"}):
+                inherited = self._global(member)
+                if entry != inherited:
+                    value["annotations"][run_id] = inherited
+                    changed = True
+        if persist and changed:
+            atomic_write_json(self._path(dataset), value)
         return value
 
     def _missing_parent(self, dataset: dict, *, persist: bool) -> dict:

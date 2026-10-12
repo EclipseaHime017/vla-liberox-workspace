@@ -60,15 +60,15 @@ def test_copy_once_and_independent_edits_in_global_parent_and_siblings(tmp_path)
     assert (datasets.root / first["id"] / "dataset.json").read_bytes() == selection
 
 
-def test_missing_is_persistent_and_inheritance_is_explicit_with_scope_revision(tmp_path):
+def test_missing_inherits_later_global_labels_without_manual_copy(tmp_path):
     datasets, stages, _ = setup(tmp_path)
     first, other = create(datasets), create(datasets, "B")
     before = stages.detail("one", first["id"])
     save(stages, 4)
-    assert stages.detail("one", first["id"])["status"] == "missing"
+    inherited = stages.detail("one", first["id"])
+    assert inherited["status"] == "ready"
     with pytest.raises(ConflictError):
         stages.save("one", [], 2, before["revision"], other["id"])
-    inherited = stages.save("one", [], 2, before["revision"], first["id"], inherit_global=True)
     assert inherited["origin"] == "global_copy" and inherited["keyframes"][0]["step"] == 4
     save(stages, 7)
     assert stages.detail("one", first["id"])["keyframes"][0]["step"] == 4
@@ -160,9 +160,39 @@ def test_dataset_api_scope_and_explicit_inherit(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.app.api.datasets.run_in_threadpool", dispatch)
     async def exercise():
         current = await get_stage_annotation("one", request, dataset["id"])
-        assert current["status"] == "missing"
+        assert current["status"] == "ready"
         saved = await save_stage_annotation("one", StageAnnotationRequest(
             keyframes=[], revision=current["revision"], dataset_id=dataset["id"], inherit_global=True), request)
         assert saved["dataset_id"] == dataset["id"] and saved["keyframes"][0]["step"] == 4
         assert (await get_stage_annotation("one", request))["dataset_id"] is None
     asyncio.run(exercise())
+
+
+def test_bulk_preflight_fills_only_gaps_and_preserves_explicit_empty_labels(tmp_path):
+    datasets, stages, _ = setup(tmp_path)
+    dataset = create(datasets, run_ids=["one", "two"])
+    save(stages, None, dataset["id"], run_id="one")
+    save(stages, 3, run_id="one")
+    save(stages, 6, run_id="two")
+    _, frozen = datasets._load(dataset["id"])
+    labels = stages.validate_members(frozen["members"], 5, dataset_id=dataset["id"])
+    assert labels["one"]["keyframes"] == []
+    assert labels["two"]["keyframes"] == [{"step": 6, "kind": "positive"}]
+    stored = datasets.stage_labels.load(frozen)["annotations"]
+    assert stored["one"]["origin"] == "dataset"
+    assert stored["two"]["origin"] == "global_copy"
+
+
+def test_old_annotation_map_with_missing_member_falls_back_and_reports_missing_global(tmp_path):
+    datasets, stages, _ = setup(tmp_path)
+    dataset = create(datasets, run_ids=["one", "two"])
+    path = datasets.root / dataset["id"] / "stage_annotations.json"
+    payload = json.loads(path.read_text())
+    payload["annotations"].pop("one")
+    path.write_text(json.dumps(payload))
+    save(stages, 4)
+    assert stages.detail("one", dataset["id"])["keyframes"][0]["step"] == 4
+    missing = stages.detail("two", dataset["id"])
+    assert missing["status"] == "missing" and "数据集与全局均缺少" in missing["error"]
+    with pytest.raises(ValueError, match="two: 数据集与全局均缺少"):
+        stages.validate_members(datasets._load(dataset["id"])[1]["members"], 5, dataset_id=dataset["id"])

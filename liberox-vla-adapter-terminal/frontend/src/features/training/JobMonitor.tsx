@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { jobWebSocket } from "../../api/websocket";
 import { stopOfflineJob } from "../run-control/api";
 import type { OfflineJob } from "../run-control/types";
+import { DatasetIntegrityResult } from "../dataset/DatasetIntegrityResult";
 
 const terminal = new Set(["COMPLETED", "FAILED", "CANCELED"]);
 
@@ -84,9 +85,12 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
     </div>}
     {error && <p className="job-warning">{error}</p>}
     {job.warning && <p className="job-warning" role="alert">{job.warning}</p>}
-    <div className="serial-monitor job-serial" ref={monitor} onScroll={() => { const node = monitor.current; if (node) follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>
+    {job.kind === "verification" ? job.result?.verification
+      ? <DatasetIntegrityResult report={job.result.verification} />
+      : <p role="status">{terminal.has(job.status) ? "未生成检查报告，请查看任务状态。" : job.stage_label}</p>
+      : <div className="serial-monitor job-serial" ref={monitor} onScroll={() => { const node = monitor.current; if (node) follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 24; }}>
       {lines.length ? lines.map((line, index) => <div key={index}><time>{line.time}</time><span className={line.level === "ERROR" ? "monitor-error" : line.level === "DONE" ? "monitor-ok" : "monitor-info"}>{line.level}</span><p>{line.message}</p></div>) : <p className="empty-log">等待后台进程输出…</p>}
-    </div>
+    </div>}
     {job.error && <p className="job-error">{job.error}</p>}
   </section>;
 }

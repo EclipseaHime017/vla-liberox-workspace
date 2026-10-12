@@ -51,6 +51,19 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("dataset evaluation configuration", () => {
+  it("sends integrity verification to the visible job monitor without reevaluating", async () => {
+    const onJob = vi.fn(); const onError = vi.fn();
+    const job = { id: "verify-1", kind: "verification", status: "QUEUED" } as Awaited<ReturnType<typeof api.verifyTrainingDataset>>;
+    vi.mocked(api.verifyTrainingDataset).mockResolvedValue(job);
+    render(<FrozenDatasetCard dataset={{ id: "ds", name: "Dataset", integrity_status: "HEALTHY" } as TrainingDataset}
+      disabled={false} onRefresh={async () => {}} onJob={onJob} onError={onError} />);
+    fireEvent.click(screen.getByRole("button", { name: "验证完整性" }));
+    await waitFor(() => expect(onJob).toHaveBeenCalledWith(job));
+    expect(api.verifyTrainingDataset).toHaveBeenCalledWith("ds");
+    expect(api.annotateTrainingDataset).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("keeps the annotation dataset when returning to the list and opening another trajectory", async () => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
     vi.mocked(api.listDatasetRuns).mockResolvedValue({ items: ["one", "two"].map((id) => ({ id, status: "COMPLETED" })),

@@ -108,7 +108,7 @@ class ExportRewards:
         if selected:
             result = self._reward_version(self._version(self.dataset["id"], selected), run_id)
         else:
-            run = self.context.datasets.get_run(run_id)
+            run = self.context.datasets.run_service.get_run(run_id)
             sidecar = snapshot_path(run, source)
             native = storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json")
             if (sidecar and sidecar.exists()) or (source == "rynnvalue" and native.exists()):

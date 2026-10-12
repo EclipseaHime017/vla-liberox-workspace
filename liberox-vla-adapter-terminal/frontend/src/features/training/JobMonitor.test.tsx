@@ -22,6 +22,30 @@ const job: OfflineJob = {
 afterEach(cleanup);
 
 describe("offline job monitor", () => {
+  it("shows verification progress then scoped reward results instead of waiting for process logs", () => {
+    render(<JobMonitor initial={{ ...job, kind: "verification", status: "QUEUED", stage_label: "等待前序任务完成" }} />);
+    expect(screen.getByRole("status").textContent).toBe("等待前序任务完成");
+    expect(screen.queryByText("等待后台进程输出…")).toBeNull();
+    const ready = { ready: 1, total: 1, invalid: 0, missing: 0 };
+    const missing = { ready: 0, total: 1, invalid: 0, missing: 1 };
+    act(() => socket.onmessage?.({ data: JSON.stringify({ job: {
+      ...job, kind: "verification", status: "COMPLETED", stage_label: "完整性检查完成",
+      result: { verification: { dataset_id: "ds", dataset_name: "测试数据集", member_count: 1,
+        checked_at: "now", integrity_status: "HEALTHY", integrity_error: null, sources: [
+          { source: "rynnvalue", global: ready, dataset: missing, effective: ready, inherited: 1, issues: [] },
+          { source: "final", global: missing, dataset: missing, effective: missing, inherited: 0,
+            issues: [{ run_id: "run-1", scope: "effective", error: "数据集无专属结果，且全局评价不可用：缺少全局评价" }] },
+        ] } },
+    } }) }));
+    expect(screen.getByLabelText("数据集完整性检查结果")).toBeTruthy();
+    for (const name of ["全局", "数据集专属", "实际可用"]) expect(screen.getByRole("columnheader", { name })).toBeTruthy();
+    expect(screen.getByText(/复用全局 1/)).toBeTruthy();
+    expect(screen.getByText("run-1")).toBeTruthy();
+    expect(screen.getByText(/全局评价不可用/)).toBeTruthy();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText("等待后台进程输出…")).toBeNull();
+  });
+
   it("restores streamed logs and exposes training metrics", () => {
     render(<JobMonitor initial={job} />);
     act(() => socket.onmessage?.({ data: JSON.stringify({

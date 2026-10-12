@@ -68,7 +68,8 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
     return episode, header
 
 
-def direct_global_reward(jobs, dataset: dict, member: dict, source: str) -> tuple[dict, bytes]:
+def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
+                         use_dataset_labels: bool = True) -> tuple[dict, bytes]:
     """Global Stage labels and environment outcomes need no evaluation job."""
     _, _, rewards, stage = reward_core(jobs.ui_config.offline_rl_root)
     episode, header = reconstruct_episode(jobs, dataset, member)
@@ -82,10 +83,16 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str) -> tupl
     gamma, cumulative = recipe["gamma"], recipe["accumulate_primitive_steps"]
     annotation = None
     if source == "stage":
-        with jobs.datasets.lock:
-            _, _, label = jobs.datasets.stage_labels.member(dataset["id"], member["run_id"])
+        if use_dataset_labels:
+            with jobs.datasets.lock:
+                _, _, label = jobs.datasets.stage_labels.member(dataset["id"], member["run_id"])
+        else:
+            label = jobs.datasets.stage_labels._global(member)
         if label.get("annotation") is None:
-            raise ValueError(label.get("error") or "缺少已保存的数据集 Stage 关键帧")
+            if label.get("error"):
+                raise ValueError(label["error"])
+            raise FileNotFoundError("数据集与全局均缺少已保存的 Stage 关键帧标注"
+                if use_dataset_labels else "缺少已保存的全局 Stage 关键帧标注")
         annotation = stage.validate_stage_annotation(label["annotation"],
             run_id=episode["run_id"], trajectory_sha256=episode["trajectory_sha256"],
             done=arrays["environment_done"], success_consecutive_steps=header["success_consecutive_steps"])

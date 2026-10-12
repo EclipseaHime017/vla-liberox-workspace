@@ -147,6 +147,8 @@ class StageAnnotationService:
         if payload is None and (dataset is not None or not data):
             if entry.get("error"):
                 response.update(status="stale", error=entry["error"])
+            elif dataset is not None:
+                response["error"] = "数据集与全局均缺少已保存的 Stage 关键帧标注"
             return response
         try:
             valid = math.validate_stage_annotation(
@@ -229,7 +231,9 @@ class StageAnnotationService:
                     if expected and expected != source["trajectory_sha256"]:
                         raise ValueError("源轨迹与冻结数据集不匹配")
                     if payload is None:
-                        raise ValueError(entry.get("error") or "缺少已保存的 Stage 标注")
+                        raise ValueError(entry.get("error") or (
+                            "数据集与全局均缺少已保存的 Stage 关键帧标注" if dataset_id
+                            else "缺少已保存的全局 Stage 关键帧标注"))
                     result[run_id] = self._module().validate_stage_annotation(
                         payload, run_id=run_id, trajectory_sha256=source["trajectory_sha256"],
                         done=source["done"], success_consecutive_steps=success_consecutive_steps,

@@ -70,6 +70,9 @@ class WorkQueue:
             result = callback()
             if payload["kind"] == "dataset" and isinstance(result, dict):
                 payload["result"] = {"dataset_id": result["id"]}
+            if payload["kind"] == "verification":
+                payload["result"] = {"verification": result}
+                payload["stage_label"] = "完整性检查完成"
             payload.update(status="COMPLETED", stage="completed")
         except BaseException as exc:
             error = exc
@@ -221,6 +224,8 @@ class WorkQueue:
                     if selected["id"] not in self._local_tasks:
                         raise RuntimeError("Backend restarted; please register this local task again")
                     selected.update(status="RUNNING", started_at=datetime.now(timezone.utc).isoformat())
+                    if selected["kind"] == "verification":
+                        selected["stage_label"] = "正在校验原始文件、全局奖励和数据集奖励"
                     self._save_work(selected)
                     threading.Thread(target=self._run_local, args=(selected, lease),
                                      name=f"work-{selected['id']}", daemon=True).start()

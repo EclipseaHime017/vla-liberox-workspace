@@ -37,7 +37,7 @@ def _saved_metadata(jobs, dataset: dict, member: dict, metadata: dict) -> tuple[
 
 
 def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
-                   run_ids: set[str] | None = None) -> tuple[list, list]:
+                   run_ids: set[str] | None = None, use_dataset_labels: bool = True) -> tuple[list, list]:
     _, frozen = jobs.datasets._load(dataset["id"])
     records, missing = [], []
     for member in frozen["members"]:
@@ -47,6 +47,7 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
             run = jobs.datasets.run_service.get_run(member["run_id"])
         except KeyError:
             missing.append({"run_id": member["run_id"],
+                            "status": "MISSING",
                             "error": "轨迹记录不存在或尚未加载，请检查部署设备的数据目录与会话索引"})
             continue
         try:
@@ -58,17 +59,22 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
                 metadata = snapshot["metadata"]
                 values = path.with_name(metadata["values_file"])
                 if source == "stage":
-                    with jobs.datasets.lock:
-                        _, _, owned = jobs.datasets.stage_labels.member(dataset["id"], member["run_id"])
+                    if use_dataset_labels:
+                        with jobs.datasets.lock:
+                            _, _, owned = jobs.datasets.stage_labels.member(dataset["id"], member["run_id"])
+                    else:
+                        owned = jobs.datasets.stage_labels._global(member)
                     annotation = owned.get("annotation")
                     if (annotation is None or metadata.get("entry", {}).get("stage_annotation_sha256")
                             != annotation.get("annotation_sha256")):
-                        raise ValueError("数据集关键帧与全局 Stage 奖励不一致，请重新生成数据集奖励")
+                        scope = "数据集" if use_dataset_labels else "全局"
+                        raise ValueError(f"{scope}关键帧与全局 Stage 奖励不一致，请重新生成对应奖励")
             elif path and path.exists():
                 raise ValueError("全局评价的源数据已变化或评价损坏")
             elif source == "stage":
-                # Legacy implicit Stage never consults another dataset's/global live labels.
-                metadata, values = direct_global_reward(jobs, dataset, member, source)
+                # Derive from this annotation scope, never another dataset's recipe.
+                metadata, values = direct_global_reward(jobs, dataset, member, source,
+                                                       use_dataset_labels=use_dataset_labels)
             elif source == "rynnvalue" and storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json").exists():
                 # Native Rynn sidecars predate source-specific reward snapshots.
                 path = storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json")
@@ -77,14 +83,16 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
                 if metadata.get("schema_version") not in (5, 6):
                     raise ValueError("全局 RynnValue 评价需要升级")
             elif has_implicit_global(run, source):
-                metadata, values = direct_global_reward(jobs, dataset, member, source)
+                metadata, values = direct_global_reward(jobs, dataset, member, source,
+                                                       use_dataset_labels=use_dataset_labels)
             else:
                 try:
                     metadata, values = _first_saved_result(jobs, member["run_id"], source)
                 except FileNotFoundError:
                     if source not in {"sparse", "stage"}:
                         raise
-                    metadata, values = direct_global_reward(jobs, dataset, member, source)
+                    metadata, values = direct_global_reward(jobs, dataset, member, source,
+                                                           use_dataset_labels=use_dataset_labels)
             values_hash = hashlib.sha256(values).hexdigest() if isinstance(values, bytes) else _hash(values)
             if (metadata.get("run_id") != member["run_id"]
                     or (not isinstance(values, bytes) and values.is_symlink())
@@ -102,7 +110,8 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
             validate_global_values(values, episode, source, jobs.ui_config.offline_rl_root)
             records.append((member, metadata, values, episode, header))
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            missing.append({"run_id": member["run_id"], "error": str(exc)})
+            missing.append({"run_id": member["run_id"], "error": str(exc),
+                            "status": "MISSING" if isinstance(exc, FileNotFoundError) else "ERROR"})
     return records, missing
 
 

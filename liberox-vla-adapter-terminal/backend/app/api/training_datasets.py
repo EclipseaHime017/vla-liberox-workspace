@@ -111,8 +111,11 @@ async def training_options(dataset_id: str, body: DatasetTrainingOptionsRequest,
 @router.post("/{dataset_id}/verify", status_code=202)
 async def verify(dataset_id: str, request: Request):
     try:
-        job, _ = offline_job_service(request).submit_local("verification",
-            lambda: training_dataset_service(request).verify(dataset_id), dataset_id=dataset_id)
+        from ..services.dataset_integrity import verify_dataset
+        jobs = offline_job_service(request)
+        training_dataset_service(request).get(dataset_id, quick_verify=False)
+        job, _ = jobs.submit_local("verification",
+            lambda: verify_dataset(jobs, dataset_id), dataset_id=dataset_id)
         return job
     except Exception as exc:
         raise http_error(exc) from exc
