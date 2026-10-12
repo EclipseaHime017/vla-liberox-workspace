@@ -516,7 +516,7 @@ class SimulationManager:
         *,
         kind: str,
         max_steps: int,
-        open_loop_steps: int,
+        open_loop_steps: int | None,
         seed: int | None = None,
         init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
@@ -552,9 +552,6 @@ class SimulationManager:
             if disabled_policy_cameras is None
             else disabled_policy_cameras
         )
-        self._validate_session_values(
-            max_steps, open_loop_steps, seed, disabled_policy_cameras
-        )
         task_id = task_id or self.catalog.default_task_id
         self.catalog.initial_state(task_id, init_state_index)
         task = self.catalog.metadata(task_id)
@@ -567,10 +564,14 @@ class SimulationManager:
             )
         else:
             policy = self._policy_entry(policy_id)
+            open_loop_steps = policy.resolve_open_loop_steps(open_loop_steps)
             if expected_policy_content_sha256 is not None:
                 self._check_policy_identity(policy, expected_policy_content_sha256)
             if parent is not None:
                 self._check_policy_identity(policy, parent.get("policy_content_sha256"))
+        self._validate_session_values(
+            max_steps, open_loop_steps, seed, disabled_policy_cameras
+        )
         session_id = uuid.uuid4().hex[:12]
         now = datetime.now()
         stamp = now.strftime("%Y-%m-%d_%H%M%S")
@@ -655,8 +656,8 @@ class SimulationManager:
     ) -> None:
         if not 1 <= max_steps <= 10000:
             raise ValueError("max_steps must be in [1, 10000]")
-        if not 1 <= open_loop_steps <= 8:
-            raise ValueError("open_loop_steps must be in [1, 8]")
+        if type(open_loop_steps) is not int or open_loop_steps < 1:
+            raise ValueError("open_loop_steps must be a positive integer")
         if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2147483647:
             raise ValueError("seed must be an integer in [0, 2147483647]")
         cameras = tuple(disabled_policy_cameras)
@@ -679,11 +680,13 @@ class SimulationManager:
         if policy_id != "base":
             raise ValueError(f"Unknown policy_id: {policy_id}")
         checkpoint = str(getattr(getattr(self, "eval_config", None), "checkpoint", "unknown"))
-        return SimpleNamespace(
+        from ..policies.catalog import PolicyEntry
+        return PolicyEntry(
             policy_id="base", label="VLA-Adapter · Object-Pro（基础模型）",
             base_checkpoint=checkpoint, manifest=None,
             compatibility_sha256=None, family="vla_adapter",
-            stats_key=getattr(getattr(self, "eval_config", None), "stats_key", None),
+            stats_key=getattr(getattr(self, "eval_config", None), "stats_key", "libero_object"),
+            action_head=None, proprio_projector=None, training_step=None,
         )
 
     @staticmethod
@@ -781,7 +784,7 @@ class SimulationManager:
     def create_original(
         self,
         max_steps: int,
-        open_loop_steps: int,
+        open_loop_steps: int | None = None,
         task_id: str | None = None,
         policy_id: str = "base",
         initial_jpeg: bytes | None = None,
@@ -845,7 +848,7 @@ class SimulationManager:
         self,
         task_id: str,
         max_steps: int,
-        open_loop_steps: int,
+        open_loop_steps: int | None = None,
         policy_id: str = "base",
         seed: int | None = None,
         init_state_index: int = 0,
@@ -860,11 +863,12 @@ class SimulationManager:
             if disabled_policy_cameras is None
             else disabled_policy_cameras
         )
+        policy = self._policy_entry(policy_id)
+        open_loop_steps = policy.resolve_open_loop_steps(open_loop_steps)
         self._validate_session_values(
             max_steps, open_loop_steps, seed, disabled_policy_cameras
         )
         self.catalog.initial_state(task_id, init_state_index)
-        policy = self._policy_entry(policy_id)
         with self.lock:
             if self.active_session_id is not None:
                 raise RuntimeError("Cannot create a draft while a simulation is active")
@@ -908,6 +912,10 @@ class SimulationManager:
                 open_loop_steps if open_loop_steps is not None else draft.open_loop_steps
             )
             next_policy_id = policy_id if policy_id is not None else draft.policy_id
+            policy = self._policy_entry(next_policy_id)
+            next_open_loop = policy.resolve_open_loop_steps(
+                open_loop_steps if next_policy_id != draft.policy_id else next_open_loop
+            )
             next_seed = seed if seed is not None else draft.seed
             next_init_state_index = (
                 init_state_index
@@ -925,7 +933,6 @@ class SimulationManager:
                 next_max_steps, next_open_loop, next_seed, next_disabled_cameras
             )
             self.catalog.initial_state(next_task_id, next_init_state_index)
-            policy = self._policy_entry(next_policy_id)
             preview_changed = (
                 next_task_id != draft.task_id
                 or next_seed != draft.seed
@@ -1067,8 +1074,8 @@ class SimulationManager:
                 )
             if controller_id == "factr" and not controller.status().get("gravity_enabled"):
                 raise RuntimeError("FACTR: enable gravity compensation before alignment/takeover")
-        if not 1 <= open_loop_steps <= 8:
-            raise ValueError("open_loop_steps must be in [1, 8]")
+        if type(open_loop_steps) is not int or open_loop_steps < 1:
+            raise ValueError("open_loop_steps must be a positive integer")
         action_count = int(parent["action_count"])
         if not 0 <= resume_step < action_count:
             raise ValueError(f"resume_step must be in [0, {max(0, action_count - 1)}]")

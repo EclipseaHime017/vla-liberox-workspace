@@ -16,7 +16,8 @@ vi.mock("../features/evaluation/EvaluationMonitor", () => ({
 import { EvaluationPage } from "./EvaluationPage";
 
 const task = { task_id: "task-a", level: "LEVEL1", task_name: "task-a", prompt: "stack bowls", init_state_count: 3, init_state_index_min: 0, init_state_index_max: 2 };
-const policy = { policy_id: "base", label: "Object-Pro", base_checkpoint: "base", stats_key: "stats", kind: "base" as const, training_step: null, compatibility_sha256: null };
+const policy = { policy_id: "base", label: "Object-Pro", base_checkpoint: "base", stats_key: "stats", kind: "base" as const, training_step: null, compatibility_sha256: null,
+  inference: { open_loop_steps: 8, max_open_loop_steps: 8 } };
 const bootstrap = {
   config: { max_steps: 300, open_loop_steps: 8, seed: 7 },
   model: { policy_id: "base" }, policy_catalog: [policy], task, task_catalog: [task],
@@ -93,6 +94,29 @@ describe("evaluation page", () => {
     }));
     expect(screen.getByText("固定使用 init state #0")).toBeTruthy();
     expect(screen.getByText("固定使用 seed 7")).toBeTruthy();
+  });
+
+  it("loads per-model execution defaults and preserves manual edits for the same model", async () => {
+    mocks.getBootstrap.mockResolvedValue({ ...bootstrap, policy_catalog: [policy,
+      { ...policy, policy_id: "pi05", label: "Pi policy", inference: { open_loop_steps: 5, max_open_loop_steps: 10 } },
+    ] });
+    render(<EvaluationPage />);
+    const model = await screen.findByLabelText("测试模型");
+    const steps = screen.getByLabelText("测试预测执行步数") as HTMLInputElement;
+    await waitFor(() => expect(steps.max).toBe("8"));
+    fireEvent.change(model, { target: { value: "pi05" } });
+    expect(steps.value).toBe("5");
+    expect(steps.max).toBe("10");
+    fireEvent.change(steps, { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("仿真次数"), { target: { value: "20" } });
+    expect(steps.value).toBe("10");
+    fireEvent.click(screen.getByRole("button", { name: "预览调度" }));
+    await waitFor(() => expect(mocks.previewEvaluation).toHaveBeenCalledWith({
+      ...config, policy_id: "pi05", open_loop_steps: 10, trials: 20,
+    }));
+    fireEvent.change(model, { target: { value: "base" } });
+    expect(steps.value).toBe("8");
+    expect(steps.max).toBe("8");
   });
 
   it("registers a test only after the schedule has been previewed", async () => {

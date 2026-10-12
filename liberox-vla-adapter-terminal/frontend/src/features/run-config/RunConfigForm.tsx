@@ -22,6 +22,8 @@ type Props = {
 };
 
 export function RunConfigForm(props: Props) {
+  const policy = props.policies.find((item) => item.policy_id === (props.branchDraft?.policy_id ?? props.policyId));
+  const maxOpenLoop = policy?.inference?.max_open_loop_steps;
   return <div className="new-run">
     {props.branchDraft ? <>
       <div className="branch-config-title">
@@ -47,7 +49,7 @@ export function RunConfigForm(props: Props) {
         <Input
           type="number"
           min={1}
-          max={8}
+          max={maxOpenLoop}
           value={props.branchDraft.open_loop_steps}
           disabled={props.active || props.busy}
           onChange={(event) => props.onBranchOpenLoop(Number(event.target.value))}
@@ -55,14 +57,14 @@ export function RunConfigForm(props: Props) {
       </label>
       <p className="locked-field-note">任务、Episode、回溯帧和轨迹总长度由源会话锁定，二次推理仍从所选帧直接恢复状态。</p>
       <div className="button-row">
-        <Button className="primary" disabled={props.active || props.busy || !Number.isInteger(props.branchDraft.open_loop_steps) || props.branchDraft.open_loop_steps < 1 || props.branchDraft.open_loop_steps > 8} onClick={props.onStartBranch}>开始二次推理</Button>
+        <Button className="primary" disabled={props.active || props.busy || !Number.isInteger(props.branchDraft.open_loop_steps) || props.branchDraft.open_loop_steps < 1 || (maxOpenLoop !== undefined && props.branchDraft.open_loop_steps > maxOpenLoop)} onClick={props.onStartBranch}>开始二次推理</Button>
         <Button disabled={props.active || props.busy} onClick={props.onCancelBranch}>取消配置</Button>
       </div>
     </> : !props.draft ? <Button className="primary create-draft" disabled={props.active || props.busy} onClick={props.onCreate}>创建仿真</Button> : <>
       <TaskSelector tasks={props.tasks} value={props.taskId} disabled={props.active || props.busy} onChange={props.onTask} labelPrefix="仿真" />
       <label>策略模型<PolicySelector policies={props.policies} value={props.policyId} disabled={props.active || props.busy} onChange={props.onPolicy} /></label>
       <label>总控制步数<Input type="number" min={1} max={10000} value={props.maxSteps} disabled={props.active || props.busy} onChange={(event) => props.onMaxSteps(Number(event.target.value), false)} onBlur={() => props.onMaxSteps(props.maxSteps, true)} /></label>
-      <label>每次预测执行步数<Input type="number" min={1} max={8} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>
+      <label>每次预测执行步数<Input type="number" min={1} max={maxOpenLoop} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>
       <label>随机种子<Input type="number" min={0} max={2147483647} step={1} value={props.seed} disabled={props.active || props.busy} onChange={(event) => props.onSeed(Number(event.target.value), false)} onBlur={() => props.onSeed(props.seed, true)} /></label>
       <label>初始状态索引<Input type="number" min={props.draft.task.init_state_index_min} max={props.draft.task.init_state_index_max} step={1} value={props.initStateIndex} disabled={props.active || props.busy} onChange={(event) => props.onInitStateIndex(Number(event.target.value), false)} onBlur={() => props.onInitStateIndex(props.initStateIndex, true)} /></label>
       <fieldset className="policy-camera-fieldset" disabled={props.active || props.busy}>

@@ -45,7 +45,7 @@ class DraftRequest(StrictModel):
     task_id: str = Field(min_length=1)
     policy_id: str = Field(default="base", min_length=1)
     max_steps: int = Field(ge=1, le=10000)
-    open_loop_steps: int = Field(ge=1, le=8)
+    open_loop_steps: StrictInt | None = Field(default=None, ge=1)
     seed: int | None = Field(default=None, ge=0, le=2147483647)
     init_state_index: int = Field(default=0, ge=0)
     disabled_policy_cameras: list[PolicyCamera] = Field(default_factory=list)
@@ -60,7 +60,7 @@ class UpdateDraftRequest(StrictModel):
     task_id: str | None = Field(default=None, min_length=1)
     policy_id: str | None = Field(default=None, min_length=1)
     max_steps: int | None = Field(default=None, ge=1, le=10000)
-    open_loop_steps: int | None = Field(default=None, ge=1, le=8)
+    open_loop_steps: StrictInt | None = Field(default=None, ge=1)
     seed: int | None = Field(default=None, ge=0, le=2147483647)
     init_state_index: int | None = Field(default=None, ge=0)
     disabled_policy_cameras: list[PolicyCamera] | None = None
@@ -84,7 +84,7 @@ class UpdateDraftRequest(StrictModel):
 class CreateBranchRequest(StrictModel):
     resume_step: int = Field(ge=0)
     control_mode: Literal["policy", "manual"]
-    open_loop_steps: int = Field(ge=1, le=8)
+    open_loop_steps: StrictInt = Field(ge=1)
     translation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
     rotation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
     controller_id: Literal["spacemouse", "factr"] | None = None
@@ -233,7 +233,7 @@ class EvaluationRequest(StrictModel):
     policy_id: StrictStr = Field(default="base", min_length=1)
     trials: StrictInt = Field(default=100, ge=1, le=1000)
     max_steps: StrictInt = Field(ge=1, le=10000)
-    open_loop_steps: StrictInt = Field(ge=1, le=8)
+    open_loop_steps: StrictInt | None = Field(default=None, ge=1)
     realtime: StrictBool = True
     init_state_indices: list[StrictInt] | None = None
     base_seed: StrictInt = Field(default=0, ge=0, le=2147483647)

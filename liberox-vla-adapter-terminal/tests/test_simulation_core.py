@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import pytest
 
 from simulation_core import run_control_loop
 from trajectory_utils import TrajectoryRecorder
@@ -61,6 +62,46 @@ def test_policy_loop_latches_success_and_runs_to_target_steps():
     assert result.stopped_reason == "horizon"
     assert queries == [0, 2, 4]
     assert recorder.state_count == 6
+
+
+@pytest.mark.parametrize("horizon,execution_steps", [(8, 8), (10, 5), (10, 10), (50, 25)])
+def test_policy_loop_executes_requested_prefix_then_replans(horizon, execution_steps):
+    env = FakeEnv()
+    recorder = TrajectoryRecorder(control_hz=20, capture_images=False)
+    recorder.record_initial(env, observation(0))
+    queries, actions = [], []
+
+    def query(obs, step):
+        queries.append(step)
+        return obs, np.arange(horizon * 7, dtype=np.float32).reshape(horizon, 7)
+
+    def transform(action):
+        actions.append(action[0])
+        return action
+
+    result = run_control_loop(
+        env=env, recorder=recorder, initial_observation=observation(0),
+        target_action_count=execution_steps * 2 + 1, rate_limiter=FakeLimiter(),
+        action_source="policy", open_loop_steps=execution_steps,
+        policy_query=query, policy_action_transform=transform,
+    )
+    assert queries == [0, execution_steps, execution_steps * 2]
+    assert actions == [float(i * 7) for i in range(execution_steps)] * 2 + [0.0]
+    assert result.executed_steps == execution_steps * 2 + 1
+
+
+def test_short_prediction_fails_before_executing_an_action():
+    env = FakeEnv()
+    recorder = TrajectoryRecorder(control_hz=20, capture_images=False)
+    recorder.record_initial(env, observation(0))
+    with pytest.raises(ValueError, match="actions"):
+        run_control_loop(
+            env=env, recorder=recorder, initial_observation=observation(0),
+            target_action_count=20, rate_limiter=FakeLimiter(), action_source="policy",
+            open_loop_steps=10, policy_query=lambda obs, step: (obs, np.zeros((8, 7))),
+            policy_action_transform=lambda action: action,
+        )
+    assert env.step_index == 0
 
 
 def test_stop_is_checked_after_policy_query():

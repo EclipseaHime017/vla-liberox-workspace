@@ -27,6 +27,8 @@ export type TaskInfo = {
 };
 
 export type PolicyInfo = {
+  io?: { native_action_horizon: number; replay_horizon: number };
+  inference?: { open_loop_steps: number; max_open_loop_steps: number };
   algorithm?: "iql" | "bc" | null;
   model_config?: {
     family: string; backbone: "frozen" | "lora" | "full";

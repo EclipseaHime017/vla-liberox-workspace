@@ -15,6 +15,7 @@ from backend.app.devices.spacemouse import SpaceMouseSnapshot
 from backend.app.storage.files import scan_trajectories
 from backend.app.workers.simulation_worker import SimulationManager
 from trajectory_utils import TrajectoryRecorder, load_trajectory, save_trajectory_bundle
+from vla_rynn_iql.base_models import resolve_open_loop_steps
 
 
 VALID = """\
@@ -98,7 +99,8 @@ def test_branch_progress_starts_at_resume_step(tmp_path: Path):
     manager.catalog = FakeCatalog()
     manager._policy_entry = lambda _: SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base",
         manifest=None, compatibility_sha256=None, content_sha256="a" * 64,
-        family="vla_adapter", stats_key="libero_object")
+        family="vla_adapter", stats_key="libero_object",
+        resolve_open_loop_steps=lambda value: resolve_open_loop_steps({}, value))
     record = manager._new_record(
         kind="branch",
         max_steps=300,
@@ -265,7 +267,8 @@ def test_branch_source_is_physical_and_survives_parent_deletion(tmp_path: Path):
     manager.catalog = FakeCatalog()
     manager._policy_entry = lambda _: SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base",
         manifest=None, compatibility_sha256=None, content_sha256="a" * 64,
-        family="vla_adapter", stats_key="libero_object")
+        family="vla_adapter", stats_key="libero_object",
+        resolve_open_loop_steps=lambda value: resolve_open_loop_steps({}, value))
     record = manager._new_record(
         kind="branch",
         max_steps=1,

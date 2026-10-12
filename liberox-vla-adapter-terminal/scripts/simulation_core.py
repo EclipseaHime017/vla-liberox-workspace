@@ -64,8 +64,8 @@ def run_control_loop(
     """
     if target_action_count < recorder.action_count:
         raise ValueError("target_action_count precedes the recorded trajectory prefix")
-    if not 1 <= open_loop_steps <= 8:
-        raise ValueError("open_loop_steps must be in [1, 8]")
+    if type(open_loop_steps) is not int or open_loop_steps < 1:
+        raise ValueError("open_loop_steps must be a positive integer")
     if (policy_query is None) == (manual_query is None):
         raise ValueError("Provide exactly one of policy_query or manual_query")
     if policy_query is not None and policy_action_transform is None:
@@ -93,6 +93,8 @@ def run_control_loop(
                 ]
                 if not chunk:
                     raise RuntimeError("Policy returned an empty action chunk")
+                if len(chunk) < open_loop_steps:
+                    raise ValueError(f"Policy returned {len(chunk)} actions; execution requires {open_loop_steps}")
                 recorder.record_inference(recorder.action_count, np.stack(chunk, axis=0))
                 queue.extend(chunk[:open_loop_steps])
                 policy_queries += 1

@@ -104,6 +104,15 @@ class PolicyEntry:
     def is_base(self) -> bool:
         return self.manifest is None
 
+    @property
+    def inference(self) -> dict:
+        return model_module("base_models").execution_config(self.settings, is_overlay=not self.is_base)
+
+    def resolve_open_loop_steps(self, value: int | None = None) -> int:
+        return model_module("base_models").resolve_open_loop_steps(
+            self.settings, value, is_overlay=not self.is_base,
+        )
+
     def public(self) -> dict[str, Any]:
         return {
             "policy_id": self.policy_id,
@@ -115,6 +124,7 @@ class PolicyEntry:
             "model_config": self.settings,
             "parent_model_id": self.parent["id"] if self.parent else self.settings["base_id"],
             "io": model_module("base_models").model_contract(self.settings)["io"],
+            "inference": self.inference,
             "training_step": self.training_step,
             "compatibility_sha256": self.compatibility_sha256,
             "family": self.family,

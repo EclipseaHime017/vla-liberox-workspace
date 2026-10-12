@@ -144,6 +144,7 @@ export function EvaluationPage() {
   const historyTouched = useRef(false);
 
   const task = useMemo(() => bootstrap?.task_catalog.find((item) => item.task_id === taskId) ?? null, [bootstrap, taskId]);
+  const inference = bootstrap?.policy_catalog.find((item) => item.policy_id === policyId)?.inference;
   const availableStates = useMemo(() => task ? Array.from({ length: task.init_state_count }, (_, index) => task.init_state_index_min + index) : [], [task]);
   const config: EvaluationConfig = {
     task_id: taskId, policy_id: policyId, trials, max_steps: maxSteps,
@@ -180,8 +181,10 @@ export function EvaluationPage() {
       setBootstrap(nextBootstrap);
       if (!historyTouched.current) setRecords(nextRecords);
       setTaskId(nextBootstrap.task.task_id);
-      setPolicyId(nextBootstrap.model.policy_id || nextBootstrap.policy_catalog[0]?.policy_id || "base");
-      setMaxSteps(nextBootstrap.config.max_steps); setOpenLoopSteps(nextBootstrap.config.open_loop_steps);
+      const initialPolicyId = nextBootstrap.model.policy_id || nextBootstrap.policy_catalog[0]?.policy_id || "base";
+      setPolicyId(initialPolicyId);
+      setMaxSteps(nextBootstrap.config.max_steps);
+      setOpenLoopSteps(nextBootstrap.policy_catalog.find((item) => item.policy_id === initialPolicyId)?.inference?.open_loop_steps ?? nextBootstrap.config.open_loop_steps);
       setBaseSeed(nextBootstrap.config.seed); setScheduleSeed(nextBootstrap.config.seed);
       const nextTask = nextBootstrap.task_catalog.find((item) => item.task_id === nextBootstrap.task.task_id) ?? nextBootstrap.task;
       setStateIndices(Array.from({ length: nextTask.init_state_count }, (_, index) => nextTask.init_state_index_min + index));
@@ -192,6 +195,12 @@ export function EvaluationPage() {
     };
   }, []);
 
+  const changePolicy = (value: string) => invalidate(() => {
+    if (value === policyId) return;
+    setPolicyId(value);
+    const next = bootstrap?.policy_catalog.find((item) => item.policy_id === value)?.inference;
+    if (next) setOpenLoopSteps(next.open_loop_steps);
+  });
   const changeTask = (value: string) => invalidate(() => {
     setTaskId(value);
     const next = bootstrap?.task_catalog.find((item) => item.task_id === value);
@@ -250,10 +259,10 @@ export function EvaluationPage() {
       <div className="panel-title"><strong>创建测试</strong><span>done 连续 5 步确认成功</span></div>
       <div className="evaluation-form">
         <TaskSelector tasks={bootstrap?.task_catalog ?? []} value={taskId} onChange={changeTask} labelPrefix="测试" />
-        <label>模型<select aria-label="测试模型" value={policyId} onChange={(event) => invalidate(() => setPolicyId(event.target.value))}>{bootstrap?.policy_catalog.map((policy) => <option key={policy.policy_id} value={policy.policy_id}>{policy.label}{policy.training_step == null ? "" : ` · step ${policy.training_step}`}</option>)}</select></label>
+        <label>模型<select aria-label="测试模型" value={policyId} onChange={(event) => changePolicy(event.target.value)}>{bootstrap?.policy_catalog.map((policy) => <option key={policy.policy_id} value={policy.policy_id}>{policy.label}{policy.training_step == null ? "" : ` · step ${policy.training_step}`}</option>)}</select></label>
         <label>仿真次数<input aria-label="仿真次数" type="number" min={1} max={1000} value={trials} onChange={(event) => invalidate(() => setTrials(Number(event.target.value)))} /></label>
         <label>每回合控制步数<input aria-label="每回合控制步数" type="number" min={1} max={10000} value={maxSteps} onChange={(event) => invalidate(() => setMaxSteps(Number(event.target.value)))} /></label>
-        <label>每次预测执行步数<input aria-label="测试预测执行步数" type="number" min={1} max={8} value={openLoopSteps} onChange={(event) => invalidate(() => setOpenLoopSteps(Number(event.target.value)))} /></label>
+        <label>每次预测执行步数<input aria-label="测试预测执行步数" type="number" min={1} max={inference?.max_open_loop_steps} value={openLoopSteps} onChange={(event) => invalidate(() => setOpenLoopSteps(Number(event.target.value)))} /></label>
         <fieldset className="evaluation-randomization-options">
           <legend>测试随机化</legend>
           <label className="evaluation-randomization-option">

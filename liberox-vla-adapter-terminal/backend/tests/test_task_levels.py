@@ -14,6 +14,7 @@ from backend.app.services.offline_job_service import OfflineJobService
 from backend.app.workers.simulation_worker import PreviewService, SimulationManager
 import backend.app.services.task_catalog as tasks_module
 from test_ui_config_storage import VALID
+from vla_rynn_iql.base_models import resolve_open_loop_steps
 
 
 def make_catalog(tmp_path, monkeypatch):
@@ -87,6 +88,7 @@ def test_level5_identity_persisted_in_run_branch_and_batch_evaluation(tmp_path, 
     catalog, _, _, scene = make_catalog(tmp_path, monkeypatch)
     task_id = f"LEVEL5::{scene}::L5-2"
     policy = SimpleNamespace(policy_id="base", label="Base", base_checkpoint="base", family="vla_adapter",
+        resolve_open_loop_steps=lambda value: resolve_open_loop_steps({}, value),
         content_sha256="a" * 64, base_revision="b" * 40,
         manifest=None, compatibility_sha256=None, stats_key="stats",
         action_head=None, proprio_projector=None, backbone=None, model_config=None, training_step=None,

@@ -3,6 +3,8 @@ model_name: pi05
 label: π₀.₅
 adapter: pi05
 default_variant: pi05-libero-base
+inference:
+  open_loop_steps: 5
 backbone_modes: [frozen, full]
 defaults:
   # frozen trains the action expert/projections; full trains all components.

@@ -158,6 +158,24 @@ def test_preview_uses_task_bounds_and_returns_frontend_shape(tmp_path: Path):
         )
 
 
+@pytest.mark.parametrize("family,default,maximum", [("vla_adapter", 8, 8), ("pi05", 5, 10)])
+def test_evaluation_resolves_and_validates_model_execution_steps(tmp_path, family, default, maximum):
+    from dataclasses import replace
+    from vla_rynn_iql.models import model_config
+    service = make_service(tmp_path)
+    settings = model_config({"model": {"family": family}})
+    entry = replace(service.manager.policy_catalog.entry("base"), family=family,
+                    base_checkpoint=settings["base_checkpoint"], stats_key=settings["stats_key"],
+                    model_config=settings)
+    service.manager.policy_catalog.entry = lambda policy_id: entry
+    result = service.preview_evaluation(evaluation_request(open_loop_steps=None))
+    assert result["config"]["open_loop_steps"] == default
+    result = service.preview_evaluation(evaluation_request(open_loop_steps=maximum))
+    assert result["config"]["open_loop_steps"] == maximum
+    with pytest.raises(ValueError, match="open_loop_steps"):
+        service.preview_evaluation(evaluation_request(open_loop_steps=maximum + 1))
+
+
 def test_launch_history_mapping_and_safe_persistent_delete(tmp_path: Path):
     service = make_service(tmp_path)
     captured = {}

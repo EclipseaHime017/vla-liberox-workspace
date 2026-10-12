@@ -1,6 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunConfigForm } from "./RunConfigForm";
+
+afterEach(cleanup);
 
 describe("policy branch configuration", () => {
   it("locks source context and starts only after the user confirms the execution step count", () => {
@@ -19,7 +21,8 @@ describe("policy branch configuration", () => {
         policy_label: "Object-Pro base",
       }}
       tasks={[]}
-      policies={[]}
+      policies={[{ policy_id: "base", label: "Base", base_checkpoint: "base", stats_key: "stats", kind: "base", training_step: null, compatibility_sha256: null,
+        inference: { open_loop_steps: 5, max_open_loop_steps: 10 } }]}
       active={false}
       busy={false}
       taskId="task"
@@ -52,6 +55,7 @@ describe("policy branch configuration", () => {
 
     const stepInput = screen.getByLabelText(/每次预测执行步数/) as HTMLInputElement;
     expect(stepInput.disabled).toBe(false);
+    expect(stepInput.max).toBe("10");
     fireEvent.change(stepInput, { target: { value: "3" } });
     expect(onBranchOpenLoop).toHaveBeenCalledWith(3);
 
@@ -76,7 +80,8 @@ describe("original simulation configuration", () => {
       }}
       branchDraft={null}
       tasks={[{ task_id: "task", level: "LEVEL1", task_name: "task", prompt: "pick", init_state_count: 10, init_state_index_min: 0, init_state_index_max: 9 }]}
-      policies={[{ policy_id: "base", label: "Base", base_checkpoint: "base", stats_key: "stats", kind: "base", training_step: null, compatibility_sha256: null }]}
+      policies={[{ policy_id: "base", label: "Base", base_checkpoint: "base", stats_key: "stats", kind: "base", training_step: null, compatibility_sha256: null,
+        inference: { open_loop_steps: 5, max_open_loop_steps: 50 } }]}
       active={false} busy={false} taskId="task" policyId="base"
       maxSteps={300} openLoop={8} seed={7} initStateIndex={0} disabledPolicyCameras={[]}
       onCreate={vi.fn()} onStart={vi.fn()} onCancel={vi.fn()} onStop={vi.fn()}
@@ -86,6 +91,7 @@ describe("original simulation configuration", () => {
     />);
 
     fireEvent.change(screen.getByLabelText("随机种子"), { target: { value: "42" } });
+    expect((screen.getByLabelText("每次预测执行步数") as HTMLInputElement).max).toBe("50");
     expect(onSeed).toHaveBeenCalledWith(42, false);
     const initStateInput = screen.getByLabelText("初始状态索引") as HTMLInputElement;
     expect(initStateInput.min).toBe("0");

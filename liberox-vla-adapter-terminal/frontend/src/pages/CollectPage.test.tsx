@@ -70,6 +70,52 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("collection controller integration", () => {
+  it("uses model execution defaults when switching without changing training horizon", async () => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    const policies = [
+      { policy_id: "base", label: "Base", inference: { open_loop_steps: 8, max_open_loop_steps: 8 }, io: { native_action_horizon: 8, replay_horizon: 8 } },
+      { policy_id: "pi05", label: "Pi policy", inference: { open_loop_steps: 5, max_open_loop_steps: 10 }, io: { native_action_horizon: 10, replay_horizon: 8 } },
+    ];
+    let draft = { id: "draft", task_id: "task", policy_id: "base", policy_label: "Base",
+      max_steps: 300, open_loop_steps: 8, seed: 0, init_state_index: 0, disabled_policy_cameras: [],
+      task: bootstrap.task, preview_status: "READY", preview_revision: 1, preview_available: false };
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (path === "/api/bootstrap") return { ...bootstrap, policy_catalog: policies, task_catalog: [bootstrap.task] };
+      if (path === "/api/draft") {
+        const patch = JSON.parse(String(options?.body ?? "{}"));
+        if (patch.policy_id && patch.policy_id !== draft.policy_id) {
+          draft = { ...draft, open_loop_steps: policies.find((item) => item.policy_id === patch.policy_id)!.inference.open_loop_steps };
+        }
+        draft = { ...draft, ...patch };
+        return draft;
+      }
+      return original(path, options);
+    });
+    render(<CollectPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "创建仿真" }));
+    const model = await screen.findByLabelText("策略模型");
+    const steps = screen.getByLabelText("每次预测执行步数") as HTMLInputElement;
+    fireEvent.change(model, { target: { value: "pi05" } });
+    await waitFor(() => expect(steps.value).toBe("5"));
+    expect(steps.max).toBe("10");
+    await screen.findByText("20 Hz / 10 步预测");
+    fireEvent.change(steps, { target: { value: "10" } });
+    fireEvent.blur(steps);
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/draft", {
+      method: "PATCH", body: JSON.stringify({ open_loop_steps: 10 }),
+    }));
+    const seed = screen.getByLabelText("随机种子");
+    fireEvent.change(seed, { target: { value: "7" } });
+    fireEvent.blur(seed);
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/draft", {
+      method: "PATCH", body: JSON.stringify({ seed: 7 }),
+    }));
+    expect(steps.value).toBe("10");
+    fireEvent.change(model, { target: { value: "base" } });
+    await waitFor(() => expect(steps.value).toBe("8"));
+    expect(steps.max).toBe("8");
+  });
+
   it("shows missing historical model as WARN without falling back to base", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     vi.mocked(api).mockImplementation(async (path, options) => {

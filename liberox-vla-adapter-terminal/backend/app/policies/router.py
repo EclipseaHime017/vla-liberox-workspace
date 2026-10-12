@@ -26,6 +26,7 @@ class PolicyProvider:
     def load(self, open_loop_steps, policy_id="base", *, expected_content_sha256=None):
         self.catalog.refresh()
         entry = self.catalog.entry(policy_id)
+        open_loop_steps = entry.resolve_open_loop_steps(open_loop_steps)
         factories = {"vla_adapter": VLAAdapterPolicyProvider, "pi05": Pi05PolicyProvider}
         if entry.family not in factories:
             raise ValueError(f"Unsupported policy family: {entry.family}")

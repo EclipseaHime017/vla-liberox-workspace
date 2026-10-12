@@ -3,6 +3,8 @@ model_name: vla_adapter
 label: VLA-Adapter
 adapter: vla_adapter
 default_variant: base
+inference:
+  open_loop_steps: 8
 backbone_modes: [frozen, lora, full]
 defaults:
   environment: vla-liberox

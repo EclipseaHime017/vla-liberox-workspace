@@ -56,7 +56,7 @@ def parser():
 def simulation_request(entry):
     return {
         "policy_id": entry["policy_id"], "task_id": TASK_ID, "trials": 1,
-        "max_steps": CONTROL_STEPS, "open_loop_steps": entry["io"]["replay_horizon"],
+        "max_steps": CONTROL_STEPS, "open_loop_steps": entry["inference"]["open_loop_steps"],
         "realtime": False, "init_state_indices": [0],
         "base_seed": SEED, "seed_count": 1, "schedule_seed": SEED,
     }
@@ -115,7 +115,7 @@ def wait_for_job(client, job):
 def record_fixture(client, entry):
     record = client.request("POST", "/api/sessions", {
         "policy_id": entry["policy_id"], "task_id": TASK_ID,
-        "max_steps": CONTROL_STEPS, "open_loop_steps": entry["io"]["replay_horizon"],
+        "max_steps": CONTROL_STEPS, "open_loop_steps": entry["inference"]["open_loop_steps"],
         "seed": SEED, "init_state_index": 0, "disabled_policy_cameras": [],
     })
     wait_for_job(client, {"id": record["work_job_id"]})

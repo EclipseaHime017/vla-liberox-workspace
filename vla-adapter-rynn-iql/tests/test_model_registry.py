@@ -25,6 +25,56 @@ def test_registry_is_lightweight_and_drives_every_base():
         assert base_models.model_contract(settings) == base.contract
 
 
+@pytest.mark.parametrize("family,default,maximum", [("vla_adapter", 8, 8), ("pi05", 5, 10)])
+def test_execution_steps_are_separate_from_prediction_and_training(family, default, maximum):
+    settings = models.model_config({"model": {"family": family}})
+    assert base_models.execution_config(settings) == {
+        "open_loop_steps": default, "max_open_loop_steps": maximum,
+    }
+    assert base_models.resolve_open_loop_steps(settings, None) == default
+    assert base_models.resolve_open_loop_steps(settings, maximum) == maximum
+    assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
+    with pytest.raises(ValueError, match="open_loop_steps"):
+        base_models.resolve_open_loop_steps(settings, maximum + 1)
+    assert base_models.execution_config(settings, is_overlay=True)["max_open_loop_steps"] == 8
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 11, 2.5, "5"])
+def test_registry_rejects_invalid_execution_steps(tmp_path, value):
+    raw = family_files()
+    raw["pi05"]["inference"]["open_loop_steps"] = value
+    with pytest.raises(ValueError, match="open_loop_steps"):
+        base_models.load_registry(write_registry(tmp_path, raw))
+
+
+def test_variant_can_override_execution_defaults_without_changing_weight_identity(tmp_path, monkeypatch):
+    raw = family_files()
+    raw["pi05"]["variants"]["pi05-libero-base"]["inference"] = {"open_loop_steps": 10}
+    families, bases = base_models.load_registry(write_registry(tmp_path, raw))
+    assert families["pi05"].inference == {"open_loop_steps": 5}
+    base = bases["pi05-libero-base"]
+    assert base.inference == {"open_loop_steps": 10}
+    original = base_models.BASE_MODELS[base.id]
+    settings = models.base_model_config(base.id)
+    snapshot = parent_snapshot(settings, "a" * 64)
+    monkeypatch.setitem(base_models.BASE_MODELS, base.id, replace(original, inference=base.inference))
+    assert models.base_model_config(base.id) == settings
+    assert parent_snapshot(settings, "a" * 64) == snapshot
+    assert base_models.execution_config(settings)["open_loop_steps"] == 10
+    assert base_models.execution_config(settings, is_overlay=True)["open_loop_steps"] == 8
+
+
+def test_execution_limit_follows_contract_not_a_family_constant(monkeypatch):
+    base = base_models.BASE_MODELS["pi05-libero-base"]
+    contract = copy.deepcopy(base.contract)
+    contract["io"]["native_action_horizon"] = 50
+    monkeypatch.setitem(base_models.BASE_MODELS, base.id,
+                        replace(base, contract=contract, inference={"open_loop_steps": 25}))
+    settings = models.base_model_config(base.id)
+    assert base_models.execution_config(settings) == {"open_loop_steps": 25, "max_open_loop_steps": 50}
+    assert base_models.resolve_open_loop_steps(settings, 50) == 50
+
+
 def family_files():
     return {name: yaml.safe_load(family.config_path.read_text())
             for name, family in base_models.MODEL_FAMILIES.items()}

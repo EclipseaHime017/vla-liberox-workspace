@@ -470,8 +470,10 @@ def load_effective_config(path: Path) -> dict[str, Any]:
         raise ValueError("config.trials must be <= 1000")
     if config["max_steps"] > 10000:
         raise ValueError("config.max_steps must be <= 10000")
-    if config["open_loop_steps"] > 8:
-        raise ValueError("config.open_loop_steps must be <= 8")
+    from ..policies.registry import model_module
+    model_module("base_models").resolve_open_loop_steps(
+        policy.get("model_config", {}), config["open_loop_steps"], is_overlay=policy["manifest"] is not None,
+    )
     if config["control_hz"] != 20:
         raise ValueError("config.control_hz must remain 20 Hz")
     if config["success_streak"] != 5:
@@ -615,6 +617,8 @@ def _episode(
                 validated.append(action)
             if not validated:
                 raise RuntimeError("Policy returned an empty action chunk")
+            if len(validated) < open_loop_steps:
+                raise ValueError(f"Policy returned {len(validated)} actions; execution requires {open_loop_steps}")
             queue.extend(validated[:open_loop_steps])
             query_count += 1
             progress["policy_queries"] = query_count

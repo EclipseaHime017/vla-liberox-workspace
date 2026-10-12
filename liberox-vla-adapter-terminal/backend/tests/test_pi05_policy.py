@@ -122,7 +122,7 @@ def test_native_inputs_camera_mask_codec_and_horizon(monkeypatch):
         captured.update(request)
         return {"actions": np.ones((10, 7)).tolist()}
     monkeypatch.setattr(provider, "_send", send)
-    assert provider.predict(obs, "test", ("robot0_eye_in_hand",)).shape == (8, 7)
+    assert provider.predict(obs, "test", ("robot0_eye_in_hand",)).shape == (10, 7)
     with np.load(io.BytesIO(base64.b64decode(captured["arrays"]))) as inputs:
         assert np.array_equal(inputs["observation/image"], agent[::-1, ::-1])
         assert not inputs["observation/wrist_image"].any()

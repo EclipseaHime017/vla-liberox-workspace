@@ -38,7 +38,7 @@ vla-liberox-workspace/
 模型负责声明：
 
 - **输入**：相机列表、图像尺寸与方向、本体状态表示及维度。
-- **输出**：原生动作长度与维度、平台执行长度、控制频率和动作编码。
+- **输出**：原生动作长度与维度、控制频率和动作编码；训练取样长度与推理执行步数分别管理。
 - **结构与训练能力**：结构参数、可训练组件、训练范围和适配器。
 - **资产与运行**：权重来源、版本、归一化文件、部署位置和运行环境。
 
@@ -91,6 +91,8 @@ variants:
     revision: null
     checkpoint: ../../../models/my-policy
     stats_key: my_dataset
+    inference:
+      open_loop_steps: 5
 ```
 
 将示例中的仓库和归一化标识替换为该权重的真实值：
@@ -103,10 +105,11 @@ variants:
 | `revision` | 原始仓库的完整 40 位 commit；已知时填写，未知时为 `null` |
 | `checkpoint` | 该家族加载器读取的本地部署目录；支持在线加载的家族也可填写仓库 ID |
 | `stats_key` | 权重配套归一化数据中的实际标识，按模型发布说明或统计文件填写 |
+| `inference.open_loop_steps` | 每次预测后连续执行的步数，作为仿真和测试的默认值；可覆盖家族默认值，页面可调整，不能超过模型支持范围；与预测长度、训练 chunk 长度分别配置 |
 
 `../../../models/my-policy` 从家族 YAML 所在的 `configs/models/` 解析，指向工作区根目录下的 `models/my-policy/`。本地权重加载时另行计算文件内容身份，和来源仓库的 commit 分别记录。
 
-变体继承家族的输入输出、架构、运行环境和默认训练范围。家族支持的差异可在变体下通过 `io`、`architecture` 声明。调整结构或动作表示需要相应的适配器实现，单独下载权重文件并不包含平台所需的完整加载逻辑。
+变体继承家族的输入输出、架构、运行环境和默认训练范围。家族支持的差异可在变体下通过 `io`、`architecture`、`inference` 声明。调整结构或动作表示需要相应的适配器实现，单独下载权重文件并不包含平台所需的完整加载逻辑。
 
 保存后重启平台，模型选择列表显示 `label`。使用训练 YAML 时，选择同一个变体：
 
@@ -120,7 +123,7 @@ model:
 
 1. 在 `vla-adapter-rynn-iql/src/vla_rynn_iql/` 实现家族适配器，提供配置校验、组件加载、输入转换、动作解码、训练目标、可训练范围及保存恢复接口。
 2. 在模型模块注册适配器与资产校验、导出解析，并在 `liberox-vla-adapter-terminal/backend/app/policies/` 接入推理 Provider。
-3. 新建 `<model_name>.yaml`，填写 `schema_version: 1`、`model_name`、`label`、`adapter`、`default_variant`、`backbone_modes`、`defaults`、`io`、`architecture` 和 `variants`；默认变体必须属于该家族。
+3. 新建 `<model_name>.yaml`，填写 `schema_version: 1`、`model_name`、`label`、`adapter`、`default_variant`、`backbone_modes`、`defaults`、`inference`、`io`、`architecture` 和 `variants`；默认变体必须属于该家族。
 4. 将家族文件加入 `registry.yaml`，重启服务并执行单模型训练／仿真测试。
 
 目录格式：

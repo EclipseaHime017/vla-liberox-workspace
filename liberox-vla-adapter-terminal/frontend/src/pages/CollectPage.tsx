@@ -110,7 +110,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
         setControlFrame(boot.config.manual.control_frame ?? "world");
         setSessions(history);
         setMaxSteps(boot.config.max_steps);
-        setOpenLoop(boot.config.open_loop_steps);
+        setOpenLoop(boot.policy_catalog.find((item) => item.policy_id === "base")?.inference?.open_loop_steps ?? boot.config.open_loop_steps);
         setSeed(boot.config.seed);
         setInitStateIndex(boot.task.init_state_index_min);
         setDisabledPolicyCameras(boot.config.disabled_policy_cameras);
@@ -329,6 +329,14 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
     } catch (reason) { setError(String(reason)); }
   };
 
+  const changePolicy = (value: string) => {
+    if (value === policyId) return;
+    setPolicyId(value);
+    const inference = bootstrap?.policy_catalog.find((item) => item.policy_id === value)?.inference;
+    if (inference) setOpenLoop(inference.open_loop_steps);
+    void updateDraft({ policy_id: value });
+  };
+
   const cancelDraft = async () => {
     setBusy(true);
     setError("");
@@ -517,6 +525,8 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       ? undefined
       : bootstrap.policy_catalog.find((policy) => policy.policy_id === "base");
   const displaySeed = draft?.seed ?? selected?.seed ?? bootstrap.config.seed;
+  const displayedModel = bootstrap.policy_catalog.find((item) => item.policy_id === (draft?.policy_id ?? selected?.policy_id ?? policyId));
+  const predictedSteps = displayedModel?.io?.native_action_horizon ?? bootstrap.model.action_schema.predicted_chunk_size;
   const displayInitStateIndex = draft?.init_state_index ?? selected?.init_state_index ?? 0;
   const displayDisabledCameras = draft?.disabled_policy_cameras
     ?? selected?.disabled_policy_cameras
@@ -565,13 +575,13 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
         <Info label="任务难度" value={displayTask.level} />
         <Info label="任务提示词" value={displayTask.prompt} />
         <Info label="计算设备" value={formatComputeDevice(bootstrap.model.gpu)} />
-        <Info label="控制与预测" value={bootstrap.config.control_hz + " Hz / " + bootstrap.model.action_schema.predicted_chunk_size + " 步预测"} note={`seed ${displaySeed} · init ${displayInitStateIndex} · ${policyCameraSummary}`} />
+        <Info label="控制与预测" value={bootstrap.config.control_hz + " Hz / " + predictedSteps + " 步预测"} note={`seed ${displaySeed} · init ${displayInitStateIndex} · ${policyCameraSummary}`} />
       </section>
 
       <section className="workspace">
         <aside className="panel session-panel">
           <div className="panel-title"><h2>会话</h2><span>{visibleSessions.length}/{sessions.length}</span></div>
-          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={(value) => { setPolicyId(value); void updateDraft({ policy_id: value }); }} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
+          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={changePolicy} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
           <div className="session-filter">
             <p className="task-filter-heading">数据检索</p>
             <TaskFilter tasks={bootstrap.task_catalog} value={sessionTaskFilter} disabled={Boolean(active)} onChange={changeSessionTaskFilter} labelPrefix="检索" />

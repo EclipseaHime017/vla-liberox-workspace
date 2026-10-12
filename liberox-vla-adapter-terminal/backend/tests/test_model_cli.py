@@ -17,6 +17,7 @@ class Platform:
     def __init__(self):
         self.calls = []
         self.base = {"policy_id": "family-variant", "kind": "base", "family": "family",
+                     "inference": {"open_loop_steps": 8, "max_open_loop_steps": 8},
                      "io": {"replay_horizon": 8}, "model_config": {}, "content_sha256": "a" * 64,
                      "base_checkpoint": "/weights/base", "base_revision": "a" * 64, "stats_key": "stats"}
         self.child = {**self.base, "policy_id": "exact-child", "kind": "overlay",
@@ -86,7 +87,8 @@ def test_fixed_training_settings_and_model_owned_contract():
         "checkpoint_interval": 2, "actor_lr_warmup_steps": 0, "seed": 0, "resume_checkpoint": None,
         "console_interval_steps": 1, "tensorboard": False, "wandb_enabled": False,
     }
-    base["io"]["replay_horizon"] = 4
+    base["inference"]["open_loop_steps"] = 4
+    assert base["io"]["replay_horizon"] == 8
     assert cli.simulation_request(base) == {
         "policy_id": api.base["policy_id"], "task_id": cli.TASK_ID, "trials": 1,
         "max_steps": 40, "open_loop_steps": 4, "realtime": False, "init_state_indices": [0],

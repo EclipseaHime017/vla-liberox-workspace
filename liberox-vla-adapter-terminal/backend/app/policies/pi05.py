@@ -117,7 +117,7 @@ class Pi05PolicyProvider:
             if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
                 self.unload()
                 raise ValueError("Invalid π₀.₅ action chunk")
-            return actions[:contract["replay_horizon"]]
+            return actions
 
     def process_action(self, action):
         action = np.asarray(action, dtype=np.float32)
@@ -151,4 +151,4 @@ class Pi05PolicyProvider:
                 "policy_id": self.current_policy_id, "policy_label": entry.label if entry else "π₀.₅ · LIBERO",
                 "model_switching": True, "action_codec": contract["action_codec"],
                 "action_schema": {"size": contract["action_dim"], "range": [-1, 1], "units": "normalized OSC_POSE command",
-                                  "predicted_chunk_size": contract["replay_horizon"], "native_action_horizon": contract["native_action_horizon"]}}
+                                  "predicted_chunk_size": contract["native_action_horizon"], "native_action_horizon": contract["native_action_horizon"]}}

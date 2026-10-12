@@ -5,12 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import backend.app.services.task_catalog as task_catalog
 from backend.app.core.config import AdditionalTaskConfig
 from backend.app.policies.vla_adapter import VLAAdapterPolicyProvider
 from backend.app.services.task_catalog import ConfiguredTaskCatalog
 from backend.app.workers.simulation_worker import SimulationManager
+from vla_rynn_iql.base_models import resolve_open_loop_steps
 
 
 def test_configured_task_catalog_validates_and_loads_selected_state(
@@ -107,7 +109,7 @@ class _PolicyCatalog:
         pass
 
     def entry(self, policy_id):
-        if policy_id not in {"base", "overlay"}:
+        if policy_id not in {"base", "overlay", "pi05-libero-base"}:
             raise ValueError(policy_id)
         return SimpleNamespace(
             policy_id=policy_id,
@@ -116,7 +118,45 @@ class _PolicyCatalog:
             manifest=None if policy_id == "base" else Path("/registry/overlay/policy.yaml"),
             compatibility_sha256=None if policy_id == "base" else "compat",
             content_sha256=policy_id + "-weights",
+            resolve_open_loop_steps=lambda value=None: resolve_open_loop_steps(
+                {"family": "pi05"} if policy_id == "pi05-libero-base" else {}, value,
+                is_overlay=policy_id == "overlay",
+            ),
         )
+
+
+def test_model_switch_applies_defaults_without_resetting_same_model_edits(tmp_path):
+    manager = object.__new__(SimulationManager)
+    manager.lock = threading.RLock()
+    manager.active_session_id = None
+    manager.draft = None
+    manager.catalog = _DraftCatalog()
+    manager.policy_catalog = _PolicyCatalog()
+    manager.eval_config = SimpleNamespace(seed=0, disabled_policy_cameras=())
+    manager._launch_draft_preview = lambda draft: None
+    assert manager.create_draft("LEVEL1::task_a", 300)["open_loop_steps"] == 8
+    assert manager.update_draft(policy_id="pi05-libero-base")["open_loop_steps"] == 5
+    assert manager.update_draft(open_loop_steps=10)["open_loop_steps"] == 10
+    assert manager.update_draft(task_id="LEVEL1::task_b")["open_loop_steps"] == 10
+    assert manager.update_draft(policy_id="pi05-libero-base")["open_loop_steps"] == 10
+    with pytest.raises(ValueError, match=r"\[1, 10\]"):
+        manager.update_draft(open_loop_steps=11)
+    assert manager.draft.open_loop_steps == 10
+    with pytest.raises(ValueError, match=r"\[1, 8\]"):
+        manager.update_draft(policy_id="base", open_loop_steps=10)
+    assert manager.draft.policy_id == "pi05-libero-base"
+    assert manager.update_draft(policy_id="base")["open_loop_steps"] == 8
+
+
+def test_original_record_resolves_omitted_execution_steps(tmp_path):
+    manager = object.__new__(SimulationManager)
+    manager.catalog = _DraftCatalog()
+    manager.policy_catalog = _PolicyCatalog()
+    manager.ui_config = SimpleNamespace(output_root=tmp_path)
+    manager._persist_effective_config = lambda record, policy: None
+    record = manager._new_record(kind="original", max_steps=20,
+                                 policy_id="pi05-libero-base", open_loop_steps=None)
+    assert record.open_loop_steps == 5
 
 
 def test_draft_does_not_create_output_until_start(tmp_path: Path):
