@@ -346,23 +346,38 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
     };
   }, [detail]);
   return <section className="content-page trajectory-detail-page">
-    <div className="page-heading detail-heading"><div><p className="eyebrow">TRAJECTORY DETAIL</p><h1>轨迹 {detail.run.id}</h1><p>{detail.run.task} · {detail.run.action_count} steps</p></div><button onClick={() => {
-      if (!stageDirty || window.confirm("切片标记尚未保存，是否丢弃并返回数据集？")) onBack();
-    }}>返回数据集</button></div>
-    <div className="detail-summary surface"><Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge><span>{detail.run.source_type ?? detail.run.control_mode}</span><span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span><label className="test-label-switch"><input type="checkbox" checked={isTest} disabled={labelBusy || !onSetTest} onChange={async (event) => { const next = event.target.checked; setLabelBusy(true); setLabelError(""); try { await onSetTest?.(next); setIsTest(next); } catch (reason) { setLabelError(String(reason)); } finally { setLabelBusy(false); } }} /><span><b>测试标签</b><small>启用后不进入新训练数据集，任务级批量评价默认跳过</small></span></label></div>
-    {onContextChange && <div className="surface detail-evaluation-context">
-      <label>数据来源<select disabled={contextLoading} value={detail.dataset_context?.dataset_id ?? ""} onChange={(event) => onContextChange(event.target.value || undefined)}>
-        <option value="">全局轨迹评价</option>{detail.available_dataset_contexts?.map((context) => <option key={context.dataset_id} value={context.dataset_id}>{context.dataset_name}</option>)}
-      </select></label>
-      <div><strong>{contextLoading || detail.global_evaluation_pending ? "正在更新评价图表…" : detail.dataset_context
-        ? `${detail.dataset_context.dataset_name} · 当前评价` : "全局轨迹评价"}</strong>
-        {!detail.evaluation_sources && <div className="reward-parameter-chips">
-          {rewardParameterLabels(detail.dataset_context?.config ?? detail.global_evaluation?.config).map((label) => <span key={label}>{label}</span>)}</div>}
-        {Object.entries(detail.evaluation_sources ?? {}).map(([source, context]) => context && <div key={source} className="evaluation-current-summary">
-          <span>{rewardSourceLabels[source as keyof typeof rewardSourceLabels]} · {context.origin === "dataset" ? "当前数据集" : detail.dataset_context ? "全局回退" : "全局"} · {context.status}</span>
-          <div className="reward-parameter-chips">{rewardParameterLabels(context.config).map((label) => <span key={label}>{label}</span>)}</div></div>)}
-        <small>此处只切换评价图表；关键帧标注归属在下方切片面板独立选择。</small></div>
-    </div>}
+    <section className="surface trajectory-overview" aria-label="轨迹信息与配置">
+      <div className="trajectory-overview-main">
+        <div className="trajectory-identity">
+          <div className="trajectory-identity-line">
+            <h1>轨迹 {detail.run.id}</h1>
+            <Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge>
+            <span>{detail.run.source_type ?? detail.run.control_mode}</span>
+            <span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span>
+          </div>
+          <p>{detail.run.task} · {detail.run.action_count} steps</p>
+        </div>
+        <button onClick={() => {
+          if (!stageDirty || window.confirm("切片标记尚未保存，是否丢弃并返回数据集？")) onBack();
+        }}>返回数据集</button>
+      </div>
+      <div className="detail-evaluation-context">
+        <div className="detail-context-controls">
+          {onContextChange && <label className="detail-source-select">数据来源<select disabled={contextLoading} value={detail.dataset_context?.dataset_id ?? ""} onChange={(event) => onContextChange(event.target.value || undefined)}>
+            <option value="">全局轨迹评价</option>{detail.available_dataset_contexts?.map((context) => <option key={context.dataset_id} value={context.dataset_id}>{context.dataset_name}</option>)}
+          </select></label>}
+          <label className="test-label-switch"><input type="checkbox" checked={isTest} disabled={labelBusy || !onSetTest} onChange={async (event) => { const next = event.target.checked; setLabelBusy(true); setLabelError(""); try { await onSetTest?.(next); setIsTest(next); } catch (reason) { setLabelError(String(reason)); } finally { setLabelBusy(false); } }} /><span><b>测试标签</b><small>启用后不进入新训练数据集，任务级批量评价默认跳过</small></span></label>
+        </div>
+        {onContextChange && <div className="detail-evaluation-results">
+          {(contextLoading || detail.global_evaluation_pending) && <span role="status">正在更新评价图表…</span>}
+          {!detail.evaluation_sources && <div className="reward-parameter-chips">
+            {rewardParameterLabels(detail.dataset_context?.config ?? detail.global_evaluation?.config).map((label) => <span key={label}>{label}</span>)}</div>}
+          {Object.entries(detail.evaluation_sources ?? {}).map(([source, context]) => context && <div key={source} className="evaluation-current-summary">
+            <span>{rewardSourceLabels[source as keyof typeof rewardSourceLabels]} · {context.origin === "dataset" ? "当前数据集" : detail.dataset_context ? "全局回退" : "全局"} · {context.status}</span>
+            <div className="reward-parameter-chips">{rewardParameterLabels(context.config).map((label) => <span key={label}>{label}</span>)}</div></div>)}
+        </div>}
+      </div>
+    </section>
     {detail.global_evaluation_error && <p className="error-banner">{detail.global_evaluation_error}</p>}
     {labelError && <div className="error-banner"><span>{labelError}</span><button onClick={() => setLabelError("")}>关闭</button></div>}
     <article className="surface trajectory-video"><h2>结果视频</h2>{video ? <video ref={videoRef} controls preload="metadata" src={video} /> : <div className="empty-table">没有可用结果视频</div>}

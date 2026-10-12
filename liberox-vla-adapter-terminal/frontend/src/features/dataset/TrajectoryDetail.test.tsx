@@ -25,6 +25,57 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe("trajectory detail stage integration", () => {
+  it("groups trajectory metadata, source selection and test controls in one card", async () => {
+    const onBack = vi.fn();
+    const onSetTest = vi.fn().mockResolvedValue(undefined);
+    const onContextChange = vi.fn();
+    render(<TrajectoryDetail detail={{ ...detail, run: { ...detail.run, source_type: "manual", success: true },
+      available_dataset_contexts: [{ dataset_id: "data-a", dataset_name: "Dataset A" }],
+      global_evaluation: { source: "rynnvalue", config: { gamma: .9, shaping_weight: .1 } },
+    }} onBack={onBack} onSetTest={onSetTest} onContextChange={onContextChange} />);
+    await screen.findByText("尚未保存阶段标注");
+    const overview = screen.getByRole("region", { name: "轨迹信息与配置" });
+    expect(within(overview).getByRole("heading", { name: "轨迹 episode" })).toBeTruthy();
+    expect(within(overview).getByText("成功")).toBeTruthy();
+    expect(within(overview).getByText("manual")).toBeTruthy();
+    expect(within(overview).getByText("折扣 γ 0.9")).toBeTruthy();
+    const source = within(overview).getByLabelText("数据来源");
+    expect(source.closest(".surface")).toBe(overview);
+    expect(screen.queryByText("TRAJECTORY DETAIL")).toBeNull();
+    expect(within(overview).getAllByText("全局轨迹评价")).toHaveLength(1);
+    expect(within(overview).getByText("全局轨迹评价").tagName).toBe("OPTION");
+    expect(screen.queryByText(/此处只切换评价图表/)).toBeNull();
+    fireEvent.change(source, { target: { value: "data-a" } });
+    expect(onContextChange).toHaveBeenCalledWith("data-a");
+    const testLabel = within(overview).getByRole("checkbox", { name: /测试标签/ }) as HTMLInputElement;
+    expect(testLabel.closest(".detail-context-controls")).toBe(source.closest(".detail-context-controls"));
+    fireEvent.click(testLabel);
+    await waitFor(() => expect(testLabel.checked).toBe(true));
+    expect(onSetTest).toHaveBeenCalledWith(true);
+    fireEvent.click(within(overview).getByRole("button", { name: "返回数据集" }));
+    expect(onBack).toHaveBeenCalledOnce();
+  });
+
+  it("retains evaluation loading status while omitting the redundant context heading", async () => {
+    render(<TrajectoryDetail detail={detail} onBack={() => {}} onContextChange={() => {}} contextLoading />);
+    await screen.findByText("尚未保存阶段标注");
+    expect(screen.getByText("正在更新评价图表…").getAttribute("role")).toBe("status");
+    expect((screen.getByLabelText("数据来源") as HTMLSelectElement).disabled).toBe(true);
+  });
+
+  it("keeps test label failures visible without toggling the label or replacing the video", async () => {
+    const onSetTest = vi.fn().mockRejectedValue(new Error("label update failed"));
+    const rendered = render(<TrajectoryDetail detail={detail} onBack={() => {}} onSetTest={onSetTest} />);
+    await screen.findByText("尚未保存阶段标注");
+    const video = rendered.container.querySelector("video");
+    const testLabel = screen.getByRole("checkbox", { name: /测试标签/ }) as HTMLInputElement;
+    fireEvent.click(testLabel);
+    await screen.findByText(/label update failed/);
+    expect(testLabel.checked).toBe(false);
+    expect(testLabel.disabled).toBe(false);
+    expect(rendered.container.querySelector("video")).toBe(video);
+  });
+
   it("updates the reward plot without clipping or replacing the playing video element", async () => {
     const rendered = render(<TrajectoryDetail detail={detail} onBack={() => {}} />);
     await screen.findByText("尚未保存阶段标注");

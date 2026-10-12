@@ -51,6 +51,21 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("stage keyframe editor", () => {
+  it("keeps the empty editor compact without explanatory text or empty lists", async () => {
+    render(<OwnedFixture />);
+    await screen.findByText("尚未保存阶段标注");
+    fireEvent.click(screen.getByRole("button", { name: "切片 / 标记关键帧" }));
+    const video = screen.getByTestId("video");
+    Object.defineProperty(video, "duration", { configurable: true, value: .5 });
+    fireEvent.loadedMetadata(video);
+    expect(screen.queryByText(/选择在后续轨迹中保持|仅标记原始 observation step|连续.*步成功确认|尚无手动关键帧/)).toBeNull();
+    expect(screen.queryByRole("list")).toBeNull();
+    expect(screen.getByLabelText("标注归属")).toBeTruthy();
+    expect(screen.getByRole("slider", { name: "切片进度" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "标记当前帧" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "保存关键帧" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("pins ownership across runs and blocks nonmembers without falling back globally", async () => {
     const rendered = render(<OwnedFixture />);
     await screen.findByText("尚未保存阶段标注");
@@ -192,7 +207,8 @@ describe("stage keyframe editor", () => {
     await openEditor();
     fireEvent.click(screen.getByRole("button", { name: "跳转成功帧" }));
     expect((screen.getByRole("button", { name: "标记当前帧" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/step 8（自动锚点/)).toBeTruthy();
+    expect((screen.getByLabelText("Observation step") as HTMLInputElement).value).toBe("8");
+    expect(screen.queryByText(/连续.*步成功确认/)).toBeNull();
     expect((screen.getByRole("slider") as HTMLInputElement).max).toBe("10");
     fireEvent.change(screen.getByRole("slider"), { target: { value: "7" } });
     expect((screen.getByRole("button", { name: "标记当前帧" }) as HTMLButtonElement).disabled).toBe(false);

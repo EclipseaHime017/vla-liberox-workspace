@@ -160,7 +160,6 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange,
         </select></label>
         {datasetId && <button disabled={saving || loading || unavailable || !annotation}
           onClick={() => void save(true)}>继承全局关键帧</button>}
-        <span className="field-hint">选择在后续轨迹中保持，不随上方“数据来源”切换。保存只影响此标注归属。</span>
       </div>}
       {unavailable && <p className="error-banner">当前轨迹不属于已固定的标注数据集，请选择其他标注归属后再编辑。</p>}
       {annotation?.origin && annotation.origin !== "global" && <p className="field-hint">
@@ -171,7 +170,6 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange,
       {(error || annotation?.error) && <div className="error-banner"><span>{error || annotation?.error}</span>
         <button onClick={reload} disabled={loading || saving}>重新加载标注</button></div>}
       {loading ? <p>正在读取时间轴与标记，不加载评价模型。</p> : !unavailable && annotation && <>
-        <p className="field-hint">仅标记原始 observation step，不裁剪轨迹。首帧、接管前缀与成功后的记录均保留。</p>
         {!videoReady && <p role="status">{videoRef.current ? "等待视频元数据，加载后可逐帧定位。" : "没有主视角视频，不能进行可视化切片。"}</p>}
         <fieldset disabled={saving || !videoReady} className="stage-controls">
           <label>切片进度<input aria-label="切片进度" type="range" min={0} max={annotation.action_count} step={1}
@@ -193,14 +191,11 @@ export function StageAnnotationPanel({ runId, videoRef, onSaved, onDirtyChange,
           </select></label><button onClick={putKeyframe} disabled={!canMark}>{selected ? "更新当前关键帧" : "标记当前帧"}</button>
             {selected && <button onClick={() => setKeyframes((current) => current.filter((item) => item.step !== step))}>删除当前标记</button>}</div>
         </fieldset>
-        <div className="stage-toolbar">
-          <span>连续 {annotation.success_consecutive_steps} 步成功确认：{annotation.success_step == null ? "未确认成功" : `step ${annotation.success_step}（自动锚点，不计入 positive 数量）`}</span></div>
-        <ul className="stage-keyframes">{keyframes.map((item, index) => <li key={`${item.step}-${index}`}>
+        {keyframes.length > 0 && <ul className="stage-keyframes">{keyframes.map((item, index) => <li key={`${item.step}-${index}`}>
           <button className={`stage-keyframe ${item.kind}`} disabled={saving || !videoReady} onClick={() => { setKind(item.kind); seek(item.step); }}>
             {item.kind} · step {item.step} · {annotation.time_seconds[item.step] == null ? "超出当前轨迹" : `${annotation.time_seconds[item.step].toFixed(3)} s`}</button>
           <button disabled={saving} aria-label={`删除帧 ${item.step}`} onClick={() => setKeyframes((current) => current.filter((entry) => entry.step !== item.step))}>删除</button>
-        </li>)}</ul>
-        {!keyframes.length && <p className="field-hint">尚无手动关键帧。失败轨迹可保存空标注，阶段奖励保持 -1。</p>}
+        </li>)}</ul>}
         <div className="stage-toolbar"><button className="primary" onClick={() => void save()}
           disabled={saving || (!dirty && annotation.status === "ready")}>{saving ? "正在保存关键帧…" : "保存关键帧"}</button></div>
       </>}

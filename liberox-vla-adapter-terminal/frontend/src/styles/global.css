@@ -272,7 +272,7 @@ td code { font-size: 11px; }
 .dataset-reward-config .parameter-grid.final-reward-parameters { display: flex; flex-wrap: nowrap; gap: 14px; overflow-x: auto; padding-bottom: 8px; }
 .final-reward-parameters > label { flex: 1 0 130px; }
 .final-reward-parameters > label:first-child { flex-basis: 170px; }
-.dataset-reward-config .parameter-grid label, .detail-evaluation-context label { display: grid; gap: 8px; min-width: 0; color: var(--muted); font-size: 15px; line-height: 1.4; }
+.dataset-reward-config .parameter-grid label, .detail-source-select { display: grid; gap: 8px; min-width: 0; color: var(--muted); font-size: 15px; line-height: 1.4; }
 .dataset-reward-config input, .dataset-reward-config select, .detail-evaluation-context select, .dataset-member-browser select { width: 100%; min-width: 0; min-height: 44px; padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: 12px; background: #fff; color: var(--text); font-family: inherit; font-size: 15px; line-height: 1.4; box-sizing: border-box; }
 .dataset-reward-config input:disabled, .dataset-reward-config select:disabled { background: var(--surface-muted); color: var(--muted); }
 .dataset-reward-config input:focus-visible, .dataset-reward-config select:focus-visible, .detail-evaluation-context select:focus-visible { outline: 3px solid var(--blue-soft); border-color: var(--blue); }
@@ -291,10 +291,12 @@ td code { font-size: 11px; }
 .reward-parameter-chips > span { display: inline-flex; align-items: center; padding: 6px 10px; border-radius: 9px; background: var(--blue-soft); color: var(--text); font-size: 13px; line-height: 1.4; }
 .evaluation-config-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
 .evaluation-config-actions button { min-width: 128px; min-height: 44px; font-size: 15px; }
-.detail-evaluation-context { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); align-items: start; gap: 24px; padding: 22px; border-radius: 16px; }
-.detail-evaluation-context > div { display: grid; gap: 12px; min-width: 0; }
-.detail-evaluation-context strong { font-size: 16px; }
-.detail-evaluation-context small { color: var(--muted); font-size: 14px; line-height: 1.5; }
+.detail-evaluation-context { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+.detail-context-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; }
+.detail-source-select { width: 260px; max-width: 100%; }
+.detail-evaluation-results { display: grid; gap: 6px; min-width: 0; }
+.detail-evaluation-context .evaluation-current-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin: 0; }
+.detail-evaluation-context .reward-parameter-chips > span { padding: 4px 8px; }
 .dataset-integrity-error { grid-column: 1 / -1; color: var(--danger) !important; }
 .job-monitor-card { min-height: 310px; display: flex; flex-direction: column; }
 .job-status-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 9px 18px; padding: 11px 15px; border-bottom: 1px solid var(--line); font-size: 10px; color: var(--muted); }
@@ -484,7 +486,7 @@ td code { font-size: 11px; }
   .evaluation-filters { grid-template-columns: repeat(3, 1fr); }
 }
 @media (max-width: 720px) {
-  .dataset-reward-config .parameter-grid, .detail-evaluation-context { grid-template-columns: minmax(0, 1fr); }
+  .dataset-reward-config .parameter-grid { grid-template-columns: minmax(0, 1fr); }
   .dataset-reward-config { padding: 16px; }
   .app-shell { display: block; }
   .app-sidebar { position: fixed; z-index: 20; left: 0; right: 0; top: auto; bottom: 0; width: 100%; height: 62px; padding: 7px; border: 0; border-top: 1px solid var(--line); }
@@ -520,12 +522,19 @@ td code { font-size: 11px; }
 .table-pagination select { width: auto; padding: 6px 28px 6px 9px; }
 .table-link { border: 0; background: transparent; color: var(--accent); padding: 4px; }
 
-.detail-heading { display: flex; align-items: end; justify-content: space-between; }
+.trajectory-overview { display: grid; gap: 14px; padding: 18px 20px; }
+.trajectory-overview-main { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; }
+.trajectory-identity { flex: 1 1 340px; min-width: 0; display: grid; gap: 6px; }
+.trajectory-identity-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.trajectory-identity h1 { font-size: 22px; line-height: 1.25; overflow-wrap: anywhere; }
+.trajectory-identity p { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.trajectory-identity-line > span:not(.badge) { color: var(--muted); font-size: 13px; }
+.trajectory-overview-main > button { flex-shrink: 0; }
 .detail-summary { display: flex; align-items: center; gap: 18px; padding: 15px 18px; }
-.test-label-switch { margin-left: auto; display: flex; align-items: center; gap: 9px; }
-.test-label-switch input { width: 18px; height: 18px; accent-color: var(--blue); }
+.test-label-switch { display: flex; align-items: center; gap: 9px; font-size: 14px; }
+.test-label-switch input { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--blue); }
 .test-label-switch span { display: grid; gap: 2px; }
-.test-label-switch small { color: var(--muted); }
+.test-label-switch small { max-width: 320px; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .trajectory-video { padding: 18px; }
 .trajectory-video h2 { margin: 0 0 14px; font-size: 18px; }
 .trajectory-video video { display: block; width: 100%; max-height: 560px; border-radius: 14px; background: #111; }
@@ -537,7 +546,6 @@ td code { font-size: 11px; }
 .stage-annotation-owner { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
 .stage-annotation-owner label { display: grid; gap: 8px; width: min(100%, 360px); }
 .stage-annotation-owner select { width: 100%; border: 1px solid var(--line); border-radius: 16px; padding: 12px 16px; font: inherit; background: var(--surface, white); }
-.stage-annotation-owner .field-hint { flex-basis: 100%; }
 .stage-controls { min-width: 0; border: 0; padding: 0; margin: 0; }
 .stage-controls > label { display: grid; gap: 8px; font-size: 13px; }
 .stage-controls input[type="range"] { width: 100%; margin: 0; }
