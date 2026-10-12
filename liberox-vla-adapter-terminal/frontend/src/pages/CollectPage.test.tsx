@@ -70,11 +70,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("collection controller integration", () => {
-  it("uses model execution defaults when switching without changing training horizon", async () => {
+  it("uses variant execution defaults when switching without changing training horizon", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     const policies = [
       { policy_id: "base", label: "Base", inference: { open_loop_steps: 8, max_open_loop_steps: 8 }, io: { native_action_horizon: 8, replay_horizon: 8 } },
-      { policy_id: "pi05", label: "Pi policy", inference: { open_loop_steps: 5, max_open_loop_steps: 10 }, io: { native_action_horizon: 10, replay_horizon: 8 } },
+      { policy_id: "pi05", family: "pi05", label: "Pi policy", inference: { open_loop_steps: 5, max_open_loop_steps: 10 }, io: { native_action_horizon: 10, replay_horizon: 8 } },
+      { policy_id: "pi05-liberox", family: "pi05", label: "Pi LIBERO-X", inference: { open_loop_steps: 7, max_open_loop_steps: 10 }, io: { native_action_horizon: 10, replay_horizon: 8 } },
     ];
     let draft = { id: "draft", task_id: "task", policy_id: "base", policy_label: "Base",
       max_steps: 300, open_loop_steps: 8, seed: 0, init_state_index: 0, disabled_policy_cameras: [],
@@ -111,6 +112,11 @@ describe("collection controller integration", () => {
       method: "PATCH", body: JSON.stringify({ seed: 7 }),
     }));
     expect(steps.value).toBe("10");
+    fireEvent.change(model, { target: { value: "pi05-liberox" } });
+    await waitFor(() => expect(steps.value).toBe("7"));
+    expect(steps.max).toBe("10");
+    fireEvent.change(model, { target: { value: "pi05" } });
+    await waitFor(() => expect(steps.value).toBe("5"));
     fireEvent.change(model, { target: { value: "base" } });
     await waitFor(() => expect(steps.value).toBe("8"));
     expect(steps.max).toBe("8");

@@ -1786,7 +1786,10 @@ class SimulationManager:
                         sample = controller.arm(*arm_args, gripper=1. if gripper > 0 else -1.)
                         follower.check_aligned(sample.joint_positions)
                     else:
-                        self._arm_spacemouse(record, gripper=1. if gripper > 0 else -1.)
+                        gripper = spacemouse_mapper.prepare_takeover(
+                            recorder.env_actions, control_hz=recorder.control_hz,
+                        )
+                        self._arm_spacemouse(record, gripper=gripper)
                     record.controller_status = "armed"
                     record.controller_connected = True
                     record.controller_stale = False

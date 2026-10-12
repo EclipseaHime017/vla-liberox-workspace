@@ -59,7 +59,6 @@ class ModelDefinition:
     defaults: dict
     contract: dict
     config_path: Path
-    inference: dict
 
     @property
     def backend(self):
@@ -100,7 +99,7 @@ def load_registry(path: Path = REGISTRY_PATH):
         family_path = (path.parent / filename).resolve()
         entry = yaml.load(family_path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
         required = {"schema_version", "model_name", "label", "adapter", "default_variant",
-                    "backbone_modes", "defaults", "io", "architecture", "variants", "inference"}
+                    "backbone_modes", "defaults", "io", "architecture", "variants"}
         if (not isinstance(entry, dict) or set(entry) != required or entry["schema_version"] != 1
                 or entry["model_name"] != identifier or entry["adapter"] not in ADAPTERS
                 or identifier != entry["adapter"]):
@@ -116,9 +115,8 @@ def load_registry(path: Path = REGISTRY_PATH):
         if not isinstance(entry["label"], str) or not entry["label"].strip():
             raise ValueError("Model family label must be non-empty")
         contract = validate_contract({key: entry[key] for key in ("io", "architecture")}, identifier)
-        inference = validate_inference(entry["inference"], contract)
         families[identifier] = ModelDefinition(identifier, entry["label"], entry["adapter"], entry["default_variant"],
-                                                tuple(modes), entry["defaults"], contract, family_path, inference)
+                                                tuple(modes), entry["defaults"], contract, family_path)
         if not isinstance(entry["variants"], dict) or not entry["variants"]:
             raise ValueError(f"Model {identifier} requires a non-empty variants mapping")
         for base_id, base_entry in entry["variants"].items():
@@ -132,13 +130,13 @@ def load_registry(path: Path = REGISTRY_PATH):
 
 
 def _parse_base(identifier: str, entry: dict, family: ModelDefinition, path: Path) -> BaseModel:
-    required = {"label", "source", "revision", "checkpoint", "stats_key"}
-    if not isinstance(entry, dict) or not required <= entry.keys() or entry.keys() - required - {"io", "architecture", "inference"}:
+    required = {"label", "source", "revision", "checkpoint", "stats_key", "inference"}
+    if not isinstance(entry, dict) or not required <= entry.keys() or entry.keys() - required - {"io", "architecture"}:
         raise ValueError(f"Invalid base registration: {identifier}")
     if (not isinstance(identifier, str) or identifier in {".", ".."}
             or re.fullmatch(r"[A-Za-z0-9_.-]+", identifier) is None):
         raise ValueError("Invalid base ID")
-    if any(not isinstance(entry[key], str) or not entry[key].strip() for key in required - {"revision"}):
+    if any(not isinstance(entry[key], str) or not entry[key].strip() for key in required - {"revision", "inference"}):
         raise ValueError("Base registration fields must be non-empty strings")
     revision = entry["revision"]
     if revision is not None and re.fullmatch(r"[0-9a-f]{40}", str(revision)) is None:
@@ -153,14 +151,14 @@ def _parse_base(identifier: str, entry: dict, family: ModelDefinition, path: Pat
                 raise ValueError(f"Base {section} must be a mapping")
             contract[section].update(entry[section])
     contract = validate_contract(contract, family.id)
-    inference = validate_inference(entry.get("inference", family.inference), contract)
-    return BaseModel(identifier, family=family.id, **{key: entry[key] for key in required - {"checkpoint"}},
+    inference = validate_inference(entry["inference"], contract)
+    return BaseModel(identifier, family=family.id, **{key: entry[key] for key in required - {"checkpoint", "inference"}},
                      checkpoint=checkpoint, contract=contract, inference=inference)
 
 
 def validate_inference(value: dict, contract: dict) -> dict:
     if not isinstance(value, dict) or set(value) != {"open_loop_steps"}:
-        raise ValueError("Model inference requires open_loop_steps")
+        raise ValueError("Variant inference requires open_loop_steps")
     validate_open_loop_steps(value["open_loop_steps"], contract["io"]["native_action_horizon"])
     return dict(value)
 
@@ -203,7 +201,7 @@ def registered_defaults(family: str, base_id: str | None = None) -> dict:
 
 
 def execution_config(settings: dict, *, is_overlay: bool = False) -> dict:
-    """Execution defaults do not change weights or the training configuration."""
+    """Variant execution defaults do not change weights or training configuration."""
     io = model_contract(settings)["io"]
     family = MODEL_FAMILIES[settings.get("family", "vla_adapter")]
     base = base_model(settings.get("base_id", family.default_base))

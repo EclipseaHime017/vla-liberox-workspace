@@ -34,6 +34,71 @@ def test_world_is_unchanged_and_identity_tool_has_same_action():
     assert state.forwards == 1  # Neutral/stale doesn't invoke physics.
 
 
+class PandaGripper:
+    dof = 1
+    speed = .01
+
+    def format_action(self, action):
+        self.current_action = np.clip(
+            self.current_action + np.array([-1., 1.]) * self.speed * np.sign(action), -1., 1.)
+        return self.current_action
+
+
+def takeover_mapper():
+    mapper, _ = mapper_for(np.eye(3))
+    mapper.env.model_timestep = .002
+    robot = mapper.robot
+    robot.gripper = PandaGripper()
+    robot.gripper.current_action = np.zeros(1)
+    calls = []
+    def update(*, force):
+        assert force
+        calls.append("update")
+        robot.controller.joint_pos = np.arange(7, dtype=float)
+    def reset(joints):
+        assert calls == ["update"]
+        calls.append("reset")
+        robot.controller.initial_joint = joints
+    def grip(gripper, command):
+        assert calls == ["update", "reset"]
+        robot.ctrl = np.array([.02, -.02]) + .02 * gripper.format_action(command)
+    robot.controller.update = update
+    robot.controller.update_initial_joints = reset
+    robot.grip_action = grip
+    return mapper
+
+
+@pytest.mark.parametrize("commands,hz,target,latch", [
+    ([], 20., [0., 0.], -1.),
+    ([1.] * 6, 20., [-1., 1.], 1.),
+    ([-1.] * 6, 20., [1., -1.], -1.),
+    ([1.] * 6 + [-1., 0.], 20., [-.75, .75], -1.),
+    ([1.] * 6 + [0.], 20., [-1., 1.], 1.),
+    ([1.] * 6 + [-1.], 10., [-.5, .5], -1.),
+])
+def test_takeover_restores_gripper_accumulator_and_pose_without_stepping(commands, hz, target, latch):
+    mapper = takeover_mapper()
+    actions = np.zeros((len(commands), 7))
+    actions[:, 6] = commands
+    original = actions.copy()
+    assert mapper.prepare_takeover(actions, control_hz=hz) == latch
+    np.testing.assert_allclose(mapper.robot.gripper.current_action, target, atol=1e-12)
+    np.testing.assert_allclose(mapper.robot.ctrl, np.array([.02, -.02]) + .02 * np.array(target), atol=1e-12)
+    np.testing.assert_array_equal(mapper.robot.controller.initial_joint, np.arange(7))
+    assert not np.shares_memory(mapper.robot.controller.initial_joint, mapper.robot.controller.joint_pos)
+    np.testing.assert_array_equal(actions, original)
+
+
+@pytest.mark.parametrize("actions,hz", [
+    ([[]], 20.), ([[0.] * 6], 20.), ([[float("nan")] * 7], 20.), ([], 0.), ([], 1000.),
+])
+def test_invalid_takeover_history_does_not_modify_controller(actions, hz):
+    mapper = takeover_mapper()
+    with pytest.raises(ValueError):
+        mapper.prepare_takeover(actions, control_hz=hz)
+    assert not hasattr(mapper.robot.controller, "initial_joint")
+
+
 @pytest.mark.parametrize("axis", range(6))
 def test_tool_axes_use_current_orientation_and_real_osc_scales(axis):
     rotation = Rotation.from_euler("xyz", [35, -42, 90], degrees=True).as_matrix()

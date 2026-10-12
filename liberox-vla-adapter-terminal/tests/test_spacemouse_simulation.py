@@ -42,6 +42,7 @@ def test_exclusive_commands_step_real_osc_and_save_complete_partial_trajectory(t
     recorder = TrajectoryRecorder(control_hz=20., capture_images=False)
     try:
         initial = direct.restore_state(env, state)
+        mapper.prepare_takeover([], control_hz=20.)
         recorder.record_initial(env, initial)
 
         def query(step):
@@ -93,5 +94,61 @@ def test_exclusive_commands_step_real_osc_and_save_complete_partial_trajectory(t
         with np.load(paths["trajectory_observations"]) as images:
             assert images["agentview_image"].shape == images["wrist_image"].shape == (22, 64, 64, 3)
         assert not any(name.startswith("prismatic") for name in sys.modules)
+    finally:
+        env.close()
+
+
+@pytest.mark.skipif(os.environ.get("RUN_MUJOCO_SMOKE") != "1", reason="opt-in MuJoCo smoke test")
+def test_restored_takeover_does_not_reopen_gripper_or_reuse_initial_osc_goal(monkeypatch):
+    import eval_pickplace_direct as direct
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(root / "third_party" / "LIBERO-X"))
+    runtime = direct.load_runtime()
+    bddl, init_path = direct.resolve_task(root / "third_party" / "LIBERO-X", "LEVEL1",
+        "EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove")
+    env = direct.make_env(runtime, bddl, 32, 100, 20, 0, "vla_views", 64, 32, True)
+    try:
+        direct.restore_state(env, direct.load_initial_states(runtime, init_path)[0])
+        actions = [np.array([0., 0., 0., 0., 0., .3, 1.])] * 12
+        actions += [np.array([0., 0., 0., 0., 0., 0., 1.])] * 10
+        for action in actions:
+            env.step(action)
+        robot = env.env.robots[0]
+        saved = np.asarray(env.get_sim_state()).copy()
+        target = robot.gripper.current_action.copy()
+        robot.sim.forward()
+        orientation = robot.sim.data.get_site_xmat(robot.controller.eef_name).copy()
+        fingers = robot._ref_gripper_joint_pos_indexes
+        original_gap = np.ptp(robot.sim.data.qpos[fingers])
+
+        measurements = []
+        for repaired in (False, True):
+            env.reset()
+            direct.restore_state(env, saved)
+            robot = env.env.robots[0]
+            if repaired:
+                mapper = SpaceMouseActionMapper(env)
+                assert mapper.prepare_takeover(actions, control_hz=20.) == 1.
+                np.testing.assert_array_equal(env.get_sim_state(), saved)
+                np.testing.assert_allclose(robot.gripper.current_action, target, atol=1e-12)
+                np.testing.assert_allclose(robot.controller.goal_ori, orientation, atol=1e-12)
+                np.testing.assert_allclose(robot.controller.goal_pos, robot.controller.ee_pos)
+                np.testing.assert_array_equal(robot.controller.initial_joint, robot.controller.joint_pos)
+            else:
+                assert np.linalg.norm(robot.controller.goal_ori - orientation) > .1
+                np.testing.assert_array_equal(robot.gripper.current_action, [0.])
+            env.step(actions[-1])  # Neutral SpaceMouse motion, keep closing.
+            robot.sim.forward()
+            measurements.append((np.ptp(robot.sim.data.qpos[fingers]),
+                np.linalg.norm(robot.sim.data.get_site_xmat(robot.controller.eef_name) - orientation)))
+
+        old_gap, old_rotation = measurements[0]
+        new_gap, new_rotation = measurements[1]
+        print(f"takeover finger gap: {original_gap:.6f} -> old {old_gap:.6f}, fixed {new_gap:.6f}; "
+              f"rotation matrix change: old {old_rotation:.6f}, fixed {new_rotation:.6f}")
+        assert old_gap > original_gap + .005
+        assert new_gap < original_gap + .001
+        assert new_rotation < old_rotation * .5
     finally:
         env.close()

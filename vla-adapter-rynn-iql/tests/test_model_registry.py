@@ -25,9 +25,11 @@ def test_registry_is_lightweight_and_drives_every_base():
         assert base_models.model_contract(settings) == base.contract
 
 
-@pytest.mark.parametrize("family,default,maximum", [("vla_adapter", 8, 8), ("pi05", 5, 10)])
-def test_execution_steps_are_separate_from_prediction_and_training(family, default, maximum):
-    settings = models.model_config({"model": {"family": family}})
+@pytest.mark.parametrize("base_id,default,maximum", [
+    ("base", 8, 8), ("pi05-libero-base", 5, 10), ("pi05-liberox-base", 5, 10),
+])
+def test_execution_steps_are_separate_from_prediction_and_training(base_id, default, maximum):
+    settings = models.base_model_config(base_id)
     assert base_models.execution_config(settings) == {
         "open_loop_steps": default, "max_open_loop_steps": maximum,
     }
@@ -40,18 +42,19 @@ def test_execution_steps_are_separate_from_prediction_and_training(family, defau
 
 
 @pytest.mark.parametrize("value", [True, 0, -1, 11, 2.5, "5"])
-def test_registry_rejects_invalid_execution_steps(tmp_path, value):
+@pytest.mark.parametrize("base_id", ["pi05-libero-base", "pi05-liberox-base"])
+def test_registry_rejects_invalid_execution_steps(tmp_path, base_id, value):
     raw = family_files()
-    raw["pi05"]["inference"]["open_loop_steps"] = value
+    raw["pi05"]["variants"][base_id]["inference"]["open_loop_steps"] = value
     with pytest.raises(ValueError, match="open_loop_steps"):
         base_models.load_registry(write_registry(tmp_path, raw))
 
 
-def test_variant_can_override_execution_defaults_without_changing_weight_identity(tmp_path, monkeypatch):
+def test_variant_owns_execution_defaults_without_changing_weight_identity(tmp_path, monkeypatch):
     raw = family_files()
     raw["pi05"]["variants"]["pi05-libero-base"]["inference"] = {"open_loop_steps": 10}
-    families, bases = base_models.load_registry(write_registry(tmp_path, raw))
-    assert families["pi05"].inference == {"open_loop_steps": 5}
+    _, bases = base_models.load_registry(write_registry(tmp_path, raw))
+    assert bases["pi05-liberox-base"].inference == {"open_loop_steps": 5}
     base = bases["pi05-libero-base"]
     assert base.inference == {"open_loop_steps": 10}
     original = base_models.BASE_MODELS[base.id]
@@ -64,15 +67,38 @@ def test_variant_can_override_execution_defaults_without_changing_weight_identit
     assert base_models.execution_config(settings, is_overlay=True)["open_loop_steps"] == 8
 
 
-def test_execution_limit_follows_contract_not_a_family_constant(monkeypatch):
-    base = base_models.BASE_MODELS["pi05-libero-base"]
-    contract = copy.deepcopy(base.contract)
-    contract["io"]["native_action_horizon"] = 50
-    monkeypatch.setitem(base_models.BASE_MODELS, base.id,
-                        replace(base, contract=contract, inference={"open_loop_steps": 25}))
+def test_execution_limit_follows_variant_contract_not_a_family_constant(tmp_path, monkeypatch):
+    raw = family_files()
+    raw["pi05"]["variants"]["pi05-liberox-base"].update(
+        io={"native_action_horizon": 50}, inference={"open_loop_steps": 25})
+    _, bases = base_models.load_registry(write_registry(tmp_path, raw))
+    base = bases["pi05-liberox-base"]
+    monkeypatch.setitem(base_models.BASE_MODELS, base.id, base)
     settings = models.base_model_config(base.id)
     assert base_models.execution_config(settings) == {"open_loop_steps": 25, "max_open_loop_steps": 50}
     assert base_models.resolve_open_loop_steps(settings, 50) == 50
+    assert base_models.execution_config(models.base_model_config("pi05-libero-base")) == {
+        "open_loop_steps": 5, "max_open_loop_steps": 10,
+    }
+    assert base_models.execution_config(settings, is_overlay=True) == {
+        "open_loop_steps": 8, "max_open_loop_steps": 8,
+    }
+
+
+@pytest.mark.parametrize("change", [
+    lambda raw: raw["pi05"].update(inference={"open_loop_steps": 5}),
+    lambda raw: raw["pi05"]["variants"]["pi05-libero-base"].pop("inference"),
+    lambda raw: raw["pi05"]["variants"]["pi05-liberox-base"].update(inference={}),
+    lambda raw: raw["pi05"]["variants"]["pi05-liberox-base"].update(inference=None),
+    lambda raw: raw["pi05"]["variants"]["pi05-liberox-base"]["inference"].update(extra=1),
+    lambda raw: raw["pi05"]["variants"]["pi05-liberox-base"].update(
+        io={"native_action_horizon": 8}, inference={"open_loop_steps": 9}),
+])
+def test_execution_configuration_is_required_per_variant(tmp_path, change):
+    raw = family_files()
+    change(raw)
+    with pytest.raises(ValueError):
+        base_models.load_registry(write_registry(tmp_path, raw))
 
 
 def family_files():
@@ -136,12 +162,14 @@ def test_new_base_inherits_family_without_vendor_or_business_registration(tmp_pa
     raw["vla_adapter"]["variants"]["new-variant"] = {
         "label": "New variant", "source": "publisher/weights", "revision": None,
         "checkpoint": "./weights", "stats_key": "new_stats",
+        "inference": {"open_loop_steps": 4},
     }
     path = write_registry(tmp_path / "configs/models", raw)
     families, bases = base_models.load_registry(path)
     added = bases["new-variant"]
     assert added.family == "vla_adapter"
     assert added.contract == families[added.family].contract
+    assert added.inference == {"open_loop_steps": 4}
     assert added.checkpoint == str(path.parent / "weights")
     monkeypatch.setitem(base_models.BASE_MODELS, added.id, added)
     settings = models.base_model_config(added.id)

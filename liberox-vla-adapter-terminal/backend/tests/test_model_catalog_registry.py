@@ -10,6 +10,21 @@ from test_policy_overlay import _overlay, BASE, STATS
 from test_pi05_policy import checkpoint
 
 
+def test_catalog_exposes_independent_variant_execution_defaults(tmp_path, monkeypatch):
+    registry = model_module("base_models")
+    definitions = {}
+    for identifier, steps in (("pi05-libero-base", 5), ("pi05-liberox-base", 9)):
+        base = registry.BASE_MODELS[identifier]
+        monkeypatch.setitem(registry.BASE_MODELS, identifier,
+                            replace(base, inference={"open_loop_steps": steps}))
+        definitions[identifier] = model_module("models").base_model_config(identifier)
+    catalog = PolicyCatalog(tmp_path / "policies", base_models=definitions)
+    policies = {entry["policy_id"]: entry for entry in catalog.list_policies()}
+    for identifier, steps in (("pi05-libero-base", 5), ("pi05-liberox-base", 9)):
+        assert policies[identifier]["inference"] == {"open_loop_steps": steps, "max_open_loop_steps": 10}
+        assert catalog.entry(identifier).resolve_open_loop_steps(None) == steps
+
+
 def test_multiple_vla_bases_resolve_their_own_assets(tmp_path, monkeypatch):
     registry = model_module("base_models")
     definitions = {}
