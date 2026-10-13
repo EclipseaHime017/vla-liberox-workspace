@@ -99,7 +99,7 @@ describe("evaluation page", () => {
   it("loads per-variant execution defaults and preserves manual edits for the same variant", async () => {
     mocks.getBootstrap.mockResolvedValue({ ...bootstrap, policy_catalog: [policy,
       { ...policy, policy_id: "pi05", family: "pi05", label: "Pi policy", inference: { open_loop_steps: 5, max_open_loop_steps: 10 } },
-      { ...policy, policy_id: "pi05-liberox", family: "pi05", label: "Pi LIBERO-X", inference: { open_loop_steps: 7, max_open_loop_steps: 10 } },
+      { ...policy, policy_id: "pi05-liberox", family: "pi05", label: "Pi LIBERO-X", inference: { open_loop_steps: 10, max_open_loop_steps: 10 } },
     ] });
     render(<EvaluationPage />);
     const model = await screen.findByLabelText("测试模型");
@@ -116,7 +116,7 @@ describe("evaluation page", () => {
       ...config, policy_id: "pi05", open_loop_steps: 10, trials: 20,
     }));
     fireEvent.change(model, { target: { value: "pi05-liberox" } });
-    expect(steps.value).toBe("7");
+    expect(steps.value).toBe("10");
     expect(steps.max).toBe("10");
     fireEvent.change(model, { target: { value: "pi05" } });
     expect(steps.value).toBe("5");

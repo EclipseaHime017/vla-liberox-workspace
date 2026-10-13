@@ -41,4 +41,4 @@ variants:
     checkpoint: ../../../models/pi05_liberox_torch
     stats_key: meituan/LIBERO-X
     inference:
-      open_loop_steps: 5
+      open_loop_steps: 10

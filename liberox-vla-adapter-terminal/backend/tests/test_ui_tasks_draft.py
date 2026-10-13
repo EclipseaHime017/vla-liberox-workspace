@@ -109,7 +109,7 @@ class _PolicyCatalog:
         pass
 
     def entry(self, policy_id):
-        if policy_id not in {"base", "overlay", "pi05-libero-base"}:
+        if policy_id not in {"base", "overlay", "pi05-libero-base", "pi05-liberox-base", "pi05-liberox-trained"}:
             raise ValueError(policy_id)
         return SimpleNamespace(
             policy_id=policy_id,
@@ -119,8 +119,8 @@ class _PolicyCatalog:
             compatibility_sha256=None if policy_id == "base" else "compat",
             content_sha256=policy_id + "-weights",
             resolve_open_loop_steps=lambda value=None: resolve_open_loop_steps(
-                {"family": "pi05"} if policy_id == "pi05-libero-base" else {}, value,
-                is_overlay=policy_id == "overlay",
+                {"family": "pi05", "base_id": "pi05-liberox-base" if "liberox" in policy_id
+                 else "pi05-libero-base"} if policy_id.startswith("pi05") else {}, value,
             ),
         )
 
@@ -145,6 +145,9 @@ def test_model_switch_applies_defaults_without_resetting_same_model_edits(tmp_pa
     with pytest.raises(ValueError, match=r"\[1, 8\]"):
         manager.update_draft(policy_id="base", open_loop_steps=10)
     assert manager.draft.policy_id == "pi05-libero-base"
+    assert manager.update_draft(policy_id="pi05-liberox-base")["open_loop_steps"] == 10
+    assert manager.update_draft(policy_id="pi05-liberox-trained")["open_loop_steps"] == 10
+    assert manager.update_draft(open_loop_steps=10)["open_loop_steps"] == 10
     assert manager.update_draft(policy_id="base")["open_loop_steps"] == 8
 
 

@@ -179,7 +179,8 @@ def test_aggregation_counts_errors_in_denominator_and_groups_results():
 
 
 @pytest.mark.parametrize("base_id", ["base", "pi05-libero-base", "pi05-liberox-base"])
-def test_effective_yaml_is_strict_and_schedule_is_frozen(tmp_path: Path, base_id):
+@pytest.mark.parametrize("trained", [False, True])
+def test_effective_yaml_is_strict_and_schedule_is_frozen(tmp_path: Path, base_id, trained):
     bddl = tmp_path / "task.bddl"
     init = tmp_path / "task.init"
     bddl.write_text("task", encoding="utf-8")
@@ -219,9 +220,24 @@ def test_effective_yaml_is_strict_and_schedule_is_frozen(tmp_path: Path, base_id
         payload["policy_snapshot"].update(policy_id=base_id, family="pi05", model_config=settings,
                                           base_checkpoint=settings["base_checkpoint"], stats_key=settings["stats_key"],
                                           base_revision="b" * 64, actor=None, base_identity=None)
+        payload["config"]["open_loop_steps"] = 10
+    if trained:
+        policy = payload["policy_snapshot"]
+        policy.update(policy_id="trained", training_step=1, compatibility_sha256="c" * 64)
+        artifacts = ("actor", "base_identity") if policy["family"] == "pi05" else ("action_head", "proprio_projector")
+        for name in ("manifest", *artifacts):
+            artifact = tmp_path / name
+            artifact.write_text("test artifact")
+            policy[name] = str(artifact)
     path = tmp_path / "effective.yaml"
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     assert load_effective_config(path)["evaluation_id"] == "eval-1"
+    maximum = payload["config"]["open_loop_steps"]
+    payload["config"]["open_loop_steps"] = maximum + 1
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="open_loop_steps"):
+        load_effective_config(path)
+    payload["config"]["open_loop_steps"] = maximum
     payload["config"]["trials"] = 1
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="Frozen schedule"):

@@ -158,15 +158,17 @@ def test_preview_uses_task_bounds_and_returns_frontend_shape(tmp_path: Path):
         )
 
 
-@pytest.mark.parametrize("family,default,maximum", [("vla_adapter", 8, 8), ("pi05", 5, 10)])
-def test_evaluation_resolves_and_validates_model_execution_steps(tmp_path, family, default, maximum):
+@pytest.mark.parametrize("base_id,default,maximum", [("base", 8, 8), ("pi05-libero-base", 5, 10),
+                                                    ("pi05-liberox-base", 10, 10)])
+@pytest.mark.parametrize("trained", [False, True])
+def test_evaluation_resolves_and_validates_model_execution_steps(tmp_path, base_id, default, maximum, trained):
     from dataclasses import replace
-    from vla_rynn_iql.models import model_config
+    from vla_rynn_iql.models import base_model_config
     service = make_service(tmp_path)
-    settings = model_config({"model": {"family": family}})
-    entry = replace(service.manager.policy_catalog.entry("base"), family=family,
+    settings = base_model_config(base_id)
+    entry = replace(service.manager.policy_catalog.entry("base"), family=settings["family"],
                     base_checkpoint=settings["base_checkpoint"], stats_key=settings["stats_key"],
-                    model_config=settings)
+                    model_config=settings, manifest=tmp_path / "policy.yaml" if trained else None)
     service.manager.policy_catalog.entry = lambda policy_id: entry
     result = service.preview_evaluation(evaluation_request(open_loop_steps=None))
     assert result["config"]["open_loop_steps"] == default

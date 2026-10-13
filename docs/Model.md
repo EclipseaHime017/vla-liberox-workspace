@@ -105,7 +105,7 @@ variants:
 | `revision` | 原始仓库的完整 40 位 commit；已知时填写，未知时为 `null` |
 | `checkpoint` | 该家族加载器读取的本地部署目录；支持在线加载的家族也可填写仓库 ID |
 | `stats_key` | 权重配套归一化数据中的实际标识，按模型发布说明或统计文件填写 |
-| `inference.open_loop_steps` | 每个 variant 必填的默认执行步数，家族层不配置；仿真和测试页面可调整，不能超过该权重的预测长度；后训练模型还受训练 chunk 长度限制 |
+| `inference.open_loop_steps` | 每个 variant 必填的默认执行步数，家族层不配置；子模型沿用父 variant 默认值，仿真和测试页面可调整，上限为该模型的预测长度，与训练 chunk 长度分开 |
 
 `../../../models/my-policy` 从家族 YAML 所在的 `configs/models/` 解析，指向工作区根目录下的 `models/my-policy/`。本地权重加载时另行计算文件内容身份，和来源仓库的 commit 分别记录。
 

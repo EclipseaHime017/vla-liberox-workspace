@@ -200,20 +200,18 @@ def registered_defaults(family: str, base_id: str | None = None) -> dict:
             "base_revision": revision}
 
 
-def execution_config(settings: dict, *, is_overlay: bool = False) -> dict:
+def execution_config(settings: dict) -> dict:
     """Variant execution defaults do not change weights or training configuration."""
     io = model_contract(settings)["io"]
     family = MODEL_FAMILIES[settings.get("family", "vla_adapter")]
     base = base_model(settings.get("base_id", family.default_base))
     maximum = io["native_action_horizon"]
-    if is_overlay:
-        # Existing exported actors only supervise the replay prefix.
-        maximum = min(maximum, io["replay_horizon"])
+    # Replay length defines training supervision, not the model's output shape.
     return {"open_loop_steps": min(base.inference["open_loop_steps"], maximum),
             "max_open_loop_steps": maximum}
 
 
-def resolve_open_loop_steps(settings: dict, value: int | None, *, is_overlay: bool = False) -> int:
-    inference = execution_config(settings, is_overlay=is_overlay)
+def resolve_open_loop_steps(settings: dict, value: int | None) -> int:
+    inference = execution_config(settings)
     return validate_open_loop_steps(inference["open_loop_steps"] if value is None else value,
                                     inference["max_open_loop_steps"])

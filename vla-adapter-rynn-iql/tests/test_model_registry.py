@@ -26,7 +26,7 @@ def test_registry_is_lightweight_and_drives_every_base():
 
 
 @pytest.mark.parametrize("base_id,default,maximum", [
-    ("base", 8, 8), ("pi05-libero-base", 5, 10), ("pi05-liberox-base", 5, 10),
+    ("base", 8, 8), ("pi05-libero-base", 5, 10), ("pi05-liberox-base", 10, 10),
 ])
 def test_execution_steps_are_separate_from_prediction_and_training(base_id, default, maximum):
     settings = models.base_model_config(base_id)
@@ -38,7 +38,6 @@ def test_execution_steps_are_separate_from_prediction_and_training(base_id, defa
     assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
     with pytest.raises(ValueError, match="open_loop_steps"):
         base_models.resolve_open_loop_steps(settings, maximum + 1)
-    assert base_models.execution_config(settings, is_overlay=True)["max_open_loop_steps"] == 8
 
 
 @pytest.mark.parametrize("value", [True, 0, -1, 11, 2.5, "5"])
@@ -54,7 +53,7 @@ def test_variant_owns_execution_defaults_without_changing_weight_identity(tmp_pa
     raw = family_files()
     raw["pi05"]["variants"]["pi05-libero-base"]["inference"] = {"open_loop_steps": 10}
     _, bases = base_models.load_registry(write_registry(tmp_path, raw))
-    assert bases["pi05-liberox-base"].inference == {"open_loop_steps": 5}
+    assert bases["pi05-liberox-base"].inference == {"open_loop_steps": 10}
     base = bases["pi05-libero-base"]
     assert base.inference == {"open_loop_steps": 10}
     original = base_models.BASE_MODELS[base.id]
@@ -64,7 +63,8 @@ def test_variant_owns_execution_defaults_without_changing_weight_identity(tmp_pa
     assert models.base_model_config(base.id) == settings
     assert parent_snapshot(settings, "a" * 64) == snapshot
     assert base_models.execution_config(settings)["open_loop_steps"] == 10
-    assert base_models.execution_config(settings, is_overlay=True)["open_loop_steps"] == 8
+    decoded, _ = decode_child(child("pi05"))
+    assert base_models.execution_config(decoded["model_config"])["open_loop_steps"] == 10
 
 
 def test_execution_limit_follows_variant_contract_not_a_family_constant(tmp_path, monkeypatch):
@@ -80,9 +80,21 @@ def test_execution_limit_follows_variant_contract_not_a_family_constant(tmp_path
     assert base_models.execution_config(models.base_model_config("pi05-libero-base")) == {
         "open_loop_steps": 5, "max_open_loop_steps": 10,
     }
-    assert base_models.execution_config(settings, is_overlay=True) == {
-        "open_loop_steps": 8, "max_open_loop_steps": 8,
+
+
+def test_child_execution_limit_uses_frozen_native_horizon_not_live_registry_or_replay(monkeypatch):
+    raw = child("pi05")
+    original = base_models.BASE_MODELS[raw["parent"]["id"]]
+    contract = copy.deepcopy(original.contract)
+    contract["io"]["native_action_horizon"] = 50
+    monkeypatch.setitem(base_models.BASE_MODELS, original.id,
+                        replace(original, contract=contract, inference={"open_loop_steps": 25}))
+    decoded, _ = decode_child(raw)
+    assert base_models.execution_config(decoded["model_config"]) == {
+        "open_loop_steps": 10, "max_open_loop_steps": 10,
     }
+    with pytest.raises(ValueError, match=r"\[1, 10\]"):
+        base_models.resolve_open_loop_steps(decoded["model_config"], 11)
 
 
 @pytest.mark.parametrize("change", [

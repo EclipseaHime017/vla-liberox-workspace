@@ -106,11 +106,11 @@ class PolicyEntry:
 
     @property
     def inference(self) -> dict:
-        return model_module("base_models").execution_config(self.settings, is_overlay=not self.is_base)
+        return model_module("base_models").execution_config(self.settings)
 
     def resolve_open_loop_steps(self, value: int | None = None) -> int:
         return model_module("base_models").resolve_open_loop_steps(
-            self.settings, value, is_overlay=not self.is_base,
+            self.settings, value,
         )
 
     def public(self) -> dict[str, Any]:

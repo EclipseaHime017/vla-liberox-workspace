@@ -472,7 +472,7 @@ def load_effective_config(path: Path) -> dict[str, Any]:
         raise ValueError("config.max_steps must be <= 10000")
     from ..policies.registry import model_module
     model_module("base_models").resolve_open_loop_steps(
-        policy.get("model_config", {}), config["open_loop_steps"], is_overlay=policy["manifest"] is not None,
+        policy.get("model_config", {}), config["open_loop_steps"],
     )
     if config["control_hz"] != 20:
         raise ValueError("config.control_hz must remain 20 Hz")
