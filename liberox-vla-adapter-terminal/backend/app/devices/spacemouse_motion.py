@@ -4,6 +4,11 @@ from __future__ import annotations
 import numpy as np
 
 
+# Operator +X forward, +Y left, +Z up -> Panda grip_site +Y, +X, -Z.
+# This fixed, right-handed basis follows the wrist without re-anchoring on arm.
+_PANDA_INPUT_TO_TOOL = np.array([[0., 1., 0.], [1., 0., 0.], [0., 0., -1.]])
+
+
 def validate_control_frame(frame: str) -> str:
     if frame not in ("world", "tool"):
         raise ValueError("SpaceMouse control_frame must be world or tool")
@@ -15,6 +20,7 @@ class SpaceMouseActionMapper:
 
     Rotation inputs are rotation vectors, not Euler angles. Both groups act at
     the same EEF origin; no camera offset or spatial-twist lever arm is applied.
+    Tool control aligns operator axes with the Panda grip_site before rotation.
     The control environment is read only at its own control boundary.
     """
 
@@ -86,8 +92,9 @@ class SpaceMouseActionMapper:
         rotation = np.asarray(self.robot.sim.data.get_site_xmat(self.eef_name)).reshape(3, 3)
         if not np.isfinite(rotation).all():
             raise ValueError("Invalid tool orientation")
+        operator_to_world = rotation @ _PANDA_INPUT_TO_TOOL
         physical = command[:6] * self.scale
-        world = np.r_[rotation @ physical[:3], rotation @ physical[3:]] / self.scale
+        world = np.r_[operator_to_world @ physical[:3], operator_to_world @ physical[3:]] / self.scale
         # Rotating a diagonal normalized input can exceed a world-axis limit.
         # Scale each whole group down uniformly to preserve its direction.
         for group in (world[:3], world[3:]):

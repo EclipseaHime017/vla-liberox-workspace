@@ -27,6 +27,8 @@ rotation_gain: 0.25
 motion_mode: exclusive
 intent_switch_ratio: 1.25
 # Both translation and rotation: fixed world axes or current tool axes.
+# Tool mode maps operator [forward, left, up] to Panda grip_site [+Y, +X, -Z].
+# Rotation uses the same right-handed mapping; gripper buttons are unchanged.
 # Tool axes are not the wrist camera's screen axes.
 control_frame: world
 deadzone: 0.05

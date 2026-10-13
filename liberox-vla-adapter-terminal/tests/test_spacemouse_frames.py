@@ -5,8 +5,11 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from backend.app.devices.spacemouse import SpaceMouseInput, load_spacemouse_config
+from backend.app.devices.spacemouse import SpaceMouseInput, SpaceMouseTransform, load_spacemouse_config
 from backend.app.devices.spacemouse_motion import SpaceMouseActionMapper
+
+
+PANDA_DOWN = np.array([[0., 1., 0.], [1., 0., 0.], [0., 0., -1.]])
 
 
 def mapper_for(rotation, scale=(.05, .05, .05, .5, .5, .5)):
@@ -23,8 +26,8 @@ def mapper_for(rotation, scale=(.05, .05, .05, .5, .5, .5)):
     return SpaceMouseActionMapper(SimpleNamespace(env=SimpleNamespace(robots=[robot]))), state
 
 
-def test_world_is_unchanged_and_identity_tool_has_same_action():
-    mapper, state = mapper_for(np.eye(3))
+def test_world_is_unchanged_and_downward_tool_matches_operator_axes():
+    mapper, state = mapper_for(PANDA_DOWN)
     action = np.array([.1, -.2, .3, -.4, .5, -.6, 1], dtype=np.float32)
     assert np.array_equal(mapper.convert(action, "world"), action)
     assert state.forwards == 0
@@ -32,6 +35,29 @@ def test_world_is_unchanged_and_identity_tool_has_same_action():
     assert state.forwards == 1
     assert np.array_equal(mapper.convert([0, 0, 0, 0, 0, 0, -1], "tool"), [0, 0, 0, 0, 0, 0, -1])
     assert state.forwards == 1  # Neutral/stale doesn't invoke physics.
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ([0, 1, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0]),  # Push forward.
+    ([1, 0, 0, 0, 0, 0], [0, -1, 0, 0, 0, 0]),  # Push right.
+    ([0, 0, 1, 0, 0, 0], [0, 0, 1, 0, 0, 0]),  # Lift cap.
+    ([0, 0, 0, 1, 0, 0], [0, 0, 0, 1, 0, 0]),
+    ([0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 0]),
+    ([0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, -1]),
+])
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("yaw", [0, 90, -90])
+def test_raw_cap_directions_follow_tool_without_swapping_front_and_right(raw, expected, sign, yaw):
+    transform = SpaceMouseTransform(replace(load_spacemouse_config(), deadzone=0,
+        smoothing_alpha=1, translation_gain=.2, rotation_gain=.2))
+    _, command = transform.apply(np.array(raw) * sign)
+    turn = Rotation.from_euler("z", yaw, degrees=True).as_matrix()
+    mapper, _ = mapper_for(turn @ PANDA_DOWN)
+    result = mapper.convert(np.r_[command, 1.], "tool")
+    expected = np.asarray(expected) * sign * .2
+    np.testing.assert_allclose(result[:3], turn @ expected[:3], atol=1e-7)
+    np.testing.assert_allclose(result[3:6], turn @ expected[3:], atol=1e-7)
+    assert result[6] == 1.
 
 
 class PandaGripper:
@@ -100,28 +126,32 @@ def test_invalid_takeover_history_does_not_modify_controller(actions, hz):
 
 
 @pytest.mark.parametrize("axis", range(6))
-def test_tool_axes_use_current_orientation_and_real_osc_scales(axis):
-    rotation = Rotation.from_euler("xyz", [35, -42, 90], degrees=True).as_matrix()
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("angles", [[0, 0, 0], [180, 0, 90], [35, -42, 90]])
+def test_tool_axes_use_current_orientation_and_real_osc_scales(axis, sign, angles):
+    operator_rotation = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+    rotation = operator_rotation @ PANDA_DOWN
     scales = np.array([.02, .05, .08, .2, .4, .6])
     mapper, state = mapper_for(rotation, scales)
     action = np.zeros(7)
-    action[axis], action[6] = .1, -1
+    action[axis], action[6] = sign * .1, -1
     out = mapper.convert(action, "tool")
     group = slice(0, 3) if axis < 3 else slice(3, 6)
-    assert np.allclose(out[:3] * scales[:3], rotation @ (action[:3] * scales[:3]), atol=1e-9)
-    assert np.allclose(out[3:6] * scales[3:], rotation @ (action[3:6] * scales[3:]), atol=1e-9)
+    assert np.allclose(out[:3] * scales[:3], operator_rotation @ (action[:3] * scales[:3]), atol=1e-9)
+    assert np.allclose(out[3:6] * scales[3:], operator_rotation @ (action[3:6] * scales[3:]), atol=1e-9)
     assert out[6] == -1
     assert not mapper.limited
     # Local rotation is a right multiplication; world OSC is left multiplication.
-    assert np.allclose(Rotation.from_rotvec(out[3:6] * scales[3:]).as_matrix() @ rotation,
-                       rotation @ Rotation.from_rotvec(action[3:6] * scales[3:]).as_matrix())
-    state.rotation = np.eye(3)
+    assert np.allclose(Rotation.from_rotvec(out[3:6] * scales[3:]).as_matrix() @ operator_rotation,
+                       operator_rotation @ Rotation.from_rotvec(action[3:6] * scales[3:]).as_matrix())
+    state.rotation = PANDA_DOWN
     assert np.allclose(mapper.convert(action, "tool")[group], action[group])
+    assert np.array_equal(mapper.convert(action, "world"), action.astype(np.float32))
     assert state.forwards == 2
 
 
 def test_rotated_input_limits_preserve_direction_and_exclusivity():
-    mapper, _ = mapper_for(Rotation.from_euler("z", 45, degrees=True).as_matrix())
+    mapper, _ = mapper_for(Rotation.from_euler("z", 45, degrees=True).as_matrix() @ PANDA_DOWN)
     output = mapper.convert([1, 1, 0, 0, 0, 0, 1], "tool")
     assert mapper.limited
     assert np.allclose(output, [0, 1, 0, 0, 0, 0, 1], atol=1e-7)

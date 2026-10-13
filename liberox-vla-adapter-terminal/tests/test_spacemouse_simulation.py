@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from backend.app.devices.spacemouse import SpaceMouseInput, load_spacemouse_config
+from backend.app.devices.spacemouse import SpaceMouseInput, SpaceMouseTransform, load_spacemouse_config
 from backend.app.devices.spacemouse_motion import SpaceMouseActionMapper
 from simulation_core import run_control_loop
 from trajectory_utils import TrajectoryRecorder, load_trajectory, save_trajectory_bundle
@@ -94,6 +94,54 @@ def test_exclusive_commands_step_real_osc_and_save_complete_partial_trajectory(t
         with np.load(paths["trajectory_observations"]) as images:
             assert images["agentview_image"].shape == images["wrist_image"].shape == (22, 64, 64, 3)
         assert not any(name.startswith("prismatic") for name in sys.modules)
+    finally:
+        env.close()
+
+
+@pytest.mark.skipif(os.environ.get("RUN_MUJOCO_SMOKE") != "1", reason="opt-in MuJoCo smoke test")
+def test_raw_tool_inputs_move_real_panda_forward_right_up_without_axis_swap(monkeypatch):
+    import eval_pickplace_direct as direct
+    from scipy.spatial.transform import Rotation
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(root / "third_party" / "LIBERO-X"))
+    runtime = direct.load_runtime()
+    bddl, init_path = direct.resolve_task(root / "third_party" / "LIBERO-X", "LEVEL1",
+        "EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove")
+    env = direct.make_env(runtime, bddl, 32, 100, 20, 0, "vla_views", 64, 32, True)
+    try:
+        direct.restore_state(env, direct.load_initial_states(runtime, init_path)[0])
+        state = np.asarray(env.get_sim_state()).copy()
+        robot = env.env.robots[0]
+        robot.sim.forward()
+        transform = SpaceMouseTransform(dataclasses.replace(load_spacemouse_config(),
+            deadzone=0, smoothing_alpha=1, translation_gain=.15, rotation_gain=.15))
+        # In the initial downward pose, forward/right/up must be +world X/-Y/+Z.
+        # Test actual HID axes, independently of the mapper's matrix definition.
+        for axis, (raw_axis, expected_sign) in enumerate(((1, 1), (0, -1), (2, 1),
+                                                        (3, 1), (4, 1), (5, -1))):
+            poses = []
+            for sign in (1, -1):
+                direct.restore_state(env, state)
+                mapper = SpaceMouseActionMapper(env)
+                mapper.prepare_takeover([], control_hz=20.)
+                transform.reset_filter()
+                raw = np.zeros(6)
+                raw[raw_axis] = sign
+                _, command = transform.apply(raw)
+                action = np.r_[command, -1.]
+                for _ in range(4):
+                    env.step(mapper.convert(action, "tool"))
+                robot.sim.forward()
+                poses.append((robot.sim.data.get_site_xpos(mapper.eef_name).copy(),
+                              robot.sim.data.get_site_xmat(mapper.eef_name).copy()))
+            # Compare opposite inputs from the same state to cancel neutral drift.
+            if axis < 3:
+                change = poses[0][0] - poses[1][0]
+            else:
+                change = Rotation.from_matrix(poses[0][1] @ poses[1][1].T).as_rotvec()
+            assert change[axis % 3] * expected_sign > 1e-3, (axis, change)
+            assert np.argmax(np.abs(change)) == axis % 3, (axis, change)
     finally:
         env.close()
 

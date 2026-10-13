@@ -61,7 +61,7 @@ def test_live_settings_map_at_control_boundary_and_persist_actual_frame(tmp_path
     ctrl = SimpleNamespace(use_delta=True, control_dim=6, input_min=-1, input_max=1,
         output_min=[-.05]*3+[-.5]*3, output_max=[.05]*3+[.5]*3, eef_name="eef")
     robot = SimpleNamespace(controller=ctrl, sim=SimpleNamespace(forward=lambda: None,
-        data=SimpleNamespace(get_site_xmat=lambda _: np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]))))
+        data=SimpleNamespace(get_site_xmat=lambda _: np.diag([-1, 1, -1]))))
     mapper = SpaceMouseActionMapper(SimpleNamespace(robots=[robot]))
     mouse._accept_event(1, (0, .8, 0, 0, 0, 0), (0, 0))
     worker.manual_settings("s", .25, .08, control_frame="tool")

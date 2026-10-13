@@ -32,7 +32,7 @@ conda run --no-capture-output -n pi05 python vla-adapter-rynn-iql/scripts/prepar
 
 ## 个人端：SpaceMouse 互斥控制测试
 
-配置文件：`configs/spacemouse_test_config.yaml`（先 `mode: device`，再 `simulation`；默认 `motion_mode: exclusive`、`intent_switch_ratio: 1.25`，两类灵敏度独立保留）。`control_frame: world` 为世界坐标，`tool` 为末端工具坐标。修改后重启程序，`combined` 可恢复六轴联动作对照。UI 可在控制器设置中直接切换坐标，运行中需松开摇杆回中后生效。
+配置文件：`configs/spacemouse_test_config.yaml`（先 `mode: device`，再 `simulation`；默认 `motion_mode: exclusive`、`intent_switch_ratio: 1.25`，两类灵敏度独立保留）。`control_frame: world` 为世界坐标，`tool` 为末端工具坐标；工具模式将前／左／上对应到 Panda 夹爪的 +Y／+X／−Z，平移和旋转均随当前末端姿态变化，夹爪按钮不变。修改后重启程序，`combined` 可恢复六轴联动作对照。UI 可在控制器设置中直接切换坐标，运行中需松开摇杆回中后生效。
 
 ```bash
 conda activate vla-liberox
