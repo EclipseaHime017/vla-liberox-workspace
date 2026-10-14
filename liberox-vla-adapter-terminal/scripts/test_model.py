@@ -20,12 +20,20 @@ SEED = 0
 METHOD = "bc"
 PLATFORM_URL = "http://127.0.0.1:8000"
 TASK_ID = "LEVEL1::EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove"
+CLEANUP_TIMEOUT = 180
+TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELED"}
 
 
 class JobFailed(RuntimeError):
     def __init__(self, message, exit_code=1):
         super().__init__(message)
         self.exit_code = exit_code
+
+
+class PlatformError(RuntimeError):
+    def __init__(self, status, message):
+        super().__init__(f"HTTP {status}: {message}")
+        self.status = status
 
 
 class Client:
@@ -42,9 +50,78 @@ class Client:
             with urlopen(request, timeout=180) as response:
                 return json.load(response)
         except HTTPError as exc:
-            raise RuntimeError(f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}") from exc
+            raise PlatformError(exc.code, exc.read().decode('utf-8', errors='replace')) from exc
         except (URLError, TimeoutError) as exc:
             raise RuntimeError(f"Platform request failed: {exc}; requests are not automatically retried") from exc
+
+
+class TestResources:
+    """Own only IDs returned by this invocation, including partially failed stages."""
+
+    def __init__(self, client):
+        self.client = client
+        self.jobs = {}
+
+    def submit(self, path, payload):
+        result = self.client.request("POST", path, payload)
+        if path == "/api/sessions":
+            self.jobs[result["work_job_id"]] = {"session_id": result["id"]}
+        else:
+            self.jobs[result["id"]] = result
+        return result
+
+    def _settle(self, identifier):
+        path = f"/api/jobs/{quote(identifier, safe='')}"
+        deadline, stop_requested = time.monotonic() + CLEANUP_TIMEOUT, False
+        while True:
+            job = self.client.request("GET", path)
+            if job["status"] in TERMINAL_STATUSES:
+                return job
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{identifier}: timed out waiting for test job to stop")
+            if not stop_requested:
+                try:
+                    self.client.request("POST", path + "/stop")
+                    stop_requested = True
+                except PlatformError as exc:
+                    if exc.status != 409:
+                        raise
+                    # An atomic dataset operation may need to finish first.
+            time.sleep(1)
+
+    def _delete(self, path, payload):
+        deadline = time.monotonic() + CLEANUP_TIMEOUT
+        while True:
+            try:
+                self.client.request("DELETE", path, payload)
+                return
+            except PlatformError as exc:
+                if exc.status == 404:
+                    return
+                if exc.status != 409 or time.monotonic() >= deadline:
+                    raise
+                # Terminal status can precede the worker's final resource release.
+                time.sleep(1)
+
+    def cleanup(self):
+        errors = []
+        for identifier, submitted in reversed(list(self.jobs.items())):
+            try:
+                job = self._settle(identifier)
+                dataset = (job.get("result") or {}).get("dataset_id") if job["kind"] == "dataset" else None
+                if dataset:
+                    self._delete(f"/api/training-datasets/{quote(dataset, safe='')}", {"confirm_dataset_id": dataset})
+                session = submitted.get("session_id")
+                if session:
+                    self._delete(f"/api/sessions/{quote(session, safe='')}", {"confirm_session_id": session})
+                self._delete(f"/api/jobs/{quote(identifier, safe='')}", {
+                    "confirm_job_id": identifier, "delete_exported_models": job["kind"] == "training",
+                })
+            except (RuntimeError, ValueError, KeyError) as exc:
+                errors.append(f"{identifier}: {exc}")
+        for error in errors:
+            print(f"CLEANUP ERROR: {error}", file=sys.stderr, flush=True)
+        return not errors
 
 
 def parser():
@@ -95,7 +172,7 @@ def wait_for_job(client, job):
             logs = client.request("GET", f"{path}/logs?offset={offset}")
             print(logs["text"], end="", flush=True)
             offset = logs["next_offset"]
-            if job["status"] in {"COMPLETED", "FAILED", "CANCELED"}:
+            if job["status"] in TERMINAL_STATUSES:
                 print(json.dumps(job, ensure_ascii=False, indent=2), flush=True)
                 if job["status"] != "COMPLETED":
                     location = job.get("config_path") or job.get("output_path") or path
@@ -109,11 +186,11 @@ def wait_for_job(client, job):
             job = client.request("GET", path)
     except KeyboardInterrupt:
         client.request("POST", path + "/stop")
-        raise JobFailed(f"Stop requested for {job['id']}; status remains available in the platform.", 130)
+        raise JobFailed(f"Stop requested for {job['id']}.", 130)
 
 
-def record_fixture(client, entry):
-    record = client.request("POST", "/api/sessions", {
+def record_fixture(client, entry, resources):
+    record = resources.submit("/api/sessions", {
         "policy_id": entry["policy_id"], "task_id": TASK_ID,
         "max_steps": CONTROL_STEPS, "open_loop_steps": entry["inference"]["open_loop_steps"],
         "seed": SEED, "init_state_index": 0, "disabled_policy_cameras": [],
@@ -132,8 +209,8 @@ def record_fixture(client, entry):
     return record, pinned
 
 
-def freeze_fixture(client, record):
-    job = wait_for_job(client, client.request("POST", "/api/training-datasets", {
+def freeze_fixture(client, record, resources):
+    job = wait_for_job(client, resources.submit("/api/training-datasets", {
         "name": f"Model smoke · {record['id']}", "task_id": TASK_ID,
         "selection": {"mode": "manual", "run_ids": [record["id"]]},
         "validation_fraction": 0.0, "split_seed": SEED,
@@ -150,8 +227,8 @@ def freeze_fixture(client, record):
     return identifier
 
 
-def simulate(client, entry):
-    job = wait_for_job(client, client.request("POST", "/api/evaluations", simulation_request(entry)))
+def simulate(client, entry, resources):
+    job = wait_for_job(client, resources.submit("/api/evaluations", simulation_request(entry)))
     result = client.request("GET", f"/api/evaluations/{quote(job['id'], safe='')}")
     aggregate, policy = result["aggregate"], result["policy_snapshot"]
     print(json.dumps(aggregate, ensure_ascii=False, indent=2), flush=True)
@@ -195,8 +272,10 @@ def exported_model(client, job, base, base_snapshot):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    resources, passed, exit_code = None, None, 1
     try:
         client = Client(PLATFORM_URL)
+        resources = TestResources(client)
         base, parameters = prepare(client, args)
         print(json.dumps({
             "model": base["policy_id"], "model_config": base["model_config"],
@@ -204,29 +283,36 @@ def main(argv=None):
             "simulation": simulation_request(base), "training": parameters,
         }, ensure_ascii=False, indent=2), flush=True)
         print("[1/5] Base simulation and test recording", flush=True)
-        record, base_snapshot = record_fixture(client, base)
+        record, base_snapshot = record_fixture(client, base, resources)
         print("[2/5] Freeze dedicated test dataset", flush=True)
-        dataset_id = freeze_fixture(client, record)
+        dataset_id = freeze_fixture(client, record, resources)
         print("[3/5] Short training", flush=True)
-        job = wait_for_job(client, client.request("POST", "/api/training-runs", {
+        job = wait_for_job(client, resources.submit("/api/training-runs", {
             "dataset_id": dataset_id, "parameters": parameters,
         }))
         print("[4/5] Export and parent validation", flush=True)
         child = exported_model(client, job, base, base_snapshot)
         print("[5/5] Exported child simulation", flush=True)
-        simulate(client, child)
-        print(f"PASS: {base['policy_id']} -> {child['policy_id']}", flush=True)
-        return 0
+        simulate(client, child, resources)
+        passed, exit_code = f"PASS: {base['policy_id']} -> {child['policy_id']}", 0
     except JobFailed as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        return exc.exit_code
+        exit_code = exc.exit_code
     except (RuntimeError, ValueError, KeyError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         traceback.print_exc()
-        return 1
+        exit_code = 1
     except KeyboardInterrupt:
         print("Interrupted before a job ID was received; check the platform queue before resubmitting.", file=sys.stderr)
-        return 130
+        exit_code = 130
+    finally:
+        if resources is not None and resources.jobs:
+            print("Cleaning up test recordings, datasets, models and jobs", flush=True)
+            if not resources.cleanup() and exit_code == 0:
+                exit_code = 1
+    if exit_code == 0:
+        print(passed, flush=True)
+    return exit_code
 
 
 if __name__ == "__main__":

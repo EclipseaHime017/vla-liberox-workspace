@@ -48,6 +48,8 @@ class RunRepository:
 
     def delete(self, run_id: str) -> None:
         with connect(self.database_path) as database:
+            database.execute("DELETE FROM run_labels WHERE run_id = ? AND project_id = ?",
+                             (run_id, self.project_id))
             database.execute(
                 "DELETE FROM runs WHERE id = ? AND project_id = ?",
                 (run_id, self.project_id),
@@ -353,6 +355,9 @@ class OfflineJobRepository:
 
     def delete(self, job_id: str) -> None:
         with connect(self.database_path) as database:
+            for table in ("training_runs", "annotation_runs"):
+                database.execute(f"DELETE FROM {table} WHERE job_id = ? AND project_id = ?",
+                                 (job_id, self.project_id))
             database.execute(
                 "DELETE FROM offline_jobs WHERE id = ? AND project_id = ?",
                 (job_id, self.project_id),

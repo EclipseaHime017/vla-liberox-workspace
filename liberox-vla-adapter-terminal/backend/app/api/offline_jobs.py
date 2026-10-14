@@ -4,7 +4,7 @@ from fastapi import APIRouter, Query, Request
 from starlette.concurrency import run_in_threadpool
 
 from .dependencies import http_error, offline_job_service
-from .models import TrainingRunRequest
+from .models import DeleteJobRequest, TrainingRunRequest
 
 
 router = APIRouter(prefix="/api", tags=["offline-jobs"])
@@ -43,6 +43,15 @@ async def logs(
 async def stop(job_id: str, request: Request):
     try:
         return await run_in_threadpool(offline_job_service(request).stop, job_id)
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
+@router.delete("/jobs/{job_id}")
+async def delete_job(job_id: str, body: DeleteJobRequest, request: Request):
+    try:
+        return await run_in_threadpool(offline_job_service(request).delete_job,
+            job_id, body.confirm_job_id, delete_exported_models=body.delete_exported_models)
     except Exception as exc:
         raise http_error(exc) from exc
 

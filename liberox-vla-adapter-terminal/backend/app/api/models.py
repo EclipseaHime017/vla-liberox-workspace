@@ -112,6 +112,11 @@ class DeleteSessionRequest(StrictModel):
     force: bool = False
 
 
+class DeleteJobRequest(StrictModel):
+    confirm_job_id: str = Field(min_length=1)
+    delete_exported_models: StrictBool = False
+
+
 DatasetSourceType = Literal["inference", "manual", "policy_requery"]
 DatasetOutcome = Literal["success", "failure"]
 

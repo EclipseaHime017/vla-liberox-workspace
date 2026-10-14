@@ -482,6 +482,10 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
     def get(self, job_id: str) -> dict[str, Any]:
         return self._reconcile(job_id)
 
+    def delete_job(self, job_id: str, confirmation: str, *, delete_exported_models: bool = False) -> dict:
+        from .job_cleanup import delete_job
+        return delete_job(self, job_id, confirmation, delete_exported_models=delete_exported_models)
+
     def delete_dataset(
         self, dataset_id: str, confirm_dataset_id: str, *, force: bool = False
     ) -> dict[str, Any]:

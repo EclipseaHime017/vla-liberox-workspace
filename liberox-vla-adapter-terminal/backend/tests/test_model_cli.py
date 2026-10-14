@@ -16,6 +16,8 @@ OPTIONS = ["--model", "family-variant"]
 class Platform:
     def __init__(self):
         self.calls = []
+        self.created_jobs = set()
+        self.deleted = []
         self.base = {"policy_id": "family-variant", "kind": "base", "family": "family",
                      "inference": {"open_loop_steps": 8, "max_open_loop_steps": 8},
                      "io": {"replay_horizon": 8}, "model_config": {}, "content_sha256": "a" * 64,
@@ -64,6 +66,7 @@ class Platform:
         if method == "POST":
             if path == "/api/sessions":
                 DraftRequest.model_validate(payload)
+                self.created_jobs.add("simulation")
                 return deepcopy(self.record)
             kinds = {"/api/training-datasets": ("dataset", CreateTrainingDatasetRequest),
                      "/api/training-runs": ("training", TrainingRunRequest),
@@ -71,10 +74,28 @@ class Platform:
             if path in kinds:
                 kind, schema = kinds[path]
                 schema.model_validate(payload)
+                self.created_jobs.add(kind)
                 return deepcopy(self.jobs[kind])
+            if path.startswith("/api/jobs/") and path.endswith("/stop"):
+                identifier = path.split("/")[-2]
+                self.jobs[identifier]["status"] = "CANCELED"
+                return deepcopy(self.jobs[identifier])
         if method == "PATCH" and path == "/api/datasets/runs/owned-run/labels":
             assert payload == {"is_test": True}
             return payload
+        if method == "DELETE":
+            identifier = path.rsplit("/", 1)[-1]
+            if path.startswith("/api/jobs/"):
+                assert identifier in self.created_jobs
+                assert payload == {"confirm_job_id": identifier, "delete_exported_models": identifier == "training"}
+            elif path == "/api/training-datasets/owned-dataset":
+                assert "dataset" in self.created_jobs and payload == {"confirm_dataset_id": identifier}
+            elif path == "/api/sessions/owned-run":
+                assert "simulation" in self.created_jobs and payload == {"confirm_session_id": identifier}
+            else:
+                raise AssertionError((method, path))
+            self.deleted.append(path)
+            return {"deleted": identifier}
         raise AssertionError((method, path))
 
 
@@ -133,6 +154,9 @@ def test_one_invocation_checks_entire_pipeline_via_queue(monkeypatch, capsys):
     assert posts[3][1]["policy_id"] == "exact-child"
     assert all("/draft" not in path for _, path, _ in api.calls)
     assert "PASS: family-variant -> exact-child" in capsys.readouterr().out
+    assert api.deleted == ["/api/jobs/evaluation", "/api/jobs/training",
+        "/api/training-datasets/owned-dataset", "/api/jobs/dataset",
+        "/api/sessions/owned-run", "/api/jobs/simulation"]
 
 
 @pytest.mark.parametrize("stage,submissions", [("simulation", 1), ("dataset", 2), ("training", 3), ("evaluation", 4)])
@@ -143,6 +167,7 @@ def test_failure_or_cancellation_stops_later_stages(monkeypatch, stage, submissi
     monkeypatch.setattr(cli, "Client", lambda _: api)
     assert cli.main(OPTIONS) == expected
     assert sum(method == "POST" for method, *_ in api.calls) == submissions
+    assert {path.rsplit("/", 1)[-1] for path in api.deleted if path.startswith("/api/jobs/")} == api.created_jobs
 
 
 @pytest.mark.parametrize("mutation,submissions", [
@@ -179,6 +204,47 @@ def test_invalid_artifacts_or_identity_stop_pipeline(monkeypatch, mutation, subm
     monkeypatch.setattr(cli, "Client", lambda _: api)
     assert cli.main(OPTIONS) == 1
     assert sum(method == "POST" for method, *_ in api.calls) == submissions
+    assert {path.rsplit("/", 1)[-1] for path in api.deleted if path.startswith("/api/jobs/")} == api.created_jobs
+
+
+def test_interrupt_waits_for_stop_and_cleans_all_submitted_resources(monkeypatch):
+    api = Platform()
+    api.jobs["training"]["status"] = "RUNNING"
+    monkeypatch.setattr(cli, "Client", lambda _: api)
+    monkeypatch.setattr(cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
+    assert cli.main(OPTIONS) == 130
+    assert api.jobs["training"]["status"] == "CANCELED"
+    assert "/api/jobs/training" in api.deleted
+    assert "/api/training-datasets/owned-dataset" in api.deleted
+    assert "/api/sessions/owned-run" in api.deleted
+    assert "evaluation" not in api.created_jobs
+
+
+def test_cleanup_failure_reports_owned_id_and_does_not_report_pass(monkeypatch, capsys):
+    api = Platform()
+    request = api.request
+    def fail(method, path, payload=None):
+        if method == "DELETE" and path == "/api/jobs/training":
+            raise cli.PlatformError(500, "disk unavailable")
+        return request(method, path, payload)
+    api.request = fail
+    monkeypatch.setattr(cli, "Client", lambda _: api)
+    assert cli.main(OPTIONS) == 1
+    captured = capsys.readouterr()
+    assert "CLEANUP ERROR: training" in captured.err and "disk unavailable" in captured.err
+    assert "PASS:" not in captured.out
+    assert "/api/sessions/owned-run" in api.deleted
+
+
+def test_cleanup_retries_release_conflict_and_accepts_already_deleted(monkeypatch):
+    calls = []
+    def request(method, path, payload):
+        calls.append(path)
+        raise cli.PlatformError(409 if len(calls) == 1 else 404, "not ready")
+    resources = cli.TestResources(type("Client", (), {"request": staticmethod(request)})())
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    resources._delete("/api/jobs/owned", {"confirm_job_id": "owned"})
+    assert calls == ["/api/jobs/owned", "/api/jobs/owned"]
 
 
 def test_interrupt_only_stops_submitted_job(monkeypatch):

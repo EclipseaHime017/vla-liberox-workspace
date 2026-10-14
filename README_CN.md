@@ -266,6 +266,8 @@ conda run --no-capture-output -n vla-liberox wandb login
 python liberox-vla-adapter-terminal/scripts/test_model.py --model <模型ID>
 ```
 
+单模型测试结束后自动清理本次生成的记录、数据集、训练模型和后台任务。
+
 ### 3.7 不开网页训练
 
 编辑 `vla-adapter-rynn-iql/configs/terminal_pipeline.yaml`，选择数据、模型和训练方法，然后执行：

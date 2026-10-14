@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import importlib.metadata
 import logging
 import math
@@ -278,6 +279,17 @@ def _publish_overlay(
     policy_id = f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     target = registry / policy_id
     target.mkdir(parents=True, exist_ok=False)
+    latest = registry / "latest"
+    export_record = checkpoint.parent.parent / "export.json"
+    export_owner = {
+        "policy_id": policy_id, "registry": str(registry.resolve()),
+        "previous_latest": None,
+    }
+    try:
+        atomic_json(export_record, export_owner)
+    except BaseException:
+        target.rmdir()
+        raise
     settings = model_config(config.raw)
     parent = getattr(components, "parent", None)
     if parent is not None:
@@ -312,10 +324,13 @@ def _publish_overlay(
     temporary = target / ".policy.yaml.tmp"
     temporary.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     os.replace(temporary, target / "policy.yaml")
-    latest = registry / "latest"
-    temporary_link = registry / f".latest-{uuid.uuid4().hex}"
-    temporary_link.symlink_to(target.name, target_is_directory=True)
-    os.replace(temporary_link, latest)
+    with (registry / ".registry.lock").open("a+") as registry_lock:
+        fcntl.flock(registry_lock.fileno(), fcntl.LOCK_EX)
+        export_owner["previous_latest"] = os.readlink(latest) if latest.is_symlink() else None
+        atomic_json(export_record, export_owner)
+        temporary_link = registry / f".latest-{uuid.uuid4().hex}"
+        temporary_link.symlink_to(target.name, target_is_directory=True)
+        os.replace(temporary_link, latest)
     return target / "policy.yaml"
 
 
