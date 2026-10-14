@@ -12,8 +12,15 @@ from test_replay import FakeAnnotator, _stats
 
 @pytest.mark.parametrize("method", ["bc", "iql"])
 @pytest.mark.parametrize("keep_tail", [False, True])
-def test_cache_matches_shared_replay(configured, tmp_path, method, keep_tail):
+@pytest.mark.parametrize("family", ["vla_adapter", "pi05"])
+def test_cache_matches_shared_replay(configured, tmp_path, method, keep_tail, family):
+    from vla_rynn_iql.models import model_config
     config = copy.deepcopy(configured)
+    config.raw["model"] = model_config({"model": {"family": family}})
+    action_stats, proprio_stats = _stats(7), _stats(8)
+    if family == "pi05":
+        for stats in (action_stats, proprio_stats):
+            stats["codec"] = "openpi_quantile"
     config.raw["training"]["method"] = method
     config.raw["data"]["include_post_success"] = keep_tail
     prepare_dataset(config)
@@ -21,10 +28,10 @@ def test_cache_matches_shared_replay(configured, tmp_path, method, keep_tail):
     if method == "iql":
         annotate_manifest(config, FakeAnnotator())
         reward = load_reward_index(config)
-        original = ReplayDataset(config, _stats(7), _stats(8), reward_index=reward)
+        original = ReplayDataset(config, action_stats, proprio_stats, reward_index=reward)
     else:
-        original = ActionDataset(config, _stats(7), _stats(8))
-    path, hit = build_replay_cache(config, tmp_path / "cache", _stats(7), _stats(8), reward)
+        original = ActionDataset(config, action_stats, proprio_stats)
+    path, hit = build_replay_cache(config, tmp_path / "cache", action_stats, proprio_stats, reward)
     assert not hit
     cached = CachedReplayDataset(path)
     assert len(cached) == len(original)
@@ -36,12 +43,12 @@ def test_cache_matches_shared_replay(configured, tmp_path, method, keep_tail):
                 assert torch.equal(value, b[key]), key
             else:
                 assert value == b[key], key
-    assert build_replay_cache(config, tmp_path / "cache", _stats(7), _stats(8), reward)[1]
+    assert build_replay_cache(config, tmp_path / "cache", action_stats, proprio_stats, reward)[1]
     damaged = path / "actions.npy"
     with damaged.open("r+b") as stream:
         stream.seek(-1, 2)
         stream.write(b"x")
-    assert not build_replay_cache(config, tmp_path / "cache", _stats(7), _stats(8), reward)[1]
+    assert not build_replay_cache(config, tmp_path / "cache", action_stats, proprio_stats, reward)[1]
 
 
 def test_distributed_sampling_same_global_order_and_resume():

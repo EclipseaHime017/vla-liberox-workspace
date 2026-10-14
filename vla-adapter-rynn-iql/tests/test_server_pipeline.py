@@ -10,7 +10,6 @@ import yaml
 from vla_rynn_iql.config import PROJECT_ROOT
 from vla_rynn_iql.server_config import load_server_config, distributed_config, validate_global_batch
 from vla_rynn_iql.server_pipeline import ServerRun, training_settings, execution_plan, visible_devices
-from vla_rynn_iql.server_tui import ServerApp, set_value
 from test_server_inputs import global_runs
 
 
@@ -37,6 +36,17 @@ def test_gpu_selection_respects_scheduler_allocation():
     for inherited in ("", "-1", "3"):
         with pytest.raises(ValueError, match="allocation"):
             visible_devices((0, 1), {"CUDA_VISIBLE_DEVICES": inherited})
+
+
+def test_legacy_server_config_migrates_environment_to_model_ownership(configured, tmp_path):
+    dataset, _, _ = global_runs(configured)
+    server = configuration(tmp_path, dataset, configured)
+    raw = yaml.safe_load(server.path.read_text())
+    raw.update(schema_version=3, environment="vla-liberox")
+    raw["overrides"]["model"] = {"family": "pi05", "base_id": "pi05-libero-base"}
+    server.path.write_text(yaml.safe_dump(raw))
+    loaded = load_server_config(server.path)
+    assert training_settings(loaded, dataset)["model"]["environment"] == "pi05"
 
 
 def test_rank_component_loading_ignores_cuda_checkpoint_tags(monkeypatch):
@@ -139,8 +149,12 @@ def test_dry_run_writes_no_training_results(configured, tmp_path, monkeypatch):
     assert script.main(["--config", str(server.path), "--dry-run"]) == 0
     assert not server.output_root.exists()
     monkeypatch.setattr(script.sys.stdin, "isatty", lambda: False)
-    with pytest.raises(SystemExit):
-        script.main(["--config", str(server.path)])
+    calls = []
+    monkeypatch.setattr(script, "run_batch", lambda run: calls.append(run) or 0)
+    assert script.main(["--config", str(server.path), "--model", "pi05-libero-base", "--method", "bc"]) == 0
+    assert calls[0].raw["model"]["family"] == "pi05"
+    assert calls[0].raw["training"]["method"] == "bc"
+    assert calls[0].raw["reward"] == {}
 
 
 def test_server_preflight_has_no_ui_simulation_or_model_inference_dependencies(configured, tmp_path):
@@ -175,21 +189,6 @@ runpy.run_path(sys.argv[0], run_name='__main__')
     assert not server.output_root.exists()
 
 
-def test_tui_never_silently_changes_method_or_reward(configured, tmp_path):
-    dataset, _, _ = global_runs(configured)
-    server = configuration(tmp_path, dataset, configured)
-    app = ServerApp(replace(server, task_id=None, reward_source="stage"))
-    app.activate(None)
-    assert "Method: iql" in app._lines()
-    assert app.source == "stage"
-    app.cursor = 0
-    with pytest.raises(ValueError, match="No eligible"):
-        app.activate(None)
-    app.cursor = 2
-    app.activate(None)
-    lines = app._lines()
-    assert app.raw["training"]["method"] == "bc"
-    assert "Method: bc" in lines
 
 
 def test_launch_failure_has_durable_status(configured, tmp_path, monkeypatch):
@@ -207,22 +206,6 @@ def test_launch_failure_has_durable_status(configured, tmp_path, monkeypatch):
     assert run.log is None
 
 
-def test_bad_legacy_json_does_not_block_bc_selection(configured, tmp_path):
-    dataset, _, _ = global_runs(configured)
-    for run in dataset.runs:
-        (run.episode_dir / "trajectory_reward.json").write_text("bad json")
-    server = configuration(tmp_path, dataset, configured)
-    app = ServerApp(replace(server, task_id=None, reward_source="stage"))
-    app.activate(None)
-    app._lines()
-    assert app.settings_error
-    assert app.page == "settings"
-    with pytest.raises(ValueError):
-        app.activate(None)
-    app.cursor = 2
-    app.activate(None)
-    assert "Method: bc" in app._lines()
-    assert app.settings_error is None
 
 
 def test_cancellation_checkpoint_request_and_escalation(configured, tmp_path, monkeypatch):

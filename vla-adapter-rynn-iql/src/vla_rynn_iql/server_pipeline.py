@@ -1,4 +1,4 @@
-"""Headless server planning/launch; shared by the full-screen UI and batch CLI."""
+"""Headless input preparation and distributed worker launch for the server CLI."""
 from __future__ import annotations
 
 import copy
@@ -38,6 +38,12 @@ def training_settings(server, task: GlobalTask, *, overrides=None, source=None) 
     changes = copy.deepcopy(server.overrides if overrides is None else overrides)
     raw = load_train_config(server.training_config, overrides=changes, overrides_path=server.path).raw
     raw["data"].update(task_ids=[task.task_id], selection_manifest=None, stage_annotations_manifest=None)
+    if task.dataset_defaults:
+        for key in ("validation_fraction", "split_seed"):
+            if key in changes["data"] and changes["data"][key] != task.dataset_defaults[key]:
+                raise ValueError(f"Frozen export owns {key}; create the requested split on the source platform")
+        raw["data"].update(task.dataset_defaults)
+        raw["data"].update(changes["data"])
     raw["reward"].update(manifest_path=None, manifest_sha256=None, version_id=None)
     if training_method(raw).requires_rewards:
         name = source or server.reward_source
@@ -67,9 +73,10 @@ def training_settings(server, task: GlobalTask, *, overrides=None, source=None) 
 
 
 def execution_plan(server, task, raw, distributed, source):
-    if any(path.resolve().is_relative_to(server.runs_root.resolve()) for path in
+    input_root = task.export_path.parent if task.export_path else server.runs_root.resolve()
+    if any(path.resolve().is_relative_to(input_root) for path in
            (server.output_root, server.cache_root)):
-        raise ValueError("Server output and cache must be outside the copied runs root")
+        raise ValueError("Server output and cache must be outside the complete input package")
     selected = task.selected(source if training_method(raw).requires_rewards else None)
     if not selected:
         raise ValueError(f"No eligible marked trajectories for {raw['training']['method']}/{source}: {task.task_id}")
@@ -109,7 +116,8 @@ class ServerRun:
         try:
             raw = copy.deepcopy(self.raw)
             raw["paths"]["output_dir"] = str(self.directory)
-            raw = prepare_global_inputs(self.task, self.directory / "inputs", raw, self.source)
+            raw = prepare_global_inputs(self.task, self.directory / "inputs", raw, self.source,
+                                        data_overrides=self.server.overrides["data"])
             raw["training"]["device"] = "cuda:0"
             config_path = self.directory / "effective_config.yaml"
             config = validate_train_config(raw, config_path)
@@ -117,8 +125,8 @@ class ServerRun:
             execution = self.directory / "execution.json"
             atomic_json(execution, {"distributed": asdict(self.distributed),
                 "cache_root": str(self.server.cache_root), "run_dir": str(self.directory)})
-            worker = Path(__file__).resolve().parents[2] / "scripts/train_iql_distributed.py"
-            argv = ["conda", "run", "--no-capture-output", "-n", self.server.environment,
+            worker = Path(__file__).resolve().parents[2] / "scripts/train_distributed.py"
+            argv = ["conda", "run", "--no-capture-output", "-n", config.section("model")["environment"],
                     "python", "-u", "-m", "torch.distributed.run", "--standalone",
                     f"--nproc-per-node={self.distributed.world_size}", str(worker),
                     "--config", str(config_path), "--execution", str(execution)]

@@ -14,19 +14,10 @@ from vla_rynn_iql.methods import COMMON_TRAINING_KEYS
 IQL_PRESET = PROJECT_ROOT / "configs/training/iql.yaml"
 
 
-def test_legacy_entrypoint_defaults_remain_unchanged():
+def test_default_entrypoint_uses_composed_iql_profile():
     from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG
-
-    assert DEFAULT_TRAIN_CONFIG == PROJECT_ROOT / "configs/liberox_iql.yaml"
-    legacy = yaml.safe_load(DEFAULT_TRAIN_CONFIG.read_text())
-    raw = load_train_config().raw
-    assert raw["reward"]["source"] == "rynnvalue"
-    for name in COMMON_TRAINING_KEYS:
-        if name in legacy["iql"]:
-            assert raw["training"][name] == legacy["iql"][name]
-    for name, value in legacy["iql"].items():
-        if name not in COMMON_TRAINING_KEYS:
-            assert raw["iql"][name] == value
+    assert DEFAULT_TRAIN_CONFIG == IQL_PRESET
+    assert load_train_config().raw == load_train_config(IQL_PRESET).raw
 
 
 def write(path: Path, value: dict) -> Path:

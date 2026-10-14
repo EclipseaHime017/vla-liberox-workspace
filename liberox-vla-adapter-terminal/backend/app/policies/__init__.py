@@ -1,1 +1,0 @@
-"""Policy provider adapters."""

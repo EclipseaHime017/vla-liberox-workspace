@@ -37,6 +37,51 @@ def merge_config(base: dict, changes: dict) -> dict:
     return result
 
 
+def strict_keys(value: Any, expected: set[str], context: str) -> dict:
+    if not isinstance(value, dict):
+        raise TypeError(f"{context} must be a mapping")
+    missing, unknown = sorted(expected - value.keys()), sorted(value.keys() - expected)
+    if missing or unknown:
+        raise ValueError(f"Invalid {context} keys; missing={missing}, unknown={unknown}")
+    return value
+
+
+def resolve_path(value: str, base: Path, context: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"{context} must be a non-empty path")
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else base / path).resolve()
+
+
+def validate_overrides(value: Any) -> dict:
+    from .config import TRAIN_SCHEMA
+    from .methods import COMMON_TRAINING_KEYS
+    from .models import MODELS
+    if not isinstance(value, dict):
+        raise TypeError("overrides must be a mapping")
+    sections = (TRAIN_SCHEMA.keys() - {"schema_version"}) | {"vla"}
+    result = {key: {} for key in sections}
+    result.update(copy.deepcopy(value))
+    strict_keys(result, sections, "overrides")
+    model_fields = {"family", "base_id", "base_checkpoint", "stats_key", "contract"}
+    for model in MODELS.values():
+        model_fields.update(model.defaults)
+    for section, fields in result.items():
+        if not isinstance(fields, dict):
+            raise TypeError(f"overrides.{section} must be a mapping")
+        allowed = (COMMON_TRAINING_KEYS | {"method", "actor_lr_warmup_steps"} if section == "training"
+                   else model_fields if section == "model"
+                   else {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"} if section == "vla"
+                   else TRAIN_SCHEMA[section].keys() | (COMMON_TRAINING_KEYS if section == "iql" else set()))
+        if fields.keys() - allowed:
+            raise ValueError(f"Unknown overrides.{section} keys: {sorted(fields.keys() - allowed)}")
+    managed = {"paths": {"work_dir"}, "data": {"task_ids", "selection_manifest"}}
+    for section, names in managed.items():
+        if result[section].keys() & names:
+            raise ValueError(f"Pipeline-managed overrides.{section} keys: {sorted(result[section].keys() & names)}")
+    return result
+
+
 def resolve_source_paths(raw: dict, path: Path) -> dict:
     result = copy.deepcopy(raw)
 
@@ -112,13 +157,13 @@ def compose_config(path: Path, *, method: str | None = None,
                    family: str | None = None, overrides: dict | None = None,
                    overrides_path: Path | None = None) -> dict:
     from .methods import METHODS
-    from .models import MODELS
+    from .models import MODELS, model_preset
 
-    root = Path(__file__).resolve().parents[2] / "configs"
     training_override = (overrides or {}).get("training", {})
     if not isinstance(training_override, dict):
         raise TypeError("overrides.training must be a mapping")
     requested_method = method or training_override.get("method")
+    family = family or (overrides or {}).get("model", {}).get("family")
     # Choose the method before reading its entry or inherited dependencies.
     layers = [migrate_fields(layer) for layer in _source_layers(path, method=requested_method)]
     if overrides:
@@ -148,7 +193,13 @@ def compose_config(path: Path, *, method: str | None = None,
     if family is not None:
         if not isinstance(family, str) or family not in MODELS:
             raise ValueError(f"Unknown model.family: {family}")
-        presets["model"] = str(root / "models" / f"{family}.yaml")
+        base_id = raw.get("model", {}).get("base_id")
+        if base_id is not None and raw.get("model", {}).get("family", family) == family:
+            from .base_models import base_model
+            base = base_model(base_id)
+            if base.family != family:
+                raise ValueError("Base model conflicts with the selected model family")
+        presets["model"] = str(MODELS[family].config_path)
     # Inherited runtime defaults < model/reward defaults < run/CLI overrides.
     # The first preset declaration marks the composition boundary.
     pivot = next((index for index, layer in enumerate(layers) if "presets" in layer), 0)
@@ -157,12 +208,15 @@ def compose_config(path: Path, *, method: str | None = None,
         result = merge_config(result, layer)
     allowed = {"model": {"model", "data"}, "reward": {"reward"}}
     for kind, source in presets.items():
-        preset = read_source(Path(source))
+        preset = model_preset(Path(source)) if kind == "model" else read_source(Path(source))
         if preset.keys() - allowed[kind]:
             raise ValueError(f"{kind} preset contains unrelated sections: {sorted(preset.keys() - allowed[kind])}")
         result = merge_config(result, preset)
     for layer in layers[pivot:]:
-        result = merge_config(result, {key: value for key, value in layer.items() if key != "presets"})
+        values = {key: value for key, value in layer.items() if key != "presets"}
+        if family and values.get("model", {}).get("family", family) != family:
+            values.pop("model")
+        result = merge_config(result, values)
     if method is not None:
         result.setdefault("training", {})["method"] = method
     if family is not None:
@@ -181,9 +235,11 @@ def migrate_fields(raw: dict) -> dict:
         training.setdefault(key, iql.pop(key))
     if result.get("schema_version") == 1 and training.get("method", "iql") == "iql":
         training.setdefault("actor_lr_warmup_steps", None)
-    legacy, model = result.get("vla", {}), result.setdefault("model", {})
+    legacy, model = result.pop("vla", {}), result.setdefault("model", {})
     if not isinstance(legacy, dict) or not isinstance(model, dict):
         raise TypeError("vla and model must be mappings")
+    if legacy.keys() - {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"}:
+        raise ValueError("Invalid legacy vla configuration")
     for key in ("base_checkpoint", "stats_key", "use_pro_version"):
         if key in legacy:
             model.setdefault(key, legacy[key])

@@ -2,7 +2,7 @@ schema_version: 1
 paths:
   selection_manifest: null
   output_dir: ../outputs/evaluations
-  robometer_root: ../../Robometer
+  robometer_root: ../../third_party/Robometer
 model:
   checkpoint: aliangdw/Robometer-4B-LIBERO
   revision: bb7dce7e6bde3bd236c0fbe0be46fdf19b57b873

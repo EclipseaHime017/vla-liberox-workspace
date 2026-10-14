@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 
 from .config import UniqueKeyLoader
-from .terminal_pipeline import _strict_keys, _resolve, _validate_overrides
+from .config_sources import strict_keys, resolve_path, validate_overrides
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,6 @@ class ServerConfig:
     task_id: str | None
     output_root: Path
     cache_root: Path
-    environment: str
     reward_source: str
     distributed: DistributedConfig
     overrides: dict[str, Any]
@@ -67,21 +66,23 @@ def load_server_config(path: Path) -> ServerConfig:
     import re
     path = path.expanduser().resolve()
     raw = yaml.load(path.read_text(), Loader=UniqueKeyLoader)
-    _strict_keys(raw, {"schema_version", "training_config", "runs_root", "task_id",
-                      "output_root", "cache_root", "environment", "reward_source",
+    if isinstance(raw, dict) and raw.get("schema_version") == 3:
+        environment = raw.pop("environment", None)
+        if environment is not None and (not isinstance(environment, str) or not re.fullmatch(r"[\w.-]+", environment)):
+            raise ValueError("Legacy environment must be a Conda environment name")
+    strict_keys(raw, {"schema_version", "training_config", "runs_root", "task_id",
+                      "output_root", "cache_root", "reward_source",
                       "distributed", "overrides"}, "server")
-    if raw["schema_version"] != 3:
-        raise ValueError("Use server schema_version=3 with runs_root and task_id (no exported dataset required)")
-    if not isinstance(raw["environment"], str) or not re.fullmatch(r"[\w.-]+", raw["environment"]):
-        raise ValueError("environment must be a Conda environment name")
+    if raw["schema_version"] not in (3, 4):
+        raise ValueError("Use server schema_version=4; model YAML owns the training environment")
     if raw["reward_source"] not in {"final", "rynnvalue", "stage", "sparse"}:
         raise ValueError("reward_source must be final, rynnvalue, stage or sparse")
-    paths = {key: _resolve(raw[key], path.parent, key) for key in
+    paths = {key: resolve_path(raw[key], path.parent, key) for key in
              ("training_config", "runs_root", "output_root", "cache_root")}
     task_id = raw["task_id"]
     if task_id is not None and (not isinstance(task_id, str) or not task_id.strip()):
         raise ValueError("task_id must be null or a non-empty canonical task ID")
-    overrides = _validate_overrides(raw["overrides"])
+    overrides = validate_overrides(raw["overrides"])
     # Semantic evaluator parameters belong to each copied global evaluation.
     if set(overrides["reward"]) - {"gamma", "accumulate_primitive_steps"}:
         raise ValueError("Server reward overrides only accept gamma and accumulate_primitive_steps")
@@ -89,7 +90,7 @@ def load_server_config(path: Path) -> ServerConfig:
         raise ValueError("Server data overrides accept include_post_success, validation_fraction and split_seed")
     if "device" in overrides["training"]:
         raise ValueError("Select server devices through distributed.gpu_ids, not training.device")
-    return ServerConfig(path, **paths, task_id=task_id, environment=raw["environment"],
+    return ServerConfig(path, **paths, task_id=task_id,
                         reward_source=raw["reward_source"], distributed=distributed_config(raw["distributed"]),
                         overrides=overrides)
 

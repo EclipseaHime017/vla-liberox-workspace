@@ -20,7 +20,6 @@ from vla_rynn_iql import training
 from vla_rynn_iql import vla_adapter
 from vla_rynn_iql.vla_adapter import load_overlay, validate_overlay
 from test_replay import FakeAnnotator, _stats
-from test_terminal_pipeline import _terminal_config
 
 
 def test_bc_config_without_reward_or_iql_and_strict_method(configured, tmp_path):
@@ -81,18 +80,6 @@ def test_bc_loss_is_equal_weight_masked_l1():
 
 
 
-def test_terminal_explicit_legacy_override_wins_over_base_common_values(configured, tmp_path):
-    from vla_rynn_iql.terminal_pipeline import load_terminal_config, merged_training_config
-    raw = copy.deepcopy(configured.raw)
-    raw["training"] = {"method": "bc", "train_steps": 10000, "resume_checkpoint": "old"}
-    configured.path.write_text(yaml.safe_dump(raw))
-    path = _terminal_config(tmp_path, configured.path)
-    terminal = yaml.safe_load(path.read_text())
-    terminal["overrides"]["iql"] = {"train_steps": 77, "resume_checkpoint": "new"}
-    path.write_text(yaml.safe_dump(terminal))
-    merged = merged_training_config(load_terminal_config(path))
-    assert merged["training"]["train_steps"] == 77
-    assert merged["training"]["resume_checkpoint"] == str(tmp_path / "new")
 
 
 def test_iql_adapter_preserves_update_and_actor_objective(configured):

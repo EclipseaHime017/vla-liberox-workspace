@@ -10,10 +10,10 @@ from conftest import _episode
 from test_replay import FakeAnnotator, _stats
 from vla_rynn_iql.config import LoadedConfig
 from vla_rynn_iql.data import prepare_dataset, load_manifest
-from vla_rynn_iql.io import atomic_json, sha256_file
+from vla_rynn_iql.io import atomic_json, sha256_file, stable_hash
 from vla_rynn_iql.replay import ReplayDataset
 from vla_rynn_iql.rewards import annotate_manifest, load_reward_index, reward_manifest_digest
-from vla_rynn_iql.server_inputs import discover_tasks, prepare_global_inputs, saved_reward
+from vla_rynn_iql.server_inputs import discover_tasks, prepare_global_inputs, saved_reward, open_run_source
 
 
 def global_runs(configured):
@@ -41,6 +41,138 @@ def global_runs(configured):
     root = Path(config.raw["paths"]["dataset_sources"][0])
     task, = discover_tasks(root, "libero_x_vla")
     return task, config, index
+
+
+def portable_export(configured, tmp_path, *, include_unmarked=False):
+    task, config, _ = global_runs(configured)
+    root = Path(config.raw["paths"]["dataset_sources"][0])
+    if include_unmarked:
+        _episode(root, "unmarked")
+        run_json = next(root.rglob("unmarked/run.json"))
+        record = json.loads(run_json.read_text())
+        record["root_session_id"] = "unmarked"
+        atomic_json(run_json, record)
+    destination = tmp_path / "export"
+    members, exported = [], []
+    for source in sorted(root.rglob("run.json")):
+        record = json.loads(source.read_text())
+        run_id = record["id"]
+        target = destination / "runs" / "task" / run_id
+        shutil.copytree(source.parent, target)
+        episode = source.parent / "episodes" / "episode_000"
+        with np.load(episode / "trajectory.npz") as arrays:
+            count = len(arrays["env_action"])
+        member = {"run_id": run_id, "root_run_id": record["root_session_id"],
+                  "parent_run_id": record["parent_session_id"],
+                  "resume_step": record["resume_step"] or 0, "end_step": count,
+                  "split": "validation" if run_id == "unmarked" else "train",
+                  "artifacts": {name: {"path": str(path), "sha256": sha256_file(path)}
+                    for name, path in (("manifest", source), ("trajectory", episode / "trajectory.npz"),
+                                       ("observations", episode / "trajectory_observations.npz"))}}
+        members.append(member)
+        exported.append({"run_id": run_id, "path": str(target.relative_to(destination)),
+                         **{key: member[key] for key in ("split", "root_run_id", "parent_run_id")},
+                         "evaluations": {}})
+    immutable = {"task_id": task.task_id, "selection": {"mode": "manual"},
+                 "validation_fraction": .3, "split_seed": 17, "success_consecutive_steps": 5,
+                 "members": members}
+    frozen = {"schema_version": 1, "id": "ds-export", "project_id": "libero_x_vla",
+              **immutable, "include_post_success": False, "dataset_sha256": stable_hash(immutable)}
+    atomic_json(destination / "dataset.json", frozen)
+    files = {str(path.relative_to(destination)): {"size": path.stat().st_size, "sha256": sha256_file(path)}
+             for path in sorted(destination.rglob("*")) if path.is_file()}
+    atomic_json(destination / "export.json", {"schema_version": 1, "complete": True,
+        "kind": "dataset_runs_export", "dataset_id": frozen["id"], "task_id": task.task_id,
+        "dataset_sha256": frozen["dataset_sha256"], "runs_root": "runs", "members": exported, "files": files})
+    return destination, config, frozen
+
+
+@pytest.mark.parametrize("child_root", [False, True])
+def test_portable_export_preserves_splits_and_reuses_rewards(configured, tmp_path, child_root):
+    root, config, frozen = portable_export(configured, tmp_path)
+    original = Path(config.raw["paths"]["dataset_sources"][0])
+    shutil.rmtree(original)
+    task, = discover_tasks(root / "runs" if child_root else root, "libero_x_vla")
+    before = {path: sha256_file(path) for path in root.rglob("*") if path.is_file()}
+    raw = prepare_global_inputs(task, tmp_path / "inputs", config.raw, "final")
+    loaded = LoadedConfig(tmp_path / "effective.yaml", raw)
+    assert raw["data"]["include_post_success"] is False
+    assert raw["data"]["split_seed"] == 17
+    assert {ep["run_id"]: ep["split"] for ep in load_manifest(loaded)["episodes"]} == {
+        member["run_id"]: member["split"] for member in frozen["members"]}
+    assert load_reward_index(loaded)["complete"]
+    assert before == {path: sha256_file(path) for path in root.rglob("*") if path.is_file()}
+    assert json.loads((tmp_path / "inputs/export_provenance.json").read_text())["source_dataset_sha256"] == frozen["dataset_sha256"]
+
+
+def test_export_bc_uses_all_members_without_evaluation_and_iql_rejects_missing(configured, tmp_path):
+    root, config, _ = portable_export(configured, tmp_path, include_unmarked=True)
+    task, = discover_tasks(root, "libero_x_vla")
+    assert {run.run_id for run in task.selected(None)} == {"root", "branch", "unmarked"}
+    with pytest.raises(ValueError, match="unmarked"):
+        task.selected("final")
+    config.raw["training"]["method"] = "bc"
+    raw = prepare_global_inputs(task, tmp_path / "bc", config.raw, "final",
+                                data_overrides={"include_post_success": True})
+    assert raw["data"]["include_post_success"] is True
+    assert len(load_manifest(LoadedConfig(config.path, raw))["episodes"]) == 3
+
+
+def test_export_zip_uses_training_files_and_cleans_temporary_view(configured, tmp_path):
+    root, config, _ = portable_export(configured, tmp_path)
+    (root / "video.mp4").write_bytes(b"unused video")
+    archive = Path(shutil.make_archive(str(tmp_path / "dataset"), "zip", root))
+    with open_run_source(archive) as source:
+        assert not (source / "video.mp4").exists()
+        task, = discover_tasks(source, "libero_x_vla")
+        raw = prepare_global_inputs(task, tmp_path / "inputs", config.raw, "final")
+        assert load_reward_index(LoadedConfig(config.path, raw))["complete"]
+    assert not source.exists()
+
+
+@pytest.mark.parametrize("mutation", ["replace", "unbound_reward", "unused_reward"])
+def test_export_keeps_selected_snapshot_and_bc_ignores_unused_rewards(configured, tmp_path, mutation):
+    root, config, _ = portable_export(configured, tmp_path)
+    task, = discover_tasks(root, "libero_x_vla")
+    export = json.loads((root / "export.json").read_text())
+    if mutation == "replace":
+        export["dataset_name"] = "changed while queued"
+    elif mutation == "unbound_reward":
+        name = str(task.runs[0].rewards["final"].relative_to(root))
+        export["files"].pop(name)
+    else:
+        _, values = saved_reward(task.runs[0], "final")
+        values.write_bytes(b"unused reward is corrupt")
+        config.raw["training"]["method"] = "bc"
+    atomic_json(root / "export.json", export)
+    if mutation == "unbound_reward":
+        task, = discover_tasks(root, "libero_x_vla")
+    if mutation == "unused_reward":
+        raw = prepare_global_inputs(task, tmp_path / "bc", config.raw, "final")
+        assert len(load_manifest(LoadedConfig(config.path, raw))["episodes"]) == 2
+    else:
+        with pytest.raises(ValueError):
+            prepare_global_inputs(task, tmp_path / "invalid", config.raw, "final")
+
+
+@pytest.mark.parametrize("mutation", ["bytes", "missing", "traversal", "incomplete", "split"])
+def test_export_integrity_fails_before_training(configured, tmp_path, mutation):
+    root, config, _ = portable_export(configured, tmp_path)
+    path = root / "export.json"
+    export = json.loads(path.read_text())
+    if mutation in ("bytes", "missing"):
+        target = next(root.rglob("trajectory.npz"))
+        target.write_bytes(b"invalid") if mutation == "bytes" else target.unlink()
+    elif mutation == "traversal":
+        export["members"][0]["path"] = "../outside"
+    elif mutation == "incomplete":
+        export["complete"] = False
+    else:
+        export["members"][0]["split"] = "validation"
+    atomic_json(path, export)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        task, = discover_tasks(root, "libero_x_vla")
+        prepare_global_inputs(task, tmp_path / "invalid", config.raw, "final")
 
 
 def test_direct_copy_keeps_global_arrays_and_requires_no_original_pc(configured, tmp_path):

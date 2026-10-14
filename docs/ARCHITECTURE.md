@@ -1,45 +1,18 @@
-# Architecture
-
-The studio uses a one-way dependency flow:
+# 服务器训练架构
 
 ```text
-React client
-  ↓ HTTP / WebSocket
-FastAPI routers (backend/app/api)
-  ├─ RunService → SimulationManager / worker
-  │    ├─ LiberoXSimulator       simulator lifecycle; never persists data
-  │    ├─ VLAAdapterPolicyProvider  model load/predict/unload
-  │    ├─ EpisodeRecorderFactory trajectory/media publishing; never calls the UI
-  │    ├─ LiberoEvaluator        LIBERO `done` success semantics
-  │    ├─ ConfiguredTaskCatalog  BDDL/init-state discovery
-  │    └─ RunRepository          SQLite index; run files remain authoritative
-  ├─ TrainingDatasetService → immutable manifests + hash verification
-  ├─ OfflineJobService / evaluation.batch → frozen schedule + evaluation index
-  └─ OfflineJobService → detached runner
-       ├─ vla-liberox: prepare / Pixel-IQL
-       ├─ rynnvalue-reward: frozen reward annotation
-       ├─ vla-liberox: lightweight batch policy evaluation
-       └─ cross-process GPU file lock
+server_pipeline.yaml + CLI
+  → 模型家族／variant + BC/IQL 配置
+  → 数据校验、保留成员与划分
+  → Prepare + 固定奖励快照
+  → 只读 mmap replay 缓存
+  → 对应模型环境中的 torchrun
+  → DDP actor、Q/V（IQL）、ZeRO-1
+  → checkpoint、日志、policy overlay
 ```
 
-## State ownership
+server_inputs.py 管理输入；server_pipeline.py 管理任务生命周期；distributed_training.py 管理多进程训练。模型适配器提供原生损失、训练范围和保存接口，训练方法定义如何赋权。
 
-- `SimulationSession` and `SimulationDraft` are domain state objects and import no FastAPI, MuJoCo, or SQLite code.
-- One worker owns the active control environment. Its state machine remains `IDLE → LOADING → READY → RUNNING → STOPPING → POSTPROCESSING → COMPLETED/ERROR`.
-- The shared preview service owns its own read-only MuJoCo environment and consumes only the latest submitted state.
-- `RunService` is the only interface used by HTTP and WebSocket routers.
-- React never imports simulator concepts or touches files; it consumes documented API resources.
-- Offline jobs own their Conda child process groups and durable logs. FastAPI may restart without terminating them, then reconciles PID/heartbeat state from `job.json`.
-- A batch evaluation freezes its complete `init_state_index`/environment-seed schedule before the detached worker starts. The worker owns the policy and simulator lifecycle; its only result artifact is the atomically updated `evaluation.json`.
-- Simulation, annotation, training, and batch evaluation share one GPU task guard; TensorBoard is read-only and outside that lock.
+rank 0 发布日志和产物，所有 rank 参与梯度同步及优化器状态汇总。ZeRO 按参数 dtype 分组，支持 π₀.₅ 原生 BF16/FP32 混合参数。mmap 保存训练所需图像和数值，避免每步重复解压 observation。
 
-## Extension points
-
-- Add a policy by implementing `policies/base.py` and registering it in the composition root.
-- The independent `vla-adapter-rynn-iql/` trainer publishes immutable component overlays to `policy-registry/`. The UI validates manifests and hashes but never imports training or RynnValue code; `VLAAdapterPolicyProvider` alone applies a selected overlay at the model boundary.
-- Add a simulator through `simulators/base.py`; simulator adapters must not write the catalog.
-- Add tasks through `configs/ui_config.yaml`; task identity is frozen into every run.
-- Batch evaluation selects exactly one registered task and one policy snapshot. It may vary only that task's finite init states and environment seeds; adding a new randomization axis belongs in `EvaluationService`, not in React or the simulator adapter.
-- Add exporters under `recording/` without introducing UI dependencies.
-
-The native host launch is intentional: the current GPU, EGL/MuJoCo, and HID device stack is hardware-coupled. A Docker Compose file is omitted until NVIDIA, EGL, and `/dev/hidraw` passthrough can be supported without weakening device permissions.
+输入记录和评价数组是真源，训练不需要网页、SQLite 或实体控制器。每次训练固定自己的数据和奖励引用。

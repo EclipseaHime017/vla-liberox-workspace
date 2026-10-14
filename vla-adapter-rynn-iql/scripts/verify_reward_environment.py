@@ -19,8 +19,8 @@ def main() -> int:
         description="Verify the pinned local RynnValue checkout and model revision"
     )
     parser.add_argument(
-        "--checkout", type=Path, default=ROOT.parent / "RynnValue",
-        help="Official RynnValue source checkout (default: workspace/RynnValue)",
+        "--checkout", type=Path, default=ROOT.parent / "third_party" / "RynnValue",
+        help="Official RynnValue source checkout (default: workspace/third_party/RynnValue)",
     )
     args = parser.parse_args()
     lock = yaml.safe_load(

@@ -1,11 +1,10 @@
 # Server-branch-only multi-GPU entrypoint; main keeps its single-GPU UI runner.
-schema_version: 3
+schema_version: 4
 training_config: ./training/iql.yaml
 runs_root: ../../dataset-root/projects/libero_x_vla/runs
-task_id: null  # choose a task in the terminal; all its marked runs are used
+task_id: null  # auto-select a single task; otherwise set this or pass --task
 output_root: ../outputs/server-training
 cache_root: ../outputs/server-replay-cache
-environment: vla-liberox
 reward_source: final
 distributed:
   # Indices within CUDA_VISIBLE_DEVICES when set, otherwise physical GPU indices.
@@ -24,6 +23,10 @@ overrides:
     micro_batch_size: 8  # GLOBAL: eight GPUs each process one chunk
     gradient_accumulation_steps: 4  # global actor effective batch = 32
     checkpoint_interval: 512
+  model:
+    family: vla_adapter  # vla_adapter | pi05
+    base_id: base  # pi05-libero-base | pi05-liberox-base for pi05
+    backbone: frozen  # frozen | full; frozen trains the pi05 action expert; VLA also supports lora
   # Other model/training/iql/logging fields use the current shared configuration.
   # Copy complete run directories from the PC, including adjacent global evaluations.
   # Evaluator/fusion parameters come from each run's saved global reward.

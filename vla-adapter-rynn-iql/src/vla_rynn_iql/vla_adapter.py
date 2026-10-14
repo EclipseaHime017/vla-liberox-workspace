@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import json
 import sys
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -14,6 +16,9 @@ from PIL import Image
 from .config import LoadedConfig, UniqueKeyLoader
 from .io import sha256_file, stable_hash
 from .models import model_config
+from .base_models import model_contract
+from .model_artifacts import parent_snapshot, decode_child
+from .checkpoint_assets import resolve_revision, checkpoint_view
 
 
 ACTION_HORIZON = 8
@@ -82,6 +87,8 @@ class VLAComponents:
     stats_key: str
     action_stats: dict[str, Any]
     proprio_stats: dict[str, Any]
+    parent: dict | None = None
+    checkpoint_holder: Any = None
 
 
 def _add_vla_path(config: LoadedConfig) -> None:
@@ -115,37 +122,52 @@ def _rank_component_loader(utils, device):
         utils.load_component_state_dict = original
 
 
+def _initialize_components(cfg, device):
+    from experiments.robot import openvla_utils
+    with _rank_component_loader(openvla_utils, device):
+        model = openvla_utils.get_vla(cfg)
+        model.set_version(cfg.save_version)
+        projector = openvla_utils.get_proprio_projector(cfg, model.llm_dim, proprio_dim=8)
+        head = openvla_utils.get_action_head(cfg, model.llm_dim)
+        processor = openvla_utils.get_processor(cfg)
+    return model, head, projector, None, processor
+
+
 def load_components(
-    config: LoadedConfig, overlay: Path | None = None, *, training: bool = True, device: Any = None
+    config: LoadedConfig, overlay: Path | None = None, *, training: bool = True
 ) -> VLAComponents:
     from .model_adaptation import configure_components
     _add_vla_path(config)
-    if device is not None:
-        # Upstream constructors use module constants, not training.device.
-        # Each torchrun worker has its own interpreter; this does not affect UI.
-        from experiments.robot import openvla_utils, robot_utils
-        openvla_utils.DEVICE = device
-        robot_utils.DEVICE = device
-    from experiments.robot.libero.run_libero_eval import GenerateConfig, initialize_model
+    import torch
+    device = torch.device(config.section("training")["device"])
 
-    vla_cfg = config.section("model")
-    cfg = GenerateConfig(
-        pretrained_checkpoint=vla_cfg["base_checkpoint"],
+    vla_cfg = model_config(config.raw)
+    policy = load_overlay(overlay) if overlay is not None else None
+    if policy is not None and policy.parent is not None:
+        if (vla_cfg["base_checkpoint"] != policy.base_checkpoint or
+                policy.stats_key not in {vla_cfg["stats_key"], f"{vla_cfg['stats_key']}_no_noops"}):
+            raise ValueError("Requested model differs from the overlay parent")
+        vla_cfg = dict(policy.model_config)
+    contract = model_contract(vla_cfg)
+    revision = resolve_revision(vla_cfg["base_checkpoint"], vla_cfg.get("base_revision"))
+    holder = checkpoint_view(vla_cfg["base_checkpoint"], revision)
+    cfg = SimpleNamespace(
+        pretrained_checkpoint=holder.name,
         task_suite_name=vla_cfg["stats_key"],
-        use_l1_regression=True, use_minivlm=True, num_images_in_input=2,
+        use_l1_regression=True, use_minivlm=True, num_images_in_input=len(contract["io"]["cameras"]),
         use_proprio=True, use_film=False, use_pro_version=True,
-        load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=ACTION_HORIZON,
-        seed=int(config.section("training")["seed"]), phase="Inference",
+        load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=contract["io"]["native_action_horizon"],
+        seed=int(config.section("training")["seed"]), phase="Inference", save_version="vla-adapter",
+        model_family="openvla", center_crop=True,
     )
-    if device is None:
-        model, action_head, proprio_projector, _, processor = initialize_model(cfg)
-    else:
-        with _rank_component_loader(openvla_utils, device):
-            model, action_head, proprio_projector, _, processor = initialize_model(cfg)
+    try:
+        model, action_head, proprio_projector, _, processor = _initialize_components(cfg, device)
+    except BaseException:
+        holder.cleanup()
+        raise
     stats_key = resolve_stats_key(model.norm_stats, vla_cfg["stats_key"])
     cfg.unnorm_key = stats_key
-    if overlay is not None:
-        policy = load_overlay(overlay)
+    if policy is not None:
         validate_overlay(policy, vla_cfg["base_checkpoint"], stats_key)
         import torch
         if policy.backbone is not None:
@@ -157,13 +179,15 @@ def load_components(
         proprio_projector=proprio_projector, processor=processor,
         stats_key=stats_key, action_stats=model.norm_stats[stats_key]["action"],
         proprio_stats=model.norm_stats[stats_key]["proprio"],
+        parent=policy.parent if policy is not None and policy.parent is not None else parent_snapshot(
+            {**vla_cfg, "stats_key": stats_key}, revision, contract=contract),
+        checkpoint_holder=holder,
     )
-    configure_components(components, model_config(config.raw), training=training)
-    if device is not None:
-        for name in ("model", "action_head", "proprio_projector"):
-            module = getattr(components, name).to(device)
-            if any(parameter.device != device for parameter in module.parameters()):
-                raise RuntimeError(f"{name} did not load on the requested device {device}")
+    configure_components(components, vla_cfg, training=training)
+    for name in ("model", "action_head", "proprio_projector"):
+        module = getattr(components, name).to(device)
+        if any(parameter.device != device for parameter in module.parameters()):
+            raise RuntimeError(f"{name} did not load on the requested device {device}")
     return components
 
 
@@ -312,11 +336,13 @@ class PolicyOverlay:
     compatibility_sha256: str
     backbone: Path | None = None
     model_config: dict[str, Any] | None = None
+    parent: dict | None = None
 
 
 def load_overlay(path: Path) -> PolicyOverlay:
     path = path.expanduser().resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+    raw, parent = decode_child(raw)
     required = {"schema_version", "policy_id", "label", "base_checkpoint", "stats_key",
                 "action_head", "proprio_projector", "action_horizon", "action_dim",
                 "proprio_dim", "dataset_sha256", "reward_sha256", "training_step",
@@ -360,7 +386,7 @@ def load_overlay(path: Path) -> PolicyOverlay:
         int(raw["action_horizon"]), int(raw["action_dim"]), int(raw["proprio_dim"]),
         str(raw["dataset_sha256"]), raw["reward_sha256"], int(raw["training_step"]),
         dict(hashes), str(raw["compatibility_sha256"]),
-        component("backbone") if raw.get("backbone") else None, raw.get("model_config"),
+        component("backbone") if raw.get("backbone") else None, raw.get("model_config"), parent,
     )
 
 
@@ -397,3 +423,52 @@ def overlay_public(path: Path) -> dict[str, Any]:
         "base_checkpoint": policy.base_checkpoint, "stats_key": policy.stats_key,
         "training_step": policy.training_step, "manifest": str(policy.path),
     }
+
+
+def actor_losses(components, batch, device):
+    prediction = predict_batch(components, batch, device)
+    error = (prediction.float() - batch["actions"].to(device).float()).abs()
+    valid = batch["action_mask"].to(device).float().unsqueeze(-1).expand_as(error)
+    losses = (error * valid).sum((1, 2)) / valid.sum((1, 2)).clamp_min(1.0)
+    return losses, prediction
+
+
+def trainable_parameters(components):
+    from .model_adaptation import trainable_parameters as parameters
+    return parameters(components)
+
+
+def parameter_counts(components):
+    from .model_adaptation import parameter_counts as counts
+    return counts(components)
+
+
+def save_actor(components, settings, directory):
+    import torch
+    from .model_adaptation import save_backbone
+    for name in ("action_head", "proprio_projector"):
+        torch.save({key: value.detach().cpu() for key, value in getattr(components, name).state_dict().items()},
+                   directory / f"{name}.pt")
+    save_backbone(components, settings, directory)
+
+
+def restore_actor(components, settings, directory):
+    import torch
+    from .model_adaptation import restore_backbone
+    restore_backbone(components, settings, directory)
+    for name in ("action_head", "proprio_projector"):
+        getattr(components, name).load_state_dict(
+            torch.load(directory / f"{name}.pt", map_location="cpu", weights_only=True), strict=True)
+
+
+def export_actor(components, settings, directory, *, checkpoint):
+    import shutil
+    from .model_adaptation import export_backbone
+    artifacts = {name: f"{name}.pt" for name in ("action_head", "proprio_projector")}
+    for name in artifacts.values():
+        shutil.copy2(checkpoint / name, directory / name)
+    adapted = export_backbone(components, settings, directory)
+    if adapted:
+        artifacts["backbone"] = "backbone.pt"
+    return {"schema_version": 3, "backbone": None, **artifacts,
+            "component_sha256": {name: sha256_file(directory / file) for name, file in artifacts.items()}}

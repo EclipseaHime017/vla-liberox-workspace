@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full-screen server training, or explicit --yes for SSH/nohup/Slurm batch jobs."""
+"""YAML-driven server training for SSH, nohup and Slurm jobs."""
 import argparse
 import json
 import signal
@@ -14,7 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from vla_rynn_iql.server_config import load_server_config
 from vla_rynn_iql.server_pipeline import ServerRun, execution_plan, training_settings
 from vla_rynn_iql.config import load_train_config
-from vla_rynn_iql.server_inputs import choose_task, discover_tasks, prepare_global_inputs
+from vla_rynn_iql.server_inputs import choose_task, discover_tasks, prepare_global_inputs, open_run_source
+from vla_rynn_iql.models import base_model_config
+from vla_rynn_iql.config_sources import merge_config
 
 
 def run_batch(run):
@@ -55,9 +57,10 @@ def run_batch(run):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parents[1] / "configs/server_pipeline.yaml")
-    parser.add_argument("--task", help="Canonical task ID; use all marked runs for this task")
-    parser.add_argument("--runs-root", type=Path, help="Copied raw runs directory; overrides YAML")
-    parser.add_argument("--yes", action="store_true", help="Noninteractive launch using YAML settings")
+    parser.add_argument("--task", help="Canonical task ID from the export or run collection")
+    parser.add_argument("--runs-root", type=Path, help="Copied runs, exported dataset directory or ZIP")
+    parser.add_argument("--model", help="Registered model variant ID")
+    parser.add_argument("--method", choices=("bc", "iql"), help="Training method; overrides YAML")
     parser.add_argument("--dry-run", action="store_true", help="Validate and show plan without writing a training run")
     args = parser.parse_args(argv)
     server = load_server_config(args.config)
@@ -65,21 +68,27 @@ def main(argv=None):
         server = replace(server, task_id=args.task)
     if args.runs_root:
         server = replace(server, runs_root=args.runs_root.expanduser().resolve())
-    if not args.yes and not args.dry_run:
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            parser.error("Interactive mode requires a TTY; use --yes with a task for batch execution")
-        from vla_rynn_iql.server_tui import run_tui
-        run_tui(server)
-        return 0
+    overrides = server.overrides
+    if args.model:
+        overrides = {**overrides, "model": base_model_config(args.model)}
+    if args.method:
+        overrides = merge_config(overrides, {"training": {"method": args.method}})
+    server = replace(server, overrides=overrides)
+    with open_run_source(server.runs_root) as root:
+        return execute(replace(server, runs_root=root), dry_run=args.dry_run)
+
+
+def execute(server, *, dry_run=False):
     project = load_train_config(server.training_config).raw["data"]["project_id"]
     task = choose_task(discover_tasks(server.runs_root, project), server.task_id)
     raw = training_settings(server, task)
     plan = execution_plan(server, task, raw, server.distributed, server.reward_source)
     print(json.dumps(plan, ensure_ascii=False, indent=2), flush=True)
-    if args.dry_run:
+    if dry_run:
         with tempfile.TemporaryDirectory(prefix="server-input-check-") as temp:
             raw["paths"]["output_dir"] = str(Path(temp) / "output")
-            prepare_global_inputs(task, Path(temp) / "inputs", raw, server.reward_source)
+            prepare_global_inputs(task, Path(temp) / "inputs", raw, server.reward_source,
+                                  data_overrides=server.overrides["data"])
         return 0
     run = ServerRun(server, task, raw, server.distributed, server.reward_source)
     return run_batch(run)

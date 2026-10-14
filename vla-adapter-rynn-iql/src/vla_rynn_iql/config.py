@@ -12,14 +12,11 @@ import yaml
 
 from .methods import COMMON_TRAINING_KEYS, training_method
 from .models import model_config
-from .config_sources import UniqueKeyLoader, compose_config, read_source
+from .config_sources import UniqueKeyLoader, compose_config, migrate_fields, read_source
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# Preserve historical defaults for standalone scripts; the server entry point
-# explicitly selects its composed training/iql.yaml or training/bc.yaml profile.
-DEFAULT_TRAIN_CONFIG = PROJECT_ROOT / "configs" / "liberox_iql.yaml"
-DEFAULT_INFERENCE_CONFIG = PROJECT_ROOT / "configs" / "inference.yaml"
+DEFAULT_TRAIN_CONFIG = PROJECT_ROOT / "configs" / "training" / "iql.yaml"
 
 
 TRAIN_SCHEMA = {
@@ -68,16 +65,6 @@ TRAIN_SCHEMA = {
         "console_interval_steps": None,
     },
 }
-
-INFERENCE_SCHEMA = {
-    "schema_version": None,
-    "paths": {"vla_adapter_root": None, "libero_x_root": None, "output_dir": None},
-    "policy": {"overlay": None},
-    "evaluation": {"level": None, "task_name": None, "trials": None,
-                   "max_steps": None, "open_loop_steps": None, "seed": None,
-                   "device": None, "mujoco_gl": None, "compare_base": None},
-}
-
 
 @dataclass(frozen=True)
 class LoadedConfig:
@@ -183,8 +170,7 @@ def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG, *, method: str | None =
 
 def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     """Normalize legacy keys once; consumers see only their own canonical section."""
-    import copy
-    raw = copy.deepcopy(raw)
+    raw = migrate_fields(raw)
     path = path.expanduser().resolve()
     if raw.get("schema_version") not in (1, 2):
         raise ValueError("Only schema_version=1 or 2 is supported")
@@ -379,32 +365,4 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     )
     _number(logging_cfg, "flush_seconds", low=1, high=3600)
     _number(logging_cfg, "console_interval_steps", low=1, integer=True)
-    return LoadedConfig(path, raw)
-
-
-def load_inference_config(path: Path = DEFAULT_INFERENCE_CONFIG) -> LoadedConfig:
-    path = path.expanduser().resolve()
-    raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
-    _validate_schema(raw, INFERENCE_SCHEMA)
-    if raw["schema_version"] != 1:
-        raise ValueError("Only schema_version=1 is supported")
-    _resolve_paths(raw, path, ("vla_adapter_root", "libero_x_root", "output_dir"))
-    overlay = raw["policy"]["overlay"]
-    if not isinstance(overlay, str) or not overlay.strip():
-        raise TypeError("policy.overlay must be a non-empty string")
-    p = Path(overlay).expanduser()
-    raw["policy"]["overlay"] = str((p if p.is_absolute() else path.parent / p).resolve())
-    ev = raw["evaluation"]
-    if ev["level"] not in {"LEVEL1", "LEVEL2", "LEVEL3", "LEVEL4"}:
-        raise ValueError("evaluation.level must be LEVEL1..LEVEL4")
-    for key in ("trials", "max_steps", "open_loop_steps", "seed"):
-        _number(ev, key, low=0 if key == "seed" else 1, high=8 if key == "open_loop_steps" else None, integer=True)
-    if type(ev["compare_base"]) is not bool:
-        raise TypeError("evaluation.compare_base must be boolean")
-    for key in ("task_name", "device", "mujoco_gl"):
-        if not isinstance(ev[key], str) or not ev[key].strip():
-            raise TypeError(f"evaluation.{key} must be a non-empty string")
-    _cuda_device(ev["device"], "evaluation.device")
-    if ev["mujoco_gl"] not in {"egl", "glfw", "osmesa"}:
-        raise ValueError("evaluation.mujoco_gl must be egl, glfw, or osmesa")
     return LoadedConfig(path, raw)

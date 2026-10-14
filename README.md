@@ -1,166 +1,229 @@
-# LIBERO-X Local Data Studio
+# LIBERO-X server training
 
-Current release: **v0.4.0**
+server tracks the main release version; both are currently **v0.7.2**. The branches are maintained independently: version alignment does not merge main's runtime workflow into server.
 
-Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse takeover,
-offline post-training, and reproducible batch policy testing for the three
-validated Franka/LIBERO-X tasks.
+Workflow: install environments → upload a dataset → configure training → run the launcher → download the trained model. Run commands from the server repository root unless marked as local.
 
-- Backend: FastAPI application service with a background simulation worker.
-- Frontend: React + TypeScript, served by FastAPI after a Vite production build.
-- Storage: portable run directories plus a rebuildable SQLite catalog.
-- Compatibility: the existing evaluation, intervention, and SpaceMouse CLI scripts remain available.
-- Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
-- Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
-- Run drafts can choose a reproducible random seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact.
-- Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) imports the read-only dataset, annotates temporal value with pinned RynnValue, trains a PyTorch IQL overlay, and publishes only the action head and proprio projector to `policy-registry/`.
-- Integrated workflow: the Dataset page evaluates RynnValue once per trajectory, preserves its complete output sidecar, paginates run previews, exposes video/action/EEF, absolute/relative remaining-time, observation-potential and entropy estimates, plus Shape/Final Reward details, and independently packages hash-verified training datasets. The Training page derives rewards from those cached model outputs using its selected `gamma`, shaping coefficient, and macro/primitive reduction, then launches resumable IQL jobs without rerunning RynnValue.
-- Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
-- Batch testing: the Test page, immediately after Training in the sidebar, evaluates one task and one base/overlay policy over a frozen, deterministically balanced schedule of benchmark init states and environment seeds.
+[中文说明](README_CN.md)
 
-## Repository layout
+## 1. Environment setup
 
-```text
-vla-liberox-workspace/
-├── liberox-vla-adapter-terminal/  # simulation, intervention, Web UI and recording
-├── vla-adapter-rynn-iql/          # standalone reward annotation and offline RL
-├── configs/                       # terminal/UI runtime configuration
-├── dataset-root/                  # recorded source data (Git-ignored)
-├── policy-registry/               # immutable policy overlays (Git-ignored)
-├── docs/                          # architecture and data-layout documentation
-└── README_CN.md                   # complete Chinese setup and operating guide
-```
-
-The collection terminal and offline trainer are separate systems. The trainer
-never rewrites recorded actions, states, observations, or media. UI-launched
-RynnValue evaluation adds only hash-checked `rynnvalue_evaluation.json/npz`
-sidecars beside an episode so later dataset packages can reuse the result. The
-deployment integration boundary remains a hash-checked `policy.yaml` overlay
-published to `policy-registry/`.
-
-The Web UI orchestrates them without importing RynnValue into the simulation
-process. Prepare/training/testing subprocesses use `vla-liberox`, annotation
-uses `rynnvalue-reward`, and simulation/annotation/training/testing share a
-persistent cross-process GPU lock. TensorBoard is read-only and remains outside
-that lock. Dataset manifests reference and hash source artifacts instead of
-copying trajectories or videos.
-
-Start from `vla-liberox-workspace/` after activating `vla-liberox`:
+### Clone the server branch
 
 ```bash
-python liberox-vla-adapter-terminal/scripts/run_ui.py
+mkdir -p ~/eclipseaws
+cd ~/eclipseaws
+git clone --branch server https://github.com/EclipseaHime017/vla-liberox-workspace.git
+cd vla-liberox-workspace
 ```
 
-On a new checkout, run `npm ci` once in `liberox-vla-adapter-terminal/frontend/`. The launcher fingerprints the frontend sources, prints the exact build command before running it, and automatically rebuilds the Git-ignored `frontend/dist` after later pulls. Run `npm run build` there for a manual source-only rebuild, or `npm ci && npm run build` after `package-lock.json` changes. Neither `npm run build` nor `npm test` installs or upgrades dependencies.
-
-Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup and operation, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module boundaries, and [docs/DATA_LAYOUT.md](docs/DATA_LAYOUT.md) for persistence rules.
-
-## Batch policy testing
-
-The Test page runs a selected task and policy repeatedly without publishing
-rollout media or trajectories. “Random environments” are the finite
-`init_state_index` values belonging to that exact BDDL task, not other scenes;
-environment seeds form the second randomization axis. The backend freezes a
-reproducible, balanced schedule before launch, then runs every normal episode to
-`max_steps`. A success is latched only after five consecutive `done=true`
-control steps, while the remainder of the episode still executes.
-
-The default mode is wall-clock-limited to 20 Hz; accelerated mode removes only
-that wall-clock wait and keeps the MuJoCo control-frequency semantics unchanged.
-Each test stores one lightweight `evaluation.json` under the project
-`evaluations/` tree. Detached-job diagnostics (`job.json`, `job.log`, and the
-validated effective YAML) remain in `jobs/`; no video, observation, action,
-trajectory, image, or plot is written by batch testing.
-
-## RynnValue + IQL offline post-training
-
-The standalone pipeline keeps `VLA-Adapter/LIBERO-Object-Pro` as the deployed
-Franka policy, freezes its vision/language backbone, and updates only the
-continuous action head and proprio projector:
-
-```text
-dataset-root
-        │
-        ├── validate trajectories; bind reusable RynnValue sidecars per episode
-        ▼
-frozen RynnValue-4B ── absolute/relative heads + exact Analysis output
-        │               (immutable, reward-agnostic annotation cache)
-        ▼
-deterministic reward materialization ── sparse + Shape + Final Reward
-        │                              (gamma/kappa/reduction keyed cache)
-        ▼
-Pixel-IQL critics/value + advantage-weighted VLA behavior cloning
-        │
-        ▼
-policy-registry/<policy_id>/policy.yaml
-        ├── standalone LIBERO-X evaluation
-        └── selectable policy overlay in the existing Web UI
-```
-
-RynnValue follows the pinned official inference implementation and is used only
-as an offline trajectory evaluator. Annotation schema v6 retains decoded absolute
-and relative temporal distances, both distributional-head logits, absolute-head
-entropy, and the exact generated Analysis text/token IDs, but no training
-reward. No overlapping-window average is applied, and PBRS is never labeled as
-a native model output. A separate deterministic cache derives sparse, Shape,
-and Final Reward. Existing compatible schema-v4/v5 sidecars are migrated by
-reusing their model heads, even when their old reward settings differ; no new
-RynnValue forward is performed. The
-PyTorch trainer implements IQL with double-Q
-critics, expectile value regression and advantage-weighted behavior cloning; it
-does not perform online exploration or modify the upstream VLA-Adapter source.
-
-Reuse the existing `vla-liberox` environment for dataset preparation, IQL and
-evaluation; only RynnValue needs the additional `rynnvalue-reward` environment. After
-following the installation steps in the [standalone trainer guide](vla-adapter-rynn-iql/README.md),
-run from the workspace root:
+To update an existing server checkout, first ensure its working tree is clean:
 
 ```bash
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/materialize_rewards.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
-  --config vla-adapter-rynn-iql/configs/liberox_iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/evaluate.py \
-  --config vla-adapter-rynn-iql/configs/inference.yaml
+git fetch origin
+git switch server
+git pull --ff-only origin server
 ```
 
-The default profile pins the RynnValue source commit and 4B model snapshot,
-uses 8×7 action chunks and 8-D proprio at 20 Hz, and is designed for staged use
-on a 16 GB GPU. A dataset containing only failures is accepted for integration
-testing with an explicit warning, but is not evidence that offline training will
-improve task success.
+You need NVIDIA GPUs, Conda, Git, and a driver supporting CUDA 12.8. Install the environment for each model you intend to use.
 
-IQL training writes TensorBoard events beside the raw `metrics.jsonl` log. Run
-`tensorboard --logdir vla-adapter-rynn-iql/outputs/training` to compare runs;
-existing JSONL-only runs can be imported with
-`vla-adapter-rynn-iql/scripts/metrics_to_tensorboard.py`.
+### VLA-Adapter
 
-## Robometer trajectory evaluation
+```bash
+conda create -n vla-liberox python=3.10 pip -y
+conda activate vla-liberox
+git clone https://github.com/OpenHelix-Team/VLA-Adapter.git third_party/VLA-Adapter
+git -C third_party/VLA-Adapter checkout 23fa0c9c159e2aa04341cdd3e924f44061311060
+python -m pip install -e ./third_party/VLA-Adapter
+python -m pip install -r vla-adapter-rynn-iql/requirements-train.txt
+python -m pip install -e ./vla-adapter-rynn-iql
+python -m pip install --upgrade torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install numpy==1.26.4 setuptools==69.5.1
+git -C third_party/VLA-Adapter apply ../../vla-adapter-rynn-iql/vla_adapter_hf_local_autoclass.patch
+```
 
-The independent [Robometer evaluator](vla-adapter-robometer/README.md) adds the
-official `Robometer-4B-LIBERO` single-trajectory progress and success
-probability outputs to existing episodes. In the data page, RynnValue and
-Robometer may be selected independently or run sequentially in one GPU job.
-Their files, cache validation and overwrite behavior remain independent;
-Robometer does not alter IQL rewards or frozen training manifests. Episode
-details show both original Robometer curves and an explicitly UI-derived,
-time-aligned comparison with normalized RynnValue remaining time.
+The default base model downloads to `models/VLA-Adapter-LIBERO-Object-Pro/` on first load. Alternatively, copy the complete directory containing the same base weights to that location.
 
-Robometer uses the separate `robometer-reward` Conda environment. Its pinned
-model/source revisions, CUDA device, BF16 mode, 3 Hz evaluation rate, four-frame
-prefix protocol and batch-size tuning are documented in the
-[evaluator configuration guide](vla-adapter-robometer/README.md#configuration).
+### π₀.₅
 
-### References
+```bash
+conda create -n pi05 python=3.11 pip -y
+conda run -n pi05 python -m pip install uv
+conda run --no-capture-output -n pi05 python vla-adapter-rynn-iql/scripts/setup_pi05.py
+conda run --no-capture-output -n pi05 python vla-adapter-rynn-iql/scripts/prepare_pi05.py --base-model pi05-libero-base
+conda activate pi05
+```
 
-- [RynnValue paper — temporal distance and potential-based reward shaping](https://arxiv.org/abs/2608.09853)
-- [RynnValue official implementation](https://github.com/alibaba-damo-academy/RynnValue)
-- [Implicit Q-Learning paper](https://arxiv.org/abs/2110.06169)
-- [VLA-Adapter official implementation](https://github.com/OpenHelix-Team/VLA-Adapter)
-- [LIBERO-X official implementation](https://github.com/meituan/LIBERO-X)
-- [Robometer paper](https://arxiv.org/abs/2603.02115)
-- [Robometer official implementation](https://github.com/robometer/robometer)
+The installer places pinned OpenPI sources in `third_party/OpenPI/`. Weights are converted to BF16 by default in `models/pi05_libero_torch/`. Copy an existing complete converted directory instead of converting it again. Other registered variants use their corresponding `--base-model` ID.
+
+Keep the environments separate. Run the launcher from an installed training environment; workers use the environment declared by the selected model. Reusing exported evaluations and rewards does not require RynnValue or Robometer installations.
+
+## 2. Upload and import a dataset
+
+Prepare a complete exported dataset ZIP or directory, including its manifests, trajectories, and evaluations. This guide uses `dataset-root/imports/` on the server.
+
+Run locally after replacing the host and repository path:
+
+```bash
+TRAIN_HOST=user@server
+TRAIN_REPO=/home/user/eclipseaws/vla-liberox-workspace
+ssh "$TRAIN_HOST" "mkdir -p '$TRAIN_REPO/dataset-root/imports'"
+scp ./task-export.zip "$TRAIN_HOST:$TRAIN_REPO/dataset-root/imports/"
+```
+
+For a directory, replace the last command with:
+
+```bash
+scp -r ./task-export "$TRAIN_HOST:$TRAIN_REPO/dataset-root/imports/"
+```
+
+Dataset exports retain their membership and train/validation splits. Complete runs directories are also supported, using their existing trajectory selection marks. ZIP inputs are temporarily extracted for training and cleaned up afterwards; manual extraction is unnecessary.
+
+## 3. Configure training
+
+Edit [server_pipeline.yaml](vla-adapter-rynn-iql/configs/server_pipeline.yaml). This example uses VLA-Adapter, IQL, and eight GPUs:
+
+```yaml
+schema_version: 4
+training_config: ./training/iql.yaml
+runs_root: ../../dataset-root/imports/task-export.zip
+task_id: null
+output_root: ../outputs/server-training
+cache_root: ../outputs/server-replay-cache
+reward_source: final
+
+distributed:
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  backend: nccl
+  zero_stage: 1
+  timeout_seconds: 1800
+  data_workers_per_rank: 2
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+
+overrides:
+  model:
+    family: vla_adapter
+    base_id: base
+    backbone: frozen
+  training:
+    method: iql
+    train_steps: 10000
+    micro_batch_size: 8
+    gradient_accumulation_steps: 4
+    checkpoint_interval: 512
+  reward: {}
+```
+
+Relative paths are resolved against their configuration file. Set `runs_root` to a directory when importing a directory. Leave `task_id: null` for a single task; otherwise set the canonical task ID or pass `--task`.
+
+### GPUs and batch size
+
+- `gpu_ids` selects 1–8 GPUs on one machine. If `CUDA_VISIBLE_DEVICES` is already set, these indices refer to that visible-device list.
+- `micro_batch_size` is global and must be divisible by the GPU count. Per-GPU batch size is global batch ÷ GPU count.
+- Effective actor batch size = micro batch × gradient accumulation. The example uses one sample per GPU, global micro batch eight, and accumulation four, giving an effective batch of 32.
+- `checkpoint_interval` must be divisible by accumulation steps. Changing the GPU count does not automatically change training steps or learning rates.
+
+### Model and training method
+
+For π₀.₅, replace `overrides.model` with:
+
+```yaml
+model:
+  family: pi05
+  base_id: pi05-libero-base
+  backbone: frozen
+```
+
+VLA-Adapter supports `frozen/lora/full`; π₀.₅ supports `frozen/full`, where frozen trains the action expert and projections. See [Model.md](docs/Model.md) for further model settings.
+
+For BC, set `training_config: ./training/bc.yaml` and `overrides.training.method: bc`. BC learns from dataset actions without rewards or Q/V training. Select or filter samples when preparing the dataset, not in the training method.
+
+IQL accepts `reward_source: final/rynnvalue/stage/sparse`. Existing evaluations are reused; missing required rewards stop the job rather than triggering model evaluation. Exported results supply p, α, κ, and other reward-recipe settings. Training only permits these overrides under `overrides.reward`:
+
+```yaml
+reward:
+  gamma: 0.99
+  accumulate_primitive_steps: false
+```
+
+Keep `reward: {}` to inherit exported settings. Cumulative reward must be Off for multiplicative Final Reward.
+
+## 4. Run training
+
+Activate an installed training environment, then validate the input and configuration:
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml --dry-run
+```
+
+Start training:
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --config vla-adapter-rynn-iql/configs/server_pipeline.yaml
+```
+
+You can also override the model and method for a run:
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_server.py \
+  --model pi05-libero-base --method bc
+```
+
+The launcher validates inputs, loads rewards, prepares the mmap cache, and starts DDP + ZeRO-1. Use tmux for long remote jobs so an SSH disconnect does not stop training.
+
+### Progress, stopping, and resuming
+
+Default run directories are `vla-adapter-rynn-iql/outputs/server-training/server_<timestamp>_<ID>/`. The terminal prints the run path and progress. From another terminal:
+
+```bash
+RUN="vla-adapter-rynn-iql/outputs/server-training/server_<timestamp>_<ID>"
+tail -f "$RUN/training.log"
+tail -n 1 "$RUN/metrics.jsonl"
+```
+
+TensorBoard is enabled by default. For W&B, run `wandb login` in the model's training environment and set `overrides.logging.wandb.enabled: true`.
+
+Ctrl+C requests a checkpoint at a safe gradient-accumulation boundary. To resume, set:
+
+```yaml
+overrides:
+  training:
+    resume_checkpoint: /absolute/path/to/checkpoints/step_00000512
+```
+
+Keep the rest of the original configuration and set `train_steps` above the completed step. Model, data, rewards, global batch, accumulation, and seed must remain consistent. GPU count may change if the global batch remains divisible.
+
+## 5. Export and download the trained model
+
+After completion, `policy_overlay` in `$RUN/summary.json` points to `policy-registry/<policy-ID>/policy.yaml`. Download its entire model directory for inference, not just the YAML file or a training checkpoint.
+
+On the server, create a deployment copy. Replace `TARGET_BASE` with the corresponding base-weight location on your local device:
+
+```bash
+POLICY_MANIFEST=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["policy_overlay"])' "$RUN/summary.json")
+POLICY_ID=$(basename "$(dirname "$POLICY_MANIFEST")")
+TARGET_BASE=/home/localuser/eclipseaws/vla-liberox-workspace/models/VLA-Adapter-LIBERO-Object-Pro
+
+python vla-adapter-rynn-iql/scripts/export_policy.py \
+  --policy "$POLICY_MANIFEST" \
+  --output "$PWD/vla-adapter-rynn-iql/outputs/deploy/$POLICY_ID" \
+  --base-checkpoint "$TARGET_BASE"
+```
+
+For π₀.₅, use the matching base-weight directory, such as `models/pi05_libero_torch/`. Base-weight contents must match between machines. Deployment export leaves the original training result unchanged and requires a new output directory.
+
+From your local repository root, enter the policy ID obtained above and download:
+
+```bash
+TRAIN_HOST=user@server
+TRAIN_REPO=/home/user/eclipseaws/vla-liberox-workspace
+POLICY_ID=your-policy-ID
+mkdir -p policy-registry
+scp -r "$TRAIN_HOST:$TRAIN_REPO/vla-adapter-rynn-iql/outputs/deploy/$POLICY_ID" ./policy-registry/
+```
+
+Keep the name and all files of `policy-registry/<policy-ID>/`. Retain server run directories and checkpoints for further training; local inference does not require training checkpoints.

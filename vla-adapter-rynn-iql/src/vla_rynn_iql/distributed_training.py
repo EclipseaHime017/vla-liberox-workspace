@@ -21,7 +21,6 @@ from .data import load_manifest, training_replay_policy
 from .distributed_algorithms import ActorModule, CommunicationMeter, DistributedAlgorithm, wrap, zero_optimizer
 from .io import atomic_json
 from .methods import actor_lr_warmup, training_method
-from .model_adaptation import parameter_counts, trainable_parameters
 from .models import model_backend, model_signature
 from .monitoring import TrainingProgressReporter, log_tensorboard_metric, log_wandb_metric
 from .rewards import load_reward_index, reward_manifest_digest
@@ -134,7 +133,9 @@ def train_distributed(config: LoadedConfig, distributed, cache_root: Path, run_d
         raise ValueError(f"Requested {distributed.world_size} GPUs but CUDA sees only {torch.cuda.device_count()}")
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
+    print(f"DISTRIBUTED initializing | rank={local_rank} | device={device} | backend=nccl", flush=True)
     dist.init_process_group("nccl", timeout=timedelta(seconds=distributed.timeout_seconds))
+    print(f"DISTRIBUTED ready | rank={local_rank} | world={dist.get_world_size()}", flush=True)
     stop = False
     def request_stop(*_):
         nonlocal stop
@@ -169,7 +170,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
     backend = model_backend(raw)
     if rank == 0:
         print(f"MODEL loading | method={method.name} | world={world} | config={model_signature(raw)}", flush=True)
-    components = backend.load_components(config, device=device)
+    components = backend.load_components(config)
     cache_info = rank_zero_call(lambda: tuple(map(str, build_replay_cache(
         config, cache_root, components.action_stats, components.proprio_stats, reward))))
     dataset = CachedReplayDataset(Path(cache_info[0]))
@@ -177,8 +178,11 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
     algorithm = DistributedAlgorithm(config, device, meter)
     # Pro retains a legacy FiLM block not used by every prediction path, even
     # when the backbone is frozen. Never assume all registered parameters fire.
-    actor = wrap(ActorModule(components, backend, device), device, unused=True, meter=meter)
-    parameters = trainable_parameters(components)
+    # Model adapters own CPU image/token transforms and device transfers. DDP
+    # must not move raw replay fields to CUDA before those transforms execute.
+    actor = wrap(ActorModule(components, backend, device), device, unused=True, meter=meter,
+                 move_inputs=False)
+    parameters = backend.trainable_parameters(components)
     optimizer = zero_optimizer(parameters, torch.optim.AdamW, lr=cfg["policy_peak_lr"],
                                betas=(.9, .95), eps=1e-8, weight_decay=1e-10)
     generator = torch.Generator().manual_seed(seed + 1)
@@ -186,6 +190,13 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
     if cfg["resume_checkpoint"]:
         start = restore_distributed_checkpoint(Path(cfg["resume_checkpoint"]), components, algorithm,
             optimizer, generator, device, config, manifest, reward, global_batch)
+    else:
+        # Initialization is identical across ranks; training noise/dropout is
+        # independent. The sampler retains its own world-size-independent RNG.
+        random.seed(seed + rank)
+        np.random.seed(seed + rank)
+        torch.manual_seed(seed + rank)
+        torch.cuda.manual_seed(seed + rank)
     if start >= total:
         raise ValueError("Resume step must be less than train_steps")
     sampler = DistributedBatchSampler(len(dataset), global_batch, rank, world, seed + 1, start, total)
@@ -206,7 +217,9 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
         atomic_json(run_dir / "provenance.json", {"algorithm": method.name, "world_size": world,
             "global_micro_batch_size": global_batch, "local_micro_batch_size": local_batch,
             "actor_effective_batch_size": global_batch * accumulation,
-            "model_config": model_signature(raw), "model_parameters": parameter_counts(components),
+            "model_config": model_signature(raw), "model_parameters": backend.parameter_counts(components),
+            "model_identity": getattr(components, "identity", None),
+            "model_parent": getattr(components, "parent", None),
             "dataset_sha256": manifest["dataset_sha256"],
             "reward_sha256": reward_manifest_digest(reward) if reward else None,
             "replay_policy": training_replay_policy(config.section("data")["include_post_success"]),
@@ -237,7 +250,9 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
             torch.randint(len(dataset), (global_batch,), generator=generator)
             data_time = time.perf_counter() - begin
             tensors = {key: value.to(device, non_blocking=True) for key, value in batch.items()
-                       if isinstance(value, torch.Tensor) and key not in {"agent_image", "wrist_image"}}
+                       if isinstance(value, torch.Tensor) and key in {
+                           "pixels", "next_pixels", "proprio", "next_proprio", "actions",
+                           "action_mask", "reward", "bootstrap_mask", "chunk_length"}}
             torch.cuda.synchronize(device)
             tick = time.perf_counter()
             context, metrics = algorithm.update(tensors, step)
@@ -246,12 +261,15 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
             boundary = (step + 1) % accumulation == 0 or step + 1 == total
             tick = time.perf_counter()
             with nullcontext() if boundary else actor.no_sync():
-                prediction = actor(batch)
-                loss = algorithm.actor_loss(prediction, tensors, context)
+                losses, prediction = actor(batch)
+                loss = algorithm.weight_actor_losses(losses, context)
                 (loss / accumulation).backward()
             torch.cuda.synchronize(device)
             actor_time = time.perf_counter() - tick
-            metrics.update(_action_diagnostics(prediction, tensors["actions"], tensors["action_mask"]))
+            if prediction is not None:
+                metrics.update(_action_diagnostics(prediction, tensors["actions"], tensors["action_mask"]))
+            else:
+                metrics["actor_flow_mse"] = float(losses.detach().mean())
             if boundary:
                 metrics["actor_grad_norm"] = float(torch.nn.utils.clip_grad_norm_(parameters, 1.0))
                 lr = _actor_lr(step, total, cfg["policy_peak_lr"], cfg["policy_final_lr"], actor_lr_warmup(raw))

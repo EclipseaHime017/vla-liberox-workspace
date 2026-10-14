@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import copy
-import importlib.util
 import json
-import sys
 import zipfile
 from pathlib import Path
 
@@ -287,24 +285,3 @@ def test_stage_replay_uses_actual_chunk_endpoint_without_reward_model(configured
     assert [item["start"] for item in post_success] == [18]
     assert post_success[0]["chunk_length"].item() == 4
     assert post_success[0]["bootstrap_mask"].item() == 0.0
-
-
-@pytest.mark.parametrize("source,method", [("sparse", "iql"), ("stage", "iql"), ("rynnvalue", "bc")])
-def test_legacy_terminal_rejects_server_only_modes(configured, tmp_path, monkeypatch, capsys, source, method):
-    from test_terminal_pipeline import _terminal_config
-    path = _terminal_config(tmp_path, configured.path)
-    raw = yaml.safe_load(path.read_text())
-    raw["overrides"]["reward"].update(source=source)
-    raw["overrides"]["training"] = {"method": method}
-    path.write_text(yaml.safe_dump(raw))
-    script = Path(__file__).parents[1] / "scripts" / "train_terminal.py"
-    spec = importlib.util.spec_from_file_location("test_stage_terminal", script)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    monkeypatch.setattr(sys, "argv", [str(script), "--config", str(path), "--yes"])
-    monkeypatch.setattr(module, "discover_candidates", lambda *_: pytest.fail("Input scan"))
-    with pytest.raises(SystemExit) as error:
-        module.main()
-    assert error.value.code == 2
-    assert "use train_server.py" in capsys.readouterr().err
-    assert not (tmp_path / "pipelines").exists()

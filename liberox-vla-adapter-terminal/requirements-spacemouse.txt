@@ -1,2 +1,0 @@
-# Optional SpaceMouse input dependency. Install requirements-sim.txt first.
-pyspacemouse==2.0.0

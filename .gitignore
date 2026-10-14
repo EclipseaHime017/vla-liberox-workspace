@@ -12,6 +12,10 @@
 /RynnValue/
 /tmp/
 /annotation-cache/
+/models/*
+/evaluator/
+/logs/
+/third_party/*
 
 # Python
 **/__pycache__/
@@ -33,9 +37,8 @@ env/
 events.out.tfevents.*
 wandb/
 
-# Frontend
+# Local frontend assets retained when switching branches
 **/node_modules/
-# Vite output stays machine-local; run_ui.py rebuilds it when sources change.
 **/frontend/dist/
 **/frontend/*.tsbuildinfo
 **/frontend/vite.config.js
