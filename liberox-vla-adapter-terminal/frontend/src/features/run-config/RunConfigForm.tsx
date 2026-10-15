@@ -18,17 +18,38 @@ type Props = {
   onInitStateIndex: (value: number, commit: boolean) => void;
   onPolicyCamera: (camera: PolicyCameraId, enabled: boolean) => void;
   onBranchOpenLoop: (value: number) => void;
+  policyInstruction?: string;
+  onPolicyInstruction?: (value: string, commit: boolean) => void;
+  onBranchSteps?: (value: number) => void;
+  onBranchInstruction?: (value: string) => void;
   onStartBranch: () => void; onCancelBranch: () => void;
 };
+
+function InstructionField({ instructions, value, disabled, onChange }: {
+  instructions: NonNullable<TaskInfo["instructions"]>; value: string; disabled: boolean;
+  onChange: (value: string, commit: boolean) => void;
+}) {
+  return <>
+    {instructions.length > 0 && <label>指令预设<select disabled={disabled}
+      value={instructions.find((item) => item.text === value)?.id ?? ""}
+      onChange={(event) => { const item = instructions.find((item) => item.id === event.target.value); if (item) onChange(item.text, true); }}>
+      <option value="">自定义</option>{instructions.map((item) => <option key={item.id} value={item.id}>{item.text}</option>)}
+    </select></label>}
+    <label className="branch-step-field">策略执行指令<Input value={value} disabled={disabled}
+      onChange={(event) => onChange(event.target.value, false)} onBlur={() => onChange(value, true)} /></label>
+  </>;
+}
 
 export function RunConfigForm(props: Props) {
   const policy = props.policies.find((item) => item.policy_id === (props.branchDraft?.policy_id ?? props.policyId));
   const maxOpenLoop = policy?.inference?.max_open_loop_steps;
+  const manual = props.branchDraft?.control_mode === "manual";
+  const invalidSteps = props.branchDraft && (!Number.isInteger(props.branchDraft.target_steps)
+    || props.branchDraft.target_steps <= props.branchDraft.resume_step || props.branchDraft.target_steps > 10000);
   return <div className="new-run">
     {props.branchDraft ? <>
       <div className="branch-config-title">
-        <strong>二次推理配置</strong>
-        <span>仅可调整执行步数</span>
+        <strong>{manual ? "人工续跑配置" : "二次推理配置"}</strong>
       </div>
       <label className="locked-field">任务（继承源会话）
         <Input value={props.branchDraft.task_prompt} disabled />
@@ -42,10 +63,15 @@ export function RunConfigForm(props: Props) {
       <label className="locked-field">回溯帧
         <Input value={props.branchDraft.resume_step} disabled />
       </label>
-      <label className="locked-field">目标总控制步数
-        <Input value={props.branchDraft.target_steps} disabled />
+      <label className="branch-step-field">目标总控制步数
+        <Input type="number" min={props.branchDraft.resume_step + 1} max={10000}
+          value={props.branchDraft.target_steps} disabled={props.active || props.busy}
+          onChange={(event) => props.onBranchSteps?.(Number(event.target.value))} />
       </label>
-      <label className="branch-step-field">每次预测执行步数
+      <InstructionField instructions={props.branchDraft.instructions ?? []}
+        value={props.branchDraft.policy_instruction ?? props.branchDraft.task_prompt}
+        disabled={props.active || props.busy} onChange={(value) => props.onBranchInstruction?.(value)} />
+      {!manual && <label className="branch-step-field">每次预测执行步数
         <Input
           type="number"
           min={1}
@@ -54,14 +80,20 @@ export function RunConfigForm(props: Props) {
           disabled={props.active || props.busy}
           onChange={(event) => props.onBranchOpenLoop(Number(event.target.value))}
         />
-      </label>
-      <p className="locked-field-note">任务、Episode、回溯帧和轨迹总长度由源会话锁定，二次推理仍从所选帧直接恢复状态。</p>
+      </label>}
       <div className="button-row">
-        <Button className="primary" disabled={props.active || props.busy || !Number.isInteger(props.branchDraft.open_loop_steps) || props.branchDraft.open_loop_steps < 1 || (maxOpenLoop !== undefined && props.branchDraft.open_loop_steps > maxOpenLoop)} onClick={props.onStartBranch}>开始二次推理</Button>
+        <Button className="primary" disabled={props.active || props.busy || Boolean(invalidSteps)
+          || !(props.branchDraft.policy_instruction ?? props.branchDraft.task_prompt).trim()
+          || (!manual && (!Number.isInteger(props.branchDraft.open_loop_steps) || props.branchDraft.open_loop_steps < 1
+            || (maxOpenLoop !== undefined && props.branchDraft.open_loop_steps > maxOpenLoop)))}
+          onClick={props.onStartBranch}>{manual ? "开始人工续跑" : "开始二次推理"}</Button>
         <Button disabled={props.active || props.busy} onClick={props.onCancelBranch}>取消配置</Button>
       </div>
     </> : !props.draft ? <Button className="primary create-draft" disabled={props.active || props.busy} onClick={props.onCreate}>创建仿真</Button> : <>
       <TaskSelector tasks={props.tasks} value={props.taskId} disabled={props.active || props.busy} onChange={props.onTask} labelPrefix="仿真" />
+      <InstructionField instructions={props.draft.task.instructions ?? []}
+        value={props.policyInstruction ?? props.draft.policy_instruction ?? props.draft.task.prompt}
+        disabled={props.active || props.busy} onChange={(value, commit) => props.onPolicyInstruction?.(value, commit)} />
       <label>策略模型<PolicySelector policies={props.policies} value={props.policyId} disabled={props.active || props.busy} onChange={props.onPolicy} /></label>
       <label>总控制步数<Input type="number" min={1} max={10000} value={props.maxSteps} disabled={props.active || props.busy} onChange={(event) => props.onMaxSteps(Number(event.target.value), false)} onBlur={() => props.onMaxSteps(props.maxSteps, true)} /></label>
       <label>每次预测执行步数<Input type="number" min={1} max={maxOpenLoop} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>

@@ -1,0 +1,59 @@
+schema_version: 1
+family_id: bowl_on_stove
+label: place the bowl on the stove
+variants:
+  level1_1:
+    task_id: LEVEL1::EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+    level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+    goal_prompt: place the black bowl on the flat stove
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL1/EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL1/EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove.init
+    optional: false
+    instructions:
+    - id: full
+      text: place the black bowl on the flat stove
+  level2_2:
+    task_id: LEVEL2::EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+    level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+    goal_prompt: place the black bowl on the flat stove
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL2/EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL2/EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove.init
+    optional: true
+    instructions:
+    - id: full
+      text: place the black bowl on the flat stove
+  level3_3:
+    task_id: LEVEL3::EXTENSION_KITCHEN_SCENE11_LEVEL3__T70_place_the_black_bowl_on_the_flat_stove
+    level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE11_LEVEL3__T70_place_the_black_bowl_on_the_flat_stove
+    goal_prompt: place the black bowl on the flat stove
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL3/EXTENSION_KITCHEN_SCENE11_LEVEL3__T70_place_the_black_bowl_on_the_flat_stove.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL3/EXTENSION_KITCHEN_SCENE11_LEVEL3__T70_place_the_black_bowl_on_the_flat_stove.init
+    optional: true
+    instructions:
+    - id: full
+      text: place the black bowl on the flat stove
+  level4_4:
+    task_id: LEVEL4::EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A1_place_the_cyan_bowl_on_the_stove
+    level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A1_place_the_cyan_bowl_on_the_stove
+    goal_prompt: place the cyan bowl on the stove
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL4/EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A1_place_the_cyan_bowl_on_the_stove.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL4/EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A1_place_the_cyan_bowl_on_the_stove.init
+    optional: true
+    instructions:
+    - id: full
+      text: place the cyan bowl on the stove
+  level4_5:
+    task_id: LEVEL4::EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A2_place_the_large_light_grey_bowl_on_the_stove
+    level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A2_place_the_large_light_grey_bowl_on_the_stove
+    goal_prompt: place the large light grey bowl on the stove
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL4/EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A2_place_the_large_light_grey_bowl_on_the_stove.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL4/EXTENSION_KITCHEN_SCENE11_LEVEL4__T70__A2_place_the_large_light_grey_bowl_on_the_stove.init
+    optional: true
+    instructions:
+    - id: full
+      text: place the large light grey bowl on the stove

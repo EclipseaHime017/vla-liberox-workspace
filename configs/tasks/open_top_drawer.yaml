@@ -1,0 +1,48 @@
+schema_version: 1
+family_id: open_top_drawer
+label: open the top drawer of the wooden cabinet
+variants:
+  level1_1:
+    task_id: LEVEL1::EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+    level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+    goal_prompt: open the top drawer of the wooden cabinet
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL1/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL1/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.init
+    optional: false
+    instructions:
+    - id: full
+      text: open the top drawer of the wooden cabinet
+  level2_2:
+    task_id: LEVEL2::EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+    level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
+    goal_prompt: open the top drawer of the wooden cabinet
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL2/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL2/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.init
+    optional: true
+    instructions:
+    - id: full
+      text: open the top drawer of the wooden cabinet
+  level3_3:
+    task_id: LEVEL3::EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet
+    level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet
+    goal_prompt: open the top drawer of the wooden cabinet
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL3/EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL3/EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet.init
+    optional: true
+    instructions:
+    - id: full
+      text: open the top drawer of the wooden cabinet
+  level4_4:
+    task_id: LEVEL4::EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet
+    level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet
+    goal_prompt: open the top drawer of the wooden cabinet
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL4/EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL4/EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet.init
+    optional: true
+    instructions:
+    - id: full
+      text: open the top drawer of the wooden cabinet

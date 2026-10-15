@@ -166,6 +166,12 @@ def replay_chunks(episode: dict[str, Any]) -> list[dict[str, Any]]:
     return chunks
 
 
+def replay_chunk_key(episode: dict[str, Any], chunk: dict[str, Any]) -> tuple[str, int, int, str]:
+    origin = chunk.get("origin_run_id") or (episode["root_run_id"]
+        if chunk.get("copied_prefix", False) else episode["run_id"])
+    return str(origin), int(chunk["start"]), int(chunk["end"]), str(chunk["action_source"])
+
+
 def iter_unique_replay_chunks(
     episodes: list[dict[str, Any]], *, split: str | None = None,
     include_post_success: bool = True,
@@ -177,15 +183,17 @@ def iter_unique_replay_chunks(
         if not any(int(chunk["end"]) == end for chunk in full_chunks[str(episode["run_id"])]):
             raise ValueError(f"Run {episode['run_id']} lacks a chunk at the confirmed success boundary; rerun Prepare")
     copied_prefix_keys = {
-        (
-            str(episode["root_run_id"]), int(chunk["start"]),
-            int(chunk["end"]), str(chunk["action_source"]),
-        )
+        replay_chunk_key(episode, chunk)
         for episode in episodes
         for chunk in full_chunks[str(episode["run_id"])]
         if bool(chunk.get("copied_prefix", False))
     }
     seen_copied_prefixes: set[tuple[str, int, int, str]] = set()
+    produced = {replay_chunk_key(episode, chunk)
+        for episode in episodes if split is None or episode["split"] == split
+        for chunk in full_chunks[str(episode["run_id"])]
+        if int(chunk["end"]) <= replay_end_step(episode, include_post_success)
+        and not chunk.get("copied_prefix", False)}
     ordered = sorted(
         episodes,
         key=lambda item: (item.get("kind") == "branch", str(item["run_id"])),
@@ -196,10 +204,9 @@ def iter_unique_replay_chunks(
         for chunk_index, chunk in enumerate(full_chunks[str(episode["run_id"])]):
             if int(chunk["end"]) > replay_end_step(episode, include_post_success):
                 continue
-            key = (
-                str(episode["root_run_id"]), int(chunk["start"]),
-                int(chunk["end"]), str(chunk["action_source"]),
-            )
+            key = replay_chunk_key(episode, chunk)
+            if chunk.get("copied_prefix", False) and key in produced:
+                continue
             if key in copied_prefix_keys:
                 if key in seen_copied_prefixes:
                     continue
@@ -383,6 +390,7 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
             f"data.project_id={data_cfg['project_id']!r}: {run_json}"
         )
     with np.load(trajectory, allow_pickle=False) as arrays:
+        metadata = json.loads(str(arrays["metadata_json"].item())) if "metadata_json" in arrays else {}
         required = {
             "time_seconds", "eef_position", "eef_axis_angle", "gripper_qpos",
             "raw_action", "env_action", "done", "action_source",
@@ -517,6 +525,9 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
         "recorded_action_source_segments": action_source_segments(
             sources, recorded_action_count,
         ),
+        **({"trajectory_segments": metadata.get("trajectory_segments", run.get("trajectory_segments")),
+            "handoff_steps": metadata.get("handoff_steps", run.get("handoff_steps", []))}
+           if "trajectory_segments" in metadata or "trajectory_segments" in run else {}),
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
@@ -538,25 +549,54 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int) -> None:
     resume_step = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
     success_end = (int(episode["terminal_step"]) + 1 if episode["terminal_step"] is not None
                    else int(episode["recorded_action_count"]))
+    segments = episode.get("trajectory_segments")
+    raw_handoffs = episode.get("handoff_steps", [])
+    if not isinstance(raw_handoffs, list) or any(type(step) is not int or not 0 <= step <= int(episode["recorded_action_count"]) for step in raw_handoffs):
+        raise ValueError("handoff_steps must contain integer recording boundaries")
+    handoffs = set(raw_handoffs) | ({resume_step} if resume_step else set())
+    if segments is not None:
+        if not isinstance(segments, list):
+            raise ValueError("trajectory_segments must be a list")
+        cursor = 0
+        for segment in segments:
+            if (not isinstance(segment, dict) or type(segment.get("start")) is not int or type(segment.get("end")) is not int
+                    or segment["start"] != cursor or not cursor < segment["end"] <= int(episode["recorded_action_count"])
+                    or not isinstance(segment.get("origin_run_id"), str) or not segment["origin_run_id"]
+                    or not isinstance(segment.get("policy_instruction"), str) or not segment["policy_instruction"].strip()):
+                raise ValueError(f"Invalid instruction/origin segments: {episode['run_id']}")
+            cursor = segment["end"]
+        if cursor != int(episode["recorded_action_count"]):
+            raise ValueError("Instruction/origin segments do not cover the recording")
+    boundaries = handoffs | ({int(s["start"]) for s in segments} if segments else set())
+    def split_sources(sources):
+        result = []
+        for source in sources:
+            cuts = sorted({int(source["start"]), int(source["end"])} |
+                          {point for point in boundaries if source["start"] < point < source["end"]})
+            result.extend({**source, "start": start, "end": end} for start, end in zip(cuts, cuts[1:]))
+        return result
     chunks = build_semi_mdp_chunks(first=0, end=success_end, horizon=horizon,
-                                   source_segments=episode["action_source_segments"])
+                                   source_segments=split_sources(episode["action_source_segments"]))
     if success_end < int(episode["recorded_action_count"]):
         chunks.extend(build_semi_mdp_chunks(first=success_end,
             end=int(episode["recorded_action_count"]), horizon=horizon,
-            source_segments=episode["recorded_action_source_segments"]))
+            source_segments=split_sources(episode["recorded_action_source_segments"])))
+    for chunk in chunks:
+        if segments:
+            segment = next(s for s in segments if s["start"] <= chunk["start"] < s["end"])
+            chunk.update(origin_run_id=segment["origin_run_id"], policy_instruction=segment["policy_instruction"])
+        if chunk["end"] in handoffs and chunk["length"] < horizon:
+            chunk["interrupted"] = True
     if episode["kind"] == "branch":
         for chunk in chunks:
             if int(chunk["end"]) > resume_step:
                 continue
-            if str(chunk["action_source"]) != "policy":
-                raise ValueError(f"Branch {episode['run_id']} has non-policy action "
-                                 f"before resume_step={resume_step}: {chunk['action_source']!r}")
             chunk["copied_prefix"] = True
             if int(chunk["end"]) == resume_step and int(chunk["length"]) < horizon:
-                chunk["transition_type"] = "policy_interrupted"
+                chunk["transition_type"] = str(chunk["action_source"]) + "_interrupted"
                 chunk["interrupted"] = True
             else:
-                chunk["transition_type"] = "policy_prefix"
+                chunk["transition_type"] = str(chunk["action_source"]) + "_prefix"
     episode["chunks"] = chunks
     episode["evaluation_chunks"] = [
         {**chunk, "transition_type": "post_terminal_evaluation"}

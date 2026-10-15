@@ -1,0 +1,8 @@
+schema_version: 1
+default_task_id: LEVEL1::EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+families:
+  bowl_on_stove: bowl_on_stove.yaml
+  open_top_drawer: open_top_drawer.yaml
+  stack_bowls: stack_bowls.yaml
+  bowl_in_drawer_and_close: bowl_in_drawer_and_close.yaml
+  stove_off_and_sort_bowls: stove_off_and_sort_bowls.yaml

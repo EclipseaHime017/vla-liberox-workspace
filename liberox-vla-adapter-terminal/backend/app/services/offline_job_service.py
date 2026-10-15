@@ -78,7 +78,7 @@ def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool
 
     def key(episode: dict[str, Any], chunk: dict[str, Any]) -> tuple[str, int, int, str]:
         return (
-            str(episode["root_run_id"]), int(chunk["start"]),
+            str(chunk.get("origin_run_id") or (episode["root_run_id"] if chunk.get("copied_prefix", False) else episode["run_id"])), int(chunk["start"]),
             int(chunk["end"]), str(chunk["action_source"]),
         )
 
@@ -87,6 +87,8 @@ def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool
         if chunk.get("copied_prefix", False)
     }
     seen: set[tuple[str, int, int, str]] = set()
+    produced = {key(episode, chunk) for episode, chunks in episodes if episode["split"] == "train"
+                for chunk in chunks if not chunk.get("copied_prefix", False)}
     action_count = chunk_count = 0
     for episode, chunks in sorted(
         episodes, key=lambda item: (item[0].get("kind") == "branch", str(item[0]["run_id"])),
@@ -95,6 +97,8 @@ def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool
             continue
         for chunk in chunks:
             current = key(episode, chunk)
+            if chunk.get("copied_prefix", False) and current in produced:
+                continue
             if current in copied:
                 if current in seen:
                     continue
@@ -1540,6 +1544,17 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             shutil.rmtree(result_dir)
             raise
         result_path = result_dir / "evaluation.json"
+        from .task_registry import RegistryTaskCatalog, freeze_task
+        if isinstance(self.manager.catalog, RegistryTaskCatalog):
+            try:
+                frozen = freeze_task(self.manager.catalog, task["task_id"], result_dir / "task_snapshot")
+                bddl, init = frozen.paths(task["task_id"])
+                task = {**task, "bddl_path": str(bddl), "init_path": str(init),
+                        "task_revision_sha256": frozen.manifest["task_revision_sha256"]}
+            except Exception:
+                shutil.rmtree(job_dir)
+                shutil.rmtree(result_dir)
+                raise
         config_path = job_dir / "effective_config.yaml"
         config_keys = {
             "trials", "max_steps", "open_loop_steps", "realtime",

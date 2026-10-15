@@ -75,7 +75,7 @@ def run_control_loop(
     queue: deque[np.ndarray] = deque()
     policy_queries = 0
     control_step_times: list[float] = []
-    success = bool(recorder.dones[-1]) if recorder.dones else False
+    success = any(recorder.dones)
     stopped_reason = horizon_reason
     start_action_count = recorder.action_count
 

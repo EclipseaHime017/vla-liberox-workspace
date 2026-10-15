@@ -131,6 +131,8 @@ class TrainingDatasetService:
                 if run.get("kind") == "branch" and actions
                 else math.ceil(actions / 8) if actions else 0
             )
+            if run.get("training_chunk_count") is not None:
+                chunk_count = int(run["training_chunk_count"])
             public = {
                 **run,
                 "is_test": run["id"] in test_ids,

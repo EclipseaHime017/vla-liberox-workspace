@@ -17,6 +17,7 @@ export type TaskInfo = {
   level: string;
   task_name: string;
   prompt: string;
+  instructions?: Array<{ id: string; text: string }>;
   prompt_variant?: string | null;
   scene_level?: string;
   available?: boolean;
@@ -83,6 +84,7 @@ export type Draft = {
   id: string; task_id: string; max_steps: number; open_loop_steps: number;
   seed: number; init_state_index: number; disabled_policy_cameras: PolicyCameraId[];
   policy_id: string; policy_label: string;
+  policy_instruction?: string | null;
   preview_status: "PREPARING" | "RENDERING" | "READY" | "ERROR";
   preview_revision: number; preview_ready: boolean; preview_available: boolean;
   error: string | null; task: TaskInfo;
@@ -90,6 +92,9 @@ export type Draft = {
 
 export type PolicyBranchDraft = {
   parent_session_id: string;
+  control_mode?: "policy" | "manual";
+  policy_instruction?: string;
+  instructions?: Array<{ id: string; text: string }>;
   task_prompt: string;
   source_episode: string;
   resume_step: number;
@@ -101,6 +106,9 @@ export type PolicyBranchDraft = {
 
 export type Session = {
   id: string; kind: "original" | "branch"; task_id: string | null; level: string | null;
+  role?: "original" | "branch";
+  can_promote?: boolean;
+  policy_instruction?: string | null;
   task_name: string | null; task: string | null; parent_session_id: string | null;
   resume_step?: number | null;
   control_mode: string; manual_source: "browser" | "spacemouse" | "factr" | null;
@@ -511,6 +519,7 @@ export type ControllerStatus = {
 };
 
 export type FrameState = {
+  actual_instruction?: string;
   step: number; time_seconds: number; eef_position_m: number[]; eef_axis_angle_rad: number[];
   gripper_qpos: number[]; raw_action: number[] | null; env_action: number[] | null; success: boolean;
 };

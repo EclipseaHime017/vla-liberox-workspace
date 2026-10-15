@@ -432,7 +432,8 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     evaluation_id = _strict_string(root["evaluation_id"], "evaluation_id")
     if Path(evaluation_id).name != evaluation_id or ".." in evaluation_id:
         raise ValueError("evaluation_id is unsafe")
-    task = _validate_exact_mapping(root["task_snapshot"], TASK_KEYS, "task_snapshot")
+    task_keys = TASK_KEYS | ({"task_revision_sha256"} if "task_revision_sha256" in root["task_snapshot"] else set())
+    task = _validate_exact_mapping(root["task_snapshot"], task_keys, "task_snapshot")
     from ..policies.snapshots import validate_snapshot
     policy = validate_snapshot(root["policy_snapshot"])
     config = _validate_exact_mapping(root["config"], CONFIG_KEYS, "config")
@@ -453,6 +454,13 @@ def load_effective_config(path: Path) -> dict[str, Any]:
         if not source.is_absolute() or not source.is_file():
             raise FileNotFoundError(f"task_snapshot.{key} is not an existing absolute file")
         task[key] = str(source.resolve())
+    if task.get("task_revision_sha256"):
+        from ..services.task_registry import TaskSnapshot
+        frozen = TaskSnapshot.load(None, Path(task["bddl_path"]).parent / "task.json")
+        if (frozen.manifest["task_revision_sha256"] != task["task_revision_sha256"]
+                or frozen.entry(task["task_id"]).prompt != task["prompt"]
+                or frozen.paths(task["task_id"]) != (Path(task["bddl_path"]), Path(task["init_path"]))):
+            raise ValueError("Evaluation task snapshot identity mismatch")
     if not isinstance(config["realtime"], bool):
         raise TypeError("config.realtime must be true or false")
     for key, minimum in (

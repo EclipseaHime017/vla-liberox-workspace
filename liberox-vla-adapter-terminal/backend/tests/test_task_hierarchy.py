@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from backend.app.api import datasets as datasets_api
 from backend.app.core.config import load_ui_config
 from backend.app.services.task_catalog import ConfiguredTaskCatalog
+from backend.app.services.task_registry import RegistryTaskCatalog
 from backend.app.services.offline_job_service import OfflineJobService
 import backend.app.services.task_catalog as tasks_module
 from test_training_platform import make_run, service
@@ -38,7 +39,6 @@ def test_rejects_ambiguous_family_configuration(tmp_path, families):
 def test_default_catalog_adds_two_level1_composite_tasks_without_changing_existing_scenes(monkeypatch):
     root = Path(__file__).resolve().parents[3]
     config = load_ui_config(root / "configs/ui_config.yaml")
-    default = SimpleNamespace(level="LEVEL1", task_name=config.task_families[0].task_names[0])
     # Read the actual BDDL prompts without importing MuJoCo, VLA or GPU libraries.
     def parse(path):
         language = Path(path).read_text().split("(:language", 1)[1].split(")", 1)[0].strip()
@@ -48,8 +48,7 @@ def test_default_catalog_adds_two_level1_composite_tasks_without_changing_existi
         reads.append(path)
         return np.zeros((10, 5))
     monkeypatch.setattr(tasks_module.direct, "load_initial_states", load_states)
-    catalog = ConfiguredTaskCatalog(SimpleNamespace(parse_bddl_file=parse), root / "third_party" / "LIBERO-X",
-                                   default, config.additional_tasks, config.task_families)
+    catalog = RegistryTaskCatalog(SimpleNamespace(parse_bddl_file=parse), config.task_registry)
     entries = catalog.list_tasks()
     assert len(entries) == 15
     assert all(entry["available"] for entry in entries)

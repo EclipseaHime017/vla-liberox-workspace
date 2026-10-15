@@ -45,6 +45,10 @@ class SimulationSession:
     task_level: str | None = None
     task_name: str | None = None
     task_prompt: str | None = None
+    policy_instruction: str | None = None
+    task_snapshot: str | None = None
+    prefix_segments: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    handoff_steps: list[int] = field(default_factory=list)
     parent_session_id: str | None = None
     root_session_id: str | None = None
     source_trajectory: str | None = None
@@ -102,6 +106,24 @@ class SimulationSession:
     def episode_dir(self) -> Path:
         return self.output_dir / "episodes" / "episode_000"
 
+    @property
+    def trajectory_segments(self) -> list[dict[str, Any]]:
+        segments = [dict(segment) for segment in self.prefix_segments]
+        start = int(self.resume_step or 0)
+        if self.action_count > start:
+            segments.append(dict(start=start, end=self.action_count, origin_run_id=self.id,
+                                 policy_instruction=self.policy_instruction or self.task_prompt))
+        return segments
+
+    @property
+    def training_chunk_count(self) -> int:
+        """Nominal eight-step chunks; Prepare additionally handles success and deduplication."""
+        boundaries = {0, self.action_count, *(self.handoff_steps), int(self.resume_step or 0)}
+        for segment in self.trajectory_segments:
+            boundaries.update((segment["start"], segment["end"]))
+        points = sorted(point for point in boundaries if 0 <= point <= self.action_count)
+        return sum((end - start + 7) // 8 for start, end in zip(points, points[1:]))
+
     def public(self, artifacts: dict[str, str] | None = None) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -110,6 +132,8 @@ class SimulationSession:
             "level": self.task_level,
             "task_name": self.task_name,
             "task": self.task_prompt,
+            "policy_instruction": self.policy_instruction or self.task_prompt,
+            "task_snapshot": self.task_snapshot,
             "parent_session_id": self.parent_session_id,
             "root_session_id": self.root_session_id,
             "source_trajectory": self.source_trajectory,
@@ -149,6 +173,7 @@ class SimulationSession:
             "current_step": self.current_step,
             "state_count": self.state_count,
             "action_count": self.action_count,
+            "training_chunk_count": self.training_chunk_count,
             "policy_queries": self.policy_queries,
             "success": self.success,
             "error": self.error,
@@ -181,6 +206,7 @@ class SimulationDraft:
     init_state_index: int = 0
     disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
+    policy_instruction: str | None = None
     policy_label: str | None = None
     policy_content_sha256: str | None = None
     preview_status: str = "PREPARING"
@@ -198,6 +224,7 @@ class SimulationDraft:
             "init_state_index": self.init_state_index,
             "disabled_policy_cameras": list(self.disabled_policy_cameras),
             "policy_id": self.policy_id,
+            "policy_instruction": self.policy_instruction or task["prompt"],
             "policy_label": self.policy_label,
             "preview_status": self.preview_status,
             "preview_revision": self.preview_revision,

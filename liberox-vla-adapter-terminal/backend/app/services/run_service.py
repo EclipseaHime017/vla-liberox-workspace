@@ -28,6 +28,7 @@ class RunService:
     def create_original(self, **kwargs): return self.worker.create_original(**kwargs)
     def stop(self, run_id): return self.worker.stop(run_id)
     def create_branch(self, run_id, *args, **kwargs): return self.worker.create_branch(run_id, *args, **kwargs)
+    def promote(self, run_id): return self.worker.promote(run_id)
     def delete(self, run_id, confirmation): return self.worker.delete_session(run_id, confirmation)
     def frame(self, run_id, step): return self.worker.render_frame(run_id, step)
     def frame_state(self, run_id, step): return self.worker.frame_state(run_id, step)

@@ -64,6 +64,20 @@ def test_policy_loop_latches_success_and_runs_to_target_steps():
     assert recorder.state_count == 6
 
 
+def test_continuation_keeps_success_reached_earlier_in_the_prefix():
+    env = FakeEnv()
+    recorder = TrajectoryRecorder(capture_images=False)
+    recorder.record_initial(env, observation(0))
+    for _ in range(5):
+        obs, reward, done, _ = env.step([0.] * 7)
+        recorder.record_transition(env, obs, np.zeros(7), np.zeros(7), reward, done, "policy")
+    assert recorder.dones == [False, False, True, False, False]
+    result = run_control_loop(env=env, recorder=recorder, initial_observation=observation(5),
+        target_action_count=6, rate_limiter=FakeLimiter(), action_source="human",
+        manual_query=lambda _: np.zeros(7))
+    assert result.success and not recorder.dones[-1]
+
+
 @pytest.mark.parametrize("horizon,execution_steps", [(8, 8), (10, 5), (10, 10), (50, 25)])
 def test_policy_loop_executes_requested_prefix_then_replans(horizon, execution_steps):
     env = FakeEnv()

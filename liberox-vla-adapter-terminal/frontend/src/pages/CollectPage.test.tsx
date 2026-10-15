@@ -70,6 +70,94 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("collection controller integration", () => {
+  it("promotes human history and resumes its final state with a new instruction", async () => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    let record = {...source, id: "human", kind: "branch", role: "branch", can_promote: true,
+      branchable: false, control_mode: "manual", manual_source: "factr"} as Session;
+    const task = {...bootstrap.task, instructions: [{id: "place", text: "place bowl on stove"}]};
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (path === "/api/bootstrap") return {...bootstrap, task, task_catalog: [task]};
+      if (path === "/api/sessions") return [record];
+      if (path === "/api/sessions/human/promote") {
+        record = {...record, role: "original", can_promote: false, branchable: true};
+        return record;
+      }
+      if (path.includes("/frames/")) return {step: Number(path.split("/frames/")[1].split("/")[0]),
+        time_seconds: 0, actual_instruction: "instruction at selected state"};
+      if (path === "/api/sessions/human/branches") return {...source, id: "continued", status: "READY"};
+      return original(path, options);
+    });
+    render(<CollectPage />);
+    expect((await screen.findByRole("button", {name: /分支 · human /})).textContent).toContain("manual / factr");
+    fireEvent.click(screen.getByRole("button", {name: "设为主线"}));
+    expect((await screen.findByRole("button", {name: /原始 · human /})).textContent).toContain("manual / factr");
+    expect(record.kind).toBe("branch");
+    fireEvent.change(document.querySelector("input.timeline")!, {target: {value: "10"}});
+    fireEvent.click(screen.getByRole("button", {name: "从此帧重新推理"}));
+    const instruction = await screen.findByLabelText("策略执行指令") as HTMLInputElement;
+    expect(instruction.value).toBe("instruction at selected state");
+    const start = screen.getByRole("button", {name: "开始二次推理"}) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("目标总控制步数"), {target: {value: "20"}});
+    fireEvent.change(screen.getByLabelText("指令预设"), {target: {value: "place"}});
+    expect(instruction.value).toBe("place bowl on stove");
+    fireEvent.change(instruction, {target: {value: "finish placing bowl"}});
+    expect((screen.getByLabelText(/任务（继承源会话）/) as HTMLInputElement).value).toBe("pick bowl");
+    fireEvent.click(start);
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/human/branches", {
+      method: "POST", body: JSON.stringify({resume_step: 10, control_mode: "policy", max_steps: 20,
+        policy_instruction: "finish placing bowl", open_loop_steps: 8}),
+    }));
+  });
+
+  it("ignores a continuation configuration response after selecting another recording", async () => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    let blocked = false;
+    let completeFrame: ((value: {step: number; time_seconds: number}) => void) | undefined;
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (path === "/api/sessions") return [source, {...source, id: "other"}];
+      if (path.includes("/source/frames/") && blocked) {
+        return new Promise((resolve) => { completeFrame = resolve; });
+      }
+      return original(path, options);
+    });
+    render(<CollectPage />);
+    const configure = await screen.findByRole("button", {name: "从此帧重新推理"});
+    blocked = true;
+    fireEvent.click(configure);
+    await waitFor(() => expect(completeFrame).toBeDefined());
+    fireEvent.click(screen.getByRole("button", {name: /原始 · other /}));
+    await act(async () => { completeFrame!({step: 0, time_seconds: 0}); });
+    expect(screen.queryByRole("button", {name: "开始二次推理"})).toBeNull();
+  });
+
+  it("keeps an edited instruction when an unrelated draft patch returns", async () => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    const draft = {id: "draft", task_id: "task", policy_id: "base", policy_label: "Base",
+      policy_instruction: "original instruction", max_steps: 300, open_loop_steps: 8,
+      seed: 0, init_state_index: 0, disabled_policy_cameras: [], task: bootstrap.task,
+      preview_status: "READY", preview_revision: 1, preview_available: false};
+    let completePatch: ((value: typeof draft) => void) | undefined;
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (path === "/api/bootstrap") return {...bootstrap, task_catalog: [bootstrap.task]};
+      if (path === "/api/draft") {
+        if (options?.method === "PATCH") return new Promise((resolve) => { completePatch = resolve; });
+        return draft;
+      }
+      return original(path, options);
+    });
+    render(<CollectPage />);
+    fireEvent.click(await screen.findByRole("button", {name: "创建仿真"}));
+    const seed = await screen.findByLabelText("随机种子");
+    fireEvent.change(seed, {target: {value: "7"}});
+    fireEvent.blur(seed);
+    await waitFor(() => expect(completePatch).toBeDefined());
+    const instruction = screen.getByLabelText("策略执行指令") as HTMLInputElement;
+    fireEvent.change(instruction, {target: {value: "new instruction being typed"}});
+    await act(async () => { completePatch!({...draft, seed: 7}); });
+    expect(instruction.value).toBe("new instruction being typed");
+  });
+
   it("uses variant execution defaults when switching without changing training horizon", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     const policies = [
@@ -130,7 +218,7 @@ describe("collection controller integration", () => {
     });
     render(<CollectPage />);
     fireEvent.click(await screen.findByRole("button", { name: "从此帧重新推理" }));
-    fireEvent.click(screen.getByRole("button", { name: "开始二次推理" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始二次推理" }));
     const warning = await screen.findByRole("alert");
     expect(warning.className).toContain("warning-banner");
     expect(warning.textContent).toContain("WARN");
@@ -195,9 +283,11 @@ describe("collection controller integration", () => {
     await waitFor(() => expect((takeover as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByRole("slider", { name: "旋转增益" })).toBeNull();
     fireEvent.click(takeover);
+    fireEvent.click(await screen.findByRole("button", { name: "开始人工续跑" }));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/source/branches", {
       method: "POST",
-      body: JSON.stringify({ resume_step: 0, control_mode: "manual", open_loop_steps: 8,
+      body: JSON.stringify({ resume_step: 0, control_mode: "manual", max_steps: 10,
+        policy_instruction: "pick bowl", open_loop_steps: 8,
         controller_id: "factr", translation_gain: 0.25, rotation_gain: 0.25 }),
     }));
     await waitFor(() => expect((screen.getByLabelText("人工控制器") as HTMLSelectElement).disabled).toBe(true));
@@ -242,8 +332,10 @@ describe("collection controller integration", () => {
     const takeover = await screen.findByRole("button", {name: "SpaceMouse 接管"});
     await waitFor(() => expect((takeover as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(takeover);
+    fireEvent.click(await screen.findByRole("button", {name: "开始人工续跑"}));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/source/branches", {
-      method: "POST", body: JSON.stringify({resume_step: 0, control_mode: "manual", open_loop_steps: 8,
+      method: "POST", body: JSON.stringify({resume_step: 0, control_mode: "manual", max_steps: 10,
+        policy_instruction: "pick bowl", open_loop_steps: 8,
         controller_id: "spacemouse", translation_gain: .5, rotation_gain: .25, control_frame: "tool"}),
     }));
   });
@@ -308,6 +400,7 @@ describe("collection controller integration", () => {
     const takeover = await screen.findByRole("button", {name: "SpaceMouse 接管"});
     await waitFor(() => expect((takeover as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(takeover);
+    fireEvent.click(await screen.findByRole("button", {name: "开始人工续跑"}));
     await waitFor(() => expect(sessionWebSocket).toHaveBeenLastCalledWith("spacemouse-branch"));
     const socket = vi.mocked(sessionWebSocket).mock.results.at(-1)!.value as WebSocket;
     fireEvent.change(screen.getByRole("slider", {name: "位移增益"}), {target: {value: ".6"}});
@@ -326,6 +419,7 @@ describe("collection controller integration", () => {
     const next = screen.getByRole("button", {name: "SpaceMouse 接管"});
     await waitFor(() => expect((next as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(next);
+    fireEvent.click(await screen.findByRole("button", {name: "开始人工续跑"}));
     await waitFor(() => {
       const calls = vi.mocked(api).mock.calls.filter(([path]) => path === "/api/sessions/source/branches");
       expect(calls).toHaveLength(2);

@@ -149,6 +149,11 @@ class LiberoXSimulator:
         return direct.restore_state(env, state)
 
     @staticmethod
+    def restore_control_state(env, actions, control_hz):
+        from .control_state import restore_control_state
+        return restore_control_state(env, actions, control_hz)
+
+    @staticmethod
     def observations(env: Any, observation: dict[str, Any]) -> dict[str, Any]:
         result = direct.capture_camera_observations(env, observation)
         direct.validate_observation(result)

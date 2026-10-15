@@ -65,6 +65,7 @@ class Candidate:
     run_path: Path
     trajectory_path: Path
     observations_path: Path
+    chunk_count: int | None = None
 
 
 def _strict_keys(value: Any, expected: set[str], context: str) -> dict[str, Any]:
@@ -300,6 +301,7 @@ def discover_candidates(
                     run_path=run_path.resolve(),
                     trajectory_path=trajectory,
                     observations_path=observations,
+                    chunk_count=run.get("training_chunk_count"),
                 ))
                 seen.add(run_id)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -395,8 +397,8 @@ def build_selection_manifest(
             "resume_step": item.resume_step,
             "end_step": item.action_count,
             "action_count": item.action_count,
-            "chunk_count": math.ceil(item.resume_step / 8)
-            + math.ceil(max(0, item.action_count - item.resume_step) / 8),
+            "chunk_count": (item.chunk_count if item.chunk_count is not None else
+                math.ceil(item.resume_step / 8) + math.ceil(max(0, item.action_count - item.resume_step) / 8)),
             "split": _split(
                 item.root_run_id, int(data["split_seed"]), float(data["validation_fraction"])
             ),
