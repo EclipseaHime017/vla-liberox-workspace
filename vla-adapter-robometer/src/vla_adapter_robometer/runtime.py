@@ -36,7 +36,7 @@ def validate_runtime_versions() -> dict[str, str]:
         details = "; ".join(problems)
         raise RuntimeError(
             "Incompatible Robometer runtime: " + details + ". Rebuild the "
-            "robometer-reward environment using vla-adapter-robometer/README.md; "
+            "robometer-reward environment using docs/DEPENDENCIES.md; "
             "downgrading torchao alone is not supported."
         )
     return found

@@ -1,4 +1,4 @@
-# This repository stores only the LIBERO-X VLA terminal source code.
+# Server training source, configuration and user documentation are versioned.
 # Upstream checkouts and generated experiment data stay local.
 /LIBERO-X/
 /VLA-Adapter/

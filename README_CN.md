@@ -4,6 +4,8 @@ server 跟随 main 的发布版本号，当前两者均为 **v0.7.2**。两个�
 
 操作顺序：安装环境 → 上传数据集 → 配置训练 → 运行脚本 → 下载训练模型。除上传和下载外，以下命令均在服务器的仓库根目录执行。
 
+[指令速查](docs/RUN_COMMANDS.md) · [依赖说明](docs/DEPENDENCIES.md)
+
 ## 1. 环境配置
 
 ### 下载 server 分支
@@ -225,3 +227,21 @@ scp -r "$TRAIN_HOST:$TRAIN_REPO/vla-adapter-rynn-iql/outputs/deploy/$POLICY_ID" 
 ```
 
 下载后保留 `policy-registry/<模型ID>/` 的目录名和全部文件。需要继续训练时，另外保留服务器上的 run 和 checkpoints；只用于本地推理则无需下载训练 checkpoint。
+
+## 6. 服务器架构
+
+```text
+server_pipeline.yaml + train_server.py
+  → 选择模型变体和 BC/IQL 方法
+  → 校验导入的数据集，固定成员、划分和奖励快照
+  → 构建或复用 mmap 数据缓存
+  → 在模型对应环境中启动 torchrun
+  → DDP 多卡训练 + ZeRO-1 优化器
+  → 保存 checkpoint、日志和可部署模型
+```
+
+`server_inputs.py` 负责输入和奖励读取，`server_pipeline.py` 负责配置与进程管理，`server_replay.py` 负责缓存及采样，`distributed_training.py` 负责训练循环和结果保存。
+
+模型 YAML 和适配器管理权重、输入处理、原生损失及训练范围；训练方法决定如何使用这些损失，分布式层负责同步和优化器状态分片。rank 0 写入日志并发布结果，所有 rank 参与梯度同步及 checkpoint 状态汇总。ZeRO 按参数 dtype 分组，支持混合 BF16/FP32 参数。
+
+server 不依赖前端、数据库或控制器。原始导出数据只读，每次训练单独保存输入和奖励快照；训练复用已有评价，不运行评价模型。mmap 缓存减少训练过程中观测文件的重复解压。后续维护记录保存在不追踪的 `logs/SERVER_MAINTENANCE.md`。

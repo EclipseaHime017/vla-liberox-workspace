@@ -6,6 +6,8 @@ Workflow: install environments → upload a dataset → configure training → r
 
 [中文说明](README_CN.md)
 
+[Command reference](docs/RUN_COMMANDS.md) · [Dependencies](docs/DEPENDENCIES.md)
+
 ## 1. Environment setup
 
 ### Clone the server branch
@@ -227,3 +229,21 @@ scp -r "$TRAIN_HOST:$TRAIN_REPO/vla-adapter-rynn-iql/outputs/deploy/$POLICY_ID" 
 ```
 
 Keep the name and all files of `policy-registry/<policy-ID>/`. Retain server run directories and checkpoints for further training; local inference does not require training checkpoints.
+
+## 6. Server architecture
+
+```text
+server_pipeline.yaml + train_server.py
+  → select model variant and BC/IQL method
+  → validate imported data and freeze members, splits, and rewards
+  → build or reuse the mmap replay cache
+  → start torchrun in the selected model environment
+  → DDP training with ZeRO-1 optimizers
+  → save checkpoints, logs, and deployment models
+```
+
+`server_inputs.py` handles inputs and rewards, `server_pipeline.py` manages configuration and processes, `server_replay.py` owns caching and sampling, and `distributed_training.py` runs training and saves results.
+
+Model YAMLs and adapters own weights, preprocessing, native losses, and adaptation scopes. Training methods determine how losses are used; the distributed layer synchronizes gradients and shards optimizer state. Rank 0 writes logs and publishes results, while every rank participates in synchronization and checkpoint consolidation. ZeRO groups parameters by dtype to support mixed BF16/FP32 models.
+
+server has no frontend, database, or controller dependency. Imported source data remains read-only; each run saves its own input and reward snapshots and reuses evaluations without running evaluator models. The mmap cache reduces repeated observation decompression during training. Local maintenance notes belong in the untracked `logs/SERVER_MAINTENANCE.md`.

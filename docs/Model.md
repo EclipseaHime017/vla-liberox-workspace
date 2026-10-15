@@ -34,7 +34,7 @@ actor_losses 返回逐样本原生损失与可选预测。BC 求平均，IQL 使
 训练子模型保存父权重内容身份、继承的 I/O 和更新参数。部署设备需保留对应基础权重。跨机器路径不同，可生成一个部署副本：
 
 ```bash
-python vla-adapter-rynn-iql/scripts/export_policy.py --policy policy-registry/<id>/policy.yaml --output /mnt/export/<id> --base-checkpoint /target/workspace/models/pi05_libero_torch
+python vla-adapter-rynn-iql/scripts/export_policy.py --policy "policy-registry/<id>/policy.yaml" --output "/mnt/export/<id>" --base-checkpoint /target/workspace/models/pi05_libero_torch
 ```
 
 此操作更新路径和对应元数据哈希，父权重内容 revision 保持不变；原训练结果不会修改。
