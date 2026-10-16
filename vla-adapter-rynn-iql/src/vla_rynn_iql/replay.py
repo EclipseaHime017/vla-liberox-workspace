@@ -12,8 +12,10 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from .config import LoadedConfig
+from .base_models import model_contract
 from .data import iter_unique_replay_chunks, load_manifest, replay_chunks, replay_end_step
-from .rewards import load_reward_index, policy_view
+from .image_transforms import policy_view, image_orientation
+from .rewards import load_reward_index
 from .vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_from_trajectory
 
 
@@ -22,6 +24,7 @@ class ActionDataset(Dataset):
     def __init__(self, config: LoadedConfig, action_stats: dict[str, Any],
                  proprio_stats: dict[str, Any], split: str = "train"):
         self.config = config
+        self.image_orientation = image_orientation(model_contract(config.section("model"))["io"])
         self.include_post_success = config.section("data").get("include_post_success", True)
         self.manifest = load_manifest(config)
         self.action_stats, self.proprio_stats = action_stats, proprio_stats
@@ -54,11 +57,11 @@ class ActionDataset(Dataset):
             trajectory = {key: source[key] for key in source.files}
         with np.load(storage_path(episode["observations_path"]), allow_pickle=False) as source:
             agent_raw, wrist_raw = source["agentview_image"], source["wrist_image"]
-            agent = policy_view(agent_raw[start], episode["observation_orientation"])
-            wrist = policy_view(wrist_raw[start], episode["observation_orientation"])
+            agent = policy_view(agent_raw[start], episode["observation_orientation"], self.image_orientation)
+            wrist = policy_view(wrist_raw[start], episode["observation_orientation"], self.image_orientation)
             if transitions:
-                next_agent = policy_view(agent_raw[end], episode["observation_orientation"])
-                next_wrist = policy_view(wrist_raw[end], episode["observation_orientation"])
+                next_agent = policy_view(agent_raw[end], episode["observation_orientation"], self.image_orientation)
+                next_wrist = policy_view(wrist_raw[end], episode["observation_orientation"], self.image_orientation)
         raw_proprio = proprio_from_trajectory(trajectory)
         if self.action_stats.get("codec") == "openpi_quantile":
             from .pi05 import normalize

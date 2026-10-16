@@ -38,6 +38,49 @@ def _stats(dim: int) -> dict[str, list[float]]:
     return {"q01": [0.0] * dim, "q99": [1.0] * dim}
 
 
+@pytest.mark.parametrize("family", ["vla_adapter", "pi05"])
+@pytest.mark.parametrize("target,strides", [
+    ("none", (1, 1)), ("flip_vertical", (-1, 1)),
+    ("flip_horizontal", (1, -1)), ("rotate_180", (-1, -1)),
+])
+@pytest.mark.parametrize("storage", ["libero_raw", "vla_policy"])
+def test_actor_and_critic_images_follow_model_contract(configured, monkeypatch, family, target, strides, storage):
+    from vla_rynn_iql import replay as module
+    from vla_rynn_iql.models import model_config
+    from vla_rynn_iql.base_models import model_contract
+
+    configured.raw["model"] = model_config({"model": {"family": family}})
+    contract = model_contract(configured.section("model"))
+    contract["io"].update(image_flip_vertical=strides[0] == -1, image_flip_horizontal=strides[1] == -1)
+    configured.raw["model"]["contract"] = contract
+    prepare_dataset(configured)
+    manifest = load_manifest(configured)
+    agent = np.arange(16 * 16 * 3, dtype=np.uint8).reshape(16, 16, 3)
+    wrist = np.roll(agent, 2, axis=1)
+    for episode in manifest["episodes"]:
+        episode["observation_orientation"] = storage
+        count = int(episode["recorded_action_count"]) + 1
+        images = {"agentview_image": np.stack([agent + i for i in range(count)]),
+                  "wrist_image": np.stack([wrist + i for i in range(count)])}
+        if storage == "vla_policy":
+            images = {key: value[:, ::-1, ::-1].copy() for key, value in images.items()}
+        np.savez_compressed(episode["observations_path"], **images)
+    monkeypatch.setattr(module, "load_manifest", lambda config: manifest)
+    bc = ActionDataset(configured, _stats(7), _stats(8))
+    sample = bc[0]
+    start, length = sample["start"], sample["chunk_length"].item()
+    expected_agent = (agent + start)[::strides[0], ::strides[1]].copy()
+    expected_wrist = (wrist + start)[::strides[0], ::strides[1]].copy()
+    np.testing.assert_array_equal(sample["agent_image"].numpy(), expected_agent)
+    np.testing.assert_array_equal(sample["wrist_image"].numpy(), expected_wrist)
+    bc.image_size = 16
+    rl_sample = bc._sample(0, transitions=True)
+    end = start + length
+    np.testing.assert_array_equal(rl_sample["pixels"][:3].numpy(), expected_agent.transpose(2, 0, 1))
+    np.testing.assert_array_equal(rl_sample["next_pixels"][:3].numpy(),
+                                  (agent + end)[::strides[0], ::strides[1]].transpose(2, 0, 1))
+
+
 def test_transient_raw_done_does_not_terminate_an_earlier_chunk(configured):
     source = Path(configured.section("paths")["dataset_sources"][0])
     trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))

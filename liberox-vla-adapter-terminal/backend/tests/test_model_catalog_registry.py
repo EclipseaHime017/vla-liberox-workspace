@@ -1,4 +1,5 @@
 from dataclasses import replace
+import copy
 from pathlib import Path
 
 import pytest
@@ -109,3 +110,64 @@ def test_model_module_pins_local_training_assets(tmp_path):
     (root / "model.safetensors").write_bytes(b"second")
     with pytest.raises(ValueError, match="changed"):
         model_module("model_assets").pin_model(settings)
+
+
+@pytest.mark.parametrize("identifier", ["base", "pi05-libero-base", "pi05-liberox-base"])
+@pytest.mark.parametrize("legacy_snapshot", [True, False])
+def test_orientation_changes_behavior_identity_but_not_weights_or_frozen_snapshot(tmp_path, monkeypatch, identifier, legacy_snapshot):
+    from backend.app.policies.snapshots import snapshot, catalog_from_snapshot
+    registry = model_module("base_models")
+    settings = model_module("models").base_model_config(identifier)
+    catalog = PolicyCatalog(tmp_path, base_models={identifier: settings}, base_revisions={identifier: "a" * 64})
+    original = catalog.entry(identifier)
+    before = original.content_sha256
+    frozen = snapshot(original)
+    if legacy_snapshot:
+        frozen.pop("model_contract")
+    base = registry.BASE_MODELS[identifier]
+    contract = copy.deepcopy(base.contract)
+    contract["io"].update(image_flip_vertical=True, image_flip_horizontal=False)
+    monkeypatch.setitem(registry.BASE_MODELS, identifier, replace(base, contract=contract))
+    catalog.refresh()
+    changed = catalog.entry(identifier)
+    assert changed.content_sha256 != before
+    assert changed.base_revision == original.base_revision
+    assert changed.public()["io"]["image_flip_horizontal"] is False
+    # Reconstruction is tested without loading any model files.
+    monkeypatch.setattr(PolicyCatalog, "select", PolicyCatalog.entry)
+    restored = catalog_from_snapshot(frozen, tmp_path / "empty")
+    assert restored.entry(identifier).content_sha256 == before
+    assert restored.entry(identifier).public()["io"]["image_flip_horizontal"] is True
+    frozen["model_contract"] = copy.deepcopy(contract)
+    frozen["model_contract"]["io"].update(image_flip_vertical=False, image_flip_horizontal=False)
+    with pytest.raises(ValueError, match="changed"):
+        catalog_from_snapshot(frozen, tmp_path / "empty")
+
+
+@pytest.mark.parametrize("schema", [1, 3, 5])
+def test_old_and_frozen_vla_child_keep_orientation_when_parent_registration_changes(tmp_path, monkeypatch, schema):
+    path = _overlay(tmp_path)
+    raw = yaml.safe_load(path.read_text())
+    settings = model_module("models").model_config({"model": {"stats_key": STATS}})
+    if schema in (3, 5):
+        raw.update(schema_version=schema, algorithm="iql", backbone=None, model_config=settings)
+    if schema == 5:
+        raw.update(family="vla_adapter", parent=model_module("model_artifacts").parent_snapshot(settings, "a" * 64))
+    path.write_text(yaml.safe_dump(raw))
+    catalog = PolicyCatalog(tmp_path, base_models={"base": {"base_checkpoint": BASE, "stats_key": "libero_object"}})
+    original = catalog.entry("trained")
+    registry = model_module("base_models")
+    base = registry.BASE_MODELS["base"]
+    contract = copy.deepcopy(base.contract)
+    contract["io"].update(image_flip_vertical=False, image_flip_horizontal=True)
+    monkeypatch.setitem(registry.BASE_MODELS, "base", replace(base, contract=contract))
+    catalog.refresh()
+    restored = catalog.entry("trained")
+    assert restored.content_sha256 == original.content_sha256
+    assert restored.public()["io"]["image_flip_vertical"] is True
+    assert restored.public()["io"]["image_flip_horizontal"] is True
+    # The independent CLI must resolve the same legacy/frozen contract.
+    cli_overlay = model_module("vla_adapter").load_overlay(path)
+    assert cli_overlay.model_config["contract"]["io"]["image_flip_vertical"] is True
+    assert cli_overlay.model_config["contract"]["io"]["image_flip_horizontal"] is True
+    assert yaml.safe_load(path.read_text()) == raw

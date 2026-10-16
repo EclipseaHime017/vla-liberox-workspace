@@ -932,8 +932,12 @@ def checked_action_chunk(
     obs: dict,
     prompt: str,
     disabled_policy_cameras: tuple[str, ...] = (),
+    *, image_orientation: str = "rotate_180",
 ) -> list[np.ndarray]:
+    from vla_rynn_iql.image_transforms import vla_adapter_observation
+
     policy_input = mask_policy_camera_observations(obs, disabled_policy_cameras)
+    policy_input = vla_adapter_observation(policy_input, image_orientation)
     policy_obs, _ = runtime.prepare_observation(policy_input, components.resize_size)
     actions = runtime.get_action(
         cfg,

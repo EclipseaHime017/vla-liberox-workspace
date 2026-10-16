@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from .config import LoadedConfig
+from .image_transforms import vla_adapter_observation, image_orientation
 from .io import atomic_json
 from .vla_adapter import load_components, load_overlay
 
@@ -35,7 +36,7 @@ def _save_video(path: Path, frames: list[np.ndarray], fps: int = 20) -> None:
 
 
 def _run_episode(env: Any, initial_state: Any, prompt: str, components: Any,
-                 max_steps: int, open_loop_steps: int) -> dict[str, Any]:
+                 max_steps: int, open_loop_steps: int, image_orientation: str = "rotate_180") -> dict[str, Any]:
     from experiments.robot.libero.run_libero_eval import (
         prepare_observation, process_action, quat2axisangle,
     )
@@ -63,7 +64,8 @@ def _run_episode(env: Any, initial_state: Any, prompt: str, components: Any,
     record_state(observation)
     for step in range(max_steps):
         if not queue:
-            policy_obs, _ = prepare_observation(observation, get_image_resize_size(components.cfg))
+            policy_obs, _ = prepare_observation(
+                vla_adapter_observation(observation, image_orientation), get_image_resize_size(components.cfg))
             chunk = get_action(
                 components.cfg, components.model, policy_obs, prompt,
                 processor=components.processor, action_head=components.action_head,
@@ -158,6 +160,7 @@ def evaluate(config: LoadedConfig) -> Path:
                 result = _run_episode(
                     env, initial_states[episode_id % len(initial_states)], prompt, components,
                     int(ev["max_steps"]), int(ev["open_loop_steps"]),
+                    image_orientation(components.parent["contract"]["io"]),
                 )
             finally:
                 env.close()

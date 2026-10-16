@@ -5,6 +5,11 @@ import re
 from .catalog import PolicyCatalog
 from .registry import model_module
 
+
+def _contract_identity(contract):
+    return model_module("image_transforms").canonical_contract(contract)
+
+
 COMMON = {"policy_id", "label", "base_checkpoint", "stats_key", "manifest", "action_head",
           "proprio_projector", "training_step", "compatibility_sha256", "family",
           "content_sha256", "base_revision"}
@@ -14,6 +19,9 @@ ARTIFACTS = {"vla_adapter": ("action_head", "proprio_projector"), "pi05": ("acto
 def snapshot(entry):
     value = {key: getattr(entry, key) for key in COMMON}
     value["model_config"] = entry.settings
+    value["model_contract"] = model_module("base_models").model_contract(entry.settings)
+    if entry.manifest is None and "contract" not in (entry.model_config or {}):
+        value["model_config"].pop("contract", None)
     if entry.backbone is not None:
         value["backbone"] = entry.backbone
     if entry.family == "pi05":
@@ -25,7 +33,7 @@ def validate_snapshot(value):
     if not isinstance(value, dict) or value.get("family") not in ARTIFACTS:
         raise ValueError("Unsupported policy snapshot family")
     required = COMMON | ({"model_config", "actor", "base_identity"} if value["family"] == "pi05" else set())
-    allowed = required | {"model_config", "backbone"}
+    allowed = required | {"model_config", "model_contract", "backbone"}
     if not required <= value.keys() or value.keys() - allowed:
         raise ValueError("policy_snapshot keys mismatch")
     for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
@@ -42,6 +50,10 @@ def validate_snapshot(value):
         settings = model_module("models").model_config({"model": value["model_config"]})
         if any(settings[key] != value[key] for key in ("family", "base_checkpoint", "stats_key")):
             raise ValueError("Snapshot model settings conflict with its identity")
+    if "model_contract" in value:
+        contract = model_module("base_models").validate_contract(value["model_contract"], value["family"])
+        if settings and "contract" in settings and _contract_identity(settings["contract"]) != _contract_identity(contract):
+            raise ValueError("Snapshot model input contract conflicts with its settings")
     if value["family"] == "pi05" and any(value.get(key) is not None for key in ("action_head", "proprio_projector", "backbone")):
         raise ValueError("π₀.₅ snapshots cannot contain VLA-Adapter artifacts")
     if value["manifest"] is None:
@@ -73,11 +85,17 @@ def catalog_from_snapshot(value, empty_registry):
     settings = value.get("model_config", {"family": value["family"],
         "base_checkpoint": value["base_checkpoint"], "stats_key": value["stats_key"]})
     base_id = model_module("models").model_config({"model": settings})["base_id"]
+    contract = value.get("model_contract")
+    if contract is None:
+        contract = model_module("model_artifacts").legacy_contract(settings)
     catalog = PolicyCatalog(registry, base_models={base_id: settings},
-                            base_revisions={base_id: value["base_revision"]})
+                            base_revisions={base_id: value["base_revision"]},
+                            base_contracts={base_id: contract})
     entry = catalog.select(value["policy_id"])
     if entry.content_sha256 != value["content_sha256"]:
         raise ValueError("Selected policy weights changed after evaluation registration")
+    if _contract_identity(model_module("base_models").model_contract(entry.settings)) != _contract_identity(contract):
+        raise ValueError("Selected policy input contract changed after evaluation registration")
     if manifest:
         for key in ("manifest", *ARTIFACTS[entry.family], *(("backbone",) if "backbone" in value else ())):
             if getattr(entry, key) != Path(value[key]).resolve():

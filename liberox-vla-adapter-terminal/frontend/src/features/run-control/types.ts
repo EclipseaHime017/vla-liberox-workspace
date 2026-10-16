@@ -27,7 +27,9 @@ export type TaskInfo = {
 };
 
 export type PolicyInfo = {
-  io?: { native_action_horizon: number; replay_horizon: number };
+  io?: { native_action_horizon: number; replay_horizon: number;
+    image_flip_vertical?: boolean; image_flip_horizontal?: boolean;
+    image_orientation?: "none" | "flip_vertical" | "flip_horizontal" | "rotate_180" };
   inference?: { open_loop_steps: number; max_open_loop_steps: number };
   algorithm?: "iql" | "bc" | null;
   model_config?: {
