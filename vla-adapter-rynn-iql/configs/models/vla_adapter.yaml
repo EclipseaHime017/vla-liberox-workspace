@@ -35,3 +35,11 @@ variants:
     stats_key: libero_object
     inference:
       open_loop_steps: 8
+  vla-adapter-pro-liberox-base:
+    label: VLA-Adapter Pro · LIBERO-X
+    source: Adam-YAN/vla-adapter-pro-liberox-base
+    revision: a2edfadb36e77a4909a3149b3d5fceaefc7fdd7d
+    checkpoint: ../../../models/Adam-YAN-vla-adapter-pro-liberox-base
+    stats_key: liberox_no_noops
+    inference:
+      open_loop_steps: 8

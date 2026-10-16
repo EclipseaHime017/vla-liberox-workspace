@@ -27,7 +27,8 @@ def test_registry_is_lightweight_and_drives_every_base():
 
 
 @pytest.mark.parametrize("base_id,default,maximum", [
-    ("base", 8, 8), ("pi05-libero-base", 5, 10), ("pi05-liberox-base", 10, 10),
+    ("base", 8, 8), ("vla-adapter-pro-liberox-base", 8, 8),
+    ("pi05-libero-base", 5, 10), ("pi05-liberox-base", 10, 10),
 ])
 def test_execution_steps_are_separate_from_prediction_and_training(base_id, default, maximum):
     settings = models.base_model_config(base_id)
@@ -39,6 +40,19 @@ def test_execution_steps_are_separate_from_prediction_and_training(base_id, defa
     assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
     with pytest.raises(ValueError, match="open_loop_steps"):
         base_models.resolve_open_loop_steps(settings, maximum + 1)
+
+
+def test_liberox_vla_variant_keeps_its_own_assets_and_inherits_family_contract():
+    base = base_models.base_model("vla-adapter-pro-liberox-base")
+    settings = models.base_model_config(base.id)
+    assert base.label == "VLA-Adapter Pro · LIBERO-X"
+    assert base.source == "Adam-YAN/vla-adapter-pro-liberox-base"
+    assert base.revision == "a2edfadb36e77a4909a3149b3d5fceaefc7fdd7d"
+    assert base.checkpoint == str(base_models.REGISTRY_PATH.parents[3] / "models" / "Adam-YAN-vla-adapter-pro-liberox-base")
+    assert settings["base_checkpoint"] == base.checkpoint
+    assert settings["stats_key"] == "liberox_no_noops"
+    assert base_models.model_contract(settings) == base_models.MODEL_FAMILIES["vla_adapter"].contract
+    assert base_models.MODEL_FAMILIES["vla_adapter"].default_base == "base"
 
 
 @pytest.mark.parametrize("orientation", ["none", "flip_vertical", "flip_horizontal", "rotate_180"])
