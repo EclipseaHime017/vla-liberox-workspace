@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 import torch
+import numpy as np
 
+from vla_rynn_iql.base_models import model_contract
 from vla_rynn_iql.data import add_episode_chunks, iter_unique_replay_chunks, load_manifest, prepare_dataset
 from vla_rynn_iql.replay import ActionDataset, ReplayDataset
 from vla_rynn_iql.rewards import annotate_manifest
@@ -11,8 +13,18 @@ from vla_rynn_iql.training import _sample_batch
 from test_replay import FakeAnnotator, _stats
 
 
-def test_instruction_segments_train_actor_but_keep_full_task_reward(configured):
+@pytest.mark.parametrize("flip_horizontal", [False, True])
+def test_instruction_segments_train_actor_but_keep_full_task_reward(configured, flip_horizontal):
     source = Path(configured.section("paths")["dataset_sources"][0])
+    contract = model_contract(configured.section("model"))
+    contract["io"].update(image_flip_vertical=True, image_flip_horizontal=flip_horizontal)
+    configured.raw["model"]["contract"] = contract
+    image = np.arange(16 * 16 * 3, dtype=np.uint8).reshape(16, 16, 3)
+    for observations in source.rglob("trajectory_observations.npz"):
+        with np.load(observations, allow_pickle=False) as arrays:
+            shape = arrays["agentview_image"].shape
+        np.savez_compressed(observations, agentview_image=np.broadcast_to(image, shape),
+                            wrist_image=np.broadcast_to(image + 1, shape))
     path = next(source.rglob("branch/run.json"))
     run = json.loads(path.read_text())
     run["trajectory_segments"] = [
@@ -39,6 +51,9 @@ def test_instruction_segments_train_actor_but_keep_full_task_reward(configured):
         dataset = kind(configured, _stats(7), _stats(8), split="train")
         actual = [dataset[index]["prompt"] for index in range(len(dataset))]
         assert "second step" in actual and "finish task" in actual
+        expected = image[::-1, ::-1] if flip_horizontal else image[::-1]
+        np.testing.assert_array_equal(dataset[0]["agent_image"].numpy(), expected)
+        np.testing.assert_array_equal(dataset[0]["wrist_image"].numpy(), expected + 1)
         generator = torch.Generator().manual_seed(7)
         for _ in range(10):
             batch = _sample_batch(dataset, 4, generator)

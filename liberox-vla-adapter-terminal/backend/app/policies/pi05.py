@@ -59,7 +59,7 @@ class Pi05PolicyProvider:
             self.unload()
             self.responses = queue.Queue()
             self.process = subprocess.Popen([
-                "conda", "run", "--no-capture-output", "-n", entry.model_config["environment"],
+                "conda", "run", "--no-capture-output", "-n", entry.settings["environment"],
                 "python", "-u", str(PROJECT / "scripts/pi05_worker.py"),
             ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, start_new_session=True)
             process, responses = self.process, self.responses
@@ -74,7 +74,7 @@ class Pi05PolicyProvider:
 
             threading.Thread(target=receive, daemon=True).start()
             try:
-                ready = self._send({"model": entry.model_config, "owner_pid": os.getpid(),
+                ready = self._send({"model": entry.settings, "owner_pid": os.getpid(),
                     "parent": entry.parent,
                     "base_revision": entry.base_revision, "content_sha256": entry.content_sha256,
                     "actor": str(entry.actor) if entry.actor else None,
@@ -98,12 +98,14 @@ class Pi05PolicyProvider:
         with self._lock:
             if not self.loaded:
                 raise RuntimeError("π₀.₅ is not loaded")
-            # Same Panda state and camera orientation as the official LIBERO example.
             from trajectory_utils import quaternion_to_axis_angle
+            contract = model_module("base_models").model_contract(self.current_policy_entry.settings)["io"]
+            transforms = model_module("image_transforms")
+            orientation = transforms.image_orientation(contract)
             images = {}
             for key, name, toggle in (("agentview_image", "observation/image", "agentview"),
                                       ("robot0_eye_in_hand_image", "observation/wrist_image", "robot0_eye_in_hand")):
-                image = np.asarray(observation[key])[::-1, ::-1].copy()
+                image = transforms.orient_image(observation[key], orientation)
                 images[name] = np.zeros_like(image) if toggle in disabled_policy_cameras else image
             images["observation/state"] = np.concatenate([
                 observation["robot0_eef_pos"], quaternion_to_axis_angle(observation["robot0_eef_quat"]),
@@ -113,7 +115,6 @@ class Pi05PolicyProvider:
             np.savez(buffer, **images)
             result = self._send({"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(), "prompt": prompt})
             actions = np.asarray(result["actions"], dtype=np.float32)
-            contract = model_module("base_models").model_contract(self.current_policy_entry.settings)["io"]
             if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
                 self.unload()
                 raise ValueError("Invalid π₀.₅ action chunk")

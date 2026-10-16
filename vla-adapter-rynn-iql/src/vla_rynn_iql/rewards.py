@@ -293,15 +293,6 @@ def reward_view(frame: np.ndarray, orientation: str) -> np.ndarray:
     raise ValueError(f"Unknown observation orientation: {orientation}")
 
 
-def policy_view(frame: np.ndarray, orientation: str) -> np.ndarray:
-    array = np.asarray(frame, dtype=np.uint8)
-    if orientation == "libero_raw":
-        return array[::-1, ::-1].copy()
-    if orientation == "vla_policy":
-        return array.copy()
-    raise ValueError(f"Unknown observation orientation: {orientation}")
-
-
 class RynnValueAnnotator:
     """Frozen official RynnValue model loaded from a pinned HF snapshot."""
 

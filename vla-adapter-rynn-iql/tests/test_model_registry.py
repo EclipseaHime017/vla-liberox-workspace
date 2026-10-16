@@ -6,6 +6,7 @@ import yaml
 
 from vla_rynn_iql import base_models, models
 from vla_rynn_iql.model_artifacts import parent_snapshot, decode_child
+from vla_rynn_iql.image_transforms import ORIENTATIONS, image_orientation
 
 
 def child(family="vla_adapter"):
@@ -38,6 +39,92 @@ def test_execution_steps_are_separate_from_prediction_and_training(base_id, defa
     assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
     with pytest.raises(ValueError, match="open_loop_steps"):
         base_models.resolve_open_loop_steps(settings, maximum + 1)
+
+
+@pytest.mark.parametrize("orientation", ["none", "flip_vertical", "flip_horizontal", "rotate_180"])
+@pytest.mark.parametrize("family", ["vla_adapter", "pi05"])
+def test_variant_image_direction_overrides_family_and_is_frozen_in_child(tmp_path, monkeypatch, family, orientation):
+    raw = family_files()
+    identifier = raw[family]["default_variant"]
+    vertical, horizontal = ORIENTATIONS[orientation]
+    raw[family]["variants"][identifier]["io"] = {
+        "image_flip_vertical": vertical, "image_flip_horizontal": horizontal}
+    _, bases = base_models.load_registry(write_registry(tmp_path, raw))
+    monkeypatch.setitem(base_models.BASE_MODELS, identifier, bases[identifier])
+    settings = models.base_model_config(identifier)
+    assert image_orientation(base_models.model_contract(settings)["io"]) == orientation
+    exported = child(family)
+    changed = copy.deepcopy(bases[identifier].contract)
+    changed["io"]["image_flip_horizontal"] = not horizontal
+    monkeypatch.setitem(base_models.BASE_MODELS, identifier, replace(bases[identifier], contract=changed))
+    decoded, _ = decode_child(exported)
+    assert image_orientation(base_models.model_contract(decoded["model_config"])["io"]) == orientation
+    assert image_orientation(raw[family]["io"]) == "rotate_180"
+
+
+def test_variant_can_override_only_one_axis(tmp_path):
+    raw = family_files()
+    raw["pi05"]["variants"]["pi05-liberox-base"]["io"] = {"image_flip_horizontal": False}
+    _, bases = base_models.load_registry(write_registry(tmp_path, raw))
+    assert image_orientation(bases["pi05-liberox-base"].contract["io"]) == "flip_vertical"
+    assert image_orientation(bases["pi05-libero-base"].contract["io"]) == "rotate_180"
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false", []])
+@pytest.mark.parametrize("key", ["image_flip_vertical", "image_flip_horizontal"])
+def test_image_flips_require_real_booleans(tmp_path, key, value):
+    raw = family_files()
+    raw["pi05"]["variants"]["pi05-libero-base"]["io"] = {key: value}
+    with pytest.raises(ValueError, match="must be booleans"):
+        base_models.load_registry(write_registry(tmp_path, raw))
+
+
+def test_legacy_family_and_new_partial_variant_can_be_read_together(tmp_path):
+    raw = family_files()
+    raw["pi05"]["io"].pop("image_flip_vertical")
+    raw["pi05"]["io"].pop("image_flip_horizontal")
+    raw["pi05"]["io"]["image_orientation"] = "rotate_180"
+    raw["pi05"]["variants"]["pi05-liberox-base"]["io"] = {"image_flip_horizontal": False}
+    _, bases = base_models.load_registry(write_registry(tmp_path, raw))
+    assert image_orientation(bases["pi05-liberox-base"].contract["io"]) == "flip_vertical"
+    assert image_orientation(bases["pi05-libero-base"].contract["io"]) == "rotate_180"
+
+
+def test_old_frozen_contract_keeps_its_hash_and_matches_new_boolean_encoding():
+    from vla_rynn_iql.io import stable_hash
+    from vla_rynn_iql.model_artifacts import parent_identity
+    from vla_rynn_iql.image_transforms import canonical_contract
+
+    raw = child()
+    current = copy.deepcopy(raw["parent"])
+    old_io = raw["parent"]["contract"]["io"]
+    old_io.pop("image_flip_vertical")
+    old_io.pop("image_flip_horizontal")
+    old_io["image_orientation"] = "rotate_180"
+    raw["parent"]["sha256"] = stable_hash({key: value for key, value in raw["parent"].items() if key != "sha256"})
+    before = copy.deepcopy(raw)
+    decoded, parent = decode_child(raw)
+    assert raw == before
+    assert parent == before["parent"]
+    assert decoded["model_config"]["contract"] == before["parent"]["contract"]
+    assert canonical_contract(decoded["model_config"]["contract"]) == current["contract"]
+    assert parent_identity(parent) == parent_identity(current)
+
+
+def test_image_orientation_and_flip_flags_cannot_be_combined(tmp_path):
+    raw = family_files()
+    raw["pi05"]["variants"]["pi05-libero-base"]["io"] = {
+        "image_orientation": "rotate_180", "image_flip_vertical": True}
+    with pytest.raises(ValueError):
+        base_models.load_registry(write_registry(tmp_path, raw))
+
+
+@pytest.mark.parametrize("orientation", [None, True, [], "mirror", 180])
+def test_variant_image_direction_is_strict(tmp_path, orientation):
+    raw = family_files()
+    raw["pi05"]["variants"]["pi05-libero-base"]["io"] = {"image_orientation": orientation}
+    with pytest.raises(ValueError, match="image_orientation"):
+        base_models.load_registry(write_registry(tmp_path, raw))
 
 
 @pytest.mark.parametrize("value", [True, 0, -1, 11, 2.5, "5"])

@@ -11,6 +11,23 @@ from vla_rynn_iql.rewards import reward_manifest_digest
 from vla_rynn_iql.training import _restore_checkpoint, _save_checkpoint
 
 
+@pytest.mark.parametrize("legacy", [True, False])
+def test_resume_rejects_camera_direction_change(configured, tmp_path, legacy):
+    from vla_rynn_iql.base_models import model_contract
+    from vla_rynn_iql.model_artifacts import parent_snapshot
+    from vla_rynn_iql.models import model_config
+
+    settings = model_config(configured.raw)
+    original = parent_snapshot(settings, "a" * 64)
+    settings["contract"] = model_contract(settings)
+    settings["contract"]["io"].update(image_flip_vertical=True, image_flip_horizontal=False)
+    configured.raw["model"] = settings
+    components = SimpleNamespace(parent=parent_snapshot(settings, "a" * 64))
+    (tmp_path / "checkpoint.json").write_text(json.dumps({"model_parent": None if legacy else original}))
+    with pytest.raises(ValueError, match="different (model input contract|parent model)"):
+        _restore_checkpoint(tmp_path, components, None, None, None, torch.device("cpu"), configured, {}, None)
+
+
 @pytest.mark.parametrize("include", [True, False])
 def test_checkpoint_records_selected_replay_policy(configured, tmp_path, monkeypatch, include):
     configured.raw["data"]["include_post_success"] = include

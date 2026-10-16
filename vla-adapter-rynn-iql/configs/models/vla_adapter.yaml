@@ -15,7 +15,8 @@ defaults:
 io:
   cameras: [agentview, robot0_eye_in_hand]
   image_size: 224
-  image_orientation: rotate_180
+  image_flip_vertical: true
+  image_flip_horizontal: true
   proprio: eef_position_axis_angle_gripper
   proprio_dim: 8
   native_action_horizon: 8

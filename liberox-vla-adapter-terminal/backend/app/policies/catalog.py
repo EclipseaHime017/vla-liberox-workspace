@@ -75,12 +75,18 @@ class PolicyEntry:
     actor: Path | None = None
     base_identity: Path | None = None
     parent: dict | None = None
+    contract: dict | None = None
 
     @property
     def settings(self) -> dict:
         raw = {**(self.model_config or {}), "family": self.family,
                "base_checkpoint": self.base_checkpoint, "stats_key": self.stats_key}
-        return model_module("models").model_config({"model": raw})
+        settings = model_module("models").model_config({"model": raw})
+        if self.contract is not None:
+            settings["contract"] = model_module("base_models").validate_contract(self.contract, self.family)
+        elif not self.is_base and "contract" not in settings:
+            settings["contract"] = model_module("model_artifacts").legacy_contract(settings)
+        return settings
 
     @property
     def content_sha256(self) -> str:
@@ -98,6 +104,10 @@ class PolicyEntry:
         }
         if self.parent is not None:
             value["parent"] = self.parent
+        orientation = model_module("image_transforms").image_orientation(
+            model_module("base_models").model_contract(self.settings)["io"])
+        if orientation != "rotate_180":
+            value["image_orientation"] = orientation
         return _stable_hash(value)
 
     @property
@@ -144,9 +154,11 @@ class PolicyCatalog:
     }
 
     def __init__(self, registry: Path, *, base_models: dict[str, dict],
-                 base_revisions: dict[str, str] | None = None):
+                 base_revisions: dict[str, str] | None = None,
+                 base_contracts: dict[str, dict] | None = None):
         self.registry = registry.expanduser().resolve()
         self.base_models = base_models
+        self.base_contracts = base_contracts or {}
         self._revisions = {(base_id, base_models[base_id]["base_checkpoint"]): revision
                            for base_id, revision in (base_revisions or {}).items()}
         self._entries: dict[str, PolicyEntry] = {}
@@ -212,6 +224,8 @@ class PolicyCatalog:
                 # Preserve the identity of existing default-base recordings.
                 compatibility_sha256=None, model_config=None if base_id == "base" else settings, family=base.family,
                 base_revision=settings.get("base_revision") or self._revisions.get((base_id, settings["base_checkpoint"])),
+                contract=model_module("base_models").validate_contract(
+                    self.base_contracts.get(base_id, model_module("base_models").model_contract(settings)), base.family),
             )
         if self.registry.is_dir():
             for directory in sorted(self.registry.iterdir()):

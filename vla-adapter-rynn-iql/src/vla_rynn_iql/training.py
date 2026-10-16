@@ -30,6 +30,8 @@ from .algorithms import TrainingAlgorithm, build_algorithm
 from .methods import actor_lr_warmup, training_method
 from .models import model_backend, model_config, model_signature
 from .base_models import model_contract
+from .image_transforms import canonical_contract
+from .model_artifacts import legacy_contract, parent_identity
 from .monitoring import (
     ACTION_NAMES,
     TrainingProgressReporter,
@@ -356,8 +358,13 @@ def _restore_checkpoint(
     checkpoint = checkpoint.expanduser().resolve()
     metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
     method = training_method(config.raw).name
-    if metadata.get("model_parent") is not None and metadata["model_parent"] != getattr(components, "parent", None):
+    previous_parent = metadata.get("model_parent")
+    if previous_parent is not None and parent_identity(previous_parent) != parent_identity(getattr(components, "parent", None)):
         raise ValueError("Resume checkpoint uses a different parent model")
+    if previous_parent is None:
+        previous_contract = legacy_contract(metadata.get("model_config", {}))
+        if canonical_contract(previous_contract) != canonical_contract(model_contract(config.section("model"))):
+            raise ValueError("Resume checkpoint uses a different model input contract")
     if metadata.get("algorithm", "iql") != method:
         raise ValueError("Resume checkpoint uses a different training method")
     previous_model = model_signature({"model": metadata.get("model_config", {})})

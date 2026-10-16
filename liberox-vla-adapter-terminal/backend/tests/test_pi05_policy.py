@@ -138,6 +138,33 @@ def test_native_inputs_camera_mask_codec_and_horizon(monkeypatch):
     assert np.array_equal(provider.process_action(np.array([2, -2, 0, 0, 0, 0, -.4])), [1, -1, 0, 0, 0, 0, np.float32(-.4)])
 
 
+@pytest.mark.parametrize("orientation,strides", [
+    ("none", (1, 1)), ("flip_vertical", (-1, 1)),
+    ("flip_horizontal", (1, -1)), ("rotate_180", (-1, -1)),
+])
+def test_pi_camera_arrays_follow_selected_model_contract(monkeypatch, orientation, strides):
+    from backend.app.policies.registry import model_module
+    settings = configured_models()["pi05-libero-base"]
+    settings["contract"] = model_module("base_models").model_contract(settings)
+    settings["contract"]["io"].update(image_flip_vertical=strides[0] == -1, image_flip_horizontal=strides[1] == -1)
+    provider = Pi05PolicyProvider(None, None, None)
+    provider.process = SimpleNamespace(poll=lambda: None)
+    provider.current_policy_entry = SimpleNamespace(settings=settings)
+    raw = np.arange(45, dtype=np.uint8).reshape(3, 5, 3)
+    obs = {"agentview_image": raw, "robot0_eye_in_hand_image": raw + 50,
+           "robot0_eef_pos": [0, 0, 0], "robot0_eef_quat": [0, 0, 0, 1], "robot0_gripper_qpos": [0, 0]}
+    captured = {}
+    def send(request):
+        captured.update(request)
+        return {"actions": np.zeros((10, 7)).tolist()}
+    monkeypatch.setattr(provider, "_send", send)
+    provider.predict(obs, "task")
+    with np.load(io.BytesIO(base64.b64decode(captured["arrays"]))) as data:
+        np.testing.assert_array_equal(data["observation/image"], raw[::strides[0], ::strides[1]])
+        np.testing.assert_array_equal(data["observation/wrist_image"], (raw + 50)[::strides[0], ::strides[1]])
+    np.testing.assert_array_equal(obs["agentview_image"], raw)
+
+
 def test_worker_timeout_unloads_and_does_not_fallback(monkeypatch):
     provider = Pi05PolicyProvider(None, None, None)
     provider.responses = queue.Queue()

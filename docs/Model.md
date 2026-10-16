@@ -91,6 +91,9 @@ variants:
     revision: null
     checkpoint: ../../../models/my-policy
     stats_key: my_dataset
+    io:
+      image_flip_vertical: true
+      image_flip_horizontal: true
     inference:
       open_loop_steps: 5
 ```
@@ -105,11 +108,15 @@ variants:
 | `revision` | 原始仓库的完整 40 位 commit；已知时填写，未知时为 `null` |
 | `checkpoint` | 该家族加载器读取的本地部署目录；支持在线加载的家族也可填写仓库 ID |
 | `stats_key` | 权重配套归一化数据中的实际标识，按模型发布说明或统计文件填写 |
+| `io.image_flip_vertical` | 相对于原始仿真图像是否上下翻转，`true`／`false`；可按 variant 覆盖家族默认值 |
+| `io.image_flip_horizontal` | 相对于原始仿真图像是否左右镜像，`true`／`false`；两项均为 `true` 等价于旋转 180° |
 | `inference.open_loop_steps` | 每个 variant 必填的默认执行步数，家族层不配置；子模型沿用父 variant 默认值，仿真和测试页面可调整，上限为该模型的预测长度，与训练 chunk 长度分开 |
 
 `../../../models/my-policy` 从家族 YAML 所在的 `configs/models/` 解析，指向工作区根目录下的 `models/my-policy/`。本地权重加载时另行计算文件内容身份，和来源仓库的 commit 分别记录。
 
 变体继承家族的输入输出、架构、运行环境和默认训练范围，可通过 `io`、`architecture` 声明支持的差异；`inference` 由各变体独立配置。调整结构或动作表示需要相应的适配器实现，单独下载权重文件并不包含平台所需的完整加载逻辑。
+
+两路相机在训练和推理时使用同一翻转配置，后训练模型保存并继承该配置；录像和评价器图像不随此设置改变。
 
 保存后重启平台，模型选择列表显示 `label`。使用训练 YAML 时，选择同一个变体：
 

@@ -9,10 +9,11 @@ from pathlib import Path
 import yaml
 
 from .config_sources import UniqueKeyLoader
+from .image_transforms import image_orientation, ORIENTATIONS
 
 REGISTRY_PATH = Path(__file__).resolve().parents[2] / "configs/models/registry.yaml"
 ADAPTERS = {"vla_adapter": "vla_rynn_iql.vla_adapter", "pi05": "vla_rynn_iql.pi05"}
-IO_KEYS = {"cameras", "image_size", "image_orientation", "proprio", "proprio_dim",
+IO_KEYS = {"cameras", "image_size", "image_flip_vertical", "image_flip_horizontal", "proprio", "proprio_dim",
            "native_action_horizon", "padded_action_dim", "action_dim", "replay_horizon",
            "control_hz", "action_codec"}
 
@@ -21,14 +22,16 @@ def validate_contract(contract: dict, family: str) -> dict:
     if not isinstance(contract, dict) or set(contract) != {"io", "architecture"}:
         raise ValueError("Model contract requires io and architecture")
     io, architecture = contract["io"], contract["architecture"]
-    if not isinstance(io, dict) or set(io) != IO_KEYS or not isinstance(architecture, dict):
+    legacy_keys = IO_KEYS - {"image_flip_vertical", "image_flip_horizontal"} | {"image_orientation"}
+    if not isinstance(io, dict) or set(io) not in (IO_KEYS, legacy_keys) or not isinstance(architecture, dict):
         raise ValueError("Invalid model I/O contract keys")
     # Validate the supported Panda bridge; YAML cannot change the robot controller.
     fixed = {"cameras": ["agentview", "robot0_eye_in_hand"], "image_size": 224,
-             "image_orientation": "rotate_180", "proprio": "eef_position_axis_angle_gripper",
+             "proprio": "eef_position_axis_angle_gripper",
              "proprio_dim": 8, "action_dim": 7, "replay_horizon": 8, "control_hz": 20}
     if any(io.get(key) != value for key, value in fixed.items()):
         raise ValueError("Model I/O is unsupported by the current Panda adapter")
+    image_orientation(io)
     for key in ("image_size", "proprio_dim", "native_action_horizon", "padded_action_dim",
                 "action_dim", "replay_horizon", "control_hz"):
         if type(io[key]) is not int or io[key] < 1:
@@ -149,6 +152,15 @@ def _parse_base(identifier: str, entry: dict, family: ModelDefinition, path: Pat
         if section in entry:
             if not isinstance(entry[section], dict):
                 raise ValueError(f"Base {section} must be a mapping")
+            if section == "io":
+                override = entry[section]
+                if "image_orientation" in override and not {"image_flip_vertical", "image_flip_horizontal"} & override.keys():
+                    contract[section].pop("image_flip_vertical", None)
+                    contract[section].pop("image_flip_horizontal", None)
+                elif {"image_flip_vertical", "image_flip_horizontal"} & override.keys() and "image_orientation" in contract[section]:
+                    vertical, horizontal = ORIENTATIONS[image_orientation(contract[section])]
+                    contract[section].pop("image_orientation")
+                    contract[section].update(image_flip_vertical=vertical, image_flip_horizontal=horizontal)
             contract[section].update(entry[section])
     contract = validate_contract(contract, family.id)
     inference = validate_inference(entry["inference"], contract)

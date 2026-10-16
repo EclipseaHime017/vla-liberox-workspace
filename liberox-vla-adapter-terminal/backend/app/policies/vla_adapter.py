@@ -15,6 +15,7 @@ import eval_pickplace_direct as direct
 
 from .catalog import PolicyCatalog, PolicyEntry
 from .checkpoint_view import checkpoint_view
+from .registry import model_module
 
 
 class VLAAdapterPolicyProvider:
@@ -186,6 +187,8 @@ class VLAAdapterPolicyProvider:
                 observation,
                 prompt,
                 disabled_policy_cameras,
+                image_orientation=model_module("image_transforms").image_orientation(
+                    model_module("base_models").model_contract(self.current_policy_entry.settings)["io"]),
             )
 
     def process_action(self, action: np.ndarray) -> np.ndarray:
