@@ -118,7 +118,7 @@ export function EvaluationPage() {
   const [trials, setTrials] = useState(100);
   const [maxSteps, setMaxSteps] = useState(300);
   const [openLoopSteps, setOpenLoopSteps] = useState(8);
-  const [realtime, setRealtime] = useState(true);
+  const [realtime, setRealtime] = useState(false);
   const [randomizeInitStates, setRandomizeInitStates] = useState(true);
   const [customStates, setCustomStates] = useState(false);
   const [stateIndices, setStateIndices] = useState<number[]>([]);

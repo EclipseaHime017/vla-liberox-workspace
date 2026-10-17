@@ -244,7 +244,7 @@ class EvaluationRequest(StrictModel):
     trials: StrictInt = Field(default=100, ge=1, le=1000)
     max_steps: StrictInt = Field(ge=1, le=10000)
     open_loop_steps: StrictInt | None = Field(default=None, ge=1)
-    realtime: StrictBool = True
+    realtime: StrictBool = False  # Unwatched batch tests run as fast as possible.
     init_state_indices: list[StrictInt] | None = None
     base_seed: StrictInt = Field(default=0, ge=0, le=2147483647)
     seed_count: StrictInt | None = Field(default=None, ge=1, le=1000)

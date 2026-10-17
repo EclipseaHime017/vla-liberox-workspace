@@ -22,7 +22,7 @@ const bootstrap = {
   config: { max_steps: 300, open_loop_steps: 8, seed: 7 },
   model: { policy_id: "base" }, policy_catalog: [policy], task, task_catalog: [task],
 } as Bootstrap;
-const config = { task_id: "task-a", policy_id: "base", trials: 100, max_steps: 300, open_loop_steps: 8, realtime: true, init_state_indices: null, base_seed: 7, seed_count: null, schedule_seed: 7 };
+const config = { task_id: "task-a", policy_id: "base", trials: 100, max_steps: 300, open_loop_steps: 8, realtime: false, init_state_indices: null, base_seed: 7, seed_count: null, schedule_seed: 7 };
 const preview: EvaluationPreview = {
   policy_content_sha256: "b".repeat(64),
   config, schedule: [{ trial_index: 0, init_state_index: 0, seed: 7 }],

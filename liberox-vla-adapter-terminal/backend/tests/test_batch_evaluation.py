@@ -287,3 +287,96 @@ def test_setup_failure_persists_terminal_manifest(tmp_path: Path, monkeypatch):
     assert result["status"] == "FAILED"
     assert persisted["status"] == "FAILED"
     assert "setup boom" in persisted["error"]
+
+
+@pytest.mark.parametrize("failure", ["policy", "reset"])
+def test_trials_share_one_environment_and_rebuild_only_after_a_failure(tmp_path: Path, monkeypatch, failure):
+    import dataclasses
+    import eval_pickplace_direct as real
+    from backend.app.policies import router, snapshots
+    from backend.app.simulators import libero_x
+
+    schedule = build_schedule(trials=3, init_state_indices=[0], base_seed=0, seed_count=3, schedule_seed=0)
+    effective = {
+        "evaluation_id": "eval-reuse", "result_path": str(tmp_path / "evaluation.json"),
+        "task_snapshot": {"task_id": "LEVEL1::task", "level": "LEVEL1", "task_name": "task", "prompt": "do task",
+                          "bddl_path": str(tmp_path / "task.bddl"), "init_path": str(tmp_path / "task.init")},
+        "policy_snapshot": {"policy_id": "base", "base_checkpoint": "model", "stats_key": "stats",
+                            "content_sha256": "a" * 64},
+        "config": {"trials": 3, "max_steps": 2, "open_loop_steps": 1, "realtime": False,
+                   "init_state_indices": [0], "base_seed": 0, "seed_count": 3, "schedule_seed": 0,
+                   "control_hz": 20, "success_streak": 1, "consecutive_error_limit": 3,
+                   "disabled_policy_cameras": []},
+        "schedule": schedule, "schedule_sha256": "x" * 64,
+    }
+
+    @dataclasses.dataclass(frozen=True)
+    class Config:
+        vla_root: str = "vla"
+        liberox_root: str = "libero"
+        checkpoint: str = ""
+        stats_key: str = ""
+        level: str = ""
+        task_name: str = ""
+        trials: int = 1
+        max_steps: int = 1
+        seed: int = 0
+        control_hz: int = 20
+        realtime_control: bool = False
+        disabled_policy_cameras: tuple = ()
+        open_loop_steps: int = 1
+        headless: bool = True
+        no_video: bool = True
+        save_trajectory: bool = False
+        save_observation_images: bool = False
+        trajectory_plot: bool = False
+
+    monkeypatch.setitem(sys.modules, "eval_pickplace_direct", SimpleNamespace(
+        load_config=lambda _path: Config(), apply_runtime_environment=lambda _config: None,
+        add_repo_paths=lambda *_: None, load_runtime=lambda: SimpleNamespace(),
+        load_initial_states=lambda _runtime, _path: [np.zeros(3)],
+        RealTimeControlLimiter=real.RealTimeControlLimiter,
+        summarize_control_timing=real.summarize_control_timing))
+    events, resets = [], []
+
+    class Env:
+        def seed(self, value): events.append(("seed", value))
+        def reset(self):
+            events.append(("reset",))
+            resets.append(1)
+            if failure == "reset" and len(resets) == 1:  # trial 2 reuses the env and fails here
+                raise RuntimeError("reset failure in the second trial")
+        def step(self, _action): return {}, 0.0, True, {}
+
+    class Simulator:
+        def __init__(self, _runtime): pass
+        def prewarm(self, *_args): pass
+        def create(self, *_args, **_kwargs):
+            events.append(("create",))
+            return Env()
+        def restore(self, _env, _state): return {}
+        def observations(self, _env, observation): return observation
+        def close(self, _env): events.append(("close",))
+
+    calls = []
+
+    class Provider:
+        def __init__(self, *_args): pass
+        def load(self, *_args, **_kwargs): pass
+        def predict(self, *_args):
+            calls.append(1)
+            if failure == "policy" and len(calls) == 3:  # two queries per trial; fail the second trial
+                raise RuntimeError("policy failure in the second trial")
+            return [np.zeros(7, np.float32)]
+        def process_action(self, action): return action
+        def unload(self): pass
+
+    monkeypatch.setattr(snapshots, "catalog_from_snapshot", lambda *_args: None)
+    monkeypatch.setattr(router, "PolicyProvider", Provider)
+    monkeypatch.setattr(libero_x, "LiberoXSimulator", Simulator)
+    result = run_evaluation(effective)
+    assert [trial["error"] is not None for trial in result["trials"]] == [False, True, False]
+    names = [event[0] for event in events]
+    # Trial 1 builds, trial 2 fails and discards it, trial 3 rebuilds; closed at the end.
+    assert names.count("create") == 2 and names.count("close") == 2
+    assert names[-1] == "close"

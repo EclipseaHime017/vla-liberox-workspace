@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 import yaml
+
+LOGGER = logging.getLogger(__name__)
 
 
 SCHEMA_VERSION = 1
@@ -684,6 +687,8 @@ def run_evaluation(
     started = time.monotonic()
     consecutive_errors = 0
     provider: Any = None
+    shared_env: Any = None
+    simulator: Any = None
     try:
         if stop_requested():
             raise InterruptedError("Evaluation stopped before setup")
@@ -775,6 +780,7 @@ def run_evaluation(
                 record["status"] = "CANCELED"
                 break
             env = None
+            discard_env = False
             episode_started = time.monotonic()
             episode_progress: dict[str, Any] = {}
             close_error: Exception | None = None
@@ -800,12 +806,22 @@ def run_evaluation(
                 if hasattr(provider, "seed"):
                     provider.seed(seed)
                 episode_config = replace(eval_config, seed=seed)
-                env = simulator.create(
-                    Path(task["bddl_path"]),
-                    episode_config,
-                    max_steps=config["max_steps"],
-                    seed=seed,
-                )
+                # One environment serves every trial of the task: a soft reset
+                # plus the explicit state restore in _episode reproduces a fresh
+                # environment exactly, without recompiling the MuJoCo model.
+                reuse = shared_env is not None
+                if not reuse:
+                    shared_env = simulator.create(
+                        Path(task["bddl_path"]),
+                        episode_config,
+                        max_steps=config["max_steps"],
+                        seed=seed,
+                    )
+                # Bind before resetting: a failed reset must discard this env.
+                env = shared_env
+                if reuse:
+                    env.seed(seed)
+                    env.reset()
                 trial = _episode(
                     simulator=simulator,
                     provider=provider,
@@ -829,6 +845,7 @@ def run_evaluation(
                 record["status"] = "CANCELED"
                 break
             except Exception as exc:
+                discard_env = True
                 consecutive_errors += 1
                 query_ms = [
                     float(value) * 1000.0
@@ -861,7 +878,9 @@ def run_evaluation(
                     "elapsed_seconds": time.monotonic() - episode_started,
                 }
             finally:
-                if env is not None:
+                # A failed trial may leave the environment inconsistent; rebuild it.
+                if env is not None and discard_env:
+                    shared_env = None
                     try:
                         simulator.close(env)
                     except Exception as exc:
@@ -922,6 +941,11 @@ def run_evaluation(
             record["status"] = "FAILED"
             record["error"] = f"{type(exc).__name__}: {exc}"
     finally:
+        if shared_env is not None:
+            try:
+                simulator.close(shared_env)
+            except Exception as exc:
+                LOGGER.warning("Evaluation environment close failed: %s", exc)
         if provider is not None:
             try:
                 provider.unload()

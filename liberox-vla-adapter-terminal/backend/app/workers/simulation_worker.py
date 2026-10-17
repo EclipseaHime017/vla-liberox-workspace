@@ -495,9 +495,15 @@ class SimulationManager:
             controller.emergency_stop(reason)
 
     def list_sessions(self) -> list[dict[str, Any]]:
+        # Directory scans run outside the manager lock, which the control loop
+        # takes on every step; only the in-memory snapshot is built under it.
         with self.lock:
-            items = [record.public(safe_artifacts(record.output_dir)) for record in self.sessions.values()]
-            items.extend(self.legacy_sessions.values())
+            records = list(self.sessions.values())
+            legacy = list(self.legacy_sessions.values())
+        artifacts = {record.id: safe_artifacts(record.output_dir) for record in records}
+        with self.lock:
+            items = [record.public(artifacts[record.id]) for record in records]
+        items.extend(legacy)
         return sorted(
             [continuation_public(item) for item in items],
             key=lambda item: (item.get("created_at") or "", item["id"]),
@@ -515,12 +521,14 @@ class SimulationManager:
 
     def get_public(self, session_id: str) -> dict[str, Any]:
         with self.lock:
-            if session_id in self.sessions:
-                record = self.sessions[session_id]
-                return continuation_public(record.public(safe_artifacts(record.output_dir)))
-            if session_id in self.legacy_sessions:
-                return continuation_public(dict(self.legacy_sessions[session_id]))
-        raise KeyError(session_id)
+            record = self.sessions.get(session_id)
+            if record is None:
+                if session_id in self.legacy_sessions:
+                    return continuation_public(dict(self.legacy_sessions[session_id]))
+                raise KeyError(session_id)
+        artifacts = safe_artifacts(record.output_dir)
+        with self.lock:
+            return continuation_public(record.public(artifacts))
 
     def promote(self, session_id: str) -> dict[str, Any]:
         with self.lock:
