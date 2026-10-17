@@ -407,7 +407,12 @@ def make_env(
     video_width: int,
     video_height: int,
     headless: bool,
+    *,
+    hard_reset: bool = False,
 ):
+    # robosuite's constructor already compiles the model. Every caller restores
+    # an explicit MuJoCo state afterwards, so the reset below need not rebuild
+    # it again (LIBERO's default hard reset roughly doubles construction time).
     camera_dimensions = {
         "agentview": [resolution, resolution],
         "robot0_eye_in_hand": [resolution, resolution],
@@ -422,6 +427,7 @@ def make_env(
         camera_heights=[dimensions[1] for dimensions in camera_dimensions.values()],
         horizon=horizon,
         control_freq=control_hz,
+        hard_reset=hard_reset,
     )
     # The policy always needs offscreen cameras. For interactive runs we attach
     # MuJoCo's native passive viewer to the same model/data after reset instead

@@ -109,7 +109,8 @@ class PreviewService:
     def _run(self) -> None:
         config = self.manager.eval_config
         env = None
-        env_context: tuple[str, int] | None = None
+        env_context: str | None = None
+        env_seed: int | None = None
         period = 1.0 / self.manager.ui_config.preview_fps
         try:
             last_render = 0.0
@@ -138,8 +139,10 @@ class PreviewService:
                             resource = ResourceLease(work_queue.gpu_lock_path)
                     task_catalog = self.manager._task_catalog_for(target) if hasattr(self.manager, "_task_catalog_for") else self.manager.catalog
                     bddl, _ = task_catalog.paths(task_id)
-                    # LEVEL5 prompt variants share the same LEVEL4 scene.
-                    target_context = (str(bddl), int(target.seed))
+                    # LEVEL5 prompt variants share the same LEVEL4 scene. The
+                    # seed places fixtures in the model (not in the saved state),
+                    # so a new seed needs a cheap soft reset, not a rebuild.
+                    target_context = str(bddl)
                     if env is None or env_context != target_context:
                         if env is not None:
                             self.manager.simulator.close(env)
@@ -150,7 +153,11 @@ class PreviewService:
                             max_steps=10000,
                             seed=target.seed,
                         )
-                        env_context = target_context
+                        env_context, env_seed = target_context, int(target.seed)
+                    elif env_seed != int(target.seed):
+                        env_seed = None
+                        self.manager.simulator.reseed(env, int(target.seed))
+                        env_seed = int(target.seed)
                     self.manager.simulator.restore(env, state)
                     frame = self.manager.simulator.render_operator_preview(
                         env,
@@ -1798,7 +1805,9 @@ class SimulationManager:
             observation = self.simulator.restore(env, initial_state)
             observation = self.simulator.observations(env, observation)
             if record.kind == "branch" and hasattr(self.simulator, "restore_control_state"):
-                self.simulator.restore_control_state(env, recorder.env_actions, recorder.control_hz)
+                self.simulator.restore_control_state(
+                    env, recorder.env_actions, recorder.control_hz,
+                    reanchor_nullspace=record.control_mode == "manual")
             if record.kind == "original":
                 recorder.record_initial(env, observation)
             else:

@@ -136,7 +136,7 @@ def test_task_extension_config_rejects_invalid_values(tmp_path, extra):
 
 
 def test_preview_reuses_physical_scene_between_language_variants():
-    created, closed = [], []
+    created, closed, reseeded = [], [], []
 
     def create(bddl, _config, **kwargs):
         created.append((bddl, kwargs["seed"]))
@@ -147,6 +147,7 @@ def test_preview_reuses_physical_scene_between_language_variants():
         ui_config=SimpleNamespace(preview_fps=100, preview_width=4, preview_height=4, jpeg_quality=85),
         catalog=SimpleNamespace(paths=lambda task_id: (Path("other" if task_id == "other" else "shared"), Path("init"))),
         simulator=SimpleNamespace(create=create, close=closed.append, restore=lambda *_: None,
+            reseed=lambda _env, seed: reseeded.append(seed),
             render_operator_preview=lambda *_: np.zeros((4, 4, 3), dtype=np.uint8)),
     )
     preview = PreviewService(manager)
@@ -157,7 +158,9 @@ def test_preview_reuses_physical_scene_between_language_variants():
             preview.submit(target, np.zeros(3))
             assert target.preview_event.wait(3)
             assert target.preview_error is None
-        assert created == [(Path("shared"), 0), (Path("other"), 0), (Path("other"), 1)]
+        # A new seed re-places fixtures with a soft reset instead of a rebuild.
+        assert created == [(Path("shared"), 0), (Path("other"), 0)]
+        assert reseeded == [1]
     finally:
         preview.close()
-    assert len(closed) == 3
+    assert len(closed) == 2

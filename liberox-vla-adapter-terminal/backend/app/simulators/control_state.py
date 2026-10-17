@@ -4,7 +4,12 @@ from __future__ import annotations
 import numpy as np
 
 
-def restore_control_state(env, env_actions, control_hz: float) -> float:
+def restore_control_state(env, env_actions, control_hz: float, *, reanchor_nullspace: bool = True) -> float:
+    """Refresh OSC pose caches/goals and replay the Panda gripper accumulator.
+
+    Policy re-inference keeps the reset-time nullspace posture that the source
+    rollout used; human takeover re-anchors it to the restored joints.
+    """
     base = getattr(env, "env", env)
     robot = base.robots[0]
     actions = np.asarray(env_actions, dtype=np.float64)
@@ -23,9 +28,13 @@ def restore_control_state(env, env_actions, control_hz: float) -> float:
 
     controller = robot.controller
     controller.update(force=True)
-    # Also re-anchor the nullspace posture. Neutral rotation otherwise keeps
-    # OSC's pre-restore orientation goal, even with six zero input axes.
-    controller.update_initial_joints(controller.joint_pos.copy())
+    if reanchor_nullspace:
+        # Also re-anchor the nullspace posture. Neutral rotation otherwise keeps
+        # OSC's pre-restore orientation goal, even with six zero input axes.
+        controller.update_initial_joints(controller.joint_pos.copy())
+    elif hasattr(controller, "reset_goal"):
+        # Goals must start from the restored pose, not the reset pose.
+        controller.reset_goal()
 
     gripper.current_action = np.zeros(gripper.dof)
     for action in actions:
