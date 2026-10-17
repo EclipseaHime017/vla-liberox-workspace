@@ -80,9 +80,66 @@ def test_real_model_server_training_and_export(configured, tmp_path, monkeypatch
         print(f"GPU {family}/{method}: loss={metrics[-1]['actor_loss']:.6f}, "
               f"peak={metrics[-1]['cuda_peak_memory_gib']:.2f} GiB, schema={payload['schema_version']}")
     finally:
-        if run.process is not None and run.process.poll() is None:
-            run.cancel()
-            while run.poll() is None:
-                time.sleep(.2)
-        run.close()
+        run.shutdown()
+        shutil.rmtree(tmp_path)
+
+
+@pytest.mark.skipif(os.environ.get("RUN_SERVER_QUEUE_GPU_SMOKE") != "1", reason="opt-in queued GPU training")
+def test_background_queue_trains_two_native_models_serially(configured, tmp_path, monkeypatch):
+    from vla_rynn_iql.server_queue import TrainingQueue, TERMINAL
+    from vla_rynn_iql.server_resources import process_alive
+    monkeypatch.setenv("NCCL_DEBUG", "INFO")
+    monkeypatch.setenv("NCCL_IB_DISABLE", "1")
+    monkeypatch.setenv("NCCL_P2P_DISABLE", "1")
+    source, config, _ = portable_export(configured, tmp_path)
+    config.raw["paths"]["vla_adapter_root"] = str(PROJECT_ROOT.parent / "third_party/VLA-Adapter")
+    config.path.write_text(yaml.safe_dump(config.raw))
+    queue = TrainingQueue(tmp_path / "queue")
+    jobs = []
+    for family, base in (("pi05", "pi05-libero-base"), ("vla_adapter", "base")):
+        settings = yaml.safe_load((PROJECT_ROOT / "configs/server_pipeline.yaml").read_text())
+        settings.update(training_config=str(config.path), runs_root=str(source),
+                        output_root=str(tmp_path / "training"), cache_root=str(tmp_path / "cache"),
+                        task_id=None, reward_source="sparse")
+        settings["distributed"].update(gpu_ids=[0], data_workers_per_rank=0,
+                                        persistent_workers=False, timeout_seconds=60)
+        settings["overrides"] = {
+            "model": {"family": family, "base_id": base, "backbone": "frozen"},
+            "training": {"method": "bc", "train_steps": 2, "micro_batch_size": 1,
+                         "gradient_accumulation_steps": 1, "checkpoint_interval": 2,
+                         "actor_lr_warmup_steps": 0},
+            "logging": {"wandb": {"enabled": False}, "tensorboard": False, "console_interval_steps": 1}}
+        path = tmp_path / f"{family}.yaml"
+        path.write_text(yaml.safe_dump(settings))
+        jobs.append(queue.add(load_server_config(path)))
+    worker = queue.start()
+    try:
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            records = queue.list()["jobs"]
+            if all(job["status"] in TERMINAL for job in records):
+                break
+            assert process_alive(worker), (queue.root / "worker.log").read_text()
+            time.sleep(.5)
+        assert [job["status"] for job in records] == ["COMPLETED", "COMPLETED"], records
+        assert records[0]["finished_at"] <= records[1]["started_at"]
+        for record, family in zip(records, ("pi05", "vla_adapter")):
+            directory = Path(record["run_directory"])
+            rows = [json.loads(line) for line in (directory / "metrics.jsonl").read_text().splitlines()]
+            assert len(rows) == 2 and all(row["actor_grad_norm"] > 0 for row in rows)
+            assert all(math.isfinite(row["actor_loss"]) and row["algorithm"] == "bc" for row in rows)
+            overlay = Path(json.loads((directory / "summary.json").read_text())["policy_overlay"])
+            assert decode_child(yaml.safe_load(overlay.read_text()))[1]["family"] == family
+            print(f"Queued GPU {family}: loss={rows[-1]['actor_loss']:.6f}, "
+                  f"peak={rows[-1]['cuda_peak_memory_gib']:.2f} GiB")
+    finally:
+        for record in queue.list()["jobs"]:
+            if record["status"] in {"QUEUED", "RUNNING"}:
+                queue.cancel(record["id"])
+        queue.stop()
+        deadline = time.monotonic() + 150
+        while process_alive(worker) and time.monotonic() < deadline:
+            time.sleep(.2)
+        assert not process_alive(worker), "Queue worker must stop before test outputs are removed"
+        os.waitpid(worker["pid"], 0)
         shutil.rmtree(tmp_path)

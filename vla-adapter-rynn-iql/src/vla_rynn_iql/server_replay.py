@@ -75,7 +75,7 @@ def build_replay_cache(config, root: Path, action_stats: dict, proprio_stats: di
         "include_post_success": source.include_post_success, "transitions": transitions,
         "image_size": config.section("iql")["critic_image_size"] if transitions else None,
         "implementation": {name: sha256_file(Path(__file__).with_name(name)) for name in
-                           ("server_replay.py", "replay.py", "data.py", "vla_adapter.py", "pi05.py")},
+                           ("server_replay.py", "replay.py", "data.py", "image_transforms.py", "vla_adapter.py", "pi05.py")},
     }
     # Source bytes, not timestamps or the original PC's absolute paths, bind the cache.
     for episode in source.manifest["episodes"]:

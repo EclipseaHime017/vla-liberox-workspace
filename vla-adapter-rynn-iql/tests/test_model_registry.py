@@ -175,12 +175,14 @@ def test_new_base_inherits_family_without_vendor_or_business_registration(tmp_pa
         "label": "New variant", "source": "publisher/weights", "revision": None,
         "checkpoint": "./weights", "stats_key": "new_stats",
         "inference": {"open_loop_steps": 4},
+        "observation": {"image_flip_vertical": True, "image_flip_horizontal": True},
     }
     path = write_registry(tmp_path / "configs/models", raw)
     families, bases = base_models.load_registry(path)
     added = bases["new-variant"]
     assert added.family == "vla_adapter"
-    assert added.contract == families[added.family].contract
+    assert added.contract == {**families[added.family].contract,
+                              "observation": raw["vla_adapter"]["variants"]["new-variant"]["observation"]}
     assert added.inference == {"open_loop_steps": 4}
     assert added.checkpoint == str(path.parent / "weights")
     monkeypatch.setitem(base_models.BASE_MODELS, added.id, added)

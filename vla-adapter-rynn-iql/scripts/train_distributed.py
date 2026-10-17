@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from vla_rynn_iql.config import load_train_config
 from vla_rynn_iql.server_config import distributed_config
 from vla_rynn_iql.distributed_training import train_distributed
+from vla_rynn_iql.server_resources import register_worker
 
 
 def main():
@@ -18,6 +19,7 @@ def main():
     parser.add_argument("--execution", type=Path, required=True)
     args = parser.parse_args()
     execution = json.loads(args.execution.read_text())
+    register_worker(execution.get("resource_token"))
     train_distributed(load_train_config(args.config), distributed_config(execution["distributed"]),
                       Path(execution["cache_root"]), Path(execution["run_dir"]))
 

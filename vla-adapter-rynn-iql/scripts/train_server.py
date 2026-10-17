@@ -11,12 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from vla_rynn_iql.server_config import load_server_config
+from vla_rynn_iql.server_config import configure_server
 from vla_rynn_iql.server_pipeline import ServerRun, execution_plan, training_settings
 from vla_rynn_iql.config import load_train_config
 from vla_rynn_iql.server_inputs import choose_task, discover_tasks, prepare_global_inputs, open_run_source
-from vla_rynn_iql.models import base_model_config
-from vla_rynn_iql.config_sources import merge_config
 
 
 def run_batch(run):
@@ -43,13 +41,11 @@ def run_batch(run):
                 print(json.dumps(progress), flush=True)
             time.sleep(1)
     finally:
-        if run.process is not None and run.process.poll() is None:
-            run.cancel()
-            while run.poll() is None:
-                time.sleep(.2)
-        run.close()
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
+        try:
+            run.shutdown()
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
     print(json.dumps(run.state, ensure_ascii=False), flush=True)
     return 0 if run.state["status"] == "COMPLETED" else 130 if run.state["status"] == "INTERRUPTED" else 1
 
@@ -63,17 +59,8 @@ def main(argv=None):
     parser.add_argument("--method", choices=("bc", "iql"), help="Training method; overrides YAML")
     parser.add_argument("--dry-run", action="store_true", help="Validate and show plan without writing a training run")
     args = parser.parse_args(argv)
-    server = load_server_config(args.config)
-    if args.task:
-        server = replace(server, task_id=args.task)
-    if args.runs_root:
-        server = replace(server, runs_root=args.runs_root.expanduser().resolve())
-    overrides = server.overrides
-    if args.model:
-        overrides = {**overrides, "model": base_model_config(args.model)}
-    if args.method:
-        overrides = merge_config(overrides, {"training": {"method": args.method}})
-    server = replace(server, overrides=overrides)
+    server = configure_server(args.config, task=args.task, runs_root=args.runs_root,
+                              model=args.model, method=args.method)
     with open_run_source(server.runs_root) as root:
         return execute(replace(server, runs_root=root), dry_run=args.dry_run)
 

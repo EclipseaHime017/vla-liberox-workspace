@@ -96,7 +96,7 @@ def test_batch_sigint_during_start_is_deferred_and_reaped(tmp_path, monkeypatch)
         def progress(self):
             return {}
 
-        def close(self):
+        def shutdown(self):
             self.closed = True
 
     monkeypatch.setattr(script.time, "sleep", lambda _: None)
@@ -192,6 +192,8 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 
 
 def test_launch_failure_has_durable_status(configured, tmp_path, monkeypatch):
+    from vla_rynn_iql import server_resources
+    monkeypatch.setattr(server_resources, "LEASE_ROOT", tmp_path / "lease")
     dataset, _, _ = global_runs(configured)
     server = configuration(tmp_path, dataset, configured)
     run = ServerRun(server, dataset, training_settings(server, dataset), server.distributed, "final")

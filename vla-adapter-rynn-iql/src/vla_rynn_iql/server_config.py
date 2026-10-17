@@ -40,6 +40,21 @@ class ServerConfig:
     overrides: dict[str, Any]
 
 
+def configure_server(path, *, task=None, runs_root=None, model=None, method=None):
+    """Resolve common CLI overrides for direct and queued training."""
+    from dataclasses import replace
+    from .models import base_model_config
+    from .config_sources import merge_config
+    server = load_server_config(path)
+    overrides = server.overrides
+    if model:
+        overrides = {**overrides, "model": base_model_config(model)}
+    if method:
+        overrides = merge_config(overrides, {"training": {"method": method}})
+    return replace(server, overrides=overrides, task_id=task or server.task_id,
+                   runs_root=Path(runs_root).expanduser().resolve() if runs_root else server.runs_root)
+
+
 def distributed_config(raw: dict) -> DistributedConfig:
     defaults = DistributedConfig((0,)).__dict__
     if not isinstance(raw, dict) or raw.keys() - defaults.keys():

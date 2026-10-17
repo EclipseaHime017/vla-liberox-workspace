@@ -15,11 +15,16 @@ new-base:
   revision: null
   checkpoint: ../../../models/new-model
   stats_key: normalization-key
+  observation:
+    image_flip_vertical: true
+    image_flip_horizontal: true
   inference:
     open_loop_steps: 5
 ```
 
-stats_key 对应该权重的归一化资产，已知的 revision 使用固定 commit；inference.open_loop_steps 由各变体独立配置。家族支持的差异可通过 io/architecture 声明，replay 长度与模型原生预测长度分别配置。π₀.₅ 的 JAX 权重通过 prepare_pi05.py --base-model <ID> 转换。
+stats_key 对应该权重的归一化资产，已知的 revision 使用固定 commit；inference.open_loop_steps 由各变体独立配置。observation 定义相对原始相机帧的垂直／水平翻转；训练会先还原记录的存储朝向，再统一转换 actor 双视角和 critic 当前／下一观测，不重复翻转。修改视角后缓存自动失效，不能继续恢复视角不同的 checkpoint；已导出的子模型保留自己的视觉配置。该设置不改变原始数据或评价模型输入。
+
+家族支持的差异可通过 io/architecture 声明，replay 长度与模型原生预测长度分别配置。π₀.₅ 的 JAX 权重通过 prepare_pi05.py --base-model <ID> 转换。LIBERO-X 变体仅上下翻转，现有 LIBERO 变体保持双轴翻转；自训练权重应按其训练输入配置对应 variant。
 
 ```bash
 conda run --no-capture-output -n vla-liberox python vla-adapter-rynn-iql/scripts/train_server.py --model new-base --method bc --dry-run

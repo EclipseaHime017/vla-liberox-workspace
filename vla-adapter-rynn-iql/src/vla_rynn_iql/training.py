@@ -27,6 +27,8 @@ from .algorithms import TrainingAlgorithm, build_algorithm
 from .methods import actor_lr_warmup, training_method
 from .models import model_backend, model_config, model_signature
 from .base_models import model_contract
+from .image_transforms import canonical_contract
+from .model_artifacts import legacy_contract, parent_identity
 from .monitoring import (
     ACTION_NAMES,
     TrainingProgressReporter,
@@ -342,8 +344,13 @@ def _restore_checkpoint(
         raise ValueError("Resume checkpoint uses a different model training configuration; start a new run")
     if metadata.get("model_identity") != getattr(components, "identity", None):
         raise ValueError("Resume checkpoint uses different model weights or normalization")
-    if metadata.get("model_parent") is not None and metadata["model_parent"] != getattr(components, "parent", None):
+    previous_parent = metadata.get("model_parent")
+    if previous_parent is not None and parent_identity(previous_parent) != parent_identity(getattr(components, "parent", None)):
         raise ValueError("Resume checkpoint uses a different parent model")
+    if previous_parent is None:
+        previous_contract = legacy_contract(metadata.get("model_config", {}))
+        if canonical_contract(previous_contract) != canonical_contract(model_contract(config.section("model"))):
+            raise ValueError("Resume checkpoint uses a different model input contract")
     has_success_tail = any(
         episode.get("split") == "train" and episode.get("terminal_step") is not None
         and int(episode["recorded_action_count"]) > int(episode["terminal_step"]) + 1

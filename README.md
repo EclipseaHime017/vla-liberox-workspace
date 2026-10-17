@@ -177,6 +177,25 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
 
 The launcher validates inputs, loads rewards, prepares the mmap cache, and starts DDP + ZeRO-1. Use tmux for long remote jobs so an SSH disconnect does not stop training.
 
+### Training queue
+
+Submit experiments and start one detached FIFO worker. Jobs run sequentially and survive terminal disconnects:
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_queue.py add --config vla-adapter-rynn-iql/configs/server_pipeline.yaml --name baseline-iql
+python vla-adapter-rynn-iql/scripts/train_queue.py add --config vla-adapter-rynn-iql/configs/server_pipeline.yaml --method bc --name baseline-bc
+python vla-adapter-rynn-iql/scripts/train_queue.py start
+python vla-adapter-rynn-iql/scripts/train_queue.py list
+```
+
+Submission freezes resolved configuration, model revision, observation contract, data/reward fingerprints, and any resume checkpoint. Later YAML edits do not change pending jobs. Changed inputs or implementation code require a new submission rather than silently changing the experiment. Enqueue validates and hashes assets without loading a GPU model.
+
+State defaults to `vla-adapter-rynn-iql/outputs/server-queue/`, with daemon output in `worker.log`; experiments retain separate training runs. Pass `--queue /path/to/queue` before the subcommand to use another state directory.
+
+`train_queue.py stop` finishes the active job and stops before the next, preserving pending jobs. `cancel <job-ID>` cancels a pending job or safely stops an active one; `retry <job-ID>` appends an explicit retry with the same configuration. Failures do not block later jobs; interrupted jobs are never automatically repeated. An empty daemon stays idle and accepts further submissions.
+
+Direct training and all queues share one local-account training lease. Surviving workers continue to block competing jobs after supervisor failure. Stop and restart the queue worker after code updates. Use `train_queue.py run` for foreground execution; Ctrl+C safely stops the active training and the worker.
+
 ### Progress, stopping, and resuming
 
 Default run directories are `vla-adapter-rynn-iql/outputs/server-training/server_<timestamp>_<ID>/`. The terminal prints the run path and progress. From another terminal:
@@ -233,7 +252,7 @@ Keep the name and all files of `policy-registry/<policy-ID>/`. Retain server run
 ## 6. Server architecture
 
 ```text
-server_pipeline.yaml + train_server.py
+server_pipeline.yaml + train_server.py / train_queue.py
   → select model variant and BC/IQL method
   → validate imported data and freeze members, splits, and rewards
   → build or reuse the mmap replay cache
@@ -242,7 +261,7 @@ server_pipeline.yaml + train_server.py
   → save checkpoints, logs, and deployment models
 ```
 
-`server_inputs.py` handles inputs and rewards, `server_pipeline.py` manages configuration and processes, `server_replay.py` owns caching and sampling, and `distributed_training.py` runs training and saves results.
+`server_inputs.py` handles inputs and rewards, `server_pipeline.py` manages configuration and processes, `server_queue.py` persists the queue, and `server_resources.py` prevents overlapping training. `server_replay.py` owns caching and sampling; `distributed_training.py` runs training and saves results.
 
 Model YAMLs and adapters own weights, preprocessing, native losses, and adaptation scopes. Training methods determine how losses are used; the distributed layer synchronizes gradients and shards optimizer state. Rank 0 writes logs and publishes results, while every rank participates in synchronization and checkpoint consolidation. ZeRO groups parameters by dtype to support mixed BF16/FP32 models.
 

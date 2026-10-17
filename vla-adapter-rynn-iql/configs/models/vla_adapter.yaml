@@ -15,7 +15,6 @@ defaults:
 io:
   cameras: [agentview, robot0_eye_in_hand]
   image_size: 224
-  image_orientation: rotate_180
   proprio: eef_position_axis_angle_gripper
   proprio_dim: 8
   native_action_horizon: 8
@@ -32,5 +31,19 @@ variants:
     revision: null
     checkpoint: VLA-Adapter/LIBERO-Object-Pro
     stats_key: libero_object
+    observation:
+      image_flip_vertical: true
+      image_flip_horizontal: true
+    inference:
+      open_loop_steps: 8
+  vla-adapter-pro-liberox-base:
+    label: VLA-Adapter Pro · LIBERO-X
+    source: Adam-YAN/vla-adapter-pro-liberox-base
+    revision: a2edfadb36e77a4909a3149b3d5fceaefc7fdd7d
+    checkpoint: ../../../models/Adam-YAN-vla-adapter-pro-liberox-base
+    stats_key: liberox_no_noops
+    observation:
+      image_flip_vertical: true
+      image_flip_horizontal: false
     inference:
       open_loop_steps: 8

@@ -19,6 +19,8 @@ from .io import atomic_json
 from .methods import training_method
 from .server_config import validate_global_batch
 from .server_inputs import GlobalTask, prepare_global_inputs, saved_reward
+from .base_models import model_contract
+from .server_resources import TrainingCleanupError, TrainingLease, process_identity, signal_worker
 
 
 def visible_devices(gpu_ids, environ=None) -> str:
@@ -69,6 +71,7 @@ def training_settings(server, task: GlobalTask, *, overrides=None, source=None) 
             if changes.get("reward", {}).get("accumulate_primitive_steps") is True:
                 raise ValueError("Global Final Reward includes multiplication; cumulative reward must be Off")
             raw["reward"]["accumulate_primitive_steps"] = False
+    raw["model"]["contract"] = model_contract(raw["model"])
     return validate_train_config(raw, server.path).raw
 
 
@@ -97,23 +100,25 @@ def execution_plan(server, task, raw, distributed, source):
 
 class ServerRun:
     """A subprocess lifecycle with durable status and cooperative safe cancellation."""
-    def __init__(self, server, task, raw, distributed, source):
+    def __init__(self, server, task, raw, distributed, source, *, directory=None):
         self.server, self.task, self.raw = server, task, raw
         self.distributed, self.source = distributed, source
         self.process = None
         self.log = None
-        self.directory = None
+        self.directory = directory
+        self.lease = None
         self.cancel_at = None
         self.terminated_at = None
         self.state = execution_plan(server, task, raw, distributed, source)
 
     def start(self):
+        self.lease = TrainingLease()
         identifier = f"server_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
-        self.directory = self.server.output_root / identifier
-        self.directory.mkdir(parents=True, exist_ok=False)
-        self.state.update(status="PREPARING", run_id=identifier, created_at=datetime.now(timezone.utc).isoformat())
-        self._save()
+        self.directory = self.directory or self.server.output_root / identifier
         try:
+            self.directory.mkdir(parents=True, exist_ok=False)
+            self.state.update(status="PREPARING", run_id=self.directory.name, created_at=datetime.now(timezone.utc).isoformat())
+            self._save()
             raw = copy.deepcopy(self.raw)
             raw["paths"]["output_dir"] = str(self.directory)
             raw = prepare_global_inputs(self.task, self.directory / "inputs", raw, self.source,
@@ -124,7 +129,8 @@ class ServerRun:
             config_path.write_text(yaml.safe_dump(config.raw, sort_keys=False))
             execution = self.directory / "execution.json"
             atomic_json(execution, {"distributed": asdict(self.distributed),
-                "cache_root": str(self.server.cache_root), "run_dir": str(self.directory)})
+                "cache_root": str(self.server.cache_root), "run_dir": str(self.directory),
+                "resource_token": self.lease.token})
             worker = Path(__file__).resolve().parents[2] / "scripts/train_distributed.py"
             argv = ["conda", "run", "--no-capture-output", "-n", config.section("model")["environment"],
                     "python", "-u", "-m", "torch.distributed.run", "--standalone",
@@ -138,14 +144,20 @@ class ServerRun:
             env.setdefault("TOKENIZERS_PARALLELISM", "false")
             self.log = (self.directory / "training.log").open("w")
             self.process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
-                stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
+                stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True,
+                pass_fds=(self.lease.fd,))
+            self.state["process"] = process_identity(self.process.pid)
             self.state.update(status="RUNNING", pid=self.process.pid, argv=argv)
             self._save()
         except BaseException as exc:
             self.state.update(status="INTERRUPTED" if isinstance(exc, KeyboardInterrupt) else "FAILED",
                               error=f"{type(exc).__name__}: {exc}")
-            self._save()
-            self.close()
+            try:
+                self.abort()
+                if self.directory.is_dir():
+                    self._save()
+            finally:
+                self.close()
             raise
 
     def _save(self):
@@ -179,16 +191,77 @@ class ServerRun:
                 except ProcessLookupError:
                     pass
         if code is not None and self.state.get("exit_code") is None:
+            if self.lease is not None:
+                self.lease.retire()
+            if self.lease is not None and self.lease.workers():
+                self.abort()
+                self.state["error"] = "Training supervisor exited with active ranks; remaining workers terminated"
+                code = code or 1
             summary = self.directory / "summary.json"
             result = json.loads(summary.read_text()) if summary.is_file() else {}
             self.state.update(status=result.get("status", "INTERRUPTED" if self.cancel_at else
                                                "COMPLETED" if code == 0 else "FAILED"),
                               exit_code=code, result=result)
+            if code != 0 and self.state["status"] == "COMPLETED":
+                self.state.update(status="FAILED", error=f"Training process exited with code {code}")
             if not result and code == 0:
                 self.state.update(status="FAILED", error="Worker exited without a completed summary")
             self._save()
             self.close()
         return code
+
+    def abort(self):
+        """Emergency cleanup without depending on the output filesystem."""
+        try:
+            self._abort()
+        except TrainingCleanupError:
+            raise
+        except Exception as exc:
+            raise TrainingCleanupError(f"Training cleanup failed; queue halted: {exc}") from exc
+
+    def _abort(self):
+        if self.lease is not None:
+            self.lease.retire()
+        for command, timeout in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+            if self.process is not None and self.process.poll() is None:
+                try:
+                    os.killpg(self.process.pid, command)
+                except ProcessLookupError:
+                    pass
+            if self.lease is not None:
+                for identity in self.lease.workers():
+                    signal_worker(identity, command)
+            deadline = time.monotonic() + timeout
+            while self.active():
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(.05)
+            if not self.active():
+                return
+        raise TrainingCleanupError("Could not stop all training processes; queue halted without advancing")
+
+    def active(self):
+        return ((self.process is not None and self.process.poll() is None) or
+                (self.lease is not None and bool(self.lease.workers())))
+
+    def shutdown(self):
+        """Always reap or halt the worker, even if safe-stop/status writes fail."""
+        try:
+            if self.active():
+                try:
+                    self.cancel()
+                    while self.poll() is None:
+                        time.sleep(.2)
+                    if self.active():
+                        self.abort()
+                except Exception:
+                    self.abort()
+                    raise
+        finally:
+            try:
+                self.close()
+            except Exception as exc:
+                raise TrainingCleanupError(f"Training resource release failed; queue halted: {exc}") from exc
 
     def progress(self):
         if self.directory is None:
@@ -213,3 +286,6 @@ class ServerRun:
         if self.log is not None:
             self.log.close()
             self.log = None
+        if self.lease is not None and not self.active():
+            self.lease.close()
+            self.lease = None

@@ -175,6 +175,25 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
 
 入口自动完成输入校验、奖励读取、mmap 缓存和 DDP + ZeRO-1 启动。远程长训练建议在 tmux 中执行，断开 SSH 不会中断训练。
 
+### 训练队列
+
+连续提交实验后启动一个后台队列，任务按入队顺序串行执行，断开终端不影响运行：
+
+```bash
+python vla-adapter-rynn-iql/scripts/train_queue.py add --config vla-adapter-rynn-iql/configs/server_pipeline.yaml --name baseline-iql
+python vla-adapter-rynn-iql/scripts/train_queue.py add --config vla-adapter-rynn-iql/configs/server_pipeline.yaml --method bc --name baseline-bc
+python vla-adapter-rynn-iql/scripts/train_queue.py start
+python vla-adapter-rynn-iql/scripts/train_queue.py list
+```
+
+入队时固定完整训练配置、模型 revision、视觉配置、数据／奖励指纹和恢复 checkpoint；之后修改原 YAML 不会改变已排队任务。数据、奖励或实现代码变化时会报错，需要重新提交，不会静默使用新内容。入队只校验及哈希，不加载 GPU 模型。
+
+默认状态保存在 `vla-adapter-rynn-iql/outputs/server-queue/`，后台日志为其中的 `worker.log`；每个实验仍有独立的训练 run。`--queue /path/to/queue` 放在子命令前可指定另一状态目录。
+
+使用 `train_queue.py stop` 停止接收下一项，当前训练完成后退出，待执行任务保留。`train_queue.py cancel <任务ID>` 取消排队任务或安全停止正在训练的任务；`retry <任务ID>` 用同一配置追加一次重试。失败后继续下一项，异常退出的任务不会自动重复训练。没有新任务时后台队列保持待机，可继续入队。
+
+直接训练与所有队列共用本机当前账号的训练锁，避免互相争用 GPU；进程异常退出后仍有训练 worker 存活时不会启动另一项。代码更新后先停止并重新启动队列 worker。需要前台运行时使用 `train_queue.py run`；Ctrl+C 会安全停止当前训练及队列。
+
 ### 查看进度、停止和恢复
 
 默认训练记录在 `vla-adapter-rynn-iql/outputs/server-training/server_<时间>_<ID>/`。终端会打印 run 路径和进度，在另一终端查看：
@@ -231,7 +250,7 @@ scp -r "$TRAIN_HOST:$TRAIN_REPO/vla-adapter-rynn-iql/outputs/deploy/$POLICY_ID" 
 ## 6. 服务器架构
 
 ```text
-server_pipeline.yaml + train_server.py
+server_pipeline.yaml + train_server.py / train_queue.py
   → 选择模型变体和 BC/IQL 方法
   → 校验导入的数据集，固定成员、划分和奖励快照
   → 构建或复用 mmap 数据缓存
@@ -240,7 +259,7 @@ server_pipeline.yaml + train_server.py
   → 保存 checkpoint、日志和可部署模型
 ```
 
-`server_inputs.py` 负责输入和奖励读取，`server_pipeline.py` 负责配置与进程管理，`server_replay.py` 负责缓存及采样，`distributed_training.py` 负责训练循环和结果保存。
+`server_inputs.py` 负责输入和奖励读取，`server_pipeline.py` 负责配置与进程管理，`server_queue.py` 负责持久队列，`server_resources.py` 防止并发训练冲突；`server_replay.py` 负责缓存及采样，`distributed_training.py` 负责训练循环和结果保存。
 
 模型 YAML 和适配器管理权重、输入处理、原生损失及训练范围；训练方法决定如何使用这些损失，分布式层负责同步和优化器状态分片。rank 0 写入日志并发布结果，所有 rank 参与梯度同步及 checkpoint 状态汇总。ZeRO 按参数 dtype 分组，支持混合 BF16/FP32 参数。
 

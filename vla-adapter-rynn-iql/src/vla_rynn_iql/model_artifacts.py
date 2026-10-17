@@ -13,6 +13,23 @@ import yaml
 from .base_models import base_model, model_contract, validate_contract
 from .io import stable_hash, sha256_file
 from .config_sources import UniqueKeyLoader
+from .image_transforms import canonical_contract
+
+
+def legacy_contract(settings: dict) -> dict:
+    contract = model_contract(settings)
+    if "contract" not in settings:
+        contract["observation"] = {"image_flip_vertical": True, "image_flip_horizontal": True}
+    return contract
+
+
+def parent_identity(parent: dict | None) -> dict | None:
+    if parent is None:
+        return None
+    value = {key: item for key, item in parent.items() if key != "sha256"}
+    if parent.get("sha256") != stable_hash(value):
+        raise ValueError("Parent model snapshot hash mismatch")
+    return {**value, "contract": canonical_contract(value["contract"])}
 
 
 def parent_snapshot(settings: dict, revision: str, *, contract: dict | None = None) -> dict:
@@ -44,7 +61,7 @@ def validate_parent(parent: dict, settings: dict) -> None:
     validate_contract(parent["contract"], parent["family"])
     if settings.get("base_revision") not in (None, parent["revision"]):
         raise ValueError("Child revision conflicts with parent revision")
-    if "contract" in settings and settings["contract"] != parent["contract"]:
+    if "contract" in settings and canonical_contract(settings["contract"]) != canonical_contract(parent["contract"]):
         raise ValueError("Child model cannot override inherited input/output contract")
 
 

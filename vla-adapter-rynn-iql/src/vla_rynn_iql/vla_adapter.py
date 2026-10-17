@@ -17,7 +17,7 @@ from .config import LoadedConfig, UniqueKeyLoader
 from .io import sha256_file, stable_hash
 from .models import model_config
 from .base_models import model_contract
-from .model_artifacts import parent_snapshot, decode_child
+from .model_artifacts import parent_snapshot, decode_child, legacy_contract
 from .checkpoint_assets import resolve_revision, checkpoint_view
 
 
@@ -148,6 +148,8 @@ def load_components(
                 policy.stats_key not in {vla_cfg["stats_key"], f"{vla_cfg['stats_key']}_no_noops"}):
             raise ValueError("Requested model differs from the overlay parent")
         vla_cfg = dict(policy.model_config)
+    elif policy is not None:
+        vla_cfg["contract"] = policy.model_config["contract"]
     contract = model_contract(vla_cfg)
     revision = resolve_revision(vla_cfg["base_checkpoint"], vla_cfg.get("base_revision"))
     holder = checkpoint_view(vla_cfg["base_checkpoint"], revision)
@@ -380,13 +382,16 @@ def load_overlay(path: Path) -> PolicyOverlay:
         if not result.is_file() or path.parent not in result.parents:
             raise ValueError(f"Overlay component {name} is missing or outside its policy directory")
         return result
+    settings = model_config({"model": {**(raw.get("model_config") or {}),
+        "base_checkpoint": raw["base_checkpoint"], "stats_key": raw["stats_key"]}})
+    settings["contract"] = legacy_contract(settings)
     return PolicyOverlay(
         path, str(raw["policy_id"]), str(raw["label"]), str(raw["base_checkpoint"]),
         str(raw["stats_key"]), component("action_head"), component("proprio_projector"),
         int(raw["action_horizon"]), int(raw["action_dim"]), int(raw["proprio_dim"]),
         str(raw["dataset_sha256"]), raw["reward_sha256"], int(raw["training_step"]),
         dict(hashes), str(raw["compatibility_sha256"]),
-        component("backbone") if raw.get("backbone") else None, raw.get("model_config"), parent,
+        component("backbone") if raw.get("backbone") else None, settings, parent,
     )
 
 
