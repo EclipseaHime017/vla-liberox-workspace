@@ -51,7 +51,7 @@ def test_actor_and_critic_images_follow_model_contract(configured, monkeypatch, 
 
     configured.raw["model"] = model_config({"model": {"family": family}})
     contract = model_contract(configured.section("model"))
-    contract["io"].update(image_flip_vertical=strides[0] == -1, image_flip_horizontal=strides[1] == -1)
+    contract["observation"].update(image_flip_vertical=strides[0] == -1, image_flip_horizontal=strides[1] == -1)
     configured.raw["model"]["contract"] = contract
     prepare_dataset(configured)
     manifest = load_manifest(configured)

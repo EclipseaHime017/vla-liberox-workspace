@@ -1698,7 +1698,8 @@ class SimulationManager:
                     float(source_metadata.get("control_hz", self.eval_config.control_hz)),
                 )
 
-            recorder.policy_action_codec = "libero_env_v1" if record.control_mode == "policy" and self.provider.metadata().get("provider") == "pi05" else "vla_adapter_v1"
+            recorder.policy_action_codec = (self.provider.metadata().get("recording_action_codec", "vla_adapter_v1")
+                                            if record.control_mode == "policy" else "vla_adapter_v1")
             session_config = replace(
                 self.eval_config,
                 max_steps=record.max_steps,

@@ -46,9 +46,9 @@ export function TrainingPage() {
   const [datasetId, setDatasetId] = useState("");
   const [algorithm, setAlgorithm] = useState<"iql" | "bc">("iql");
   const isBC = algorithm === "bc";
-  const [modelFamily, setModelFamily] = useState("vla_adapter");
+  const [modelFamily, setModelFamily] = useState("");
   const [modelBaseId, setModelBaseId] = useState("");
-  const appliedSelection = useRef({ family: "vla_adapter", baseId: "", algorithm: "iql" });
+  const appliedSelection = useRef({ family: "", baseId: "", algorithm: "iql" });
   const [rewardSource, setRewardSource] = useState<"final" | "rynnvalue">("final");
   const [rewardRevision, setRewardRevision] = useState(0);
   const [showDatasetConfig, setShowDatasetConfig] = useState(false);
@@ -77,6 +77,7 @@ export function TrainingPage() {
     void Promise.all([getBootstrap(), getTrainingDefaults(), listOfflineJobs(), getTensorBoard()])
       .then(([nextBootstrap, nextDefaults, jobs, board]) => {
         setBootstrap(nextBootstrap); setDefaults(nextDefaults); setTaskScope(scopeForTask(nextBootstrap.task_catalog, nextBootstrap.task.task_id));
+        setModelFamily(String(nextDefaults.model?.model_family ?? nextDefaults.models?.[0]?.id ?? ""));
         const { reward_rynnvalue: legacyRynn, ...advanced } = nextDefaults.advanced;
         setParameters({ ...nextDefaults.basic, ...advanced, ...nextDefaults.monitoring, ...nextDefaults.model,
           reward_source: rewardSource,
@@ -138,7 +139,7 @@ export function TrainingPage() {
   useEffect(() => {
     setDefaultsError("");
     setDefaultsKey("");
-    if (!bootstrap) { setDefaultsLoading(false); return; }
+    if (!bootstrap || !modelFamily) { setDefaultsLoading(false); return; }
     let current = true;
     setDefaultsLoading(true);
     void getTrainingDefaults(datasetId || undefined, isBC ? undefined : rewardSource, algorithm, modelFamily, modelBaseId || undefined).then((next) => {
@@ -184,7 +185,7 @@ export function TrainingPage() {
     const timer = window.setTimeout(() => setRewardRevision((value) => value + 1), 1000);
     return () => window.clearTimeout(timer);
   }, [defaultsLoading, defaults, isBC]);
-  const trainingReady = Boolean(datasetId && !defaultsError && !modelConfigurationError(parameters)
+  const trainingReady = Boolean(datasetId && !defaultsError && !modelConfigurationError(parameters, defaults?.models)
     && defaultsKey === requestedDefaultsKey && (isBC || rewardReady));
   const patchParameter = (name: string, value: number | string | boolean | null) => setParameters((current) => ({ ...current, [name]: value }));
   const refreshDataset = async () => {

@@ -19,7 +19,25 @@ const runningJob: OfflineJob = {
   parameters: { dataset_name: "First dataset", micro_batch_size: 1, train_steps: 10000, seed: 7 },
 };
 const defaults: TrainingDefaults = {
-  models: [{ id: "vla_adapter", label: "VLA-Adapter · Object-Pro", backbone_modes: ["frozen", "lora", "full"] }],
+  models: [{ id: "vla_adapter", label: "VLA-Adapter · Object-Pro", backbone_modes: ["frozen", "lora", "full"],
+    training_ui: {
+      fields: [
+        { name: "model_backbone", label: "Backbone 适配方式", type: "select", default: "frozen",
+          options: ["frozen", "lora", "full"].map(value => ({ value, label: value })) },
+        { name: "model_action_head", label: "Action head", type: "select", default: "train",
+          options: ["train", "frozen"].map(value => ({ value, label: value })) },
+        { name: "model_proprio_projector", label: "Proprio projector", type: "select", default: "train",
+          options: ["train", "frozen"].map(value => ({ value, label: value })) },
+        { name: "model_lora_rank", label: "LoRA rank", type: "number", default: 32,
+          min: 1, visible_when: { model_backbone: "lora" } },
+        { name: "model_lora_alpha", label: "LoRA alpha", type: "number", default: 64,
+          min: 1, visible_when: { model_backbone: "lora" } },
+        { name: "model_lora_dropout", label: "LoRA dropout", type: "number", default: 0,
+          min: 0, max: .99, step: .01, visible_when: { model_backbone: "lora" } },
+      ],
+      trainable_any: ["model_backbone", "model_action_head", "model_proprio_projector"],
+    },
+  }],
   model: { model_family: "vla_adapter", model_backbone: "frozen", model_action_head: "train",
     model_proprio_projector: "train", model_lora_rank: 32, model_lora_alpha: 64, model_lora_dropout: 0 },
   basic: { train_steps: 10000, micro_batch_size: 1 },

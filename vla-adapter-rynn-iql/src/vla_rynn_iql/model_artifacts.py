@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import re
 
-from .base_models import base_model, model_contract, validate_contract
+from .base_models import MODEL_FAMILIES, base_model, model_contract, validate_contract, family_adapter
 from .io import stable_hash
 from .image_transforms import canonical_contract
 
@@ -13,8 +13,7 @@ def legacy_contract(settings: dict) -> dict:
     """Exports/snapshots without a contract used the original 180° camera input."""
     contract = model_contract(settings)
     if "contract" not in settings:
-        contract["io"].pop("image_orientation", None)
-        contract["io"].update(image_flip_vertical=True, image_flip_horizontal=True)
+        contract["observation"] = {"image_flip_vertical": True, "image_flip_horizontal": True}
     return contract
 
 
@@ -29,7 +28,7 @@ def parent_identity(parent: dict | None) -> dict | None:
 
 
 def parent_snapshot(settings: dict, revision: str, *, contract: dict | None = None) -> dict:
-    base = base_model(settings.get("base_id", "base" if settings["family"] == "vla_adapter" else "pi05-libero-base"))
+    base = base_model(settings.get("base_id", MODEL_FAMILIES[settings["family"]].default_base))
     value = {"id": base.id, "family": base.family, "checkpoint": settings["base_checkpoint"],
              "stats_key": settings["stats_key"], "revision": revision,
              "source": base.source, "source_revision": base.revision,
@@ -86,9 +85,19 @@ def decode_child(raw: dict) -> tuple[dict, dict | None]:
     if (value.get("action_horizon"), value.get("action_dim"), value.get("proprio_dim")) != (
             io["replay_horizon"], io["action_dim"], io["proprio_dim"]):
         raise ValueError("Child geometry conflicts with parent I/O")
-    if parent["family"] == "vla_adapter":
+    adapter = family_adapter(parent["family"])
+    if not adapter.MANIFEST_FAMILY_FIELD:
         value.pop("family")
-        value["schema_version"] = 3
-    else:
-        value["schema_version"] = 4
+    value["schema_version"] = adapter.MANIFEST_SCHEMA
     return value, parent
+
+
+def manifest_family(raw: dict) -> str:
+    if not isinstance(raw, dict):
+        raise ValueError("Model manifest must be a mapping")
+    family = raw.get("family") or (raw.get("model_config") or {}).get("family")
+    if family is None:
+        # Only old, already-published formats lack an explicit family.
+        family = {1: "vla_adapter", 2: "vla_adapter", 3: "vla_adapter", 4: "pi05"}.get(raw.get("schema_version"))
+    family_adapter(family)
+    return family

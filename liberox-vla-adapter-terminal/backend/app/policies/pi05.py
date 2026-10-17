@@ -51,7 +51,8 @@ class Pi05PolicyProvider:
     def load(self, open_loop_steps, policy_id="pi05-libero-base", *, expected_content_sha256=None):
         with self._lock:
             entry = self.catalog.select(policy_id)
-            if entry.family != "pi05" or (expected_content_sha256 is not None and entry.content_sha256 != expected_content_sha256):
+            if (model_module("base_models").family_adapter(entry.family).POLICY_ADAPTER != "backend.app.policies.pi05_catalog"
+                    or (expected_content_sha256 is not None and entry.content_sha256 != expected_content_sha256)):
                 raise ValueError("Selected π₀.₅ identity changed; select the model again")
             if self.loaded and self.current_policy_entry.content_sha256 == entry.content_sha256:
                 self.current_policy_entry, self.current_policy_id = entry, policy_id
@@ -99,9 +100,9 @@ class Pi05PolicyProvider:
             if not self.loaded:
                 raise RuntimeError("π₀.₅ is not loaded")
             from trajectory_utils import quaternion_to_axis_angle
-            contract = model_module("base_models").model_contract(self.current_policy_entry.settings)["io"]
+            contract = model_module("base_models").model_contract(self.current_policy_entry.settings)
             transforms = model_module("image_transforms")
-            orientation = transforms.image_orientation(contract)
+            orientation = transforms.image_orientation(transforms.observation_config(contract))
             images = {}
             for key, name, toggle in (("agentview_image", "observation/image", "agentview"),
                                       ("robot0_eye_in_hand_image", "observation/wrist_image", "robot0_eye_in_hand")):
@@ -115,7 +116,7 @@ class Pi05PolicyProvider:
             np.savez(buffer, **images)
             result = self._send({"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(), "prompt": prompt})
             actions = np.asarray(result["actions"], dtype=np.float32)
-            if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
+            if actions.shape != (contract["io"]["native_action_horizon"], contract["io"]["action_dim"]) or not np.isfinite(actions).all():
                 self.unload()
                 raise ValueError("Invalid π₀.₅ action chunk")
             return actions

@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from .config import LoadedConfig
-from .image_transforms import vla_adapter_observation, image_orientation
+from .image_transforms import vla_adapter_observation, image_orientation, observation_config
 from .io import atomic_json
 from .vla_adapter import load_components, load_overlay
 
@@ -160,7 +160,7 @@ def evaluate(config: LoadedConfig) -> Path:
                 result = _run_episode(
                     env, initial_states[episode_id % len(initial_states)], prompt, components,
                     int(ev["max_steps"]), int(ev["open_loop_steps"]),
-                    image_orientation(components.parent["contract"]["io"]),
+                    image_orientation(observation_config(components.parent["contract"])),
                 )
             finally:
                 env.close()

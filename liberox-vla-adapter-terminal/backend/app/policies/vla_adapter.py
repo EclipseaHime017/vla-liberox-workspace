@@ -188,7 +188,7 @@ class VLAAdapterPolicyProvider:
                 prompt,
                 disabled_policy_cameras,
                 image_orientation=model_module("image_transforms").image_orientation(
-                    model_module("base_models").model_contract(self.current_policy_entry.settings)["io"]),
+                    model_module("base_models").model_observation(self.current_policy_entry.settings)),
             )
 
     def process_action(self, action: np.ndarray) -> np.ndarray:

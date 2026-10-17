@@ -13,8 +13,6 @@ defaults:
 io:
   cameras: [agentview, robot0_eye_in_hand]
   image_size: 224
-  image_flip_vertical: true
-  image_flip_horizontal: true
   proprio: eef_position_axis_angle_gripper
   proprio_dim: 8
   native_action_horizon: 10
@@ -33,6 +31,9 @@ variants:
     revision: null
     checkpoint: ../../../models/pi05_libero_torch
     stats_key: physical-intelligence/libero
+    observation:
+      image_flip_vertical: true
+      image_flip_horizontal: true
     inference:
       open_loop_steps: 5
   pi05-liberox-base:
@@ -41,5 +42,8 @@ variants:
     revision: 4664e4725d2e72c3a8af8b09adfda41eaf74514c
     checkpoint: ../../../models/pi05_liberox_torch
     stats_key: meituan/LIBERO-X
+    observation:
+      image_flip_vertical: true
+      image_flip_horizontal: true
     inference:
       open_loop_steps: 10

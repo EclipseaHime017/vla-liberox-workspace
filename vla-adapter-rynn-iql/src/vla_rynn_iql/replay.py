@@ -12,7 +12,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from .config import LoadedConfig
-from .base_models import model_contract
+from .base_models import model_observation
 from .data import iter_unique_replay_chunks, load_manifest, replay_chunks, replay_end_step
 from .image_transforms import policy_view, image_orientation
 from .rewards import load_reward_index
@@ -24,7 +24,7 @@ class ActionDataset(Dataset):
     def __init__(self, config: LoadedConfig, action_stats: dict[str, Any],
                  proprio_stats: dict[str, Any], split: str = "train"):
         self.config = config
-        self.image_orientation = image_orientation(model_contract(config.section("model"))["io"])
+        self.image_orientation = image_orientation(model_observation(config.section("model")))
         self.include_post_success = config.section("data").get("include_post_success", True)
         self.manifest = load_manifest(config)
         self.action_stats, self.proprio_stats = action_stats, proprio_stats

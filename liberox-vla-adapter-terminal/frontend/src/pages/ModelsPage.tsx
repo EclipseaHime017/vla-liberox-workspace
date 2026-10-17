@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { copyModel, deleteModel, getModel, listModels, renameModel } from "../features/run-control/api";
 import type { PolicyDetail, PolicyInfo } from "../features/run-control/types";
 import { Badge } from "../components/ui/Badge";
@@ -54,13 +54,14 @@ export function ModelsPage() {
         <div className="model-detail-head"><div><p className="eyebrow">{detail.kind}</p><h2>{detail.label}</h2><code>{detail.policy_id}</code></div><div>{detail.kind !== "base" && <><button disabled={busy} onClick={() => void rename()}>重命名</button><button disabled={busy} onClick={() => void duplicate()}>复制模型</button><button className="danger" disabled={busy} onClick={() => void remove()}>删除</button></>}</div></div>
         <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd><dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
         {detail.model_config && <dl className="model-properties">
-          <dt>上下翻转</dt><dd>{(detail.io?.image_flip_vertical ?? ["rotate_180", "flip_vertical"].includes(detail.io?.image_orientation ?? "")) ? "On" : "Off"}</dd>
-          <dt>左右镜像</dt><dd>{(detail.io?.image_flip_horizontal ?? ["rotate_180", "flip_horizontal"].includes(detail.io?.image_orientation ?? "")) ? "On" : "Off"}</dd>
+          <dt>上下翻转</dt><dd>{detail.observation?.image_flip_vertical ? "On" : "Off"}</dd>
+          <dt>左右镜像</dt><dd>{detail.observation?.image_flip_horizontal ? "On" : "Off"}</dd>
           <dt>Backbone</dt><dd>{{ frozen: "冻结", lora: "LoRA", full: "全量微调" }[detail.model_config.backbone]}</dd>
-          {detail.model_config.family === "pi05" ? <><dt>动作专家</dt><dd>{detail.kind === "base" ? "基础权重" : "Flow-matching 微调"}</dd></> : <>
-            <dt>Action head</dt><dd>{detail.model_config.action_head === "train" ? "训练" : "冻结"}</dd>
-            <dt>Proprio projector</dt><dd>{detail.model_config.proprio_projector === "train" ? "训练" : "冻结"}</dd>
-          </>}
+          {(detail.model_components ?? []).map((component) => <Fragment key={component.label}>
+            <dt>{component.label}</dt><dd>{component.parameter
+              ? ({ train: "训练", frozen: "冻结" }[String(detail.model_config?.[component.parameter])] ?? String(detail.model_config?.[component.parameter] ?? "—"))
+              : detail.kind === "base" ? "基础权重" : component.description}</dd>
+          </Fragment>)}
           {detail.model_config.backbone === "lora" && detail.model_config.lora && <>
             <dt>LoRA 参数</dt><dd>rank {detail.model_config.lora.rank} · alpha {detail.model_config.lora.alpha} · dropout {detail.model_config.lora.dropout}</dd>
           </>}

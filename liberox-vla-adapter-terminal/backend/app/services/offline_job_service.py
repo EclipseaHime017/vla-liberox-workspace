@@ -979,13 +979,13 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "reward_accumulate_primitive_steps", "reward_source", "reward_stage_exponent",
             "reward_version_id", "reward_alpha", "reward_fusion_mode",
         }
-        allowed.update(models.MODEL_PARAMETER_PATHS)
+        allowed.update(models.parameter_paths())
         unknown = sorted(set(parameters) - allowed)
         if unknown:
             raise ValueError(f"Unknown training parameters: {unknown}")
         # Validate individual fields here; actual defaults and all-frozen checks
         # are resolved together in _launch_training, before creating job files.
-        models.apply_model_parameters({}, {"model_backbone": "full", **parameters})
+        models.apply_model_parameters({}, parameters, partial=True)
         if parameters.get("algorithm", "iql") not in ("iql", "bc"):
             raise ValueError("algorithm must be iql or bc")
         if parameters.get("algorithm") == "bc" and any(

@@ -29,7 +29,7 @@ from .io import atomic_json, stable_hash
 from .algorithms import TrainingAlgorithm, build_algorithm
 from .methods import actor_lr_warmup, training_method
 from .models import model_backend, model_config, model_signature
-from .base_models import model_contract
+from .base_models import model_contract, family_adapter
 from .image_transforms import canonical_contract
 from .model_artifacts import legacy_contract, parent_identity
 from .monitoring import (
@@ -276,8 +276,9 @@ def _publish_overlay(
 ) -> Path:
     method = training_method(config.raw).name
     prefix = "rynn-iql" if method == "iql" else method
-    if model_config(config.raw)["family"] != "vla_adapter":
-        prefix = f"{model_config(config.raw)['family']}-{prefix}"
+    model_prefix = family_adapter(model_config(config.raw)["family"]).EXPORT_PREFIX
+    if model_prefix:
+        prefix = f"{model_prefix}-{prefix}"
     policy_id = f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     target = registry / policy_id
     target.mkdir(parents=True, exist_ok=False)

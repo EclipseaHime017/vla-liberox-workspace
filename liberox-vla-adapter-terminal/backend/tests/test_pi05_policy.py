@@ -88,6 +88,11 @@ def test_pi_overlay_roundtrip_and_base_protection(tmp_path, base_id, legacy, sch
     with pytest.raises(ValueError, match=r"\[1, 10\]"):
         entry.resolve_open_loop_steps(11)
     assert (directory / "policy.yaml").read_text() == yaml.safe_dump(payload)
+    invalid = {**payload, "schema_version": 999}
+    (directory / "policy.yaml").write_text(yaml.safe_dump(invalid))
+    with pytest.raises(ValueError, match="manifest"):
+        catalog._load(directory / "policy.yaml")
+    (directory / "policy.yaml").write_text(yaml.safe_dump(payload))
     if legacy and schema == 4:
         old_hash = _stable_hash({"family": "pi05", "base_checkpoint": settings["base_checkpoint"],
                                 "stats_key": settings["stats_key"], "model_config": payload["model_config"],
@@ -146,7 +151,7 @@ def test_pi_camera_arrays_follow_selected_model_contract(monkeypatch, orientatio
     from backend.app.policies.registry import model_module
     settings = configured_models()["pi05-libero-base"]
     settings["contract"] = model_module("base_models").model_contract(settings)
-    settings["contract"]["io"].update(image_flip_vertical=strides[0] == -1, image_flip_horizontal=strides[1] == -1)
+    settings["contract"]["observation"].update(image_flip_vertical=strides[0] == -1, image_flip_horizontal=strides[1] == -1)
     provider = Pi05PolicyProvider(None, None, None)
     provider.process = SimpleNamespace(poll=lambda: None)
     provider.current_policy_entry = SimpleNamespace(settings=settings)

@@ -1,4 +1,4 @@
-"""Safe local management of VLA policy overlays."""
+"""Safe local management of registered policy overlays."""
 
 from __future__ import annotations
 
@@ -50,13 +50,7 @@ class PolicyManagementService:
                 "size_bytes": path.stat().st_size,
                 "sha256": manifest["component_sha256"][name],
             }
-            for name, path in (
-                ("action_head", entry.action_head),
-                ("proprio_projector", entry.proprio_projector),
-                ("backbone", entry.backbone),
-                ("actor", entry.actor),
-                ("base_identity", entry.base_identity),
-            )
+            for name, path in entry.component_paths.items()
             if path is not None
         ]
         records: list[dict[str, Any]] = []
@@ -154,10 +148,13 @@ class PolicyManagementService:
             suffix += 1
         temporary = Path(tempfile.mkdtemp(prefix=".policy-copy-", dir=root))
         try:
-            for component in (entry.action_head, entry.proprio_projector, entry.backbone, entry.actor, entry.base_identity):
+            for component in entry.component_paths.values():
                 if component is None:
                     continue
-                shutil.copy2(component, temporary / component.name)
+                relative = component.resolve().relative_to(source.resolve())
+                destination = temporary / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(component, destination)
             assert entry.manifest is not None
             payload = self._load_manifest(entry.manifest)
             payload["policy_id"] = target_id

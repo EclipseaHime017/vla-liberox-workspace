@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from vla_rynn_iql.image_transforms import orient_image, policy_view, vla_adapter_observation
+from vla_rynn_iql.image_transforms import orient_image, policy_view, vla_adapter_observation, canonical_contract
 from vla_rynn_iql.rewards import reward_view
 
 
@@ -32,9 +32,9 @@ def test_legacy_storage_and_official_vla_flip_produce_the_same_model_pixels(targ
     compensated = vla_adapter_observation(obs, target)
     for key in ("agentview_image", "robot0_eye_in_hand_image"):
         np.testing.assert_array_equal(compensated[key][::-1, ::-1], obs[key][::strides[0], ::strides[1]])
+        assert not np.shares_memory(compensated[key], obs[key])
     assert compensated["state"] is obs["state"]
-    if target == "rotate_180":
-        assert compensated is obs  # Default official preprocessing is untouched.
+    assert compensated is not obs
     np.testing.assert_array_equal(reward_view(raw, "libero_raw"), raw[::-1])
 
 
@@ -49,3 +49,9 @@ def test_invalid_storage_and_images_are_rejected():
         policy_view(np.zeros((3, 5, 3), np.uint8), "unknown")
     with pytest.raises(ValueError, match="HxWx3"):
         orient_image(np.zeros((3, 5), np.uint8), "none")
+
+
+def test_observation_and_legacy_io_settings_cannot_be_combined():
+    with pytest.raises(ValueError, match="cannot also appear in io"):
+        canonical_contract({"io": {"image_orientation": "rotate_180"}, "architecture": {},
+                            "observation": {"image_flip_vertical": True, "image_flip_horizontal": True}})

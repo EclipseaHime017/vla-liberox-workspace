@@ -13,6 +13,7 @@ ORIENTATIONS = {
 }
 STORED_ORIENTATIONS = {"libero_raw": "none", "vla_policy": "rotate_180"}
 CAMERA_KEYS = ("agentview_image", "robot0_eye_in_hand_image")
+FLIP_KEYS = {"image_flip_vertical", "image_flip_horizontal"}
 
 
 def validate_orientation(value: str) -> str:
@@ -21,24 +22,41 @@ def validate_orientation(value: str) -> str:
     return value
 
 
-def image_orientation(io: dict) -> str:
+def image_orientation(observation: dict) -> str:
     """Resolve independent YAML flips; retain frozen contracts from older exports."""
     keys = ("image_flip_vertical", "image_flip_horizontal")
-    if "image_orientation" in io:
-        if any(key in io for key in keys):
+    if "image_orientation" in observation:
+        if any(key in observation for key in keys):
             raise ValueError("Do not combine image_orientation with image_flip_* settings")
-        return validate_orientation(io["image_orientation"])
-    if any(type(io.get(key)) is not bool for key in keys):
+        return validate_orientation(observation["image_orientation"])
+    if any(type(observation.get(key)) is not bool for key in keys):
         raise ValueError("image_flip_vertical and image_flip_horizontal must be booleans")
-    flips = tuple(io[key] for key in keys)
+    flips = tuple(observation[key] for key in keys)
     return next(name for name, value in ORIENTATIONS.items() if value == flips)
+
+
+def validate_observation(value: dict) -> dict:
+    if not isinstance(value, dict) or set(value) != FLIP_KEYS:
+        raise ValueError("Variant observation requires image_flip_vertical and image_flip_horizontal")
+    image_orientation(value)
+    return dict(value)
+
+
+def observation_config(contract: dict) -> dict:
+    """Read current observation settings or an unchanged legacy frozen contract."""
+    if "observation" in contract:
+        if (FLIP_KEYS | {"image_orientation"}) & contract["io"].keys():
+            raise ValueError("Observation settings cannot also appear in io")
+        return validate_observation(contract["observation"])
+    vertical, horizontal = ORIENTATIONS[image_orientation(contract["io"])]
+    return {"image_flip_vertical": vertical, "image_flip_horizontal": horizontal}
 
 
 def canonical_contract(contract: dict) -> dict:
     value = copy.deepcopy(contract)
-    vertical, horizontal = ORIENTATIONS[image_orientation(value["io"])]
-    value["io"].pop("image_orientation", None)
-    value["io"].update(image_flip_vertical=vertical, image_flip_horizontal=horizontal)
+    value["observation"] = observation_config(value)
+    for key in FLIP_KEYS | {"image_orientation"}:
+        value["io"].pop(key, None)
     return value
 
 
@@ -62,9 +80,7 @@ def policy_view(frame: np.ndarray, orientation: str, target: str = "rotate_180")
 
 
 def vla_adapter_observation(observation: dict, target: str) -> dict:
-    """Compensate for the official VLA-Adapter prepare function's fixed 180° flip."""
+    """Compensate upstream's 180° flip using privately owned camera buffers."""
     validate_orientation(target)
-    if target == "rotate_180":
-        return observation
     return {**observation, **{key: orient_image(observation[key], target, source="rotate_180")
-                              for key in CAMERA_KEYS}}
+                              for key in CAMERA_KEYS if key in observation}}

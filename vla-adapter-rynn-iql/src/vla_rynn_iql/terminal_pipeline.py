@@ -21,7 +21,7 @@ from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_ste
 from .evaluation_store import valid_bound_evaluation
 from .io import atomic_json, sha256_file, stable_hash
 from .methods import COMMON_TRAINING_KEYS
-from .models import DEFAULT_MODEL
+from .models import MODEL_CONFIG_KEYS
 from .rewards import (
     ANNOTATION_SCHEMA_VERSION,
     REWARD_SCHEMA_VERSION,
@@ -100,7 +100,7 @@ def _validate_overrides(overrides: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(values, dict):
             raise TypeError(f"overrides.{section} must be a mapping")
         allowed = (COMMON_TRAINING_KEYS | {"method", "actor_lr_warmup_steps"}
-                   if section == "training" else set(DEFAULT_MODEL) if section == "model"
+                   if section == "training" else MODEL_CONFIG_KEYS if section == "model"
                    else {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"} if section == "vla"
                    else set(TRAIN_SCHEMA[section]) | (COMMON_TRAINING_KEYS if section == "iql" else set()))
         unknown = sorted(set(values) - allowed)

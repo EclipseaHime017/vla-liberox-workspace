@@ -7,7 +7,33 @@ from pathlib import Path
 
 from ..services.inherited_reward_inputs import offline_module
 from .catalog import PolicyEntry, _stable_hash
-from .registry import PROJECT
+from .registry import PROJECT, model_module
+
+PROVIDER = "backend.app.policies.pi05:Pi05PolicyProvider"
+ARTIFACTS = ("actor", "base_identity")
+SNAPSHOT_FIELDS = ARTIFACTS
+FORBIDDEN_FIELDS = ("action_head", "proprio_projector", "backbone")
+
+
+def base_settings(base_id, settings):
+    return settings
+
+
+def identity_settings(entry):
+    settings = dict(entry.model_config) if entry.model_config is not None else None
+    # Preserve the identity of recordings made before the explicit base selector.
+    if settings is not None and settings.get("base_id") == "pi05-libero-base":
+        settings.pop("base_id")
+    return settings
+
+
+def resolve_revision(catalog, entry):
+    identity = assets().checkpoint_identity(Path(entry.base_checkpoint), catalog._component_sha256,
+        base_id=entry.settings["base_id"], parent=entry.parent,
+        contract=offline_module(PROJECT, "base_models").model_contract(entry.settings))
+    if entry.base_identity is not None and json.loads(entry.base_identity.read_text()) != identity:
+        raise ValueError("π₀.₅ overlay requires different base weights or normalization assets")
+    return assets().identity_digest(identity)
 
 
 def assets():
@@ -17,10 +43,12 @@ def assets():
 def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEntry:
     required = (catalog.REQUIRED - {"action_head", "proprio_projector"}) | {
         "family", "algorithm", "model_config", "actor", "base_identity"}
-    if set(raw) != required or raw["family"] != "pi05" or raw["algorithm"] not in {"bc", "iql"}:
+    if (set(raw) != required or raw["schema_version"] != 4
+            or model_module("base_models").family_adapter(raw["family"]).POLICY_ADAPTER != __name__
+            or raw["algorithm"] not in {"bc", "iql"}):
         raise ValueError("Invalid π₀.₅ policy manifest")
     settings = offline_module(PROJECT, "models").model_config({"model": raw["model_config"]})
-    if settings["family"] != "pi05" or settings["base_checkpoint"] != raw["base_checkpoint"]:
+    if settings["family"] != raw["family"] or settings["base_checkpoint"] != raw["base_checkpoint"]:
         raise ValueError("π₀.₅ model identity conflicts with its manifest")
     if raw["stats_key"] != settings["stats_key"]:
         raise ValueError("π₀.₅ normalization identity conflicts with its manifest")
@@ -61,5 +89,5 @@ def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEn
         stats_key=raw["stats_key"], manifest=manifest.resolve(), action_head=None,
         proprio_projector=None, training_step=raw["training_step"],
         compatibility_sha256=raw["compatibility_sha256"], algorithm=raw["algorithm"],
-        model_config=settings, component_sha256=raw["component_sha256"], family="pi05",
+        model_config=settings, component_sha256=raw["component_sha256"], family=settings["family"],
         base_revision=assets().identity_digest(identity), parent=parent, **paths)

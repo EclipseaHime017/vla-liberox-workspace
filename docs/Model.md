@@ -4,7 +4,7 @@
 
 ```text
 模型家族（model_name）：结构、接口、输入输出契约、可训练范围
-  └─ 权重变体（variant）：来源、权重版本、归一化、部署路径、默认执行步数
+  └─ 权重变体（variant）：来源、权重版本、归一化、部署路径、观测处理、默认执行步数
        └─ 后训练模型：父模型配置快照 + 更新后的权重
 ```
 
@@ -37,7 +37,7 @@ vla-liberox-workspace/
 
 模型负责声明：
 
-- **输入**：相机列表、图像尺寸与方向、本体状态表示及维度。
+- **输入**：家族 `io` 声明相机、图像尺寸、本体状态表示及维度；每个 variant 的 `observation` 独立配置图像翻转。
 - **输出**：原生动作长度与维度、控制频率和动作编码；训练取样长度与推理执行步数分别管理。
 - **结构与训练能力**：结构参数、可训练组件、训练范围和适配器。
 - **资产与运行**：权重来源、版本、归一化文件、部署位置和运行环境。
@@ -91,7 +91,7 @@ variants:
     revision: null
     checkpoint: ../../../models/my-policy
     stats_key: my_dataset
-    io:
+    observation:
       image_flip_vertical: true
       image_flip_horizontal: true
     inference:
@@ -108,15 +108,15 @@ variants:
 | `revision` | 原始仓库的完整 40 位 commit；已知时填写，未知时为 `null` |
 | `checkpoint` | 该家族加载器读取的本地部署目录；支持在线加载的家族也可填写仓库 ID |
 | `stats_key` | 权重配套归一化数据中的实际标识，按模型发布说明或统计文件填写 |
-| `io.image_flip_vertical` | 相对于原始仿真图像是否上下翻转，`true`／`false`；可按 variant 覆盖家族默认值 |
-| `io.image_flip_horizontal` | 相对于原始仿真图像是否左右镜像，`true`／`false`；两项均为 `true` 等价于旋转 180° |
+| `observation.image_flip_vertical` | 当前 variant 相对于原始仿真图像是否上下翻转，必填 `true`／`false` |
+| `observation.image_flip_horizontal` | 当前 variant 相对于原始仿真图像是否左右镜像，必填 `true`／`false`；两项均为 `true` 等价于旋转 180° |
 | `inference.open_loop_steps` | 每个 variant 必填的默认执行步数，家族层不配置；子模型沿用父 variant 默认值，仿真和测试页面可调整，上限为该模型的预测长度，与训练 chunk 长度分开 |
 
 `../../../models/my-policy` 从家族 YAML 所在的 `configs/models/` 解析，指向工作区根目录下的 `models/my-policy/`。本地权重加载时另行计算文件内容身份，和来源仓库的 commit 分别记录。
 
-变体继承家族的输入输出、架构、运行环境和默认训练范围，可通过 `io`、`architecture` 声明支持的差异；`inference` 由各变体独立配置。调整结构或动作表示需要相应的适配器实现，单独下载权重文件并不包含平台所需的完整加载逻辑。
+变体继承家族的输入输出、架构、运行环境和默认训练范围，可通过 `io`、`architecture` 声明支持的结构差异；`observation` 与 `inference` 均由各变体独立配置，不在家族 `io` 中维护。调整结构或动作表示需要相应的适配器实现，单独下载权重文件并不包含平台所需的完整加载逻辑。
 
-两路相机在训练和推理时使用同一翻转配置，后训练模型保存并继承该配置；录像和评价器图像不随此设置改变。
+两路相机在训练和推理时使用所选 variant 自己的翻转配置，后训练模型保存并继承该配置；其他 variant、录像和评价器图像不受影响。修改后重启平台并创建新任务，已有任务沿用保存的配置。
 
 保存后重启平台，模型选择列表显示 `label`。使用训练 YAML 时，选择同一个变体：
 
@@ -128,9 +128,9 @@ model:
 
 ## 4. 添加新家族
 
-1. 在 `vla-adapter-rynn-iql/src/vla_rynn_iql/` 实现家族适配器，提供配置校验、组件加载、输入转换、动作解码、训练目标、可训练范围及保存恢复接口。
-2. 在模型模块注册适配器与资产校验、导出解析，并在 `liberox-vla-adapter-terminal/backend/app/policies/` 接入推理 Provider。
-3. 新建 `<model_name>.yaml`，填写 `schema_version: 1`、`model_name`、`label`、`adapter`、`default_variant`、`backbone_modes`、`defaults`、`io`、`architecture` 和 `variants`；每个变体填写自己的 `inference.open_loop_steps`，默认变体必须属于该家族。
+1. 在 `vla-adapter-rynn-iql/src/vla_rynn_iql/model_families/` 实现轻量家族适配器，声明契约校验、默认参数、训练面板字段、资产身份及导出格式；在该目录的 `ADAPTERS` 中登记适配器模块。家族名称与适配器 ID 分开，同一适配器可以服务多个家族配置。
+2. 由适配器的 `BACKEND` 指定组件加载、输入转换、训练损失与保存恢复实现；`POLICY_ADAPTER` 指定推理 Provider、导出文件解析及任务快照所需资产。发现配置时不加载权重，实际训练或推理时再加载实现。
+3. 新建 `<model_name>.yaml`，填写 `schema_version: 1`、`model_name`、`label`、`adapter`、`default_variant`、`backbone_modes`、`defaults`、`io`、`architecture` 和 `variants`；每个变体填写自己的 `observation` 和 `inference.open_loop_steps`，默认变体必须属于该家族。
 4. 将家族文件加入 `registry.yaml`，重启服务并执行单模型训练／仿真测试。
 
 目录格式：
@@ -142,7 +142,7 @@ models:
   family_b: family_b.yaml
 ```
 
-目录键与对应文件的 `model_name` 一致。已有家族增加权重只修改家族文件；新增家族才增加目录项和适配器实现。
+目录键与对应文件的 `model_name` 一致。已有家族增加或重命名权重只修改家族文件，不增加型号专用判断或测试；新增架构才实现并登记适配器。模型列表、训练面板、任务快照与推理入口均读取适配器声明，不各自维护家族名单。
 
 注册与契约代码位于 `vla-adapter-rynn-iql/src/vla_rynn_iql/{base_models,models,model_assets,model_artifacts}.py`。业务页面和任务调度读取统一接口，家族适配器负责调用模型实现。家族 YAML 的 `defaults.environment` 指定运行环境；上游模型包统一位于 `third_party/`，提供网络结构和运算实现；权重目录保存参数及配套资产。安装与已有目录迁移见 [第三方依赖](DEPENDENCIES.md)。
 

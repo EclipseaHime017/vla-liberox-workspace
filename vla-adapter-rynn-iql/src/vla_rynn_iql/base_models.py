@@ -9,45 +9,39 @@ from pathlib import Path
 import yaml
 
 from .config_sources import UniqueKeyLoader
-from .image_transforms import image_orientation, ORIENTATIONS
+from .image_transforms import FLIP_KEYS, observation_config, validate_observation
+from .model_families import ADAPTERS, get_adapter
 
 REGISTRY_PATH = Path(__file__).resolve().parents[2] / "configs/models/registry.yaml"
-ADAPTERS = {"vla_adapter": "vla_rynn_iql.vla_adapter", "pi05": "vla_rynn_iql.pi05"}
-IO_KEYS = {"cameras", "image_size", "image_flip_vertical", "image_flip_horizontal", "proprio", "proprio_dim",
+DEFAULT_FAMILY = "vla_adapter"
+IO_KEYS = {"cameras", "image_size", "proprio", "proprio_dim",
            "native_action_horizon", "padded_action_dim", "action_dim", "replay_horizon",
            "control_hz", "action_codec"}
 
 
-def validate_contract(contract: dict, family: str) -> dict:
-    if not isinstance(contract, dict) or set(contract) != {"io", "architecture"}:
+def validate_contract(contract: dict, family: str, *, adapter: str | None = None,
+                      require_observation: bool = True) -> dict:
+    if not isinstance(contract, dict) or set(contract) not in ({"io", "architecture"}, {"io", "architecture", "observation"}):
         raise ValueError("Model contract requires io and architecture")
     io, architecture = contract["io"], contract["architecture"]
-    legacy_keys = IO_KEYS - {"image_flip_vertical", "image_flip_horizontal"} | {"image_orientation"}
-    if not isinstance(io, dict) or set(io) not in (IO_KEYS, legacy_keys) or not isinstance(architecture, dict):
+    if (not isinstance(io, dict) or set(io) not in (IO_KEYS, IO_KEYS | FLIP_KEYS, IO_KEYS | {"image_orientation"})
+            or not isinstance(architecture, dict)):
         raise ValueError("Invalid model I/O contract keys")
     # Validate the supported Panda bridge; YAML cannot change the robot controller.
-    fixed = {"cameras": ["agentview", "robot0_eye_in_hand"], "image_size": 224,
+    fixed = {"cameras": ["agentview", "robot0_eye_in_hand"],
              "proprio": "eef_position_axis_angle_gripper",
              "proprio_dim": 8, "action_dim": 7, "replay_horizon": 8, "control_hz": 20}
     if any(io.get(key) != value for key, value in fixed.items()):
         raise ValueError("Model I/O is unsupported by the current Panda adapter")
-    image_orientation(io)
+    if require_observation or "observation" in contract or set(io) != IO_KEYS:
+        observation_config(contract)
     for key in ("image_size", "proprio_dim", "native_action_horizon", "padded_action_dim",
                 "action_dim", "replay_horizon", "control_hz"):
         if type(io[key]) is not int or io[key] < 1:
             raise ValueError(f"Invalid model I/O integer: {key}")
-    if family == "vla_adapter":
-        valid = (io["native_action_horizon"] == 8 and io["padded_action_dim"] == 7
-                 and io["action_codec"] == "vla_adapter_pro" and architecture == {})
-    elif family == "pi05":
-        valid = (io["native_action_horizon"] >= io["replay_horizon"] and io["padded_action_dim"] == 32
-                 and io["action_codec"] == "libero_env_v1"
-                 and set(architecture) == {"config_name", "discrete_state_input"}
-                 and architecture["config_name"] == "pi05_libero"
-                 and type(architecture["discrete_state_input"]) is bool)
-    else:
-        valid = False
-    if not valid:
+    definition = globals().get("MODEL_FAMILIES", {}).get(family)
+    implementation = get_adapter(adapter or (definition.adapter if definition else family))
+    if not implementation.validate_contract(io, architecture):
         raise ValueError(f"Unsupported model contract for {family}")
     return copy.deepcopy(contract)
 
@@ -65,7 +59,11 @@ class ModelDefinition:
 
     @property
     def backend(self):
-        return ADAPTERS[self.adapter]
+        return self.implementation.BACKEND
+
+    @property
+    def implementation(self):
+        return get_adapter(self.adapter)
 
 
 @dataclass(frozen=True)
@@ -104,20 +102,22 @@ def load_registry(path: Path = REGISTRY_PATH):
         required = {"schema_version", "model_name", "label", "adapter", "default_variant",
                     "backbone_modes", "defaults", "io", "architecture", "variants"}
         if (not isinstance(entry, dict) or set(entry) != required or entry["schema_version"] != 1
-                or entry["model_name"] != identifier or entry["adapter"] not in ADAPTERS
-                or identifier != entry["adapter"]):
+                or entry["model_name"] != identifier or entry["adapter"] not in ADAPTERS):
             raise ValueError(f"Unsupported model family registration: {identifier}")
+        implementation = get_adapter(entry["adapter"])
         modes = entry["backbone_modes"]
-        supported = {"frozen", "full", "lora"} if identifier == "vla_adapter" else {"frozen", "full"}
+        supported = set(implementation.TRAINING_MODES)
         if not isinstance(modes, list) or not modes or len(set(modes)) != len(modes) or set(modes) - supported:
             raise ValueError(f"Invalid training scopes: {identifier}")
-        default_keys = ({"environment", "backbone", "action_head", "proprio_projector", "lora", "use_pro_version", "base_revision"}
-                        if identifier == "vla_adapter" else {"environment", "backbone", "base_revision", "num_inference_steps"})
+        default_keys = implementation.DEFAULT_KEYS
         if not isinstance(entry["defaults"], dict) or set(entry["defaults"]) != default_keys:
             raise ValueError("Invalid model defaults keys")
         if not isinstance(entry["label"], str) or not entry["label"].strip():
             raise ValueError("Model family label must be non-empty")
-        contract = validate_contract({key: entry[key] for key in ("io", "architecture")}, identifier)
+        if not isinstance(entry["io"], dict) or set(entry["io"]) != IO_KEYS:
+            raise ValueError("Family io only defines interfaces; put image flips in variant observation")
+        contract = validate_contract({key: entry[key] for key in ("io", "architecture")}, identifier,
+                                     adapter=entry["adapter"], require_observation=False)
         families[identifier] = ModelDefinition(identifier, entry["label"], entry["adapter"], entry["default_variant"],
                                                 tuple(modes), entry["defaults"], contract, family_path)
         if not isinstance(entry["variants"], dict) or not entry["variants"]:
@@ -133,13 +133,13 @@ def load_registry(path: Path = REGISTRY_PATH):
 
 
 def _parse_base(identifier: str, entry: dict, family: ModelDefinition, path: Path) -> BaseModel:
-    required = {"label", "source", "revision", "checkpoint", "stats_key", "inference"}
+    required = {"label", "source", "revision", "checkpoint", "stats_key", "inference", "observation"}
     if not isinstance(entry, dict) or not required <= entry.keys() or entry.keys() - required - {"io", "architecture"}:
         raise ValueError(f"Invalid base registration: {identifier}")
     if (not isinstance(identifier, str) or identifier in {".", ".."}
             or re.fullmatch(r"[A-Za-z0-9_.-]+", identifier) is None):
         raise ValueError("Invalid base ID")
-    if any(not isinstance(entry[key], str) or not entry[key].strip() for key in required - {"revision", "inference"}):
+    if any(not isinstance(entry[key], str) or not entry[key].strip() for key in required - {"revision", "inference", "observation"}):
         raise ValueError("Base registration fields must be non-empty strings")
     revision = entry["revision"]
     if revision is not None and re.fullmatch(r"[0-9a-f]{40}", str(revision)) is None:
@@ -152,19 +152,13 @@ def _parse_base(identifier: str, entry: dict, family: ModelDefinition, path: Pat
         if section in entry:
             if not isinstance(entry[section], dict):
                 raise ValueError(f"Base {section} must be a mapping")
-            if section == "io":
-                override = entry[section]
-                if "image_orientation" in override and not {"image_flip_vertical", "image_flip_horizontal"} & override.keys():
-                    contract[section].pop("image_flip_vertical", None)
-                    contract[section].pop("image_flip_horizontal", None)
-                elif {"image_flip_vertical", "image_flip_horizontal"} & override.keys() and "image_orientation" in contract[section]:
-                    vertical, horizontal = ORIENTATIONS[image_orientation(contract[section])]
-                    contract[section].pop("image_orientation")
-                    contract[section].update(image_flip_vertical=vertical, image_flip_horizontal=horizontal)
+            if section == "io" and entry[section].keys() - IO_KEYS:
+                raise ValueError("Variant io cannot contain observation settings")
             contract[section].update(entry[section])
-    contract = validate_contract(contract, family.id)
+    contract["observation"] = validate_observation(entry["observation"])
+    contract = validate_contract(contract, family.id, adapter=family.adapter)
     inference = validate_inference(entry["inference"], contract)
-    return BaseModel(identifier, family=family.id, **{key: entry[key] for key in required - {"checkpoint", "inference"}},
+    return BaseModel(identifier, family=family.id, **{key: entry[key] for key in required - {"checkpoint", "inference", "observation"}},
                      checkpoint=checkpoint, contract=contract, inference=inference)
 
 
@@ -191,7 +185,7 @@ def base_model(base_id: str) -> BaseModel:
 
 
 def model_contract(settings: dict) -> dict:
-    family = settings.get("family", "vla_adapter")
+    family = settings.get("family", DEFAULT_FAMILY)
     if family not in MODEL_FAMILIES:
         raise ValueError(f"Unknown model family: {family}")
     base = base_model(settings.get("base_id", MODEL_FAMILIES[family].default_base))
@@ -206,16 +200,26 @@ def registered_defaults(family: str, base_id: str | None = None) -> dict:
     if base.family != family:
         raise ValueError("Model family conflicts with base model")
     # A local deployment is pinned by content hash, not its source repository commit.
-    revision = base.revision if family == "vla_adapter" and not Path(base.checkpoint).is_absolute() else None
+    revision = base.revision if definition.implementation.PIN_SOURCE_REVISION and not Path(base.checkpoint).is_absolute() else None
     return {**copy.deepcopy(definition.defaults), "family": family, "base_id": base.id,
             "base_checkpoint": base.checkpoint, "stats_key": base.stats_key,
             "base_revision": revision}
 
 
+def model_observation(settings: dict) -> dict:
+    return observation_config(model_contract(settings))
+
+
+def family_adapter(family: str):
+    if not isinstance(family, str) or family not in MODEL_FAMILIES:
+        raise ValueError(f"Unknown model family: {family!r}")
+    return MODEL_FAMILIES[family].implementation
+
+
 def execution_config(settings: dict) -> dict:
     """Variant execution defaults do not change weights or training configuration."""
     io = model_contract(settings)["io"]
-    family = MODEL_FAMILIES[settings.get("family", "vla_adapter")]
+    family = MODEL_FAMILIES[settings.get("family", DEFAULT_FAMILY)]
     base = base_model(settings.get("base_id", family.default_base))
     maximum = io["native_action_horizon"]
     # Replay length defines training supervision, not the model's output shape.

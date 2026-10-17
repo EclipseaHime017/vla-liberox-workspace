@@ -27,13 +27,14 @@ export type TaskInfo = {
 };
 
 export type PolicyInfo = {
-  io?: { native_action_horizon: number; replay_horizon: number;
-    image_flip_vertical?: boolean; image_flip_horizontal?: boolean;
-    image_orientation?: "none" | "flip_vertical" | "flip_horizontal" | "rotate_180" };
+  model_components?: Array<{ label: string; parameter?: string; description?: string }>;
+  io?: { native_action_horizon: number; replay_horizon: number };
+  observation?: { image_flip_vertical: boolean; image_flip_horizontal: boolean };
   inference?: { open_loop_steps: number; max_open_loop_steps: number };
   algorithm?: "iql" | "bc" | null;
   model_config?: {
-    family: string; backbone: "frozen" | "lora" | "full";
+    [key: string]: unknown;
+    family: string; backbone: string;
     action_head?: "train" | "frozen"; proprio_projector?: "train" | "frozen";
     lora?: { rank: number; alpha: number; dropout: number };
   } | null;
@@ -465,6 +466,12 @@ export type EvaluationFilters = {
 export type TrainingDefaults = {
   algorithm?: "iql" | "bc";
   models?: Array<{ id: string; label: string; backbone_modes: string[];
+    training_ui?: {
+      fields: Array<{ name: string; label: string; type: "select" | "number";
+        options?: Array<{ value: string; label: string }>; default?: string | number | boolean | null;
+        min?: number; max?: number; step?: number; visible_when?: Record<string, string> }>;
+      trainable_any?: string[]; hints?: Record<string, string>;
+    };
     bases?: Array<{ id: string; label: string; source: string }> }>;
   model?: Record<string, number | string | boolean | null>;
   reward_availability?: {
