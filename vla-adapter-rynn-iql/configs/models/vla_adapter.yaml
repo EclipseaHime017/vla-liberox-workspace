@@ -44,6 +44,6 @@ variants:
     stats_key: liberox_no_noops
     observation:
       image_flip_vertical: true
-      image_flip_horizontal: true
+      image_flip_horizontal: false
     inference:
       open_loop_steps: 8

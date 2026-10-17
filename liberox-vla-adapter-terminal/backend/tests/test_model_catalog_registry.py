@@ -130,29 +130,36 @@ def test_catalog_owns_its_configuration_and_contract_copies(tmp_path):
 def test_orientation_changes_behavior_identity_but_not_weights_or_frozen_snapshot(tmp_path, monkeypatch, identifier, legacy_snapshot):
     from backend.app.policies.snapshots import snapshot, catalog_from_snapshot
     registry = model_module("base_models")
+    if legacy_snapshot:
+        # Snapshots predating explicit contracts always used the historical 180° input.
+        base = registry.BASE_MODELS[identifier]
+        contract = copy.deepcopy(base.contract)
+        contract["observation"].update(image_flip_vertical=True, image_flip_horizontal=True)
+        monkeypatch.setitem(registry.BASE_MODELS, identifier, replace(base, contract=contract))
     settings = model_module("models").base_model_config(identifier)
     catalog = PolicyCatalog(tmp_path, base_models={identifier: settings}, base_revisions={identifier: "a" * 64})
     original = catalog.entry(identifier)
     before = original.content_sha256
+    before_observation = original.public()["observation"]
     frozen = snapshot(original)
     if legacy_snapshot:
         frozen.pop("model_contract")
     base = registry.BASE_MODELS[identifier]
     contract = copy.deepcopy(base.contract)
-    contract["observation"].update(image_flip_vertical=True, image_flip_horizontal=False)
+    contract["observation"]["image_flip_horizontal"] = not before_observation["image_flip_horizontal"]
     monkeypatch.setitem(registry.BASE_MODELS, identifier, replace(base, contract=contract))
     catalog.refresh()
     changed = catalog.entry(identifier)
     assert changed.content_sha256 != before
     assert changed.base_revision == original.base_revision
-    assert changed.public()["observation"]["image_flip_horizontal"] is False
+    assert changed.public()["observation"]["image_flip_horizontal"] != before_observation["image_flip_horizontal"]
     # Reconstruction is tested without loading any model files.
     monkeypatch.setattr(PolicyCatalog, "select", PolicyCatalog.entry)
     restored = catalog_from_snapshot(frozen, tmp_path / "empty")
     assert restored.entry(identifier).content_sha256 == before
-    assert restored.entry(identifier).public()["observation"]["image_flip_horizontal"] is True
+    assert restored.entry(identifier).public()["observation"] == before_observation
     frozen["model_contract"] = copy.deepcopy(contract)
-    frozen["model_contract"]["observation"].update(image_flip_vertical=False, image_flip_horizontal=False)
+    frozen["model_contract"]["observation"]["image_flip_vertical"] = not before_observation["image_flip_vertical"]
     with pytest.raises(ValueError, match="changed"):
         catalog_from_snapshot(frozen, tmp_path / "empty")
 
