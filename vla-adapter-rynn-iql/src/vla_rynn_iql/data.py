@@ -214,6 +214,27 @@ def iter_unique_replay_chunks(
             yield episode, chunk_index
 
 
+def npz_array_headers(path: Path) -> dict[str, tuple[tuple[int, ...], np.dtype]]:
+    """Read array shapes and dtypes from npy headers without decompressing their data."""
+    headers: dict[str, tuple[tuple[int, ...], np.dtype]] = {}
+    with zipfile.ZipFile(path) as archive:
+        for member in archive.infolist():
+            if not member.filename.endswith(".npy"):
+                continue
+            with archive.open(member) as stream:
+                version = np.lib.format.read_magic(stream)
+                if version == (1, 0):
+                    shape, _, dtype = np.lib.format.read_array_header_1_0(stream)
+                else:
+                    shape, _, dtype = np.lib.format.read_array_header_2_0(stream)
+            headers[member.filename[:-4]] = (tuple(int(value) for value in shape), np.dtype(dtype))
+    return headers
+
+
+def npz_array_shapes(path: Path) -> dict[str, tuple[int, ...]]:
+    return {name: shape for name, (shape, _) in npz_array_headers(path).items()}
+
+
 def _safe_extract(archive: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
@@ -472,14 +493,15 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
     # already frozen sources. Full source hashes are verified before training;
     # status requests must not repeatedly decompress the two image archives.
     if frozen_observations_sha256 is None:
-        with np.load(observations, allow_pickle=False) as images:
-            for key in ("agentview_image", "wrist_image"):
-                if key not in images or images[key].shape[0] != recorded_action_count + 1:
-                    raise ValueError(f"Invalid {key} alignment: {observations}")
-                if images[key].ndim != 4 or images[key].shape[-1] != 3:
-                    raise ValueError(f"Invalid {key} image dimensions: {observations}")
-                if images[key].dtype != np.uint8:
-                    raise ValueError(f"{key} must contain uint8 RGB images: {observations}")
+        headers = npz_array_headers(observations)
+        for key in ("agentview_image", "wrist_image"):
+            shape, dtype = headers.get(key, ((), None))
+            if not shape or shape[0] != recorded_action_count + 1:
+                raise ValueError(f"Invalid {key} alignment: {observations}")
+            if len(shape) != 4 or shape[-1] != 3:
+                raise ValueError(f"Invalid {key} image dimensions: {observations}")
+            if dtype != np.uint8:
+                raise ValueError(f"{key} must contain uint8 RGB images: {observations}")
     kind = str(run.get("kind", "original"))
     resume = int(run.get("resume_step") or 0) if kind == "branch" else 0
     if not 0 <= resume < action_count:

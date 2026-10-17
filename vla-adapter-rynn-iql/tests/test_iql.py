@@ -104,3 +104,19 @@ def test_policy_advantage_uses_online_q_by_default():
     torch.testing.assert_close(
         model.advantage(_batch(), target=True), torch.full((2,), 20.0)
     )
+
+
+def test_update_advantage_matches_a_fresh_online_critic_pass():
+    import torch
+    from vla_rynn_iql.iql import PixelIQL
+
+    torch.manual_seed(0)
+    agent = PixelIQL(horizon=8, action_dim=7, proprio_dim=8)
+    batch = {"pixels": torch.randint(0, 255, (3, 6, 32, 32), dtype=torch.uint8),
+             "next_pixels": torch.randint(0, 255, (3, 6, 32, 32), dtype=torch.uint8),
+             "proprio": torch.randn(3, 8), "next_proprio": torch.randn(3, 8),
+             "actions": torch.randn(3, 8, 7), "action_mask": torch.ones(3, 8),
+             "reward": torch.randn(3), "chunk_length": torch.full((3,), 8),
+             "bootstrap_mask": torch.ones(3)}
+    agent.update(batch)
+    torch.testing.assert_close(agent.last_advantage, agent.advantage(batch))

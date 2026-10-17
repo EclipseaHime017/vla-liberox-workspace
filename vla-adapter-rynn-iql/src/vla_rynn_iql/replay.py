@@ -14,6 +14,7 @@ from torch.utils.data import Dataset
 from .config import LoadedConfig
 from .base_models import model_contract
 from .data import iter_unique_replay_chunks, load_manifest, replay_chunks, replay_end_step
+from .frame_cache import FrameCache
 from .image_transforms import policy_view, image_orientation
 from .rewards import load_reward_index
 from .vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_from_trajectory
@@ -41,6 +42,18 @@ class ActionDataset(Dataset):
             self.prompt_groups.setdefault(prompt, []).append(index)
         if split == "train" and not self.items:
             raise RuntimeError("Training replay is empty")
+        # Only chunk boundaries are ever read: the start frame for the actor
+        # and the end frame for the critic's next observation.
+        self._frame_indices: dict[str, set[int]] = {}
+        for episode, chunk_index, _ in self.items:
+            chunk = self.chunks[episode["run_id"]][chunk_index]
+            self._frame_indices.setdefault(episode["run_id"], set()).update(
+                (int(chunk["start"]), int(chunk["end"])))
+        # Prepared work directories may be frozen dataset inputs; the decoded
+        # frames belong to the shared, writable cache root instead.
+        cache_root = config.section("paths").get("annotation_cache")
+        self._frames = FrameCache(Path(cache_root) / "replay-frames" if cache_root else None)
+        self._trajectories: dict[str, dict[str, np.ndarray]] = {}
 
     def __len__(self) -> int:
         return len(self.items)
@@ -53,19 +66,28 @@ class ActionDataset(Dataset):
     def __getitem__(self, item: int) -> dict[str, Any]:
         return self._sample(item, transitions=False)
 
+    def _trajectory(self, episode: dict[str, Any]) -> dict[str, np.ndarray]:
+        # Control arrays are small; keep each decoded recording for the run.
+        run_id = episode["run_id"]
+        cached = self._trajectories.get(run_id)
+        if cached is None:
+            with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as source:
+                cached = {key: source[key] for key in source.files}
+            self._trajectories[run_id] = cached
+        return cached
+
     def _sample(self, item: int, *, transitions: bool) -> dict[str, Any]:
         episode, chunk_index, annotation_path = self.items[item]
         chunk = self.chunks[episode["run_id"]][chunk_index]
         start, end, length = int(chunk["start"]), int(chunk["end"]), int(chunk["length"])
-        with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as source:
-            trajectory = {key: source[key] for key in source.files}
-        with np.load(storage_path(episode["observations_path"]), allow_pickle=False) as source:
-            agent_raw, wrist_raw = source["agentview_image"], source["wrist_image"]
-            agent = policy_view(agent_raw[start], episode["observation_orientation"], self.image_orientation)
-            wrist = policy_view(wrist_raw[start], episode["observation_orientation"], self.image_orientation)
-            if transitions:
-                next_agent = policy_view(agent_raw[end], episode["observation_orientation"], self.image_orientation)
-                next_wrist = policy_view(wrist_raw[end], episode["observation_orientation"], self.image_orientation)
+        trajectory = self._trajectory(episode)
+        frames = self._frames.episode(episode, self._frame_indices[episode["run_id"]])
+        orientation = episode["observation_orientation"]
+        agent = policy_view(frames.frame("agentview_image", start), orientation, self.image_orientation)
+        wrist = policy_view(frames.frame("wrist_image", start), orientation, self.image_orientation)
+        if transitions:
+            next_agent = policy_view(frames.frame("agentview_image", end), orientation, self.image_orientation)
+            next_wrist = policy_view(frames.frame("wrist_image", end), orientation, self.image_orientation)
         raw_proprio = proprio_from_trajectory(trajectory)
         if self.action_stats.get("codec") == "openpi_quantile":
             from .pi05 import normalize
@@ -136,11 +158,16 @@ class ReplayDataset(ActionDataset):
                 checked.add(run_id)
         self.items = [(episode, chunk_index, annotations[episode["run_id"]])
                       for episode, chunk_index, _ in self.items]
+        self._rewards: dict[Path, np.ndarray] = {}
 
     def __getitem__(self, item: int) -> dict[str, Any]:
         sample = self._sample(item, transitions=True)
         _, chunk_index, annotation = self.items[item]
-        with np.load(annotation, allow_pickle=False) as rewards:
-            key = "final_reward" if "final_reward" in rewards else "pbrs_chunk_reward"
-            sample["reward"] = torch.tensor(float(rewards[key][chunk_index]), dtype=torch.float32)
+        rewards = self._rewards.get(annotation)
+        if rewards is None:
+            with np.load(annotation, allow_pickle=False) as source:
+                key = "final_reward" if "final_reward" in source else "pbrs_chunk_reward"
+                rewards = np.asarray(source[key], dtype=np.float32)
+            self._rewards[annotation] = rewards
+        sample["reward"] = torch.tensor(float(rewards[chunk_index]), dtype=torch.float32)
         return sample

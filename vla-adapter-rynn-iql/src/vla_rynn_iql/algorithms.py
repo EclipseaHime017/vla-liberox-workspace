@@ -63,7 +63,7 @@ class ImplicitQLearning:
             weights = torch.ones(batch["actions"].shape[0], device=batch["actions"].device)
         else:
             weights = advantage_weights(
-                self.agent.advantage(batch), self.cfg["beta"], self.cfg["max_advantage_weight"],
+                self.agent.last_advantage, self.cfg["beta"], self.cfg["max_advantage_weight"],
             )
         metrics["advantage_weight_mean"] = float(weights.mean())
         return weights, metrics

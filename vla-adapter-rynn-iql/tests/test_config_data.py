@@ -547,3 +547,28 @@ def test_ui_selection_manifest_prepares_exact_members_and_split(configured, tmp_
     assert manifest["episodes"][0]["chunks"][0]["start"] == 0
     assert manifest["episodes"][0]["chunks"][0]["end"] == 5
     assert manifest["episodes"][0]["chunks"][0]["transition_type"] == "policy_interrupted"
+
+
+def test_npz_shapes_come_from_headers_without_decoding(tmp_path):
+    import numpy as np
+    from vla_rynn_iql.data import npz_array_shapes
+
+    path = tmp_path / "observations.npz"
+    np.savez_compressed(path, agentview_image=np.zeros((5, 4, 6, 3), np.uint8),
+                        wrist_image=np.zeros((5, 4, 6, 3), np.uint8))
+    assert npz_array_shapes(path) == {"agentview_image": (5, 4, 6, 3), "wrist_image": (5, 4, 6, 3)}
+
+
+def test_prepare_rejects_float_images_with_valid_shapes(configured):
+    from pathlib import Path
+    import numpy as np
+    import pytest
+    from vla_rynn_iql.data import prepare_dataset
+
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    observations = next(source.rglob("trajectory_observations.npz"))
+    with np.load(observations) as archive:
+        arrays = {key: archive[key].astype(np.float32) for key in archive.files}
+    np.savez_compressed(observations, **arrays)
+    with pytest.raises(ValueError, match="uint8"):
+        prepare_dataset(configured)

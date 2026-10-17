@@ -180,6 +180,8 @@ class PixelIQL(nn.Module):
             )
             updated_value = self.value(batch["pixels"], batch["proprio"])
             advantage = online_q - updated_value
+        # Same online-critic advantage as advantage(batch), without a second forward.
+        self.last_advantage = advantage
         return IQLMetrics(
             float(q_loss.detach()), float(value_loss.detach()), float(online_q.mean()),
             float(updated_value.mean()), float(advantage.mean()),
