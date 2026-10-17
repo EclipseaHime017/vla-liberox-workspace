@@ -15,7 +15,7 @@ from .io import atomic_json, sha256_file
 from .models import model_config
 from .base_models import model_contract
 from .model_artifacts import parent_snapshot
-from .model_storage import configure_openpi_cache, local_model_directory
+from .model_storage import cached_sha256, configure_openpi_cache, local_model_directory
 from .pi05_assets import IDENTITY_FILE, OPENPI_COMMIT, checkpoint_identity, identity_digest
 
 
@@ -67,7 +67,7 @@ def load_components(config, *, training: bool = True, parent: dict | None = None
     settings = model_config(config.raw)
     contract = model_contract(settings)
     root = local_model_directory(settings["base_checkpoint"])
-    identity = checkpoint_identity(root, base_id=settings["base_id"], parent=parent, contract=contract)
+    identity = checkpoint_identity(root, hash_file=cached_sha256, base_id=settings["base_id"], parent=parent, contract=contract)
     if settings["base_revision"] is not None and settings["base_revision"] != identity_digest(identity):
         raise ValueError("π₀.₅ base weights/normalization changed after training registration")
     cfg = configs.get_config(identity["config_name"])

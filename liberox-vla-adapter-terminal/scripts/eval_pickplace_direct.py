@@ -345,8 +345,22 @@ def load_runtime() -> SimpleNamespace:
     )
 
 
+def restrict_tensorflow_to_cpu() -> None:
+    """Upstream VLA-Adapter uses TensorFlow only for image resizing and cropping.
+
+    Hide GPUs from it before first use so it can never pre-allocate the memory
+    the PyTorch policy, MuJoCo renderer or later jobs need.
+    """
+    try:
+        import tensorflow as tf
+        tf.config.set_visible_devices([], "GPU")
+    except (ImportError, RuntimeError, ValueError) as exc:
+        LOGGER.warning("Could not restrict TensorFlow to CPU: %s", exc)
+
+
 def load_policy_runtime(runtime: SimpleNamespace) -> SimpleNamespace:
     """Load VLA/TensorFlow modules only when a policy rollout is requested."""
+    restrict_tensorflow_to_cpu()
     from experiments.robot.libero.run_libero_eval import (
         GenerateConfig,
         initialize_model,

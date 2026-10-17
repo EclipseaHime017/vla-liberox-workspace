@@ -13,6 +13,46 @@ OPENPI_CACHE_ROOT = MODELS_ROOT / ".cache/openpi"
 SOURCE_FILE = ".model-source.json"
 
 
+def digest_cache_root() -> Path:
+    # Resolved at call time so a relocated MODELS_ROOT, or the test override,
+    # never writes into the workspace's real cache.
+    override = os.environ.get("VLA_DIGEST_CACHE_ROOT")
+    return Path(override) if override else MODELS_ROOT / ".cache/digests"
+
+
+def _signature(path: Path) -> dict:
+    stat = path.stat()
+    return {"path": str(path), "inode": stat.st_ino, "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns}
+
+
+def cached_sha256(path: Path, cache_root: Path | None = None) -> str:
+    """Content SHA-256 of a large model file, reused while its inode metadata is unchanged.
+
+    Any write or metadata change updates ctime, which an unprivileged process
+    cannot set back, so an unchanged (inode, size, mtime, ctime) tuple means the
+    previously hashed bytes. Unknown or changed files are always hashed in full.
+    """
+    resolved = Path(path).resolve()
+    signature = _signature(resolved)
+    entry = (cache_root or digest_cache_root()) / f"{stable_hash(str(resolved))[:32]}.json"
+    try:
+        cached = json.loads(entry.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cached = None
+    # Any unreadable, malformed or stale entry is ignored and recomputed.
+    if (isinstance(cached, dict) and all(cached.get(key) == value for key, value in signature.items())
+            and isinstance(cached.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", cached["sha256"])):
+        return cached["sha256"]
+    digest = sha256_file(resolved)
+    if _signature(resolved) == signature:
+        try:
+            atomic_json(entry, {**signature, "sha256": digest})
+        except OSError:
+            pass
+    return digest
+
+
 def local_model_directory(value: str | Path) -> Path:
     """Resolve the workspace rename at IO boundaries, not in experiment identities."""
     path = Path(value).expanduser().absolute()
@@ -29,7 +69,7 @@ def repository_directory(repo: str) -> Path:
 
 
 def deployment_digest(root: Path) -> str:
-    return stable_hash({str(path.relative_to(root)): sha256_file(path)
+    return stable_hash({str(path.relative_to(root)): cached_sha256(path)
                         for path in sorted(root.rglob("*")) if path.is_file()
                         and not any(part.startswith(".") for part in path.relative_to(root).parts)})
 

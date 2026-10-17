@@ -204,7 +204,8 @@ class PolicyCatalog:
         cached = self._hash_cache.get(key)
         if cached is not None:
             return cached
-        digest = _sha256(path)
+        # Persisted across restarts, keyed by the same inode/size/mtime/ctime tuple.
+        digest = model_module("model_storage").cached_sha256(path)
         self._hash_cache = {candidate: value for candidate, value in self._hash_cache.items() if candidate[0] != key[0]}
         self._hash_cache[key] = digest
         return digest

@@ -209,9 +209,9 @@ def test_multiple_bases_are_lightweight_and_wrong_source_is_rejected(tmp_path, m
     liberox, identity = checkpoint(tmp_path, "pi05-liberox-base")
     catalog = PolicyCatalog(tmp_path / "registry",
                             base_models={item["base_id"]: item for item in (official, liberox)})
-    monkeypatch.setattr(catalog, "_component_sha256", lambda _: pytest.fail("listing hashed a model"))
-    assert [item["policy_id"] for item in catalog.list_policies()] == ["pi05-libero-base", "pi05-liberox-base"]
-    monkeypatch.undo()
+    with monkeypatch.context() as patched:  # scoped: keep the suite-wide digest-cache isolation
+        patched.setattr(catalog, "_component_sha256", lambda _: pytest.fail("listing hashed a model"))
+        assert [item["policy_id"] for item in catalog.list_policies()] == ["pi05-libero-base", "pi05-liberox-base"]
     chosen = catalog.select("pi05-liberox-base")
     assert chosen.is_base and chosen.base_revision == assets().identity_digest(identity)
     assert chosen.stats_key == "meituan/LIBERO-X"

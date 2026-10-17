@@ -78,3 +78,9 @@ def configured(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return load_train_config(config_path)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_digest_cache(tmp_path_factory, monkeypatch):
+    """Model digests computed by tests must never reach models/.cache/digests."""
+    monkeypatch.setenv("VLA_DIGEST_CACHE_ROOT", str(tmp_path_factory.mktemp("digests")))

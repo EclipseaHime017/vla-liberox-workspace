@@ -77,3 +77,38 @@ def test_legacy_path_resolution_is_scoped_to_this_workspace(tmp_path, monkeypatc
     old = tmp_path / "weights/explicit"
     old.mkdir(parents=True)
     assert model_storage.local_model_directory(old) == old
+
+
+def test_cached_sha256_reuses_unchanged_files_and_rehashes_changed_ones(tmp_path, monkeypatch):
+    import os
+    from vla_rynn_iql import model_storage
+    from vla_rynn_iql.io import sha256_file
+
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"a" * 1024)
+    calls = []
+    monkeypatch.setattr(model_storage, "sha256_file", lambda path: calls.append(path) or sha256_file(path))
+    cache = tmp_path / "digests"
+    first = model_storage.cached_sha256(weights, cache)
+    assert first == sha256_file(weights) and len(calls) == 1
+    assert model_storage.cached_sha256(weights, cache) == first and len(calls) == 1
+    weights.write_bytes(b"b" * 1024)
+    stat = weights.stat()
+    os.utime(weights, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert model_storage.cached_sha256(weights, cache) == sha256_file(weights) and len(calls) == 2
+
+
+@pytest.mark.parametrize("content", ["null", "[]", '{"sha256": 5}', "{broken"])
+def test_malformed_digest_cache_entries_are_recomputed(tmp_path, monkeypatch, content):
+    from vla_rynn_iql.io import sha256_file
+
+    monkeypatch.delenv("VLA_DIGEST_CACHE_ROOT")
+    monkeypatch.setattr(model_storage, "MODELS_ROOT", tmp_path / "models")
+    weights = tmp_path / "model.safetensors"
+    weights.write_bytes(b"weights")
+    expected = sha256_file(weights)
+    assert model_storage.cached_sha256(weights) == expected
+    entries = list(model_storage.digest_cache_root().glob("*.json"))
+    assert len(entries) == 1 and entries[0].is_relative_to(tmp_path)
+    entries[0].write_text(content)
+    assert model_storage.cached_sha256(weights) == expected
