@@ -59,9 +59,9 @@ export function DatasetPage() {
   const [builder, setBuilder] = useState(false);
   const [name, setName] = useState("");
   const [parentId, setParentId] = useState<string | null>(null);
+  const [parentSuccessSteps, setParentSuccessSteps] = useState<number | null>(null);
   const [validationFraction, setValidationFraction] = useState(0.2);
   const [splitSeed, setSplitSeed] = useState(7);
-  const [successSteps, setSuccessSteps] = useState(5);
   const [includePostSuccess, setIncludePostSuccess] = useState(true);
   const [annotationJob, setAnnotationJob] = useState<OfflineJob | null>(null);
   const [busy, setBusy] = useState(false);
@@ -163,12 +163,13 @@ export function DatasetPage() {
     if (parent) {
       setTaskScope(scopeForTask(bootstrap?.task_catalog ?? [], parent.task_id)); setPage(1);
       setParentId(parent.id); setName(`${parent.name} · 派生`);
+      setParentSuccessSteps(parent.success_consecutive_steps ?? null);
       setValidationFraction(parent.validation_fraction ?? 0.2);
-      setSplitSeed(parent.split_seed ?? 7); setSuccessSteps(parent.success_consecutive_steps ?? 5);
+      setSplitSeed(parent.split_seed ?? 7);
       setIncludePostSuccess(parent.include_post_success ?? true);
       setSelection({ ...initialSelection(), mode: "manual", run_ids: parent.members.map((item) => item.run_id) });
     } else {
-      setParentId(null); setName(`训练数据集 ${new Date().toLocaleString()}`);
+      setParentId(null); setParentSuccessSteps(null); setName(`训练数据集 ${new Date().toLocaleString()}`);
       setIncludePostSuccess(true);
       setSelection(initialSelection());
     }
@@ -184,7 +185,7 @@ export function DatasetPage() {
     setBusy(true); setError("");
     const body = {
       name, selection, validation_fraction: validationFraction,
-      split_seed: splitSeed, success_consecutive_steps: successSteps,
+      split_seed: splitSeed,
       include_post_success: includePostSuccess,
     };
     try {
@@ -307,7 +308,7 @@ export function DatasetPage() {
           <fieldset><legend>结果过滤</legend>{outcomes.map((value) => <label key={value}><input type="checkbox" checked={selection.outcomes.includes(value)} onChange={() => toggleOutcome(value)} />{outcomeLabel[value]}</label>)}</fieldset>
           {selection.mode === "manual" && <div className="manual-selection-note">已手动选择 <strong>{selectedSet.size}</strong> 条。请在上方轨迹表中勾选；不可训练记录已禁用。</div>}
           {selection.mode === "rule" && <div className="quota-grid">{selection.quotas.map((quota, index) => <div key={`${quota.source_type}:${quota.outcome}`}><span>{sourceLabel[quota.source_type]} · {outcomeLabel[quota.outcome]}</span><input type="number" min={0} value={quota.count} onChange={(event) => { const quotas = [...selection.quotas]; quotas[index] = { ...quota, count: Number(event.target.value) }; patchSelection({ quotas }); }} /><select value={quota.order} onChange={(event) => { const quotas = [...selection.quotas]; quotas[index] = { ...quota, order: event.target.value as typeof quota.order }; patchSelection({ quotas }); }}><option value="random">随机</option><option value="newest">最新</option><option value="oldest">最早</option></select></div>)}</div>}
-          <details><summary>数据准备高级设置</summary><div className="advanced-grid"><label>验证集比例<input type="number" min={0} max={0.9} step={0.05} value={validationFraction} onChange={(event) => setValidationFraction(Number(event.target.value))} /></label><label>划分种子<input type="number" min={0} value={splitSeed} onChange={(event) => setSplitSeed(Number(event.target.value))} /></label><label>连续成功阈值<input type="number" min={1} max={100} value={successSteps} onChange={(event) => setSuccessSteps(Number(event.target.value))} /></label></div></details>
+          <details><summary>数据准备高级设置</summary><div className="advanced-grid"><label>验证集比例<input type="number" min={0} max={0.9} step={0.05} value={validationFraction} onChange={(event) => setValidationFraction(Number(event.target.value))} /></label><label>划分种子<input type="number" min={0} value={splitSeed} onChange={(event) => setSplitSeed(Number(event.target.value))} /></label><p className="locked-field-note">{parentSuccessSteps != null ? `成功判定：done 连续 ${parentSuccessSteps} 步（继承父数据集）` : `成功判定：done 连续 ${bootstrap?.config?.success_consecutive_steps ?? 5} 步（系统统一配置，新数据集会记录该值）`}</p></div></details>
         </div>
         <div className="builder-actions"><button onClick={() => void makePreview()} disabled={busy}>预览选择结果</button><button className="primary" onClick={() => void saveDataset()} disabled={busy || !preview || !name.trim()}>冻结数据集</button></div>
         {preview && <div className="selection-preview"><strong>{preview.selected_count} 条轨迹</strong><span>{preview.action_count} actions</span><span>{preview.chunk_count} chunks</span>{Object.entries(preview.categories).map(([key, count]) => <Badge key={key}>{key} · {count}</Badge>)}</div>}

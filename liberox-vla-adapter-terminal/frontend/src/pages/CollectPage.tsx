@@ -14,6 +14,7 @@ import { calibrateController, setControllerGravity, CONTROLLER_LABELS, controlle
 import { RunConfigForm } from "../features/run-config/RunConfigForm";
 import { RunStatus } from "../features/run-control/RunStatus";
 import { SessionMonitor } from "../features/run-control/SessionMonitor";
+import { runOutcome } from "../features/run-control/formatters";
 import { formatComputeDevice } from "../features/run-control/formatters";
 import { TaskFilter } from "../features/run-config/TaskSelector";
 import { ALL_TASK_SCOPE, filterByTaskScope, scopeForTask, type TaskScope } from "../features/run-config/taskHierarchy";
@@ -691,7 +692,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
                 <Metric label="控制步" value={String(selected.current_step)} />
                 <Metric label="实测频率" value={selected.measured_control_hz ? selected.measured_control_hz.toFixed(2) + " Hz" : "—"} />
                 <Metric label="推理次数" value={String(selected.policy_queries)} />
-                <Metric label="成功" value={selected.success ? "是" : "否"} />
+                <Metric label="成功" value={runOutcome(selected).confirmed ? "是" : selected.success ? "未确认" : "否"} />
               </div>
             </>}
             </div>

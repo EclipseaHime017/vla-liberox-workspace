@@ -1,4 +1,5 @@
 """Recorded FACTR transitions; fake device only, no serial or motor writes."""
+import json
 import threading
 from types import SimpleNamespace
 
@@ -196,3 +197,8 @@ def test_shared_session_publishes_factr_like_other_manual_runs(tmp_path, monkeyp
             assert (record.episode_dir/"agentview.mp4").exists()
     assert record.status == ("ERROR" if failure in ("prepare", "step", "postprocess") else "COMPLETED")
     assert controller.gravity == (failure in (None, "cancel"))
+    if failure is None:
+        # Three done steps after a non-done prefix: instantaneous, not confirmed.
+        result = json.loads((record.output_dir/"summary.json").read_text())["result"]
+        assert record.success and record.success_confirmed_step is None
+        assert (result["success"], result["success_confirmed"], result["success_confirmed_step"]) == (True, False, None)

@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pytest
 
-from simulation_core import run_control_loop
+from simulation_core import confirmed_success_step, run_control_loop, success_confirm_steps
 from trajectory_utils import TrajectoryRecorder
 
 
@@ -202,3 +202,21 @@ def test_manual_stop_during_wait_does_not_execute_an_extra_action():
     )
     assert result.stopped_reason == "user_stop"
     assert result.executed_steps == recorder.action_count == env.step_index == 0
+
+
+def test_confirmed_success_requires_consecutive_done_values():
+    assert success_confirm_steps() == 5  # vla-adapter-rynn-iql/configs/runtime.yaml
+    assert confirmed_success_step([False, True, False, True, True, True, True]) is None
+    assert confirmed_success_step([True] * 4 + [False] + [True] * 5) == 9
+    assert confirmed_success_step(np.ones(5, dtype=bool)) == 4
+    assert confirmed_success_step([]) is None
+    with pytest.raises(ValueError):
+        confirmed_success_step([True], required=0)
+
+
+def test_success_rule_follows_the_system_setting(monkeypatch):
+    import vla_rynn_iql.config as config
+    monkeypatch.setattr(config, "success_consecutive_steps", lambda: 3)
+    assert success_confirm_steps() == 3
+    assert confirmed_success_step([False, True, True, True]) == 3
+    assert confirmed_success_step([False, True, True, True], required=5) is None

@@ -38,7 +38,6 @@ overrides:
   data:
     validation_fraction: 0.2
     split_seed: 7
-    success_consecutive_steps: 5
   reward:
     # Cheap reward reduction override. Existing RynnValue evaluations are reused.
     fusion_mode: additive

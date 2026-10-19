@@ -214,7 +214,7 @@ def freeze_fixture(client, record, resources):
         "name": f"Model smoke · {record['id']}", "task_id": TASK_ID,
         "selection": {"mode": "manual", "run_ids": [record["id"]]},
         "validation_fraction": 0.0, "split_seed": SEED,
-        "success_consecutive_steps": 5, "include_post_success": True,
+        "include_post_success": True,
     }))
     identifier = job["result"]["dataset_id"]
     dataset = client.request("GET", f"/api/training-datasets/{quote(identifier, safe='')}")

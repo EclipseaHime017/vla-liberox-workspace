@@ -380,3 +380,15 @@ def test_trials_share_one_environment_and_rebuild_only_after_a_failure(tmp_path:
     # Trial 1 builds, trial 2 fails and discards it, trial 3 rebuilds; closed at the end.
     assert names.count("create") == 2 and names.count("close") == 2
     assert names[-1] == "close"
+
+
+def test_batch_success_rule_is_the_platform_confirmation_rule():
+    from simulation_core import confirmed_success_step, success_confirm_steps
+    assert ConsecutiveSuccess().required == success_confirm_steps()
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        dones = rng.random(40) < 0.7
+        tracker = ConsecutiveSuccess()
+        for step, done in enumerate(dones):
+            tracker.observe(bool(done), step)
+        assert tracker.first_confirmed_step == confirmed_success_step(dones)

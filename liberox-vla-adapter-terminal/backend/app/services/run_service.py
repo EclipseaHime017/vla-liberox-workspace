@@ -20,9 +20,8 @@ class RunService:
     def dataset_summary(self):
         method = getattr(self.worker, "dataset_summary", None)
         if method is None:
-            runs = self.list_runs()
-            successes = sum(bool(item.get("success")) for item in runs)
-            return {"runs": len(runs), "successes": successes, "success_rate": successes / len(runs) if runs else 0.0, "tasks": []}
+            from ..domain.run import summarize_runs
+            return summarize_runs(self.list_runs())
         return method()
     def get_run(self, run_id): return self.worker.get_public(run_id)
     def create_original(self, **kwargs): return self.worker.create_original(**kwargs)

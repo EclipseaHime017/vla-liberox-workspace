@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 from .paths import storage_path
 
+from simulation_core import confirmed_success_step, success_confirm_steps
 from trajectory_utils import load_trajectory
 import yaml
 
@@ -142,6 +143,7 @@ def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
                 "policy_compatibility_sha256": metadata.get(
                     "policy_compatibility_sha256"
                 ),
+                "disabled_policy_cameras": list(metadata.get("disabled_policy_cameras") or []),
                 "manual_source": metadata.get("manual_source"),
                 "manual_translation_gain": metadata.get("manual_translation_gain"),
                 "manual_rotation_gain": metadata.get("manual_rotation_gain"),
@@ -168,6 +170,9 @@ def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
                 "training_chunk_count": metadata.get("training_chunk_count"),
                 "policy_queries": int(metadata.get("policy_queries", len(trajectory.get("inference_query_step", [])))),
                 "success": bool(metadata.get("success", bool(trajectory["done"].any()))),
+                "success_confirmed": confirmed_success_step(trajectory["done"]) is not None,
+                "success_confirmed_step": confirmed_success_step(trajectory["done"]),
+                "success_confirm_steps": success_confirm_steps(),
                 "error": metadata.get("error"),
                 "stopped_reason": metadata.get("stopped_reason", "legacy"),
                 "measured_control_hz": metadata.get("measured_control_hz"),

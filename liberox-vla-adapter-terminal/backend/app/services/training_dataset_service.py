@@ -21,6 +21,34 @@ from ..storage.repositories import RunLabelRepository, TrainingDatasetRepository
 
 
 SOURCE_TYPES = frozenset({"inference", "manual", "policy_requery"})
+
+
+def _policy_camera_ablation(manifest: Path, trajectory: Path) -> list[str]:
+    """Policy cameras masked while recording; older manifests keep it only in the trajectory."""
+    try:
+        cameras = json.loads(manifest.read_text(encoding="utf-8")).get("disabled_policy_cameras")
+    except (OSError, ValueError, AttributeError):
+        cameras = None
+    if not cameras:
+        import numpy as np
+        try:
+            with np.load(trajectory, allow_pickle=False) as arrays:
+                if "metadata_json" in arrays.files:
+                    cameras = json.loads(str(arrays["metadata_json"].item())).get("disabled_policy_cameras")
+        except (OSError, ValueError, EOFError, AttributeError):
+            cameras = None
+    return list(cameras or [])
+
+
+def _trajectory_confirms_success(trajectory: Path) -> bool:
+    """Fallback for run views that predate the confirmed-success fields."""
+    from simulation_core import confirmed_success_step
+    import numpy as np
+    try:
+        with np.load(trajectory, allow_pickle=False) as arrays:
+            return "done" in arrays.files and confirmed_success_step(arrays["done"]) is not None
+    except (OSError, ValueError, EOFError):
+        return False
 OUTCOMES = frozenset({"success", "failure"})
 
 
@@ -80,8 +108,14 @@ class TrainingDatasetService:
             source = "manual" if run.get("control_mode") == "manual" else "policy_requery"
         else:
             source = "inference"
-        outcome = "success" if bool(run.get("success")) else "failure"
         trajectory = storage_path(str(run.get("trajectory") or ""))
+        # Datasets are split by confirmed success (the system-wide
+        # success_consecutive_steps), the same rule as batch tests and training
+        # termination; a single flickering done is not a success.
+        confirmed = run.get("success_confirmed")
+        if confirmed is None:
+            confirmed = _trajectory_confirms_success(trajectory)
+        outcome = "success" if confirmed else "failure"
         observations = trajectory.with_name("trajectory_observations.npz")
         output = storage_path(str(run.get("output_dir") or trajectory.parent.parent.parent))
         manifest = output / "run.json"
@@ -95,6 +129,10 @@ class TrainingDatasetService:
         ]
         if missing:
             return source, outcome, False, "缺少 " + ", ".join(missing)
+        if run.get("disabled_policy_cameras"):
+            # Actions came from masked camera input, but the saved observations
+            # are unmasked re-renders, so the pair is not a valid demonstration.
+            return source, outcome, False, "策略相机被禁用的消融运行：动作基于遮挡输入，保存的观测未遮挡"
         return source, outcome, True, None
 
     def list_runs(
@@ -467,7 +505,6 @@ class TrainingDatasetService:
         selection: dict[str, Any],
         validation_fraction: float = 0.2,
         split_seed: int = 7,
-        success_consecutive_steps: int = 5,
         include_post_success: bool = True,
         parent_dataset_id: str | None = None,
         resolved_run_ids: list[str] | None = None,
@@ -478,12 +515,17 @@ class TrainingDatasetService:
             raise ValueError("validation_fraction must be in [0, 0.9]")
         if type(split_seed) is not int:
             raise ValueError("split_seed must be an integer")
-        if type(success_consecutive_steps) is not int or not 1 <= success_consecutive_steps <= 100:
-            raise ValueError("success_consecutive_steps must be in [1, 100]")
+        # A new dataset stores the system-wide success rule so it stays
+        # reproducible if the setting changes; a derived dataset keeps its
+        # parent's rule, so parent/child differences come only from membership
+        # and split. There is no per-dataset override.
+        from simulation_core import success_confirm_steps
+        success_consecutive_steps = success_confirm_steps()
         if type(include_post_success) is not bool:
             raise TypeError("include_post_success must be boolean")
         if parent_dataset_id is not None:
-            self.get(parent_dataset_id)
+            parent = self.get(parent_dataset_id)
+            success_consecutive_steps = int(parent.get("success_consecutive_steps", success_consecutive_steps))
         resolved = self.preview(task_id, selection if resolved_run_ids is None else
                                 {**selection, "mode": "manual", "run_ids": resolved_run_ids})
         dataset_id = f"ds_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -979,6 +1021,19 @@ class TrainingDatasetService:
         value = self.verify(dataset_id)
         if value["integrity_status"] != "HEALTHY":
             raise ConflictError("Dataset is broken", code="DATASET_BROKEN")
+        # Datasets frozen before ablation runs were excluded may still hold them.
+        _, payload = self._load(dataset_id)
+        ablations = [
+            member["run_id"] for member in payload["members"]
+            if _policy_camera_ablation(storage_path(member["artifacts"]["manifest"]["path"]),
+                                       storage_path(member["artifacts"]["trajectory"]["path"]))
+        ]
+        if ablations:
+            raise ConflictError(
+                "Dataset contains policy-camera ablation runs; their actions came from masked "
+                "inputs while the saved observations are unmasked. Create a new dataset without them.",
+                code="DATASET_ABLATION_RUNS", context={"dataset_id": dataset_id, "run_ids": ablations},
+            )
         return value
 
     def _index_existing(self) -> None:

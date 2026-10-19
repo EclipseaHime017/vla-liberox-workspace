@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
@@ -18,6 +19,23 @@ from .config_sources import UniqueKeyLoader, compose_config, migrate_fields, rea
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRAIN_CONFIG = PROJECT_ROOT / "configs" / "training" / "iql.yaml"
 DEFAULT_INFERENCE_CONFIG = PROJECT_ROOT / "configs" / "inference.yaml"
+RUNTIME_CONFIG = PROJECT_ROOT / "configs" / "runtime.yaml"
+
+
+@functools.lru_cache(maxsize=1)
+def success_consecutive_steps() -> int:
+    """System-wide success rule: consecutive ``done`` values that confirm success.
+
+    ``configs/runtime.yaml`` (``data.success_consecutive_steps``) is the only
+    source. Run classification, statistics, batch tests, rewards and training
+    of new datasets all read it; each new dataset stores the value it used, so
+    existing datasets keep theirs when the setting changes. Read once per
+    process; restart the platform after changing it.
+    """
+    value = read_source(RUNTIME_CONFIG)["data"]["success_consecutive_steps"]
+    if type(value) is not int or not 1 <= value <= 100:
+        raise ValueError("data.success_consecutive_steps must be an integer in [1, 100]")
+    return value
 
 
 TRAIN_SCHEMA = {

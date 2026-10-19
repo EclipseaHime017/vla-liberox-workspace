@@ -49,7 +49,6 @@ async def create(body: CreateTrainingDatasetRequest, request: Request):
             selection=body.selection.model_dump(),
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
-            success_consecutive_steps=body.success_consecutive_steps,
             include_post_success=body.include_post_success,
         )
         return await run_in_threadpool(offline_job_service(request).enqueue_dataset, parameters)
@@ -63,7 +62,6 @@ async def derive(dataset_id: str, body: DeriveTrainingDatasetRequest, request: R
         parameters = dict(name=body.name, selection=body.selection.model_dump(),
             validation_fraction=body.validation_fraction,
             split_seed=body.split_seed,
-            success_consecutive_steps=body.success_consecutive_steps,
             **({} if body.include_post_success is None else {"include_post_success": body.include_post_success}),
         )
         return await run_in_threadpool(offline_job_service(request).enqueue_dataset, parameters, parent_id=dataset_id)

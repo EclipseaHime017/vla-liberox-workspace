@@ -29,6 +29,9 @@ data:
   # Optional immutable Stage annotation snapshot; null reads each episode sidecar.
   stage_annotations_manifest: null
   control_hz: 20.0
+  # System-wide success rule (consecutive done values) for run classification,
+  # statistics, batch tests, rewards and new datasets. Datasets store the value
+  # they were created with; change it here, not per dataset.
   success_consecutive_steps: 5
   # false: train through the confirming action only; keep full recordings/evaluations.
   include_post_success: true

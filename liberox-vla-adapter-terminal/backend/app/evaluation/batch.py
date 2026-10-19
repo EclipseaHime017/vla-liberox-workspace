@@ -487,8 +487,9 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     )
     if config["control_hz"] != 20:
         raise ValueError("config.control_hz must remain 20 Hz")
-    if config["success_streak"] != 5:
-        raise ValueError("config.success_streak must remain 5")
+    required = model_module("config").success_consecutive_steps()
+    if config["success_streak"] != required:
+        raise ValueError(f"config.success_streak must remain {required} (system success_consecutive_steps)")
     if config["consecutive_error_limit"] != 3:
         raise ValueError("config.consecutive_error_limit must remain 3")
     seed_count = config["seed_count"]

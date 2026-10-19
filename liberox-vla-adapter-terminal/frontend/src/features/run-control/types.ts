@@ -59,6 +59,8 @@ export type Bootstrap = {
   config: {
     max_steps: number; open_loop_steps: number; seed: number;
     disabled_policy_cameras: PolicyCameraId[]; control_hz: number; video_fps: number;
+    /** System-wide success rule; not configurable per dataset. */
+    success_consecutive_steps?: number;
     preview: {
       width: number; height: number; fps: number; layout: "2x2";
       stream_width: number; stream_height: number;
@@ -128,6 +130,8 @@ export type Session = {
   max_steps: number; open_loop_steps: number; current_step: number; state_count: number;
   seed: number; init_state_index: number; disabled_policy_cameras: PolicyCameraId[];
   action_count: number; policy_queries: number; success: boolean; error: string | null;
+  /** Confirmed by the system-wide success_consecutive_steps (shared with batch tests and training). */
+  success_confirmed?: boolean; success_confirmed_step?: number | null;
   stopped_reason: string | null; measured_control_hz: number | null;
   simulated_duration_seconds: number; branchable: boolean; legacy: boolean; managed: boolean;
   preparation_phase: string | null; preparation_message: string | null;

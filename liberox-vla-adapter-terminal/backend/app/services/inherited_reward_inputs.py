@@ -50,7 +50,7 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
         config.LoadedConfig(jobs.base_config_path, raw),
         frozen_observations_sha256=artifacts["observations"]["sha256"])
     if episode is None or episode["run_id"] != member["run_id"]:
-        raise ValueError("冻结轨迹身份或任务不匹配")
+        raise ValueError("冻结轨迹不是有效的训练轨迹（身份或任务不匹配、未完成，或为策略相机消融运行）")
     for name, field in (("manifest", "source_manifest"), ("trajectory", "trajectory"),
                         ("observations", "observations")):
         path_field = "source_manifest" if name == "manifest" else f"{field}_path"

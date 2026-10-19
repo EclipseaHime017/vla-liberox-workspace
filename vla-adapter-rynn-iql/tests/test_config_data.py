@@ -572,3 +572,22 @@ def test_prepare_rejects_float_images_with_valid_shapes(configured):
     np.savez_compressed(observations, **arrays)
     with pytest.raises(ValueError, match="uint8"):
         prepare_dataset(configured)
+
+
+@pytest.mark.parametrize("marker", ["manifest", "trajectory"])
+def test_policy_camera_ablation_runs_never_become_training_episodes(configured, marker):
+    import json
+    from vla_rynn_iql.data import load_manifest, prepare_dataset
+    run_dir = (Path(configured.section("paths")["dataset_sources"][0])
+               / "projects/libero_x_vla/runs/task/2026-01-01/branch")
+    if marker == "manifest":
+        manifest = json.loads((run_dir / "run.json").read_text())
+        (run_dir / "run.json").write_text(json.dumps({**manifest, "disabled_policy_cameras": ["wrist"]}))
+    else:  # older manifests keep the setting only in the trajectory metadata
+        trajectory = run_dir / "episodes/episode_000/trajectory.npz"
+        with np.load(trajectory) as source:
+            arrays = {key: source[key] for key in source.files}
+        np.savez_compressed(trajectory, **arrays,
+                            metadata_json=np.asarray(json.dumps({"disabled_policy_cameras": ["wrist"]})))
+    prepare_dataset(configured)
+    assert [episode["run_id"] for episode in load_manifest(configured)["episodes"]] == ["root"]

@@ -388,6 +388,9 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
     run = json.loads(run_json.read_text(encoding="utf-8"))
     if run.get("status") != "COMPLETED" or run.get("error"):
         return None
+    if run.get("disabled_policy_cameras"):
+        # Camera ablation: actions came from masked inputs, observations are not masked.
+        return None
     data_cfg = config.section("data")
     task_ids = set(data_cfg["task_ids"])
     if task_ids and run.get("task_id") not in task_ids:
@@ -412,6 +415,8 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
         )
     with np.load(trajectory, allow_pickle=False) as arrays:
         metadata = json.loads(str(arrays["metadata_json"].item())) if "metadata_json" in arrays else {}
+        if metadata.get("disabled_policy_cameras"):
+            return None
         required = {
             "time_seconds", "eef_position", "eef_axis_angle", "gripper_qpos",
             "raw_action", "env_action", "done", "action_source",
@@ -646,7 +651,8 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
         if episode is None:
             if selected:
                 raise ValueError(
-                    f"Selected run is not a valid completed episode: {run_json}"
+                    "Selected run is not a valid training episode (incomplete, another task, "
+                    f"or a policy-camera ablation): {run_json}"
                 )
             continue
         run_id = episode["run_id"]

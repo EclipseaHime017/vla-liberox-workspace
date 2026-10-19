@@ -68,7 +68,7 @@ export const previewTrainingDataset = (taskId: string, selection: DatasetSelecti
 
 export const createTrainingDataset = (body: {
   name: string; task_id: string; selection: DatasetSelection;
-  validation_fraction: number; split_seed: number; success_consecutive_steps: number;
+  validation_fraction: number; split_seed: number;
   include_post_success?: boolean;
 }) => api<OfflineJob>("/api/training-datasets", {
   method: "POST", body: JSON.stringify(body),
@@ -76,7 +76,7 @@ export const createTrainingDataset = (body: {
 
 export const deriveTrainingDataset = (parentId: string, body: {
   name: string; selection: DatasetSelection; validation_fraction: number;
-  split_seed: number; success_consecutive_steps: number;
+  split_seed: number;
   include_post_success?: boolean;
 }) => api<OfflineJob>(`/api/training-datasets/${encodeURIComponent(parentId)}/derive`, {
   method: "POST", body: JSON.stringify(body),

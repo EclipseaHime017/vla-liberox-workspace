@@ -1400,6 +1400,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         request: dict[str, Any], *, state_indices: list[int], seed_count: int,
         control_hz: float,
     ) -> dict[str, Any]:
+        from ..policies.registry import model_module
         return {
             "trials": int(request["trials"]),
             "max_steps": int(request["max_steps"]),
@@ -1410,7 +1411,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "seed_count": seed_count,
             "schedule_seed": int(request["schedule_seed"]),
             "control_hz": int(control_hz),
-            "success_streak": 5,
+            "success_streak": model_module("config").success_consecutive_steps(),
             "consecutive_error_limit": 3,
             "disabled_policy_cameras": [],
         }

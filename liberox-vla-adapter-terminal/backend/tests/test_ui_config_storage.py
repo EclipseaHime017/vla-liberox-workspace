@@ -325,6 +325,8 @@ def test_ui_manifest_and_summary_are_compact(tmp_path: Path):
         state_count=301,
         action_count=300,
         success=True,
+        success_confirmed_step=120,
+        success_confirm_steps=5,
         stopped_reason="source_horizon",
         measured_control_hz=19.9,
         simulated_duration_seconds=15.0,
@@ -361,12 +363,17 @@ def test_ui_manifest_and_summary_are_compact(tmp_path: Path):
     )
     assert summary["result"] == {
         "success": True,
+        "success_confirmed": True,
+        "success_confirmed_step": 120,
+        "success_confirm_steps": 5,
         "steps": 300,
         "target_steps": 300,
         "policy_queries": 0,
         "stopped_reason": "source_horizon",
         "error": None,
     }
+    persisted = manager._public_from_persisted(tmp_path, manifest, summary)
+    assert (persisted["success_confirmed"], persisted["success_confirmed_step"]) == (True, 120)
     assert summary["timing"]["mean_control_interval_ms"] == pytest.approx(50.2)
     assert summary["timing"]["model_load_seconds"] == pytest.approx(9.75)
     assert summary["timing"]["model_cache_hit"] is False
@@ -435,3 +442,45 @@ def test_delete_rejects_legacy_and_symlink_directories(tmp_path: Path):
     )
     with pytest.raises(ValueError, match="symbolic-link"):
         manager.delete_session("linked", "linked")
+
+
+@pytest.mark.parametrize("streak,expected", [(5, 14), (4, None)])
+def test_records_without_confirmed_fields_derive_them_from_done(tmp_path, streak, expected):
+    done = np.zeros(20, dtype=bool)
+    done[10:10 + streak] = True
+    np.savez_compressed(tmp_path / "trajectory.npz", done=done)
+    manifest = {"id": "old", "trajectory": "trajectory.npz", "success": True}
+    item = SimulationManager._public_from_persisted(tmp_path, manifest, {"result": {"success": True}})
+    assert item["success"] is True
+    assert (item["success_confirmed"], item["success_confirmed_step"]) == (expected is not None, expected)
+
+
+
+def test_legacy_scan_keeps_the_policy_camera_ablation_marker(tmp_path):
+    recorder = TrajectoryRecorder(capture_images=False)
+    observation = {"robot0_eef_pos": np.zeros(3), "robot0_eef_quat": np.array([0., 0., 0., 1.]),
+                   "robot0_gripper_qpos": np.zeros(2)}
+    env = SimpleNamespace(get_sim_state=lambda: np.zeros(1))
+    recorder.record_initial(env, observation)
+    recorder.record_transition(env, observation, np.zeros(7), np.zeros(7), 0.0, False, "policy")
+    save_trajectory_bundle(recorder, tmp_path / "trajectory",
+                           {"disabled_policy_cameras": ["wrist"]}, create_plot=False)
+    indexed = scan_trajectories([tmp_path])
+    assert [item["disabled_policy_cameras"] for item in indexed] == [["wrist"]]
+
+
+
+def test_stored_confirmation_is_recomputed_after_the_system_rule_changes(tmp_path, monkeypatch):
+    import vla_rynn_iql.config as config
+    done = np.zeros(20, dtype=bool)
+    done[10:13] = True  # a three-step streak
+    np.savez_compressed(tmp_path / "trajectory.npz", done=done)
+    manifest = {"id": "run", "trajectory": "trajectory.npz"}
+    result = {"success": True, "success_confirmed": False, "success_confirmed_step": None,
+              "success_confirm_steps": 5}
+    kept = SimulationManager._public_from_persisted(tmp_path, manifest, {"result": result})
+    assert (kept["success_confirmed"], kept["success_confirm_steps"]) == (False, 5)
+    monkeypatch.setattr(config, "success_consecutive_steps", lambda: 3)
+    recomputed = SimulationManager._public_from_persisted(tmp_path, manifest, {"result": result})
+    assert (recomputed["success_confirmed"], recomputed["success_confirmed_step"],
+            recomputed["success_confirm_steps"]) == (True, 12, 3)

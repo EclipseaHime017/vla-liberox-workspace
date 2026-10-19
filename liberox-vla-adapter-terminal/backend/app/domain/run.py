@@ -67,6 +67,10 @@ class SimulationSession:
     action_count: int = 0
     policy_queries: int = 0
     success: bool = False
+    # Action index of the first confirming done streak, and the system-wide
+    # streak length (success_consecutive_steps) it was evaluated with.
+    success_confirmed_step: int | None = None
+    success_confirm_steps: int | None = None
     error: str | None = None
     stopped_reason: str | None = None
     measured_control_hz: float | None = None
@@ -176,6 +180,9 @@ class SimulationSession:
             "training_chunk_count": self.training_chunk_count,
             "policy_queries": self.policy_queries,
             "success": self.success,
+            "success_confirmed": self.success_confirmed_step is not None,
+            "success_confirmed_step": self.success_confirmed_step,
+            "success_confirm_steps": self.success_confirm_steps,
             "error": self.error,
             "stopped_reason": self.stopped_reason,
             "measured_control_hz": self.measured_control_hz,
@@ -233,3 +240,35 @@ class SimulationDraft:
             "error": self.error,
             "task": task,
         }
+
+
+def summarize_runs(runs: list[dict[str, Any]], project_id: str | None = None) -> dict[str, Any]:
+    """Run counts for the dataset overview; successes are confirmed successes.
+
+    A run view's ``success`` is the instantaneous "done at least once" flag;
+    the overview counts ``success_confirmed`` so it agrees with run lists and
+    dataset classification.
+    """
+    def confirmed(run: dict[str, Any]) -> bool:
+        return run.get("status") != "ERROR" and bool(run.get("success_confirmed"))
+
+    tasks: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    for run in runs:
+        tasks.setdefault((run.get("task_id"), run.get("task_name"), run.get("level")), []).append(run)
+    successes = sum(confirmed(run) for run in runs)
+    rows = [
+        {"task_id": task_id, "task_name": task_name, "level": level, "runs": len(items),
+         "successes": sum(confirmed(run) for run in items),
+         "success_rate": sum(confirmed(run) for run in items) / len(items)}
+        for (task_id, task_name, level), items in tasks.items()
+    ]
+    rows.sort(key=lambda row: (-row["runs"], str(row["task_name"] or "")))
+    return {
+        "project_id": project_id,
+        "runs": len(runs),
+        "completed": sum(run.get("status") == "COMPLETED" for run in runs),
+        "errors": sum(run.get("status") == "ERROR" for run in runs),
+        "successes": successes,
+        "success_rate": successes / len(runs) if runs else 0.0,
+        "tasks": rows,
+    }

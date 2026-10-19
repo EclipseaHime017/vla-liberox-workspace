@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 import eval_pickplace_direct as direct
-from simulation_core import run_control_loop
+from simulation_core import confirmed_success_step, run_control_loop, success_confirm_steps
 from trajectory_utils import (
     TrajectoryRecorder,
     load_trajectory,
@@ -38,6 +38,7 @@ from ..domain.run import (
     TERMINAL_STATES,
     SimulationDraft,
     SimulationSession,
+    summarize_runs,
     utc_now,
 )
 from ..evaluation.libero_evaluator import LiberoEvaluator
@@ -67,6 +68,32 @@ from ..storage.repositories import RunRepository
 LOGGER = logging.getLogger("liberox.backend.worker")
 SESSION_MANIFEST_SCHEMA_VERSION = 2
 SESSION_SUMMARY_SCHEMA_VERSION = 2
+
+
+def _confirmed_success(result: dict[str, Any], manifest: dict[str, Any],
+                       trajectory: str | None) -> dict[str, Any]:
+    """Confirmed-success fields under the current system-wide streak length.
+
+    A stored result is reused only if it was evaluated with the current
+    setting; older records, and records from before a setting change, are
+    re-derived from the trajectory's ``done`` array.
+    """
+    required = success_confirm_steps()
+    for source in (result, manifest):
+        if "success_confirmed_step" in source and source.get("success_confirm_steps") == required:
+            step = source["success_confirmed_step"]
+            step = int(step) if isinstance(step, int) and not isinstance(step, bool) else None
+            return {"success_confirmed": step is not None, "success_confirmed_step": step,
+                    "success_confirm_steps": required}
+    step = None
+    if trajectory is not None:
+        try:
+            with np.load(trajectory, allow_pickle=False) as arrays:
+                step = confirmed_success_step(arrays["done"], required) if "done" in arrays.files else None
+        except (OSError, ValueError, KeyError, EOFError):
+            step = None
+    return {"success_confirmed": step is not None, "success_confirmed_step": step,
+            "success_confirm_steps": required}
 
 
 class PreviewService:
@@ -379,6 +406,7 @@ class SimulationManager:
                 ),
                 "control_hz": self.eval_config.control_hz,
                 "video_fps": self.eval_config.video_fps,
+                "success_consecutive_steps": success_confirm_steps(),
                 "preview": {
                     "width": self.ui_config.preview_width,
                     "height": self.ui_config.preview_height,
@@ -511,7 +539,12 @@ class SimulationManager:
         )
 
     def dataset_summary(self) -> dict[str, Any]:
-        summary = self.repository.summary()
+        # Counted from the run views, not the SQLite index: its success column
+        # holds the instantaneous flag, while lists and datasets use confirmed success.
+        with self.lock:
+            runs = [record.public() for record in self.sessions.values()]
+            runs.extend(item for item in self.legacy_sessions.values() if not item.get("legacy"))
+        summary = summarize_runs(runs, self.ui_config.project_id)
         summary["dataset_root"] = str(self.ui_config.dataset_root)
         summary["catalog"] = str(self.ui_config.catalog_path)
         summary["legacy_indexed"] = sum(
@@ -1409,6 +1442,9 @@ class SimulationManager:
                 "policy_queries": record.policy_queries,
                 "trajectory": trajectory,
                 "success": record.success,
+                "success_confirmed": record.success_confirmed_step is not None,
+                "success_confirmed_step": record.success_confirmed_step,
+                "success_confirm_steps": record.success_confirm_steps,
                 "error": record.error,
             }
         atomic_write_json(record.output_dir / "run.json", manifest)
@@ -1528,6 +1564,7 @@ class SimulationManager:
             "action_count": action_count,
             "policy_queries": int(result.get("policy_queries", manifest.get("policy_queries", 0)) or 0),
             "success": bool(result.get("success", False)),
+            **_confirmed_success(result, manifest, trajectory),
             "error": manifest.get("error") or result.get("error"),
             "stopped_reason": result.get("stopped_reason") or manifest.get("stopped_reason"),
             "measured_control_hz": timing.get(
@@ -1914,9 +1951,17 @@ class SimulationManager:
                     record.action_count = recorder.action_count
                     record.state_count = recorder.state_count
                     record.success = self.evaluator.success(success)
+                    dones, required = recorder.dones, record.success_confirm_steps
+                    if (record.success_confirmed_step is None and len(dones) >= required
+                            and all(dones[-required:])):
+                        record.success_confirmed_step = len(dones) - 1
                     record.policy_queries = len(recorder.inference_query_steps)
                 self.preview.submit(record, env.get_sim_state())
 
+            # Fixed for the session; a branch prefix may already contain the streak.
+            record.success_confirm_steps = success_confirm_steps()
+            record.success_confirmed_step = confirmed_success_step(
+                recorder.dones, record.success_confirm_steps)
             common = dict(
                 env=env,
                 recorder=recorder,
@@ -1949,6 +1994,8 @@ class SimulationManager:
                 )
 
             record.success = result.success
+            record.success_confirmed_step = confirmed_success_step(
+                recorder.dones, record.success_confirm_steps)
             record.policy_queries = len(recorder.inference_query_steps)
             record.stopped_reason = result.stopped_reason
             record.current_step = recorder.action_count
@@ -2190,6 +2237,9 @@ class SimulationManager:
             "realtime_control": True,
             "policy_queries": record.policy_queries,
             "success": record.success,
+            "success_confirmed": record.success_confirmed_step is not None,
+            "success_confirmed_step": record.success_confirmed_step,
+            "success_confirm_steps": record.success_confirm_steps,
             "stopped_reason": record.stopped_reason,
             "error": record.error,
             "restore_max_abs_error": restore_error,
@@ -2225,6 +2275,9 @@ class SimulationManager:
             "task": record.task_prompt,
             "result": {
                 "success": record.success,
+                "success_confirmed": record.success_confirmed_step is not None,
+                "success_confirmed_step": record.success_confirmed_step,
+                "success_confirm_steps": record.success_confirm_steps,
                 "steps": record.action_count,
                 "target_steps": record.max_steps,
                 "policy_queries": record.policy_queries,
