@@ -45,6 +45,10 @@ class SimulationSession:
     task_level: str | None = None
     task_name: str | None = None
     task_prompt: str | None = None
+    policy_instruction: str | None = None
+    task_snapshot: str | None = None
+    prefix_segments: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    handoff_steps: list[int] = field(default_factory=list)
     parent_session_id: str | None = None
     root_session_id: str | None = None
     source_trajectory: str | None = None
@@ -63,6 +67,10 @@ class SimulationSession:
     action_count: int = 0
     policy_queries: int = 0
     success: bool = False
+    # Action index of the first confirming done streak, and the system-wide
+    # streak length (success_consecutive_steps) it was evaluated with.
+    success_confirmed_step: int | None = None
+    success_confirm_steps: int | None = None
     error: str | None = None
     stopped_reason: str | None = None
     measured_control_hz: float | None = None
@@ -102,6 +110,30 @@ class SimulationSession:
     def episode_dir(self) -> Path:
         return self.output_dir / "episodes" / "episode_000"
 
+    @property
+    def trajectory_segments(self) -> list[dict[str, Any]]:
+        segments = [dict(segment) for segment in self.prefix_segments]
+        start = int(self.resume_step or 0)
+        if self.action_count > start:
+            segments.append(dict(start=start, end=self.action_count, origin_run_id=self.id,
+                                 policy_instruction=self.policy_instruction or self.task_prompt,
+                                 open_loop_steps=self.open_loop_steps))
+        return segments
+
+    @property
+    def training_chunk_count(self) -> int:
+        """Lightweight execution-grid count; Prepare adds success/query boundaries."""
+        boundaries = {0, self.action_count, *(self.handoff_steps), int(self.resume_step or 0)}
+        for segment in self.trajectory_segments:
+            boundaries.update((segment["start"], segment["end"]))
+        points = sorted(point for point in boundaries if 0 <= point <= self.action_count)
+        count = 0
+        for start, end in zip(points, points[1:]):
+            segment = next((s for s in self.trajectory_segments if s["start"] <= start < s["end"]), {})
+            steps = int(segment.get("open_loop_steps", self.open_loop_steps))
+            count += (end - start + steps - 1) // steps
+        return count
+
     def public(self, artifacts: dict[str, str] | None = None) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -110,6 +142,8 @@ class SimulationSession:
             "level": self.task_level,
             "task_name": self.task_name,
             "task": self.task_prompt,
+            "policy_instruction": self.policy_instruction or self.task_prompt,
+            "task_snapshot": self.task_snapshot,
             "parent_session_id": self.parent_session_id,
             "root_session_id": self.root_session_id,
             "source_trajectory": self.source_trajectory,
@@ -149,8 +183,13 @@ class SimulationSession:
             "current_step": self.current_step,
             "state_count": self.state_count,
             "action_count": self.action_count,
+            "training_chunk_count": self.training_chunk_count,
+            "training_chunk_count_rule": "recorded_execution_v1",
             "policy_queries": self.policy_queries,
             "success": self.success,
+            "success_confirmed": self.success_confirmed_step is not None,
+            "success_confirmed_step": self.success_confirmed_step,
+            "success_confirm_steps": self.success_confirm_steps,
             "error": self.error,
             "stopped_reason": self.stopped_reason,
             "measured_control_hz": self.measured_control_hz,
@@ -181,6 +220,7 @@ class SimulationDraft:
     init_state_index: int = 0
     disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
+    policy_instruction: str | None = None
     policy_label: str | None = None
     policy_content_sha256: str | None = None
     preview_status: str = "PREPARING"
@@ -198,6 +238,7 @@ class SimulationDraft:
             "init_state_index": self.init_state_index,
             "disabled_policy_cameras": list(self.disabled_policy_cameras),
             "policy_id": self.policy_id,
+            "policy_instruction": self.policy_instruction or task["prompt"],
             "policy_label": self.policy_label,
             "preview_status": self.preview_status,
             "preview_revision": self.preview_revision,
@@ -206,3 +247,35 @@ class SimulationDraft:
             "error": self.error,
             "task": task,
         }
+
+
+def summarize_runs(runs: list[dict[str, Any]], project_id: str | None = None) -> dict[str, Any]:
+    """Run counts for the dataset overview; successes are confirmed successes.
+
+    A run view's ``success`` is the instantaneous "done at least once" flag;
+    the overview counts ``success_confirmed`` so it agrees with run lists and
+    dataset classification.
+    """
+    def confirmed(run: dict[str, Any]) -> bool:
+        return run.get("status") != "ERROR" and bool(run.get("success_confirmed"))
+
+    tasks: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    for run in runs:
+        tasks.setdefault((run.get("task_id"), run.get("task_name"), run.get("level")), []).append(run)
+    successes = sum(confirmed(run) for run in runs)
+    rows = [
+        {"task_id": task_id, "task_name": task_name, "level": level, "runs": len(items),
+         "successes": sum(confirmed(run) for run in items),
+         "success_rate": sum(confirmed(run) for run in items) / len(items)}
+        for (task_id, task_name, level), items in tasks.items()
+    ]
+    rows.sort(key=lambda row: (-row["runs"], str(row["task_name"] or "")))
+    return {
+        "project_id": project_id,
+        "runs": len(runs),
+        "completed": sum(run.get("status") == "COMPLETED" for run in runs),
+        "errors": sum(run.get("status") == "ERROR" for run in runs),
+        "successes": successes,
+        "success_rate": successes / len(runs) if runs else 0.0,
+        "tasks": rows,
+    }

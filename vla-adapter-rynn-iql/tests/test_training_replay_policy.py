@@ -39,7 +39,7 @@ def test_checkpoint_records_selected_replay_policy(configured, tmp_path, monkeyp
     optimizer = torch.optim.Adam(components.action_head.parameters())
     checkpoint = _save_checkpoint(
         tmp_path, 1, components, SimpleNamespace(checkpoint=lambda: {}), optimizer,
-        torch.Generator(), configured, {"dataset_sha256": "dataset"}, {},
+        torch.Generator(), configured, {"dataset_sha256": "dataset", "action_horizon": 8}, {},
     )
     assert json.loads((checkpoint / "checkpoint.json").read_text())["replay_policy"] == training_replay_policy(include)
 
@@ -61,12 +61,13 @@ def test_resume_checks_changed_training_sample_policy(
         reject = policy != training_replay_policy(include)
     rewards = {}
     metadata = {
+        "training_layout": {"chunking": None, "actor_horizon": 8, "transition_horizon": 8},
         "dataset_sha256": "dataset", "reward_sha256": reward_manifest_digest(rewards),
         "base_checkpoint": configured.section("model")["base_checkpoint"],
         "stats_key": "test", "replay_policy": policy,
     }
     (tmp_path / "checkpoint.json").write_text(json.dumps(metadata))
-    manifest = {"dataset_sha256": "dataset", "episodes": [{
+    manifest = {"dataset_sha256": "dataset", "action_horizon": 8, "episodes": [{
         "split": split, "terminal_step": terminal, "recorded_action_count": recorded,
     }]}
     components = SimpleNamespace(action_head=torch.nn.Linear(1, 1), stats_key="test")

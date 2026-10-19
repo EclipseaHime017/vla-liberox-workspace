@@ -20,6 +20,29 @@ TransitionCallback = Callable[[dict[str, Any], int, bool], None]
 StopPredicate = Callable[[], bool]
 
 
+def success_confirm_steps() -> int:
+    """Consecutive ``done`` values that confirm success (system-wide setting).
+
+    Defined once in the training package's ``configs/runtime.yaml``. ``success``
+    on a run record means "done at least once" and is kept as a diagnostic.
+    """
+    from vla_rynn_iql.config import success_consecutive_steps
+    return success_consecutive_steps()
+
+
+def confirmed_success_step(dones: Sequence[Any], required: int | None = None) -> int | None:
+    """Return the action index that completes the first confirming done streak."""
+    required = success_confirm_steps() if required is None else required
+    if required < 1:
+        raise ValueError("required must be positive")
+    streak = 0
+    for index, value in enumerate(np.asarray(dones, dtype=bool).reshape(-1)):
+        streak = streak + 1 if value else 0
+        if streak >= required:
+            return index
+    return None
+
+
 @dataclass(frozen=True)
 class ControlLoopResult:
     success: bool
@@ -75,7 +98,7 @@ def run_control_loop(
     queue: deque[np.ndarray] = deque()
     policy_queries = 0
     control_step_times: list[float] = []
-    success = bool(recorder.dones[-1]) if recorder.dones else False
+    success = any(recorder.dones)
     stopped_reason = horizon_reason
     start_action_count = recorder.action_count
 

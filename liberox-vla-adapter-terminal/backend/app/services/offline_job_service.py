@@ -78,7 +78,7 @@ def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool
 
     def key(episode: dict[str, Any], chunk: dict[str, Any]) -> tuple[str, int, int, str]:
         return (
-            str(episode["root_run_id"]), int(chunk["start"]),
+            str(chunk.get("origin_run_id") or (episode["root_run_id"] if chunk.get("copied_prefix", False) else episode["run_id"])), int(chunk["start"]),
             int(chunk["end"]), str(chunk["action_source"]),
         )
 
@@ -87,6 +87,8 @@ def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool
         if chunk.get("copied_prefix", False)
     }
     seen: set[tuple[str, int, int, str]] = set()
+    produced = {key(episode, chunk) for episode, chunks in episodes if episode["split"] == "train"
+                for chunk in chunks if not chunk.get("copied_prefix", False)}
     action_count = chunk_count = 0
     for episode, chunks in sorted(
         episodes, key=lambda item: (item[0].get("kind") == "branch", str(item[0]["run_id"])),
@@ -95,6 +97,8 @@ def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool
             continue
         for chunk in chunks:
             current = key(episode, chunk)
+            if chunk.get("copied_prefix", False) and current in produced:
+                continue
             if current in copied:
                 if current in seen:
                     continue
@@ -236,6 +240,9 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         missing_fields = sorted(required - settings.keys())
                         if missing_fields:
                             raise ValueError(f"缺少 reward 字段：{', '.join(missing_fields)}")
+                        prepared = json.loads(Path(version["prepared_manifest_path"]).read_text(encoding="utf-8"))
+                        if prepared.get("chunking") != offline_module(self.ui_config.offline_rl_root, "execution").CHUNKING_RULE:
+                            raise ValueError("旧切片布局，请重新生成评价／奖励")
                         raw["reward"].update(settings)
                         raw["reward"]["final_normalization"] = settings.get("final_normalization", "none")
                         availability["ready"] = bool(version.get("complete") and version.get("status") == "READY")
@@ -1229,6 +1236,9 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         raw["data"]["include_post_success"] = include_post_success
         raw["model"] = self.training_models.apply_model_parameters(raw, parameters)
         raw["model"] = offline_module(self.ui_config.offline_rl_root, "model_assets").pin_model(raw["model"])
+        model_io = offline_module(self.ui_config.offline_rl_root, "base_models").model_contract(raw["model"])["io"]
+        raw["data"].update(action_horizon=model_io["replay_horizon"], action_dim=model_io["action_dim"],
+                            proprio_dim=model_io["proprio_dim"])
         source = None
         if algorithm == "iql":
             raw["reward"].setdefault("final_normalization", "none")
@@ -1240,6 +1250,8 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         replay_counts = {}
         if reward_version is not None:
             prepared = json.loads(Path(reward_version["prepared_manifest_path"]).read_text(encoding="utf-8"))
+            if prepared.get("chunking") != offline_module(self.ui_config.offline_rl_root, "execution").CHUNKING_RULE:
+                raise ValueError("奖励使用旧的固定长度切片，请在数据集配置中重新生成评价／奖励后训练")
             replay_counts = _training_replay_counts(prepared, include_post_success)
         if algorithm == "iql":
             raw["reward"].update(
@@ -1396,6 +1408,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         request: dict[str, Any], *, state_indices: list[int], seed_count: int,
         control_hz: float,
     ) -> dict[str, Any]:
+        from ..policies.registry import model_module
         return {
             "trials": int(request["trials"]),
             "max_steps": int(request["max_steps"]),
@@ -1406,7 +1419,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "seed_count": seed_count,
             "schedule_seed": int(request["schedule_seed"]),
             "control_hz": int(control_hz),
-            "success_streak": 5,
+            "success_streak": model_module("config").success_consecutive_steps(),
             "consecutive_error_limit": 3,
             "disabled_policy_cameras": [],
         }
@@ -1439,6 +1452,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         from ..policies.registry import model_module
         request = {**request, "open_loop_steps": model_module("base_models").resolve_open_loop_steps(
             policy_snapshot.get("model_config", {}), request.get("open_loop_steps"),
+            trained=policy_snapshot.get("manifest") is not None,
         )}
         state_count = int(self.manager.catalog.initial_state_count(task_id))
         requested_states = request.get("init_state_indices")
@@ -1540,6 +1554,17 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             shutil.rmtree(result_dir)
             raise
         result_path = result_dir / "evaluation.json"
+        from .task_registry import RegistryTaskCatalog, freeze_task
+        if isinstance(self.manager.catalog, RegistryTaskCatalog):
+            try:
+                frozen = freeze_task(self.manager.catalog, task["task_id"], result_dir / "task_snapshot")
+                bddl, init = frozen.paths(task["task_id"])
+                task = {**task, "bddl_path": str(bddl), "init_path": str(init),
+                        "task_revision_sha256": frozen.manifest["task_revision_sha256"]}
+            except Exception:
+                shutil.rmtree(job_dir)
+                shutil.rmtree(result_dir)
+                raise
         config_path = job_dir / "effective_config.yaml"
         config_keys = {
             "trials", "max_steps", "open_loop_steps", "realtime",

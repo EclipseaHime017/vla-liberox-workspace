@@ -59,7 +59,8 @@ def finish(jobs, dataset, job, *, prepared_episodes=None):
                 for start, end in ((0, 8), (8, 16), (16, 17))
             ],
         }]
-    prepared = {"dataset_sha256": "prepared", "source_dataset_sha256": dataset["dataset_sha256"],
+    prepared = {"schema_version": 5, "chunking": "recorded_execution_v1", "action_horizon": 8,
+                "dataset_sha256": "prepared", "source_dataset_sha256": dataset["dataset_sha256"],
                 "source_dataset_id": dataset["id"], "episodes": prepared_episodes}
     (work / "dataset_manifest.json").write_text(json.dumps(prepared))
     rewards = work / "rewards"
@@ -102,6 +103,19 @@ def test_direct_generation_is_cpu_only_and_snapshots_latest_labels(tmp_path):
     assert snapshot["annotations"]["run"]["annotation_sha256"] == "new-label"
     assert Path(version["reward_manifest_path"]).read_bytes() == original_bytes
     assert jobs.datasets.get(dataset["id"])["reward_version_id"] == version["id"]
+
+
+def test_old_chunk_layout_is_viewable_but_not_ready_for_new_training(tmp_path):
+    jobs, dataset = setup_jobs(tmp_path)
+    version = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="sparse"))
+    path = Path(version["prepared_manifest_path"])
+    prepared = json.loads(path.read_text())
+    prepared.pop("chunking")
+    path.write_text(json.dumps(prepared))
+    defaults = jobs.defaults(dataset["id"], "sparse")
+    assert not defaults["reward_availability"]["ready"]
+    assert "旧切片布局" in defaults["reward_availability"]["message"]
+    assert jobs.datasets.get_version(dataset["id"], version["id"])["status"] == "READY"
 
 
 def test_failed_regeneration_and_robometer_do_not_replace_reward(tmp_path):

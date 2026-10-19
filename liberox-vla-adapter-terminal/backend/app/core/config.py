@@ -73,8 +73,9 @@ class UIConfig:
     robometer_environment: str
     tensorboard_host: str
     tensorboard_port: int
-    additional_tasks: tuple[AdditionalTaskConfig, ...]
+    additional_tasks: tuple[AdditionalTaskConfig, ...] = ()
     task_families: tuple[TaskFamilyConfig, ...] = ()
+    task_registry: Path | None = None
 
     @property
     def project_root(self) -> Path:
@@ -130,7 +131,7 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
     if not isinstance(raw, dict):
         raise TypeError("UI configuration root must be a mapping")
     expected = {field.name for field in fields(UIConfig)}
-    missing = sorted(expected - set(raw) - {"task_families"})
+    missing = sorted(expected - set(raw) - {"task_families", "additional_tasks", "task_registry"})
     unknown = sorted(set(raw) - expected)
     if missing:
         raise ValueError(f"Missing UI configuration keys: {missing}")
@@ -141,7 +142,7 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         raise TypeError("UI key 'legacy_scan_roots' must be a list")
     if any(not isinstance(value, str) or not value.strip() for value in scan_roots):
         raise TypeError("Every legacy_scan_roots entry must be a non-empty string")
-    additional_tasks = raw["additional_tasks"]
+    additional_tasks = raw.get("additional_tasks", [])
     if not isinstance(additional_tasks, list):
         raise TypeError("UI key 'additional_tasks' must be a list")
     parsed_tasks: list[AdditionalTaskConfig] = []
@@ -222,6 +223,7 @@ def load_ui_config(path: Path = DEFAULT_UI_CONFIG) -> UIConfig:
         tensorboard_port=_strict_int(raw, "tensorboard_port"),
         additional_tasks=tuple(parsed_tasks),
         task_families=tuple(parsed_families),
+        task_registry=_resolve(_strict_string(raw, "task_registry"), base) if "task_registry" in raw else None,
     )
     if config.host != "127.0.0.1":
         raise ValueError("The first UI version is local-only; host must be 127.0.0.1")

@@ -30,7 +30,8 @@ def full_reward(jobs, dataset, source="stage", exponent=2):
         "chunks": [{"start": a, "end": b, "length": b-a, "action_source": "policy",
                     "transition_type": "policy", "interrupted": False, "copied_prefix": False}
                    for a, b in [(0, 8), (8, 16), (16, 17)]], "reward_boundaries": [0, 8, 16, 17]}
-    prepared = {"schema_version": 4, "dataset_sha256": "prepared", "source_dataset_id": dataset["id"],
+    prepared = {"schema_version": 5, "chunking": "recorded_execution_v1",
+        "dataset_sha256": "prepared", "source_dataset_id": dataset["id"],
         "source_dataset_sha256": dataset["dataset_sha256"], "episodes": [episode],
         **{key: raw["data"][key] for key in ("action_horizon", "action_dim", "proprio_dim", "control_hz")}}
     (work / "dataset_manifest.json").write_text(json.dumps(prepared))
@@ -133,9 +134,11 @@ def test_global_pin_is_independent_of_dataset_evaluation_and_copies_exact_arrays
 def test_source_selection_never_falls_back_to_another_type(tmp_path):
     jobs, dataset = setup_jobs(tmp_path)
     full_reward(jobs, dataset)
-    assert not jobs.defaults(dataset["id"], "sparse")["reward_availability"]["ready"]
-    with pytest.raises(ConflictError, match="sparse"):
-        jobs.start_training(dataset["id"], {"reward_source": "sparse"})
+    # Sparse is derivable directly from a valid recording; a missing learned
+    # evaluator must not be replaced by the available Stage result.
+    assert not jobs.defaults(dataset["id"], "rynnvalue")["reward_availability"]["ready"]
+    with pytest.raises(ConflictError, match="rynnvalue"):
+        jobs.start_training(dataset["id"], {"reward_source": "rynnvalue"})
 
 
 def test_legacy_evaluation_without_version_config_does_not_break_defaults(tmp_path):

@@ -58,9 +58,13 @@ def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEn
         raise ValueError("π₀.₅ policy label is empty")
     if type(raw["training_step"]) is not int or raw["training_step"] < 1:
         raise ValueError("Invalid π₀.₅ training step")
+    contract = (offline_module(PROJECT, "model_artifacts").legacy_contract(settings) if parent is None
+                else offline_module(PROJECT, "base_models").model_contract(settings))
+    io = contract["io"]
     if any(type(raw[key]) is not int or raw[key] != value for key, value in
-           (("action_horizon", 8), ("action_dim", 7), ("proprio_dim", 8))):
-        raise ValueError("π₀.₅ overlay must use platform replay geometry 8/7/8")
+           (("action_horizon", io["replay_horizon"]), ("action_dim", io["action_dim"]),
+            ("proprio_dim", io["proprio_dim"]))):
+        raise ValueError("π₀.₅ overlay supervision geometry conflicts with its model contract")
     compatibility = {key: raw[key] for key in ("base_checkpoint", "stats_key", "action_horizon", "action_dim", "proprio_dim")}
     if _stable_hash(compatibility) != raw["compatibility_sha256"]:
         raise ValueError("π₀.₅ compatibility hash mismatch")

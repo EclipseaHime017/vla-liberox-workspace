@@ -82,6 +82,27 @@ def test_child_selection_does_not_rebase_registered_parent(tmp_path):
     assert catalog.entry("base").content_sha256 == before
 
 
+def test_short_supervision_child_loads_through_catalog_and_cli(tmp_path):
+    path = _overlay(tmp_path)
+    raw = yaml.safe_load(path.read_text())
+    settings = model_module("models").model_config({"model": {"stats_key": STATS}})
+    settings["contract"] = model_module("base_models").model_contract(settings)
+    settings["contract"]["io"]["replay_horizon"] = 4
+    parent = model_module("model_artifacts").parent_snapshot(settings, "b" * 40)
+    raw.update(schema_version=5, family="vla_adapter", algorithm="iql", backbone=None,
+               model_config=settings, parent=parent, action_horizon=4)
+    raw["compatibility_sha256"] = _stable_hash({key: raw[key] for key in (
+        "base_checkpoint", "stats_key", "action_horizon", "action_dim", "proprio_dim")})
+    path.write_text(yaml.safe_dump(raw))
+    catalog = PolicyCatalog(tmp_path, base_models={
+        "base": {"base_checkpoint": BASE, "stats_key": "libero_object"}}, base_revisions={"base": "b" * 40})
+    entry = catalog.select("trained")
+    assert entry.public()["io"]["replay_horizon"] == 4
+    assert entry.public()["io"]["native_action_horizon"] == 8
+    adapter = model_module("vla_adapter")
+    adapter.validate_overlay(adapter.load_overlay(path), BASE, STATS)
+
+
 @pytest.mark.parametrize("legacy", [True, False])
 def test_pi_base_snapshot_reconstruction_preserves_hash(tmp_path, legacy):
     from backend.app.policies.snapshots import snapshot, catalog_from_snapshot

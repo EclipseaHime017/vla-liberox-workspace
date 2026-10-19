@@ -1,0 +1,15 @@
+schema_version: 1
+family_id: bowl_in_drawer_and_close
+label: place the bowl in the drawer and close it
+variants:
+  level1_1:
+    task_id: LEVEL1::EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    goal_prompt: place the yellow bowl in the bottom drawer of the white cabinet and close the drawer
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL1/EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL1/EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.init
+    optional: true
+    instructions:
+    - id: full
+      text: place the yellow bowl in the bottom drawer of the white cabinet and close the drawer

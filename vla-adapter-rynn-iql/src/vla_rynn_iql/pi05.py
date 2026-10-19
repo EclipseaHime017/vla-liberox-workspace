@@ -15,7 +15,7 @@ from .io import atomic_json, sha256_file
 from .models import model_config
 from .base_models import model_contract
 from .model_artifacts import parent_snapshot
-from .model_storage import configure_openpi_cache, local_model_directory
+from .model_storage import cached_sha256, configure_openpi_cache, local_model_directory
 from .pi05_assets import IDENTITY_FILE, OPENPI_COMMIT, checkpoint_identity, identity_digest
 
 
@@ -67,7 +67,7 @@ def load_components(config, *, training: bool = True, parent: dict | None = None
     settings = model_config(config.raw)
     contract = model_contract(settings)
     root = local_model_directory(settings["base_checkpoint"])
-    identity = checkpoint_identity(root, base_id=settings["base_id"], parent=parent, contract=contract)
+    identity = checkpoint_identity(root, hash_file=cached_sha256, base_id=settings["base_id"], parent=parent, contract=contract)
     if settings["base_revision"] is not None and settings["base_revision"] != identity_digest(identity):
         raise ValueError("π₀.₅ base weights/normalization changed after training registration")
     cfg = configs.get_config(identity["config_name"])
@@ -134,9 +134,10 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
 
     samples = []
     io = model_contract(components.settings)["io"]
+    raw_actions = batch.get("actor_raw_actions", batch["raw_actions"])
     for index, prompt in enumerate(batch["prompt"]):
         actions = np.zeros((io["native_action_horizon"], io["action_dim"]), dtype=np.float32)
-        actions[:batch["raw_actions"].shape[1]] = batch["raw_actions"][index].numpy()
+        actions[:raw_actions.shape[1]] = raw_actions[index].numpy()
         samples.append(components.input_transform({
             "observation/image": batch["agent_image"][index].numpy(),
             "observation/wrist_image": batch["wrist_image"][index].numpy(),
@@ -147,7 +148,7 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
     # Quantile statistics can promote NumPy actions to float64; OpenPI trains with float32 actions.
     inputs["actions"] = inputs["actions"].to(dtype=torch.float32)
     errors = components.model(Observation.from_dict(inputs), inputs["actions"])
-    return masked_flow_losses(errors, batch["action_mask"], io["action_dim"]), None
+    return masked_flow_losses(errors, batch.get("actor_action_mask", batch["action_mask"]), io["action_dim"]), None
 
 
 def trainable_parameters(components):

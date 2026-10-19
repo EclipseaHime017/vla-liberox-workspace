@@ -145,8 +145,19 @@ class LiberoXSimulator:
         )
 
     @staticmethod
+    def reseed(env: Any, seed: int) -> None:
+        """Re-place seed-dependent fixtures with a soft reset (no model rebuild)."""
+        env.seed(seed)
+        env.reset()
+
+    @staticmethod
     def restore(env: Any, state: Any) -> dict[str, Any]:
         return direct.restore_state(env, state)
+
+    @staticmethod
+    def restore_control_state(env, actions, control_hz, **options):
+        from .control_state import restore_control_state
+        return restore_control_state(env, actions, control_hz, **options)
 
     @staticmethod
     def observations(env: Any, observation: dict[str, Any]) -> dict[str, Any]:

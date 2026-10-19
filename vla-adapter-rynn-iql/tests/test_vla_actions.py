@@ -26,6 +26,11 @@ class FakeBatch(dict):
         return self
 
 
+def _unchanged_images(images):
+    from PIL import Image
+    return [Image.fromarray(value) for value in images]
+
+
 class FakeProcessor:
     def __call__(self, text, images, padding, return_tensors):
         assert padding is True
@@ -140,7 +145,7 @@ def test_action_round_trip_preserves_motion_and_binary_gripper():
 
 def test_processor_inputs_batches_two_views_without_changing_sample_order():
     components = SimpleNamespace(
-        processor=FakeProcessor(),
+        processor=FakeProcessor(), policy_images=_unchanged_images,
         model=SimpleNamespace(device=torch.device("cpu"), dtype=torch.float32),
     )
     agent = np.zeros((3, 4, 5, 3), dtype=np.uint8)
@@ -159,7 +164,7 @@ def test_processor_inputs_batches_two_views_without_changing_sample_order():
 
 def test_processor_inputs_keeps_legacy_single_sample_and_rejects_mixed_prompts():
     components = SimpleNamespace(
-        processor=FakeProcessor(),
+        processor=FakeProcessor(), policy_images=_unchanged_images,
         model=SimpleNamespace(device=torch.device("cpu"), dtype=torch.float32),
     )
     image = np.zeros((4, 5, 3), dtype=np.uint8)
@@ -188,7 +193,7 @@ def test_frozen_hidden_and_action_helpers_preserve_batch_dimension(monkeypatch, 
     monkeypatch.setitem(sys.modules, "prismatic.vla.constants", constants)
 
     components = SimpleNamespace(
-        processor=FakeProcessor(),
+        processor=FakeProcessor(), policy_images=_unchanged_images,
         model=FakePrismaticModel().requires_grad_(trainable),
         action_head=FakeActionHead(),
         proprio_projector=object(),
@@ -213,3 +218,29 @@ def test_frozen_hidden_and_action_helpers_preserve_batch_dimension(monkeypatch, 
     if trainable:
         hidden.sum().backward()
         assert components.model.action_queries.weight.grad.abs().sum() > 0
+
+
+def test_training_images_match_the_official_inference_preprocessing():
+    """C2: post-training feeds the processor the same pixels as the LIBERO client."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2] / "third_party/VLA-Adapter"
+    if not (root / "experiments/robot/openvla_utils.py").is_file():
+        pytest.skip("VLA-Adapter checkout is unavailable")
+    sys.path.insert(0, str(root))
+    try:
+        from experiments.robot.openvla_utils import prepare_images_for_vla, resize_image_for_policy
+        from experiments.robot.robot_utils import get_image_resize_size
+        from vla_rynn_iql.vla_adapter import policy_image_pipeline
+        from vla_rynn_iql.image_transforms import policy_view
+        cfg = SimpleNamespace(model_family="openvla", center_crop=True)
+        raw = np.random.default_rng(0).integers(0, 256, (256, 256, 3), dtype=np.uint8)
+        # Inference: get_libero_image's 180-degree rotation, prepare_observation's
+        # resize, then prepare_images_for_vla's center crop.
+        size = get_image_resize_size(cfg)
+        expected = prepare_images_for_vla([resize_image_for_policy(raw[::-1, ::-1], size)], cfg)[0]
+        # Training: the replay's oriented frame, then the shared pipeline.
+        actual = policy_image_pipeline(cfg)([policy_view(raw, "libero_raw", "rotate_180")])[0]
+        assert actual.size == expected.size == (224, 224)
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    finally:
+        sys.path.remove(str(root))

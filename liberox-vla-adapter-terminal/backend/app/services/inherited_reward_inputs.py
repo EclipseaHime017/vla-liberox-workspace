@@ -50,7 +50,7 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
         config.LoadedConfig(jobs.base_config_path, raw),
         frozen_observations_sha256=artifacts["observations"]["sha256"])
     if episode is None or episode["run_id"] != member["run_id"]:
-        raise ValueError("冻结轨迹身份或任务不匹配")
+        raise ValueError("冻结轨迹不是有效的训练轨迹（身份或任务不匹配、未完成，或为策略相机消融运行）")
     for name, field in (("manifest", "source_manifest"), ("trajectory", "trajectory"),
                         ("observations", "observations")):
         path_field = "source_manifest" if name == "manifest" else f"{field}_path"
@@ -61,10 +61,12 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
             or int(episode.get("resume_step") or 0) != int(member.get("resume_step") or 0)):
         raise ValueError("冻结轨迹长度或接管边界已改变")
     episode["split"] = member["split"]
-    data.add_episode_chunks(episode, raw["data"]["action_horizon"])
+    data.add_episode_chunks(episode)
     header = {"schema_version": data.MANIFEST_SCHEMA_VERSION, "replay_policy": data.REPLAY_POLICY,
+              "chunking": data.CHUNKING_RULE,
               **{key: raw["data"][key] for key in ("action_horizon", "action_dim", "proprio_dim",
                                                   "control_hz", "success_consecutive_steps")}}
+    header["action_horizon"] = max(chunk["length"] for chunk in episode["chunks"])
     return episode, header
 
 
@@ -128,7 +130,7 @@ def validate_global_values(values: Path | bytes, episode: dict, source: str, off
     with np.load(io.BytesIO(values) if isinstance(values, bytes) else values, allow_pickle=False) as arrays:
         boundaries = arrays["boundary_steps"]
         if not np.array_equal(boundaries, episode["reward_boundaries"]):
-            raise ValueError("全局评价时间点与当前数据集 chunk 边界不一致，请使用相同成功阈值；不会自动重新评价")
+            raise ValueError("全局评价时间点与当前执行区间／成功边界不一致，请在数据集配置中重新生成评价／奖励；不会自动重跑模型")
         final = arrays["final_reward"] if "final_reward" in arrays else arrays["pbrs_chunk_reward"]
         if final.shape != (len(boundaries) - 1,) or not np.isfinite(final).all():
             raise ValueError("全局奖励数组不完整或包含无效数值")

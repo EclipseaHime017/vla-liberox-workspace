@@ -43,7 +43,20 @@ def make_run(
     episode = run_dir / "episodes" / "episode_000"
     episode.mkdir(parents=True)
     action_count = 17
-    np.savez_compressed(episode / "trajectory.npz", action=np.zeros((action_count, 7)))
+    raw_actions = np.zeros((action_count, 7), dtype=np.float32)
+    raw_actions[:, 6] = .5
+    done = np.zeros(action_count, dtype=bool)
+    if success:
+        done[-5:] = True
+    sources = ["policy"] * action_count
+    if kind == "branch":
+        sources[resume_step:] = [source] * (action_count - resume_step)
+    np.savez_compressed(episode / "trajectory.npz", action=np.zeros((action_count, 7)),
+        env_action=np.zeros((action_count, 7)), raw_action=raw_actions,
+        time_seconds=np.arange(action_count + 1) / 20,
+        eef_position=np.zeros((action_count + 1, 3)),
+        eef_axis_angle=np.zeros((action_count + 1, 3)),
+        gripper_qpos=np.zeros((action_count + 1, 2)), done=done, action_source=np.array(sources))
     np.savez_compressed(
         episode / "trajectory_observations.npz",
         agentview_image=np.zeros((action_count + 1, 2, 2, 3), dtype=np.uint8),
@@ -55,6 +68,11 @@ def make_run(
         "task_id": task_id,
         "status": "COMPLETED",
         "success": success,
+        "task": "pick the bowl", "task_name": "pick", "open_loop_steps": 8,
+        "control_mode": "manual" if source == "human" else "policy",
+        "resume_step": resume_step if kind == "branch" else None,
+        "parent_session_id": "root" if kind == "branch" else None,
+        "root_session_id": "root" if kind == "branch" else run_id,
     }
     (run_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     return {
@@ -587,3 +605,77 @@ def test_training_accepts_legacy_reward_manifest_for_no_forward_migration(tmp_pa
     validated_work, _, manifest = jobs._validated_annotation_work(dataset)
     assert validated_work == work
     assert manifest["schema_version"] == 5
+
+
+def test_dataset_outcome_requires_confirmed_success_and_excludes_camera_ablations(tmp_path: Path):
+    runs = {name: make_run(tmp_path, name, success=True) for name in
+            ("flicker", "confirmed", "legacy_confirmed", "legacy_flicker", "ablation")}
+    runs["flicker"].update(success_confirmed=False, success_confirmed_step=None)
+    runs["confirmed"].update(success_confirmed=True, success_confirmed_step=9)
+    runs["ablation"].update(success_confirmed=True, success_confirmed_step=9,
+                            disabled_policy_cameras=["wrist"])
+    # Records written before the confirmed fields existed are derived from done.
+    for name, streak in (("legacy_confirmed", 5), ("legacy_flicker", 4)):
+        done = np.zeros(17, dtype=bool)
+        done[10:10 + streak] = True
+        np.savez_compressed(runs[name]["trajectory"], action=np.zeros((17, 7)), done=done)
+    listed = {item["id"]: item for item in service(tmp_path, list(runs.values())).list_runs()}
+    assert {name: listed[name]["outcome"] for name in runs} == {
+        "flicker": "failure", "confirmed": "success", "legacy_confirmed": "success",
+        "legacy_flicker": "failure", "ablation": "success",
+    }
+    assert listed["flicker"]["training_eligible"] is True
+    assert listed["ablation"]["training_eligible"] is False
+    assert "消融" in listed["ablation"]["ineligible_reason"]
+
+
+def test_training_rejects_frozen_datasets_that_contain_camera_ablations(tmp_path: Path):
+    from backend.app.core.exceptions import ConflictError
+    clean, ablation = make_run(tmp_path, "clean"), make_run(tmp_path, "ablation")
+    # Frozen before ablations were excluded: the run view lacked the marker, the manifest has it.
+    manifest = Path(ablation["output_dir"]) / "run.json"
+    manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "disabled_policy_cameras": ["wrist"]}))
+    current = service(tmp_path, [clean, ablation])
+    dataset = current.create(name="old", task_id="LEVEL1::pick",
+                             selection={"mode": "manual", "run_ids": ["clean", "ablation"]})
+    with pytest.raises(ConflictError) as raised:
+        current.require_ready_for_training(dataset["id"])
+    assert raised.value.code == "DATASET_ABLATION_RUNS"
+    assert raised.value.context["run_ids"] == ["ablation"]
+    ok = current.create(name="clean", task_id="LEVEL1::pick",
+                        selection={"mode": "manual", "run_ids": ["clean"]})
+    assert current.require_ready_for_training(ok["id"])["integrity_status"] == "HEALTHY"
+
+
+def test_new_datasets_store_the_system_success_rule_and_old_ones_keep_theirs(tmp_path: Path, monkeypatch):
+    import vla_rynn_iql.config as config
+    from pydantic import ValidationError
+    from backend.app.api.models import CreateTrainingDatasetRequest
+    runs = [make_run(tmp_path, "a"), make_run(tmp_path, "b")]
+    current = service(tmp_path, runs)
+    selection = {"mode": "manual", "run_ids": ["a"]}
+    before = current.create(name="before", task_id="LEVEL1::pick", selection=selection)
+    assert before["success_consecutive_steps"] == 5
+    monkeypatch.setattr(config, "success_consecutive_steps", lambda: 3)
+    after = current.create(name="after", task_id="LEVEL1::pick", selection=selection)
+    assert after["success_consecutive_steps"] == 3
+    assert current.get(before["id"])["success_consecutive_steps"] == 5  # existing experiments unchanged
+    # Deriving adjusts membership or split, never the success rule.
+    child = current.create(name="child", task_id="LEVEL1::pick", selection={"mode": "manual", "run_ids": ["b"]},
+                           parent_dataset_id=before["id"])
+    assert child["success_consecutive_steps"] == 5
+    with pytest.raises(ValidationError):  # no per-dataset override
+        CreateTrainingDatasetRequest(task_id="LEVEL1::pick", name="x", selection={"mode": "manual", "run_ids": ["a"]},
+                                     success_consecutive_steps=3)
+
+
+def test_overview_counts_confirmed_successes():
+    from backend.app.domain.run import summarize_runs
+    runs = [
+        {"task_id": "t", "task_name": "pick", "level": "L1", "status": "COMPLETED", "success": True, "success_confirmed": True},
+        {"task_id": "t", "task_name": "pick", "level": "L1", "status": "COMPLETED", "success": True, "success_confirmed": False},
+        {"task_id": "u", "task_name": "stack", "level": "L2", "status": "ERROR", "success": True, "success_confirmed": True},
+    ]
+    summary = summarize_runs(runs, "project")
+    assert (summary["runs"], summary["completed"], summary["errors"], summary["successes"]) == (3, 2, 1, 1)
+    assert {row["task_id"]: (row["runs"], row["successes"]) for row in summary["tasks"]} == {"t": (2, 1), "u": (1, 0)}

@@ -1,0 +1,48 @@
+schema_version: 1
+family_id: stack_bowls
+label: stack the bowls
+variants:
+  level1_1:
+    task_id: LEVEL1::EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+    level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+    goal_prompt: stack the blue bowl on the green bowl
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL1/EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL1/EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl.init
+    optional: false
+    instructions:
+    - id: full
+      text: stack the blue bowl on the green bowl
+  level2_2:
+    task_id: LEVEL2::EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+    level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl
+    goal_prompt: stack the blue bowl on the green bowl
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL2/EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL2/EXTENSION_KITCHEN_SCENE25_stack_the_blue_bowl_on_the_green_bowl.init
+    optional: true
+    instructions:
+    - id: full
+      text: stack the blue bowl on the green bowl
+  level3_3:
+    task_id: LEVEL3::EXTENSION_KITCHEN_SCENE25_LEVEL3__T133_stack_the_blue_bowl_on_the_green_bowl
+    level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE25_LEVEL3__T133_stack_the_blue_bowl_on_the_green_bowl
+    goal_prompt: stack the blue bowl on the green bowl
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL3/EXTENSION_KITCHEN_SCENE25_LEVEL3__T133_stack_the_blue_bowl_on_the_green_bowl.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL3/EXTENSION_KITCHEN_SCENE25_LEVEL3__T133_stack_the_blue_bowl_on_the_green_bowl.init
+    optional: true
+    instructions:
+    - id: full
+      text: stack the blue bowl on the green bowl
+  level4_4:
+    task_id: LEVEL4::EXTENSION_KITCHEN_SCENE25_LEVEL4__T133__A1_stack_the_cyan_bowl_on_the_green_bowl
+    level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE25_LEVEL4__T133__A1_stack_the_cyan_bowl_on_the_green_bowl
+    goal_prompt: stack the cyan bowl on the green bowl
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL4/EXTENSION_KITCHEN_SCENE25_LEVEL4__T133__A1_stack_the_cyan_bowl_on_the_green_bowl.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL4/EXTENSION_KITCHEN_SCENE25_LEVEL4__T133__A1_stack_the_cyan_bowl_on_the_green_bowl.init
+    optional: true
+    instructions:
+    - id: full
+      text: stack the cyan bowl on the green bowl

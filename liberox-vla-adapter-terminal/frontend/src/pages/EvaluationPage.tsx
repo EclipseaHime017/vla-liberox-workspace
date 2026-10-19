@@ -84,11 +84,12 @@ function EvaluationDetail({ record }: { record: EvaluationRecord }) {
         <div><strong>{aggregate?.errors ?? 0}</strong><span>错误</span></div>
         <div><strong>{percentage(aggregate?.completion_rate)}</strong><span>完成覆盖率</span></div>
         <p>Wilson 95% 置信区间：{percentage(aggregate?.wilson_lower)} – {percentage(aggregate?.wilson_upper)}。错误回合计入成功率分母。</p>
+        <p>该区间假设各回合相互独立。同一 init state 的回合结果可能相关，init state 较少时区间可能偏窄，请结合下方各 init state 的成功率判断{aggregate?.init_state_summary?.state_mean_success_rate != null && <>（{aggregate.init_state_summary.states} 个 init state 的平均成功率 {percentage(aggregate.init_state_summary.state_mean_success_rate)}）</>}。</p>
       </div>
     </div>
     <div className="surface evaluation-context">
       <div className="panel-title"><strong>测试上下文</strong><span>{record.id}</span></div>
-      <div><span>任务</span><b>{record.task_prompt || record.task_name}</b><span>策略</span><b>{record.policy_label}</b><span>调度</span><code>{record.schedule_sha256?.slice(0, 16) || "—"}</code><span>成功规则</span><b>done 连续 5 步，回合仍执行满 horizon</b><span>模型加载</span><b>{duration(record.model_load_seconds)}</b><span>总墙钟时间</span><b>{duration(record.wall_time_seconds)}</b></div>
+      <div><span>任务</span><b>{record.task_prompt || record.task_name}</b><span>策略</span><b>{record.policy_label}</b><span>调度</span><code>{record.schedule_sha256?.slice(0, 16) || "—"}</code><span>成功规则</span><b>done 连续 {record.success_rule?.done_consecutive_steps ?? 5} 步，回合仍执行满 horizon</b><span>模型加载</span><b>{duration(record.model_load_seconds)}</b><span>总墙钟时间</span><b>{duration(record.wall_time_seconds)}</b></div>
     </div>
     <div className="evaluation-breakdown-grid surface">
       <Breakdown title="不同随机环境成功率" prefix="Init #" values={aggregate?.by_init_state} />
@@ -118,7 +119,7 @@ export function EvaluationPage() {
   const [trials, setTrials] = useState(100);
   const [maxSteps, setMaxSteps] = useState(300);
   const [openLoopSteps, setOpenLoopSteps] = useState(8);
-  const [realtime, setRealtime] = useState(true);
+  const [realtime, setRealtime] = useState(false);
   const [randomizeInitStates, setRandomizeInitStates] = useState(true);
   const [customStates, setCustomStates] = useState(false);
   const [stateIndices, setStateIndices] = useState<number[]>([]);
@@ -256,7 +257,7 @@ export function EvaluationPage() {
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
 
     <section className="surface evaluation-builder">
-      <div className="panel-title"><strong>创建测试</strong><span>done 连续 5 步确认成功</span></div>
+      <div className="panel-title"><strong>创建测试</strong><span>done 连续 {bootstrap?.config?.success_consecutive_steps ?? 5} 步确认成功</span></div>
       <div className="evaluation-form">
         <TaskSelector tasks={bootstrap?.task_catalog ?? []} value={taskId} onChange={changeTask} labelPrefix="测试" />
         <label>模型<select aria-label="测试模型" value={policyId} onChange={(event) => changePolicy(event.target.value)}>{bootstrap?.policy_catalog.map((policy) => <option key={policy.policy_id} value={policy.policy_id}>{policy.label}{policy.training_step == null ? "" : ` · step ${policy.training_step}`}</option>)}</select></label>

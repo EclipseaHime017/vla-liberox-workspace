@@ -79,6 +79,10 @@ def test_all_variants_preserve_declared_assets_and_execution_defaults():
             assert base_models.execution_config(settings) == {"open_loop_steps": default, "max_open_loop_steps": maximum}
             assert base_models.resolve_open_loop_steps(settings, None) == default
             assert base_models.resolve_open_loop_steps(settings, maximum) == maximum
+            supervision = base_models.model_contract(settings)["io"]["replay_horizon"]
+            assert base_models.execution_config(settings, trained=True) == {
+                "open_loop_steps": min(default, supervision), "max_open_loop_steps": maximum}
+            assert base_models.resolve_open_loop_steps(settings, maximum, trained=True) == maximum
             with pytest.raises(ValueError, match="open_loop_steps"):
                 base_models.resolve_open_loop_steps(settings, maximum + 1)
 
@@ -87,6 +91,23 @@ def test_registry_imports_without_loading_model_runtimes():
     subprocess.run([sys.executable, "-B", "-c", "import sys; import vla_rynn_iql.models; "
                     "assert not {'torch', 'transformers', 'openpi', 'prismatic'} & sys.modules.keys()"],
                    check=True, capture_output=True, text=True)
+
+
+def test_trained_defaults_and_supervision_bounds_are_family_independent(monkeypatch):
+    from dataclasses import replace
+
+    for identifier, base in list(base_models.BASE_MODELS.items()):
+        maximum = base.contract["io"]["native_action_horizon"]
+        monkeypatch.setitem(base_models.BASE_MODELS, identifier,
+                            replace(base, inference={"open_loop_steps": maximum}))
+        settings = models.base_model_config(identifier)
+        settings["contract"] = base_models.model_contract(settings)
+        settings["contract"]["io"]["replay_horizon"] = min(4, maximum)
+        assert base_models.execution_config(settings)["open_loop_steps"] == maximum
+        assert base_models.execution_config(settings, trained=True)["open_loop_steps"] == min(4, maximum)
+        settings["contract"]["io"]["replay_horizon"] = maximum + 1
+        with pytest.raises(ValueError, match="supervision horizon"):
+            base_models.model_contract(settings)
 
 
 def test_default_family_is_not_changed_by_registry_order(monkeypatch):
@@ -376,7 +397,7 @@ def test_third_family_uses_registered_adapter_without_runtime_branches(tmp_path,
     entry.update(model_name="independent-family", adapter="fixture-adapter", default_variant="custom-checkpoint",
                  backbone_modes=["frozen"], defaults={"environment": "test", "backbone": "frozen", "base_revision": None, "gain": 2})
     entry["variants"] = {"custom-checkpoint": next(iter(entry["variants"].values()))}
-    entry["io"].update(image_size=384, native_action_horizon=16)
+    entry["io"].update(image_size=384, native_action_horizon=16, replay_horizon=12)
     entry["variants"]["custom-checkpoint"]["inference"]["open_loop_steps"] = 12
     raw["independent-family"] = entry
     definitions, variants = base_models.load_registry(write_registry(tmp_path / "third", raw))
@@ -393,7 +414,7 @@ def test_third_family_uses_registered_adapter_without_runtime_branches(tmp_path,
     exported = child("independent-family")
     original = variants["custom-checkpoint"]
     assert base_models.resolve_open_loop_steps(settings, 16) == 16
-    assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
+    assert base_models.model_contract(settings)["io"]["replay_horizon"] == 12
     changed = copy.deepcopy(original.contract)
     changed["io"]["native_action_horizon"] = 32
     monkeypatch.setitem(base_models.BASE_MODELS, original.id,

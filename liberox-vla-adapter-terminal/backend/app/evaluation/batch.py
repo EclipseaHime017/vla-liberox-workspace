@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 import yaml
+
+LOGGER = logging.getLogger(__name__)
 
 
 SCHEMA_VERSION = 1
@@ -310,6 +313,25 @@ def _group_summary(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def init_state_summary(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Per-init-state view of the success rate, without an interval.
+
+    Trials sharing an init state differ only in seed-placed fixtures and policy
+    sampling, so their outcomes can be strongly correlated, and the overall
+    Wilson interval (which assumes independent trials) can be too narrow. With
+    the few init states a batch test uses, no simple clustered interval has
+    reliable coverage, so only the unweighted mean of per-state rates is given
+    next to ``by_init_state``.
+    """
+    grouped: dict[int, list[bool]] = {}
+    for item in items:
+        grouped.setdefault(int(item["init_state_index"]), []).append(
+            bool(item.get("success")) and not bool(item.get("error")))
+    rates = [sum(values) / len(values) for values in grouped.values()]
+    return {"states": len(grouped),
+            "state_mean_success_rate": statistics.fmean(rates) if rates else None}
+
+
 def _numeric_summary(values: Sequence[float]) -> dict[str, float | None]:
     clean = sorted(float(value) for value in values if math.isfinite(float(value)))
     if not clean:
@@ -366,6 +388,7 @@ def aggregate_trials(
             "completion_coverage": len(items) / scheduled_trials,
             "completion_rate": len(items) / scheduled_trials,
             "by_init_state": groups(lambda item: str(item["init_state_index"])),
+            "init_state_summary": init_state_summary(items),
             "by_seed": groups(lambda item: str(item["seed"])),
             "by_combination": groups(
                 lambda item: f"{item['init_state_index']}:{item['seed']}"
@@ -432,7 +455,8 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     evaluation_id = _strict_string(root["evaluation_id"], "evaluation_id")
     if Path(evaluation_id).name != evaluation_id or ".." in evaluation_id:
         raise ValueError("evaluation_id is unsafe")
-    task = _validate_exact_mapping(root["task_snapshot"], TASK_KEYS, "task_snapshot")
+    task_keys = TASK_KEYS | ({"task_revision_sha256"} if "task_revision_sha256" in root["task_snapshot"] else set())
+    task = _validate_exact_mapping(root["task_snapshot"], task_keys, "task_snapshot")
     from ..policies.snapshots import validate_snapshot
     policy = validate_snapshot(root["policy_snapshot"])
     config = _validate_exact_mapping(root["config"], CONFIG_KEYS, "config")
@@ -453,6 +477,13 @@ def load_effective_config(path: Path) -> dict[str, Any]:
         if not source.is_absolute() or not source.is_file():
             raise FileNotFoundError(f"task_snapshot.{key} is not an existing absolute file")
         task[key] = str(source.resolve())
+    if task.get("task_revision_sha256"):
+        from ..services.task_registry import TaskSnapshot
+        frozen = TaskSnapshot.load(None, Path(task["bddl_path"]).parent / "task.json")
+        if (frozen.manifest["task_revision_sha256"] != task["task_revision_sha256"]
+                or frozen.entry(task["task_id"]).prompt != task["prompt"]
+                or frozen.paths(task["task_id"]) != (Path(task["bddl_path"]), Path(task["init_path"]))):
+            raise ValueError("Evaluation task snapshot identity mismatch")
     if not isinstance(config["realtime"], bool):
         raise TypeError("config.realtime must be true or false")
     for key, minimum in (
@@ -476,8 +507,9 @@ def load_effective_config(path: Path) -> dict[str, Any]:
     )
     if config["control_hz"] != 20:
         raise ValueError("config.control_hz must remain 20 Hz")
-    if config["success_streak"] != 5:
-        raise ValueError("config.success_streak must remain 5")
+    required = model_module("config").success_consecutive_steps()
+    if config["success_streak"] != required:
+        raise ValueError(f"config.success_streak must remain {required} (system success_consecutive_steps)")
     if config["consecutive_error_limit"] != 3:
         raise ValueError("config.consecutive_error_limit must remain 3")
     seed_count = config["seed_count"]
@@ -676,6 +708,8 @@ def run_evaluation(
     started = time.monotonic()
     consecutive_errors = 0
     provider: Any = None
+    shared_env: Any = None
+    simulator: Any = None
     try:
         if stop_requested():
             raise InterruptedError("Evaluation stopped before setup")
@@ -767,6 +801,7 @@ def run_evaluation(
                 record["status"] = "CANCELED"
                 break
             env = None
+            discard_env = False
             episode_started = time.monotonic()
             episode_progress: dict[str, Any] = {}
             close_error: Exception | None = None
@@ -792,12 +827,22 @@ def run_evaluation(
                 if hasattr(provider, "seed"):
                     provider.seed(seed)
                 episode_config = replace(eval_config, seed=seed)
-                env = simulator.create(
-                    Path(task["bddl_path"]),
-                    episode_config,
-                    max_steps=config["max_steps"],
-                    seed=seed,
-                )
+                # One environment serves every trial of the task: a soft reset
+                # plus the explicit state restore in _episode reproduces a fresh
+                # environment exactly, without recompiling the MuJoCo model.
+                reuse = shared_env is not None
+                if not reuse:
+                    shared_env = simulator.create(
+                        Path(task["bddl_path"]),
+                        episode_config,
+                        max_steps=config["max_steps"],
+                        seed=seed,
+                    )
+                # Bind before resetting: a failed reset must discard this env.
+                env = shared_env
+                if reuse:
+                    env.seed(seed)
+                    env.reset()
                 trial = _episode(
                     simulator=simulator,
                     provider=provider,
@@ -821,6 +866,7 @@ def run_evaluation(
                 record["status"] = "CANCELED"
                 break
             except Exception as exc:
+                discard_env = True
                 consecutive_errors += 1
                 query_ms = [
                     float(value) * 1000.0
@@ -853,7 +899,9 @@ def run_evaluation(
                     "elapsed_seconds": time.monotonic() - episode_started,
                 }
             finally:
-                if env is not None:
+                # A failed trial may leave the environment inconsistent; rebuild it.
+                if env is not None and discard_env:
+                    shared_env = None
                     try:
                         simulator.close(env)
                     except Exception as exc:
@@ -914,6 +962,11 @@ def run_evaluation(
             record["status"] = "FAILED"
             record["error"] = f"{type(exc).__name__}: {exc}"
     finally:
+        if shared_env is not None:
+            try:
+                simulator.close(shared_env)
+            except Exception as exc:
+                LOGGER.warning("Evaluation environment close failed: %s", exc)
         if provider is not None:
             try:
                 provider.unload()

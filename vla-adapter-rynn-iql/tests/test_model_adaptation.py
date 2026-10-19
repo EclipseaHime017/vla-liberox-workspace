@@ -156,7 +156,8 @@ def test_terminal_preserves_nested_lora_defaults_and_explicit_legacy_override(co
 
 
 @pytest.mark.parametrize("mode", ["frozen", "full", "lora"])
-def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("supervision", [4, 8])
+def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeypatch, mode, supervision):
     import sys
     import types
     from vla_rynn_iql.training import _publish_overlay, _save_checkpoint
@@ -167,6 +168,10 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
     config = copy.deepcopy(configured)
     config.raw["training"]["method"] = "bc"
     config.raw["model"]["backbone"] = mode
+    from vla_rynn_iql.base_models import model_contract
+    config.raw["model"]["contract"] = model_contract(config.raw["model"])
+    config.raw["model"]["contract"]["io"]["replay_horizon"] = supervision
+    config.raw["data"]["action_horizon"] = supervision
     initial = components()
     initial.model.norm_stats = {config.section("model")["stats_key"]: {"action": _stats(7), "proprio": _stats(8)}}
     c = copy.deepcopy(initial)
@@ -178,7 +183,7 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
     predict(c).square().mean().backward()
     optimizer.step()
     checkpoint = _save_checkpoint(tmp_path / "checkpoints", 1, c, BehaviorCloning(), optimizer,
-        torch.Generator(), config, {"dataset_sha256": "d" * 64}, None)
+        torch.Generator(), config, {"dataset_sha256": "d" * 64, "action_horizon": 8}, None)
     expected = predict(c).detach()
     overlay_path = _publish_overlay(checkpoint, tmp_path / "registry", 1, config, c,
                                    {"dataset_sha256": "d" * 64}, None)

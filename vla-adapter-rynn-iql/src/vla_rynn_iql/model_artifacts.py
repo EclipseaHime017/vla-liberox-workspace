@@ -13,6 +13,7 @@ def legacy_contract(settings: dict) -> dict:
     """Exports/snapshots without a contract used the original 180° camera input."""
     contract = model_contract(settings)
     if "contract" not in settings:
+        contract["io"]["replay_horizon"] = 8
         contract["observation"] = {"image_flip_vertical": True, "image_flip_horizontal": True}
     return contract
 

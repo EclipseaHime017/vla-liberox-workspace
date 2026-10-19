@@ -26,7 +26,7 @@ def test_model_family_configuration_is_independent(method, tmp_path):
     path = PROJECT_ROOT / f"configs/training/{method}.yaml"
     raw = load_train_config(path, family="pi05").raw
     assert raw["model"]["family"] == "pi05"
-    assert raw["data"]["action_horizon"] == 8
+    assert raw["data"]["action_horizon"] == 10
     assert set(model_parameters(raw)) == {"model_family", "model_backbone", "model_base_id"}
     assert "lora" not in raw["model"] and "proprio_projector" not in raw["model"]
     saved = tmp_path / "vla.yaml"

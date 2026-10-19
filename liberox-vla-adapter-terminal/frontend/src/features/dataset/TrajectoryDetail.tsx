@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AnnotationDataset, StageAnnotation, TrajectoryDetail as Detail } from "../run-control/types";
 import { Badge } from "../../components/ui/Badge";
+import { runOutcome } from "../run-control/formatters";
 import { Dialog } from "../../components/ui/Dialog";
 import { StageAnnotationPanel } from "./StageAnnotationPanel";
 import { selectMainVideoArtifact } from "../simulation-view/controls";
@@ -342,7 +343,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
       available: correlation != null, correlation,
       reason: correlation == null ? "至少一条序列没有方差，无法计算相关性" : null,
       rynnEnd: aligned[aligned.length - 1], roboEnd: robo.progress_pred.at(-1),
-      successEnd: robo.success_probs.at(-1), environmentSuccess: detail.run.success,
+      successEnd: robo.success_probs.at(-1), environmentSuccess: runOutcome(detail.run).confirmed,
     };
   }, [detail]);
   return <section className="content-page trajectory-detail-page">
@@ -351,7 +352,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
         <div className="trajectory-identity">
           <div className="trajectory-identity-line">
             <h1>轨迹 {detail.run.id}</h1>
-            <Badge tone={detail.run.success ? "green" : "neutral"}>{detail.run.success ? "成功" : "失败"}</Badge>
+            <Badge tone={runOutcome(detail.run).tone}>{runOutcome(detail.run).label}</Badge>
             <span>{detail.run.source_type ?? detail.run.control_mode}</span>
             <span>{detail.run.created_at ? new Date(detail.run.created_at).toLocaleString() : "—"}</span>
           </div>

@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 import eval_pickplace_direct as direct
-from simulation_core import run_control_loop
+from simulation_core import confirmed_success_step, run_control_loop, success_confirm_steps
 from trajectory_utils import (
     TrajectoryRecorder,
     load_trajectory,
@@ -38,6 +38,7 @@ from ..domain.run import (
     TERMINAL_STATES,
     SimulationDraft,
     SimulationSession,
+    summarize_runs,
     utc_now,
 )
 from ..evaluation.libero_evaluator import LiberoEvaluator
@@ -49,6 +50,9 @@ from ..services.work_resources import ResourceLease
 from ..recording.episode_recorder import EpisodeRecorderFactory
 from ..services.controller_service import SpaceMouseControllerService
 from ..services.task_catalog import ConfiguredTaskCatalog
+from ..services.task_registry import RegistryTaskCatalog, TaskSnapshot, freeze_task
+from ..services.run_continuation import (continuation_public, promote_run, instruction_at,
+                                         prefix_segments)
 from ..simulators.libero_x import LiberoXSimulator
 from ..storage.files import (
     atomic_write_bytes,
@@ -64,6 +68,32 @@ from ..storage.repositories import RunRepository
 LOGGER = logging.getLogger("liberox.backend.worker")
 SESSION_MANIFEST_SCHEMA_VERSION = 2
 SESSION_SUMMARY_SCHEMA_VERSION = 2
+
+
+def _confirmed_success(result: dict[str, Any], manifest: dict[str, Any],
+                       trajectory: str | None) -> dict[str, Any]:
+    """Confirmed-success fields under the current system-wide streak length.
+
+    A stored result is reused only if it was evaluated with the current
+    setting; older records, and records from before a setting change, are
+    re-derived from the trajectory's ``done`` array.
+    """
+    required = success_confirm_steps()
+    for source in (result, manifest):
+        if "success_confirmed_step" in source and source.get("success_confirm_steps") == required:
+            step = source["success_confirmed_step"]
+            step = int(step) if isinstance(step, int) and not isinstance(step, bool) else None
+            return {"success_confirmed": step is not None, "success_confirmed_step": step,
+                    "success_confirm_steps": required}
+    step = None
+    if trajectory is not None:
+        try:
+            with np.load(trajectory, allow_pickle=False) as arrays:
+                step = confirmed_success_step(arrays["done"], required) if "done" in arrays.files else None
+        except (OSError, ValueError, KeyError, EOFError):
+            step = None
+    return {"success_confirmed": step is not None, "success_confirmed_step": step,
+            "success_confirm_steps": required}
 
 
 class PreviewService:
@@ -106,7 +136,8 @@ class PreviewService:
     def _run(self) -> None:
         config = self.manager.eval_config
         env = None
-        env_context: tuple[str, int] | None = None
+        env_context: str | None = None
+        env_seed: int | None = None
         period = 1.0 / self.manager.ui_config.preview_fps
         try:
             last_render = 0.0
@@ -133,9 +164,12 @@ class PreviewService:
                                 continue
                         else:
                             resource = ResourceLease(work_queue.gpu_lock_path)
-                    bddl, _ = self.manager.catalog.paths(task_id)
-                    # LEVEL5 prompt variants share the same LEVEL4 scene.
-                    target_context = (str(bddl), int(target.seed))
+                    task_catalog = self.manager._task_catalog_for(target) if hasattr(self.manager, "_task_catalog_for") else self.manager.catalog
+                    bddl, _ = task_catalog.paths(task_id)
+                    # LEVEL5 prompt variants share the same LEVEL4 scene. The
+                    # seed places fixtures in the model (not in the saved state),
+                    # so a new seed needs a cheap soft reset, not a rebuild.
+                    target_context = str(bddl)
                     if env is None or env_context != target_context:
                         if env is not None:
                             self.manager.simulator.close(env)
@@ -146,7 +180,11 @@ class PreviewService:
                             max_steps=10000,
                             seed=target.seed,
                         )
-                        env_context = target_context
+                        env_context, env_seed = target_context, int(target.seed)
+                    elif env_seed != int(target.seed):
+                        env_seed = None
+                        self.manager.simulator.reseed(env, int(target.seed))
+                        env_seed = int(target.seed)
                     self.manager.simulator.restore(env, state)
                     frame = self.manager.simulator.render_operator_preview(
                         env,
@@ -226,7 +264,7 @@ class SimulationManager:
         self.simulator = LiberoXSimulator(self.runtime)
         self.recorder_factory = EpisodeRecorderFactory()
         self.evaluator = LiberoEvaluator()
-        self.catalog = ConfiguredTaskCatalog(
+        self.catalog = RegistryTaskCatalog(self.runtime, self.ui_config.task_registry) if getattr(self.ui_config, "task_registry", None) else ConfiguredTaskCatalog(
             self.runtime,
             liberox_root,
             self.eval_config,
@@ -343,8 +381,8 @@ class SimulationManager:
                 task_id = item.get("task_id")
                 if task_id is not None:
                     try:
-                        self.catalog.entry(str(task_id))
-                    except ValueError:
+                        self._task_catalog_for(item).entry(str(task_id))
+                    except (ValueError, OSError):
                         task_id = None
                 if task_id is None:
                     task_id = self.catalog.resolve_id(
@@ -368,6 +406,7 @@ class SimulationManager:
                 ),
                 "control_hz": self.eval_config.control_hz,
                 "video_fps": self.eval_config.video_fps,
+                "success_consecutive_steps": success_confirm_steps(),
                 "preview": {
                     "width": self.ui_config.preview_width,
                     "height": self.ui_config.preview_height,
@@ -484,17 +523,28 @@ class SimulationManager:
             controller.emergency_stop(reason)
 
     def list_sessions(self) -> list[dict[str, Any]]:
+        # Directory scans run outside the manager lock, which the control loop
+        # takes on every step; only the in-memory snapshot is built under it.
         with self.lock:
-            items = [record.public(safe_artifacts(record.output_dir)) for record in self.sessions.values()]
-            items.extend(self.legacy_sessions.values())
+            records = list(self.sessions.values())
+            legacy = list(self.legacy_sessions.values())
+        artifacts = {record.id: safe_artifacts(record.output_dir) for record in records}
+        with self.lock:
+            items = [record.public(artifacts[record.id]) for record in records]
+        items.extend(legacy)
         return sorted(
-            items,
+            [continuation_public(item) for item in items],
             key=lambda item: (item.get("created_at") or "", item["id"]),
             reverse=True,
         )
 
     def dataset_summary(self) -> dict[str, Any]:
-        summary = self.repository.summary()
+        # Counted from the run views, not the SQLite index: its success column
+        # holds the instantaneous flag, while lists and datasets use confirmed success.
+        with self.lock:
+            runs = [record.public() for record in self.sessions.values()]
+            runs.extend(item for item in self.legacy_sessions.values() if not item.get("legacy"))
+        summary = summarize_runs(runs, self.ui_config.project_id)
         summary["dataset_root"] = str(self.ui_config.dataset_root)
         summary["catalog"] = str(self.ui_config.catalog_path)
         summary["legacy_indexed"] = sum(
@@ -504,12 +554,39 @@ class SimulationManager:
 
     def get_public(self, session_id: str) -> dict[str, Any]:
         with self.lock:
-            if session_id in self.sessions:
-                record = self.sessions[session_id]
-                return record.public(safe_artifacts(record.output_dir))
-            if session_id in self.legacy_sessions:
-                return dict(self.legacy_sessions[session_id])
-        raise KeyError(session_id)
+            record = self.sessions.get(session_id)
+            if record is None:
+                if session_id in self.legacy_sessions:
+                    return continuation_public(dict(self.legacy_sessions[session_id]))
+                raise KeyError(session_id)
+        artifacts = safe_artifacts(record.output_dir)
+        with self.lock:
+            return continuation_public(record.public(artifacts))
+
+    def promote(self, session_id: str) -> dict[str, Any]:
+        with self.lock:
+            run = self.get_public(session_id)
+            if run.get("can_promote"):
+                load_trajectory(Path(run["trajectory"]))
+            return promote_run(run)
+
+    def _task_catalog_for(self, target):
+        output = target.get("output_dir") if isinstance(target, dict) else getattr(target, "output_dir", None)
+        declared = target.get("task_snapshot") if isinstance(target, dict) else getattr(target, "task_snapshot", None)
+        snapshot = Path(output) / "task_snapshot" / "task.json" if output else None
+        if snapshot is None or not snapshot.is_file():
+            if declared:
+                raise FileNotFoundError(f"Saved task snapshot is unavailable: {snapshot or declared}")
+            return self.catalog
+        files = [snapshot, snapshot.parent / "task.bddl", snapshot.parent / "initial_states.init"]
+        key = (str(snapshot), tuple((file.stat().st_size, file.stat().st_mtime_ns) for file in files))
+        cache = getattr(self, "_task_snapshot_cache", {})
+        if key not in cache:
+            if len(cache) >= 8:
+                cache.clear()
+            cache[key] = TaskSnapshot.load(self.runtime, snapshot)
+            self._task_snapshot_cache = cache
+        return cache[key]
 
     def _new_record(
         self,
@@ -530,6 +607,7 @@ class SimulationManager:
         manual_rotation_gain: float | None = None,
         controller_id: str | None = None,
         control_frame: str | None = None,
+        policy_instruction: str | None = None,
     ) -> SimulationSession:
         eval_config = getattr(self, "eval_config", None)
         default_seed = int(getattr(eval_config, "seed", 0))
@@ -553,8 +631,12 @@ class SimulationManager:
             else disabled_policy_cameras
         )
         task_id = task_id or self.catalog.default_task_id
-        self.catalog.initial_state(task_id, init_state_index)
-        task = self.catalog.metadata(task_id)
+        task_catalog = self.catalog if parent is None else self._task_catalog_for(parent)
+        task_catalog.initial_state(task_id, init_state_index)
+        task = task_catalog.metadata(task_id)
+        policy_instruction = task["prompt"] if policy_instruction is None else policy_instruction.strip()
+        if not policy_instruction:
+            raise ValueError("policy_instruction must not be empty")
         if parent is not None and control_mode == "manual":
             policy = SimpleNamespace(
                 policy_id=policy_id, label=parent.get("policy_label"),
@@ -583,6 +665,14 @@ class SimulationManager:
         )
         episode_dir = output_dir / "episodes" / "episode_000"
         episode_dir.mkdir(parents=True, exist_ok=False)
+        task_snapshot = None
+        if isinstance(task_catalog, (RegistryTaskCatalog, TaskSnapshot)):
+            try:
+                frozen = freeze_task(task_catalog, task_id, output_dir / "task_snapshot")
+                task_snapshot = str(frozen.manifest_path)
+            except Exception:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                raise
         record = SimulationSession(
             id=session_id,
             kind=kind,
@@ -602,6 +692,8 @@ class SimulationManager:
             task_level=task["level"],
             task_name=task["task_name"],
             task_prompt=task["prompt"],
+            policy_instruction=policy_instruction,
+            task_snapshot=task_snapshot,
             parent_session_id=None if parent is None else parent["id"],
             root_session_id=session_id if parent is None else (parent.get("root_session_id") or parent["id"]),
             source_trajectory=None if parent is None else parent["trajectory"],
@@ -792,6 +884,7 @@ class SimulationManager:
         seed: int | None = None,
         init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
+        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         record = self._new_record(
             kind="original",
@@ -803,6 +896,7 @@ class SimulationManager:
             seed=seed,
             init_state_index=init_state_index,
             disabled_policy_cameras=disabled_policy_cameras,
+            policy_instruction=policy_instruction,
         )
         if initial_jpeg is not None:
             record.latest_jpeg = initial_jpeg
@@ -853,6 +947,7 @@ class SimulationManager:
         seed: int | None = None,
         init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
+        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         gpu_guard = getattr(self, "gpu_guard", None)
         if gpu_guard is not None and getattr(self, "work_queue", None) is None:
@@ -881,6 +976,7 @@ class SimulationManager:
                 init_state_index=init_state_index,
                 disabled_policy_cameras=disabled_policy_cameras,
                 policy_id=policy.policy_id,
+                policy_instruction=policy_instruction,
                 policy_label=policy.label,
                 policy_content_sha256=getattr(policy, "content_sha256", None),
             )
@@ -899,6 +995,7 @@ class SimulationManager:
         seed: int | None = None,
         init_state_index: int | None = None,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
+        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             if self.active_session_id is not None:
@@ -907,6 +1004,10 @@ class SimulationManager:
                 raise KeyError("draft")
             draft = self.draft
             next_task_id = task_id if task_id is not None else draft.task_id
+            if policy_instruction is not None and not policy_instruction.strip():
+                raise ValueError("policy_instruction must not be empty")
+            next_instruction = (policy_instruction.strip() if policy_instruction is not None else
+                                None if next_task_id != draft.task_id else draft.policy_instruction)
             next_max_steps = max_steps if max_steps is not None else draft.max_steps
             next_open_loop = (
                 open_loop_steps if open_loop_steps is not None else draft.open_loop_steps
@@ -939,6 +1040,7 @@ class SimulationManager:
                 or next_init_state_index != draft.init_state_index
             )
             draft.task_id = next_task_id
+            draft.policy_instruction = next_instruction
             draft.max_steps = next_max_steps
             draft.open_loop_steps = next_open_loop
             draft.seed = next_seed
@@ -997,6 +1099,7 @@ class SimulationManager:
                 seed=draft.seed,
                 init_state_index=draft.init_state_index,
                 disabled_policy_cameras=draft.disabled_policy_cameras,
+                **({"policy_instruction": draft.policy_instruction} if draft.policy_instruction is not None else {}),
             )
         except Exception:
             with self.lock:
@@ -1014,14 +1117,16 @@ class SimulationManager:
         rotation_gain: float | None = None,
         controller_id: str | None = None,
         control_frame: str | None = None,
+        max_steps: int | None = None,
+        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         if control_frame is not None:
             validate_control_frame(control_frame)
             if control_mode != "manual" or controller_id == "factr":
                 raise ValueError("control_frame is only valid for SpaceMouse manual branches")
         parent = self.get_public(parent_id)
-        if parent["kind"] != "original" or not parent.get("branchable"):
-            raise ValueError("Only a completed original trajectory may create one-level branches")
+        if not parent.get("branchable"):
+            raise ValueError("Promote this completed branch to a mainline before continuing")
         if parent["status"] not in TERMINAL_STATES:
             raise ValueError("The source session must finish before branching")
         if parent.get("trajectory"):
@@ -1077,9 +1182,9 @@ class SimulationManager:
         if type(open_loop_steps) is not int or open_loop_steps < 1:
             raise ValueError("open_loop_steps must be a positive integer")
         action_count = int(parent["action_count"])
-        if not 0 <= resume_step < action_count:
-            raise ValueError(f"resume_step must be in [0, {max(0, action_count - 1)}]")
-        target_steps = int(parent["max_steps"])
+        if not 0 <= resume_step <= action_count:
+            raise ValueError(f"resume_step must be in [0, {action_count}]")
+        target_steps = int(parent["max_steps"]) if max_steps is None else max_steps
         if target_steps <= resume_step:
             raise ValueError(
                 "The source target step count must be greater than resume_step: "
@@ -1096,6 +1201,8 @@ class SimulationManager:
             manual_rotation_gain=rotation_gain,
             controller_id=controller_id,
             control_frame=control_frame,
+            policy_instruction=(instruction_at(source_metadata, action_count, resume_step)
+                                if policy_instruction is None and parent.get("trajectory") else policy_instruction),
         )
         try:
             if getattr(self, "work_queue", None) is not None:
@@ -1250,6 +1357,8 @@ class SimulationManager:
                     "level": record.task_level,
                     "task_name": record.task_name,
                     "prompt": record.task_prompt,
+                    "policy_instruction": record.policy_instruction or record.task_prompt,
+                    "snapshot": record.task_snapshot,
                     "init_state_index": record.init_state_index,
                 },
                 "policy": {
@@ -1301,6 +1410,10 @@ class SimulationManager:
                 "level": record.task_level,
                 "task_name": record.task_name,
                 "task": record.task_prompt,
+                "policy_instruction": record.policy_instruction or record.task_prompt,
+                "task_snapshot": record.task_snapshot,
+                "trajectory_segments": record.trajectory_segments,
+                "handoff_steps": record.handoff_steps,
                 "status": record.status,
                 "created_at": record.created_at,
                 "completed_at": record.completed_at,
@@ -1325,9 +1438,14 @@ class SimulationManager:
                 "disabled_policy_cameras": list(record.disabled_policy_cameras),
                 "state_count": record.state_count,
                 "action_count": record.action_count,
+                "training_chunk_count": record.training_chunk_count,
+                "training_chunk_count_rule": "recorded_execution_v1",
                 "policy_queries": record.policy_queries,
                 "trajectory": trajectory,
                 "success": record.success,
+                "success_confirmed": record.success_confirmed_step is not None,
+                "success_confirmed_step": record.success_confirmed_step,
+                "success_confirm_steps": record.success_confirm_steps,
                 "error": record.error,
             }
         atomic_write_json(record.output_dir / "run.json", manifest)
@@ -1416,6 +1534,10 @@ class SimulationManager:
             ),
             "manual_control_frame": control_frame,
             "manual_requested_control_frame": manifest.get("manual_requested_control_frame") or control_frame,
+            "policy_instruction": manifest.get("policy_instruction") or manifest.get("task"),
+            "training_chunk_count": manifest.get("training_chunk_count"),
+            "training_chunk_count_rule": manifest.get("training_chunk_count_rule"),
+            "task_snapshot": manifest.get("task_snapshot"),
             "spacemouse_status": None,
             "spacemouse_connected": None,
             "spacemouse_stale": None,
@@ -1444,6 +1566,7 @@ class SimulationManager:
             "action_count": action_count,
             "policy_queries": int(result.get("policy_queries", manifest.get("policy_queries", 0)) or 0),
             "success": bool(result.get("success", False)),
+            **_confirmed_success(result, manifest, trajectory),
             "error": manifest.get("error") or result.get("error"),
             "stopped_reason": result.get("stopped_reason") or manifest.get("stopped_reason"),
             "measured_control_hz": timing.get(
@@ -1639,8 +1762,6 @@ class SimulationManager:
         controller_summary: dict[str, Any] | None = None
         controller = self._controller_service(record.manual_source or "spacemouse") if record.control_mode == "manual" else None
         prep_started = time.monotonic()
-        task = self.catalog.entry(record.task_id)
-        bddl, _ = self.catalog.paths(record.task_id)
         seed = record.seed
 
         def phase(name: str, message: str) -> None:
@@ -1653,6 +1774,9 @@ class SimulationManager:
                 self._persist_manifest(record)
 
         try:
+            task_catalog = self._task_catalog_for(record)
+            task = task_catalog.entry(record.task_id)
+            bddl, _ = task_catalog.paths(record.task_id)
             phase("loading_source", "读取轨迹与初始状态")
             if record.control_mode == "policy":
                 phase("loading_model", "加载策略模型")
@@ -1676,7 +1800,7 @@ class SimulationManager:
                 if hasattr(self.provider, "seed"):
                     self.provider.seed(seed)
             if record.kind == "original":
-                initial_state = self.catalog.initial_state(
+                initial_state = task_catalog.initial_state(
                     record.task_id, record.init_state_index
                 )
                 recorder = self.recorder_factory.original(float(self.eval_config.control_hz))
@@ -1685,6 +1809,8 @@ class SimulationManager:
                 source_trajectory, source_metadata = load_trajectory(
                     Path(record.source_trajectory)
                 )
+                source_metadata = {"session_id": record.parent_session_id or Path(record.source_trajectory).stem,
+                                   "task": record.task_prompt or task.prompt, **source_metadata}
                 source_seed = int(source_metadata.get("seed", seed))
                 if source_seed != seed:
                     raise ValueError(
@@ -1697,6 +1823,11 @@ class SimulationManager:
                     record.resume_step,
                     float(source_metadata.get("control_hz", self.eval_config.control_hz)),
                 )
+                record.prefix_segments = prefix_segments(source_metadata,
+                    len(source_trajectory["env_action"]), record.resume_step)
+                old_handoffs = source_metadata.get("handoff_steps", [source_metadata.get("source_resume_step") or 0])
+                record.handoff_steps = sorted({int(step) for step in old_handoffs
+                    if 0 <= int(step) <= record.resume_step} | {record.resume_step})
 
             recorder.policy_action_codec = (self.provider.metadata().get("recording_action_codec", "vla_adapter_v1")
                                             if record.control_mode == "policy" else "vla_adapter_v1")
@@ -1721,6 +1852,10 @@ class SimulationManager:
             phase("restoring_state", "恢复所选帧状态")
             observation = self.simulator.restore(env, initial_state)
             observation = self.simulator.observations(env, observation)
+            if record.kind == "branch" and hasattr(self.simulator, "restore_control_state"):
+                self.simulator.restore_control_state(
+                    env, recorder.env_actions, recorder.control_hz,
+                    reanchor_nullspace=record.control_mode == "manual")
             if record.kind == "original":
                 recorder.record_initial(env, observation)
             else:
@@ -1809,7 +1944,7 @@ class SimulationManager:
                 current_observation = self.simulator.observations(env, current_observation)
                 return current_observation, self.provider.predict(
                     current_observation,
-                    task.prompt,
+                    record.policy_instruction or record.task_prompt or task.prompt,
                     record.disabled_policy_cameras,
                 )
 
@@ -1819,9 +1954,17 @@ class SimulationManager:
                     record.action_count = recorder.action_count
                     record.state_count = recorder.state_count
                     record.success = self.evaluator.success(success)
+                    dones, required = recorder.dones, record.success_confirm_steps
+                    if (record.success_confirmed_step is None and len(dones) >= required
+                            and all(dones[-required:])):
+                        record.success_confirmed_step = len(dones) - 1
                     record.policy_queries = len(recorder.inference_query_steps)
                 self.preview.submit(record, env.get_sim_state())
 
+            # Fixed for the session; a branch prefix may already contain the streak.
+            record.success_confirm_steps = success_confirm_steps()
+            record.success_confirmed_step = confirmed_success_step(
+                recorder.dones, record.success_confirm_steps)
             common = dict(
                 env=env,
                 recorder=recorder,
@@ -1854,6 +1997,8 @@ class SimulationManager:
                 )
 
             record.success = result.success
+            record.success_confirmed_step = confirmed_success_step(
+                recorder.dones, record.success_confirm_steps)
             record.policy_queries = len(recorder.inference_query_steps)
             record.stopped_reason = result.stopped_reason
             record.current_step = recorder.action_count
@@ -2039,7 +2184,7 @@ class SimulationManager:
         timing: dict[str, float | None],
         restore_error: float | None,
     ) -> dict[str, Any]:
-        bddl, _ = self.catalog.paths(record.task_id)
+        bddl, _ = self._task_catalog_for(record).paths(record.task_id)
         provider_metadata = self.provider.metadata() if record.control_mode == "policy" else {}
         return {
             "session_id": record.id,
@@ -2070,6 +2215,12 @@ class SimulationManager:
             "task_name": record.task_name,
             "level": record.task_level,
             "bddl": str(bddl),
+            "policy_instruction": record.policy_instruction or record.task_prompt,
+            "task_snapshot": record.task_snapshot,
+            "trajectory_segments": record.trajectory_segments,
+            "training_chunk_count": record.training_chunk_count,
+            "training_chunk_count_rule": "recorded_execution_v1",
+            "handoff_steps": record.handoff_steps,
             "checkpoint": record.policy_base_checkpoint
             if record.control_mode == "policy"
             else None,
@@ -2090,6 +2241,9 @@ class SimulationManager:
             "realtime_control": True,
             "policy_queries": record.policy_queries,
             "success": record.success,
+            "success_confirmed": record.success_confirmed_step is not None,
+            "success_confirmed_step": record.success_confirmed_step,
+            "success_confirm_steps": record.success_confirm_steps,
             "stopped_reason": record.stopped_reason,
             "error": record.error,
             "restore_max_abs_error": restore_error,
@@ -2125,6 +2279,9 @@ class SimulationManager:
             "task": record.task_prompt,
             "result": {
                 "success": record.success,
+                "success_confirmed": record.success_confirmed_step is not None,
+                "success_confirmed_step": record.success_confirmed_step,
+                "success_confirm_steps": record.success_confirm_steps,
                 "steps": record.action_count,
                 "target_steps": record.max_steps,
                 "policy_queries": record.policy_queries,
@@ -2192,6 +2349,7 @@ class SimulationManager:
         has_action = action_count > 0 and step < action_count
         return {
             "step": step,
+            "actual_instruction": instruction_at(metadata, action_count, step),
             "time_seconds": float(trajectory["time_seconds"][step]),
             "eef_position_m": trajectory["eef_position"][step].tolist(),
             "eef_axis_angle_rad": trajectory["eef_axis_angle"][step].tolist(),
@@ -2211,13 +2369,15 @@ class SimulationManager:
             raise ValueError("Trajectory task is not available in the UI catalog")
         if not 0 <= step < len(trajectory["sim_state"]):
             raise IndexError(step)
+        task_catalog = self._task_catalog_for(self.get_public(session_id))
+        bddl, _ = task_catalog.paths(task_id)
+        scene_key = (str(bddl), int(metadata.get("seed", self.eval_config.seed)))
         coordinator = getattr(self, "work_queue", None)
         with self._frame_lock, (ResourceLease(coordinator.gpu_lock_path) if coordinator is not None else nullcontext()):
-            if self._frame_env is None or self._frame_task_id != task_id:
+            if self._frame_env is None or self._frame_task_id != task_id or getattr(self, "_frame_scene_key", None) != scene_key:
                 if self._frame_env is not None:
                     self.simulator.close(self._frame_env)
                     self._frame_env = None
-                bddl, _ = self.catalog.paths(task_id)
                 self._frame_env = self.simulator.create(
                     bddl,
                     self.eval_config,
@@ -2225,6 +2385,7 @@ class SimulationManager:
                     seed=int(metadata.get("seed", self.eval_config.seed)),
                 )
                 self._frame_task_id = task_id
+                self._frame_scene_key = scene_key
             self.simulator.restore(self._frame_env, trajectory["sim_state"][step])
             frame = self.simulator.render(
                 self._frame_env,

@@ -288,3 +288,106 @@ def test_replay_deduplicates_full_copied_prefix_against_parent(configured):
         and episode["chunks"][chunk_index]["end"] == 13
         for episode, chunk_index, _ in replay.items
     )
+
+
+def test_replay_frames_are_decoded_once_per_episode_and_reused_from_disk(configured, monkeypatch):
+    from vla_rynn_iql import frame_cache
+
+    prepare_dataset(configured)
+    observations = {Path(episode["observations_path"]).resolve()
+                    for episode in load_manifest(configured)["episodes"]}
+    decoded = []
+    original = frame_cache.np.load
+
+    def counting_load(path, *args, **kwargs):
+        if Path(path).resolve() in observations:
+            decoded.append(Path(path).resolve())
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(frame_cache.np, "load", counting_load)
+    first = ActionDataset(configured, _stats(7), _stats(8))
+    samples = [first[index] for index in range(len(first))] * 2
+    assert len(decoded) == len({episode["run_id"] for episode, _, _ in first.items})
+
+    for episode, chunk_index, _ in first.items[:3]:
+        start = int(first.chunks[episode["run_id"]][chunk_index]["start"])
+        with original(episode["observations_path"], allow_pickle=False) as source:
+            expected = source["agentview_image"][start]
+        item = first.items.index((episode, chunk_index, None))
+        np.testing.assert_array_equal(
+            first[item]["agent_image"].numpy(),
+            expected[::-1, ::-1])
+
+    decoded.clear()
+    second = ActionDataset(configured, _stats(7), _stats(8))
+    for index in range(len(second)):
+        np.testing.assert_array_equal(second[index]["agent_image"].numpy(),
+                                      samples[index]["agent_image"].numpy())
+    assert decoded == []
+    assert any((Path(configured.section("paths")["annotation_cache"]) / "replay-frames").iterdir())
+
+
+@pytest.mark.parametrize("damage", ["empty", "wrong_dtype", "wrong_shape", "bad_json"])
+def test_damaged_frame_cache_is_rebuilt_from_the_recording(configured, damage):
+    prepare_dataset(configured)
+    reference = ActionDataset(configured, _stats(7), _stats(8))
+    expected = [reference[index]["agent_image"].numpy() for index in range(len(reference))]
+    for folder in (Path(configured.section("paths")["annotation_cache"]) / "replay-frames").iterdir():
+        if not folder.is_dir():
+            continue
+        target = folder / "agentview_image.npy"
+        if damage == "empty":
+            target.write_bytes(b"")
+        elif damage == "wrong_dtype":
+            np.save(target, np.load(target).astype(np.float32))
+        elif damage == "wrong_shape":
+            np.save(target, np.load(target)[:, :, :, :1])
+        else:
+            (folder / "frames.json").write_text("null")
+    rebuilt = ActionDataset(configured, _stats(7), _stats(8))
+    for index, image in enumerate(expected):
+        actual = rebuilt[index]["agent_image"].numpy()
+        assert actual.dtype == np.uint8
+        np.testing.assert_array_equal(actual, image)
+    fresh = ActionDataset(configured, _stats(7), _stats(8))
+    assert all(fresh._frames._load(key, sorted(indices)) is not None
+               for key, indices in ((fresh._frames.key(episode, fresh._frame_indices[episode["run_id"]]),
+                                     fresh._frame_indices[episode["run_id"]])
+                                    for episode, _, _ in fresh.items))
+
+
+def test_concurrent_rebuilds_of_a_damaged_frame_cache_decode_once(configured, monkeypatch):
+    import threading
+    import time
+    from vla_rynn_iql.frame_cache import FrameCache
+
+    prepare_dataset(configured)
+    reference = ActionDataset(configured, _stats(7), _stats(8))
+    reference[0]  # publish the entry
+    episode = reference.items[0][0]
+    indices = sorted(reference._frame_indices[episode["run_id"]])
+    directory = Path(configured.section("paths")["annotation_cache"]) / "replay-frames"
+    key = FrameCache.key(episode, indices)
+    expected = np.load(directory / key / "agentview_image.npy")
+    (directory / key / "frames.json").write_text("null")
+
+    decoded, original = [], FrameCache._decode
+    def slow_decode(self, *args):
+        decoded.append(threading.get_ident())
+        time.sleep(0.3)  # keep the first rebuild in flight while the other process checks
+        return original(self, *args)
+    monkeypatch.setattr(FrameCache, "_decode", slow_decode)
+
+    results, start = [None, None], threading.Barrier(2)
+    def worker(slot):
+        start.wait()
+        results[slot] = FrameCache(directory).episode(episode, indices).frame("agentview_image", indices[0])
+    threads = [threading.Thread(target=worker, args=(slot,)) for slot in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(decoded) == 1
+    for result in results:
+        np.testing.assert_array_equal(result, expected[0])
+    assert FrameCache(directory)._load(key, indices) is not None

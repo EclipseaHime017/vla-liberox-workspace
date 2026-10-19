@@ -22,7 +22,7 @@ const bootstrap = {
   config: { max_steps: 300, open_loop_steps: 8, seed: 7 },
   model: { policy_id: "base" }, policy_catalog: [policy], task, task_catalog: [task],
 } as Bootstrap;
-const config = { task_id: "task-a", policy_id: "base", trials: 100, max_steps: 300, open_loop_steps: 8, realtime: true, init_state_indices: null, base_seed: 7, seed_count: null, schedule_seed: 7 };
+const config = { task_id: "task-a", policy_id: "base", trials: 100, max_steps: 300, open_loop_steps: 8, realtime: false, init_state_indices: null, base_seed: 7, seed_count: null, schedule_seed: 7 };
 const preview: EvaluationPreview = {
   policy_content_sha256: "b".repeat(64),
   config, schedule: [{ trial_index: 0, init_state_index: 0, seed: 7 }],
@@ -33,6 +33,7 @@ const aggregate = {
   total_trials: 10, attempted_trials: 10, completed_trials: 10, successes: 7,
   failures: 3, errors: 0, success_rate: .7, wilson_lower: .4, wilson_upper: .89,
   completion_rate: 1, by_init_state: {}, by_seed: {}, by_combination: {},
+  init_state_summary: { states: 3, state_mean_success_rate: .65 },
   first_success_step_mean: 30, policy_queries_mean: 38, inference_latency_ms_mean: 50,
   measured_control_hz_mean: 20, elapsed_seconds_mean: 15,
 };
@@ -218,6 +219,7 @@ describe("evaluation page", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看详情" }));
     await waitFor(() => expect(mocks.getEvaluation).toHaveBeenCalledWith(record.id));
     expect(await screen.findByText(/Wilson 95% 置信区间/)).toBeTruthy();
+    expect(screen.getByText(/3 个 init state 的平均成功率 65.0%/)).toBeTruthy();
     expect(screen.getByLabelText("成功率 70.0%")).toBeTruthy();
   });
 

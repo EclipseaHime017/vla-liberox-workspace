@@ -30,7 +30,7 @@ def validate_contract(contract: dict, family: str, *, adapter: str | None = None
     # Validate the supported Panda bridge; YAML cannot change the robot controller.
     fixed = {"cameras": ["agentview", "robot0_eye_in_hand"],
              "proprio": "eef_position_axis_angle_gripper",
-             "proprio_dim": 8, "action_dim": 7, "replay_horizon": 8, "control_hz": 20}
+             "proprio_dim": 8, "action_dim": 7, "control_hz": 20}
     if any(io.get(key) != value for key, value in fixed.items()):
         raise ValueError("Model I/O is unsupported by the current Panda adapter")
     if require_observation or "observation" in contract or set(io) != IO_KEYS:
@@ -39,6 +39,8 @@ def validate_contract(contract: dict, family: str, *, adapter: str | None = None
                 "action_dim", "replay_horizon", "control_hz"):
         if type(io[key]) is not int or io[key] < 1:
             raise ValueError(f"Invalid model I/O integer: {key}")
+    if io["replay_horizon"] > io["native_action_horizon"]:
+        raise ValueError("Model supervision horizon exceeds its native action output")
     definition = globals().get("MODEL_FAMILIES", {}).get(family)
     implementation = get_adapter(adapter or (definition.adapter if definition else family))
     if not implementation.validate_contract(io, architecture):
@@ -216,18 +218,22 @@ def family_adapter(family: str):
     return MODEL_FAMILIES[family].implementation
 
 
-def execution_config(settings: dict) -> dict:
+def execution_config(settings: dict, *, trained: bool = False) -> dict:
     """Variant execution defaults do not change weights or training configuration."""
     io = model_contract(settings)["io"]
     family = MODEL_FAMILIES[settings.get("family", DEFAULT_FAMILY)]
     base = base_model(settings.get("base_id", family.default_base))
     maximum = io["native_action_horizon"]
-    # Replay length defines training supervision, not the model's output shape.
-    return {"open_loop_steps": min(base.inference["open_loop_steps"], maximum),
-            "max_open_loop_steps": maximum}
+    default = min(base.inference["open_loop_steps"], maximum)
+    if trained:
+        # Post-training supervises only the first replay_horizon actions of a
+        # chunk; by default a trained model does not execute the unsupervised
+        # tail. The model's output length remains the explicit maximum.
+        default = min(default, io["replay_horizon"])
+    return {"open_loop_steps": default, "max_open_loop_steps": maximum}
 
 
-def resolve_open_loop_steps(settings: dict, value: int | None) -> int:
-    inference = execution_config(settings)
+def resolve_open_loop_steps(settings: dict, value: int | None, *, trained: bool = False) -> int:
+    inference = execution_config(settings, trained=trained)
     return validate_open_loop_steps(inference["open_loop_steps"] if value is None else value,
                                     inference["max_open_loop_steps"])

@@ -345,8 +345,22 @@ def load_runtime() -> SimpleNamespace:
     )
 
 
+def restrict_tensorflow_to_cpu() -> None:
+    """Upstream VLA-Adapter uses TensorFlow only for image resizing and cropping.
+
+    Hide GPUs from it before first use so it can never pre-allocate the memory
+    the PyTorch policy, MuJoCo renderer or later jobs need.
+    """
+    try:
+        import tensorflow as tf
+        tf.config.set_visible_devices([], "GPU")
+    except (ImportError, RuntimeError, ValueError) as exc:
+        LOGGER.warning("Could not restrict TensorFlow to CPU: %s", exc)
+
+
 def load_policy_runtime(runtime: SimpleNamespace) -> SimpleNamespace:
     """Load VLA/TensorFlow modules only when a policy rollout is requested."""
+    restrict_tensorflow_to_cpu()
     from experiments.robot.libero.run_libero_eval import (
         GenerateConfig,
         initialize_model,
@@ -393,7 +407,12 @@ def make_env(
     video_width: int,
     video_height: int,
     headless: bool,
+    *,
+    hard_reset: bool = False,
 ):
+    # robosuite's constructor already compiles the model. Every caller restores
+    # an explicit MuJoCo state afterwards, so the reset below need not rebuild
+    # it again (LIBERO's default hard reset roughly doubles construction time).
     camera_dimensions = {
         "agentview": [resolution, resolution],
         "robot0_eye_in_hand": [resolution, resolution],
@@ -408,6 +427,7 @@ def make_env(
         camera_heights=[dimensions[1] for dimensions in camera_dimensions.values()],
         horizon=horizon,
         control_freq=control_hz,
+        hard_reset=hard_reset,
     )
     # The policy always needs offscreen cameras. For interactive runs we attach
     # MuJoCo's native passive viewer to the same model/data after reset instead

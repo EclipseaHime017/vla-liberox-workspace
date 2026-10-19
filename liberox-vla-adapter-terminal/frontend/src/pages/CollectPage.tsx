@@ -14,6 +14,7 @@ import { calibrateController, setControllerGravity, CONTROLLER_LABELS, controlle
 import { RunConfigForm } from "../features/run-config/RunConfigForm";
 import { RunStatus } from "../features/run-control/RunStatus";
 import { SessionMonitor } from "../features/run-control/SessionMonitor";
+import { runOutcome } from "../features/run-control/formatters";
 import { formatComputeDevice } from "../features/run-control/formatters";
 import { TaskFilter } from "../features/run-config/TaskSelector";
 import { ALL_TASK_SCOPE, filterByTaskScope, scopeForTask, type TaskScope } from "../features/run-config/taskHierarchy";
@@ -38,6 +39,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
   const [disabledPolicyCameras, setDisabledPolicyCameras] = useState<PolicyCameraId[]>([]);
   const [taskId, setTaskId] = useState("");
   const [policyId, setPolicyId] = useState("base");
+  const [policyInstruction, setPolicyInstruction] = useState("");
   const [sessionTaskFilter, setSessionTaskFilter] = useState<TaskScope>(ALL_TASK_SCOPE);
   const [translationGain, setTranslationGain] = useState(0.5);
   const [rotationGain, setRotationGain] = useState(0.25);
@@ -59,6 +61,8 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
   const [busy, setBusy] = useState(false);
   const websocket = useRef<WebSocket | null>(null);
   const trajectoryVideo = useRef<HTMLVideoElement | null>(null);
+  const latestFrameSelection = useRef({ id: selectedId, step: selectedStep });
+  latestFrameSelection.current = { id: selectedId, step: selectedStep };
   const gainRef = useRef({ translationGain, rotationGain });
   const controllerGains = useRef<Record<ControllerId, { translationGain: number; rotationGain: number }>>({
     spacemouse: { translationGain: 0.5, rotationGain: 0.25 },
@@ -115,6 +119,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
         setInitStateIndex(boot.task.init_state_index_min);
         setDisabledPolicyCameras(boot.config.disabled_policy_cameras);
         setTaskId(boot.task.task_id);
+        setPolicyInstruction(boot.task.prompt);
         setPolicyId("base");
         controllerGains.current.spacemouse = {
           translationGain: boot.config.manual.translation_gain,
@@ -259,9 +264,11 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
     }
     const safeStep = Math.min(selectedStep, selected.state_count - 1);
     if (safeStep !== selectedStep) setSelectedStep(safeStep);
+    let cancelled = false;
     api<FrameState>("/api/sessions/" + selected.id + "/frames/" + safeStep + "/state")
-      .then(setFrameState)
+      .then((value) => { if (!cancelled) setFrameState(value); })
       .catch((reason) => setError(String(reason)));
+    return () => { cancelled = true; };
   }, [selected?.id, selected?.status, selected?.state_count, selectedStep]);
 
   useEffect(() => {
@@ -302,6 +309,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
           seed,
           init_state_index: initStateIndex,
           disabled_policy_cameras: disabledPolicyCameras,
+          policy_instruction: policyInstruction,
         }),
       });
       setDraft(value);
@@ -310,7 +318,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
     } finally { setBusy(false); }
   };
 
-  const updateDraft = async (patch: Partial<Pick<Draft, "task_id" | "policy_id" | "max_steps" | "open_loop_steps" | "seed" | "init_state_index" | "disabled_policy_cameras">>) => {
+  const updateDraft = async (patch: Partial<Pick<Draft, "task_id" | "policy_id" | "max_steps" | "open_loop_steps" | "seed" | "init_state_index" | "disabled_policy_cameras" | "policy_instruction">>) => {
     if (!draft) return;
     setError("");
     try {
@@ -320,6 +328,11 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       });
       setDraft(value);
       setTaskId(value.task_id);
+      if (typeof patch.policy_instruction === "string") {
+        const submittedInstruction = patch.policy_instruction;
+        setPolicyInstruction((current) => current === submittedInstruction
+          ? value.policy_instruction ?? value.task.prompt : current);
+      }
       setPolicyId(value.policy_id);
       setMaxSteps(value.max_steps);
       setOpenLoop(value.open_loop_steps);
@@ -362,6 +375,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
           seed,
           init_state_index: initStateIndex,
           disabled_policy_cameras: disabledPolicyCameras,
+          policy_instruction: policyInstruction,
         }),
       });
       setDraft(synchronized);
@@ -385,25 +399,36 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
     } catch (reason) { setError(String(reason)); }
   };
 
-  const configurePolicyBranch = () => {
+  const configurePolicyBranch = async (controlMode: "policy" | "manual") => {
     if (!selected) return;
     setError("");
     trajectoryVideo.current?.pause();
-    setPolicyBranchDraft({
-      parent_session_id: selected.id,
-      task_prompt: selected.task ?? "该历史轨迹没有任务提示词",
-      source_episode: "episode_000 · " + selected.id,
-      resume_step: selectedStep,
-      target_steps: selected.max_steps,
-      open_loop_steps: selected.open_loop_steps,
-      policy_id: selected.policy_id,
-      policy_label: selected.policy_label ?? selected.policy_id,
-    });
+    setBusy(true);
+    try {
+      const frame = await api<FrameState>("/api/sessions/" + selected.id + "/frames/" + selectedStep + "/state");
+      if (latestFrameSelection.current.id !== selected.id
+          || latestFrameSelection.current.step !== selectedStep) return;
+      setPolicyBranchDraft({
+        parent_session_id: selected.id,
+        control_mode: controlMode,
+        policy_instruction: frame.actual_instruction || selected.policy_instruction || selected.task || "",
+        instructions: bootstrap?.task_catalog.find((item) => item.task_id === selected.task_id)?.instructions ?? [],
+        task_prompt: selected.task ?? "该历史轨迹没有任务提示词",
+        source_episode: "episode_000 · " + selected.id,
+        resume_step: selectedStep,
+        target_steps: selected.max_steps,
+        open_loop_steps: selected.open_loop_steps,
+        policy_id: selected.policy_id,
+        policy_label: selected.policy_label ?? selected.policy_id,
+      });
+    } catch (reason) { reportFailure(reason); }
+    finally { setBusy(false); }
   };
 
-  const branch = async (controlMode: "policy" | "manual") => {
-    if (!selected) return;
-    const parentSessionId = controlMode === "policy" && policyBranchDraft
+  const branch = async () => {
+    if (!selected || !policyBranchDraft) return;
+    const controlMode = policyBranchDraft.control_mode ?? "policy";
+    const parentSessionId = policyBranchDraft
       ? policyBranchDraft.parent_session_id
       : selected.id;
     setBusy(true);
@@ -412,11 +437,13 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       const session = await api<Session>("/api/sessions/" + parentSessionId + "/branches", {
         method: "POST",
         body: JSON.stringify({
-          resume_step: controlMode === "policy" && policyBranchDraft
+          resume_step: policyBranchDraft
             ? policyBranchDraft.resume_step
             : selectedStep,
           control_mode: controlMode,
-          open_loop_steps: controlMode === "policy" && policyBranchDraft
+          max_steps: policyBranchDraft.target_steps,
+          policy_instruction: policyBranchDraft.policy_instruction ?? selected.task,
+          open_loop_steps: policyBranchDraft
             ? policyBranchDraft.open_loop_steps
             : openLoop,
           ...(controlMode === "manual" ? {
@@ -434,6 +461,16 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
     } catch (reason) {
       reportFailure(reason);
     } finally { setBusy(false); }
+  };
+
+  const promote = async () => {
+    if (!selected?.can_promote) return;
+    setBusy(true); setError("");
+    try {
+      const session = await api<Session>("/api/sessions/" + selected.id + "/promote", {method: "POST"});
+      setSessions((current) => current.map((item) => item.id === session.id ? session : item));
+    } catch (reason) { reportFailure(reason); }
+    finally { setBusy(false); }
   };
 
   const selectControlFrame = (frame: ControlFrame) => {
@@ -581,10 +618,10 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       <section className="workspace">
         <aside className="panel session-panel">
           <div className="panel-title"><h2>会话</h2><span>{visibleSessions.length}/{sessions.length}</span></div>
-          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onTask={(value) => { setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={changePolicy} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch("policy")} onCancelBranch={() => setPolicyBranchDraft(null)} />
+          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} policyInstruction={policyInstruction} onPolicyInstruction={(value, commit) => { setPolicyInstruction(value); if (commit) void updateDraft({ policy_instruction: value }); }} onBranchSteps={(value) => setPolicyBranchDraft((current) => current ? { ...current, target_steps: value } : current)} onBranchInstruction={(value) => setPolicyBranchDraft((current) => current ? { ...current, policy_instruction: value } : current)} onTask={(value) => { setPolicyInstruction(bootstrap.task_catalog.find((item) => item.task_id === value)?.prompt ?? ""); setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={changePolicy} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch()} onCancelBranch={() => setPolicyBranchDraft(null)} />
           <div className="session-filter">
             <p className="task-filter-heading">数据检索</p>
-            <TaskFilter tasks={bootstrap.task_catalog} value={sessionTaskFilter} disabled={Boolean(active)} onChange={changeSessionTaskFilter} labelPrefix="检索" />
+            <TaskFilter tasks={bootstrap.task_catalog} value={sessionTaskFilter} disabled={Boolean(active) || Boolean(policyBranchDraft)} onChange={changeSessionTaskFilter} labelPrefix="检索" />
           </div>
           <div className="session-list">
             {visibleSessions.map((session) => (
@@ -623,20 +660,20 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
                   key={selected.id + "-" + mainVideoName}
                   ref={trajectoryVideo}
                   src={videoArtifactUrl}
-                  controls
+                  controls={!busy && !policyBranchDraft}
                   playsInline
                   preload="metadata"
                   onLoadedMetadata={() => syncVideoToStep(selectedStep)}
-                  onTimeUpdate={(event) => setSelectedStep(videoTimeToStep(
+                  onTimeUpdate={(event) => { if (!busy && !policyBranchDraft) setSelectedStep(videoTimeToStep(
                     event.currentTarget.currentTime,
                     selected.state_count,
                     bootstrap.config.video_fps,
-                  ))}
-                  onSeeked={(event) => setSelectedStep(videoTimeToStep(
+                  )); }}
+                  onSeeked={(event) => { if (!busy && !policyBranchDraft) setSelectedStep(videoTimeToStep(
                     event.currentTarget.currentTime,
                     selected.state_count,
                     bootstrap.config.video_fps,
-                  ))}
+                  )); }}
                 />
               ) : timelineReady && selected ? (
                 <div className="viewer-empty">该历史轨迹没有可播放的主视角视频</div>
@@ -655,7 +692,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
                 <Metric label="控制步" value={String(selected.current_step)} />
                 <Metric label="实测频率" value={selected.measured_control_hz ? selected.measured_control_hz.toFixed(2) + " Hz" : "—"} />
                 <Metric label="推理次数" value={String(selected.policy_queries)} />
-                <Metric label="成功" value={selected.success ? "是" : "否"} />
+                <Metric label="成功" value={runOutcome(selected).confirmed ? "是" : selected.success ? "未确认" : "否"} />
               </div>
             </>}
             </div>
@@ -664,13 +701,14 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
 
           {!draft && selected && <div className="panel timeline-panel">
             <div className="panel-title"><h2>回溯与分支</h2><span>{timelineReady ? "0 — " + (selected.state_count - 1) : "结束后启用"}</span></div>
-            <input className="timeline" type="range" min={0} max={Math.max(0, selected.state_count - 1)} value={selectedStep} disabled={!timelineReady || Boolean(policyBranchDraft)} onChange={(event) => {
+            <input className="timeline" type="range" min={0} max={Math.max(0, selected.state_count - 1)} value={selectedStep} disabled={!timelineReady || busy || Boolean(policyBranchDraft)} onChange={(event) => {
               const step = Number(event.target.value);
               setSelectedStep(step);
               syncVideoToStep(step);
             }} />
             <div className="frame-grid">
               <Metric label="仿真时间" value={frameState ? frameState.time_seconds.toFixed(3) + " s" : "—"} />
+              <Metric label="执行指令" value={frameState?.actual_instruction || selected.policy_instruction || selected.task || "—"} />
               <Metric label="EEF 位置 [m]" value={fixed(frameState?.eef_position_m ?? null)} />
               <Metric label="EEF 轴角 [rad]" value={fixed(frameState?.eef_axis_angle_rad ?? null)} />
               <Metric label="夹爪 qpos" value={fixed(frameState?.gripper_qpos ?? null)} />
@@ -678,14 +716,15 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
               <Metric label="环境 action [-]" value={fixed(frameState?.env_action ?? null, 3)} />
             </div>
             <div className="button-row branch-buttons">
-              <button className="primary" disabled={!selected.branchable || Boolean(active) || busy || Boolean(policyBranchDraft) || selectedStep >= selected.action_count} onClick={configurePolicyBranch}>{policyBranchDraft ? "正在配置二次推理" : "从此帧重新推理"}</button>
+              <button className="primary" disabled={!selected.branchable || Boolean(active) || busy || Boolean(policyBranchDraft) || selectedStep >= selected.state_count} onClick={() => void configurePolicyBranch("policy")}>{policyBranchDraft ? "正在配置续跑" : "从此帧重新推理"}</button>
               <button
-                disabled={!selected.branchable || Boolean(active) || busy || controllerBusy || Boolean(policyBranchDraft) || selectedStep >= selected.action_count || !controllerReady}
+                disabled={!selected.branchable || Boolean(active) || busy || controllerBusy || Boolean(policyBranchDraft) || selectedStep >= selected.state_count || !controllerReady}
                 title={controllerReady ? `从所选帧开始 ${controllerLabel} 接管` : `请先连接并校准 ${controllerLabel}${controllerId === "factr" ? "，并开启重力补偿" : ""}`}
-                onClick={() => branch("manual")}
+                onClick={() => void configurePolicyBranch("manual")}
               >{controllerLabel} 接管</button>
+              {selected.can_promote && <button disabled={Boolean(active) || busy || Boolean(policyBranchDraft)} onClick={() => void promote()}>设为主线</button>}
             </div>
-            {!selected.branchable && <p className="hint">分支结果只读，不能继续创建子分支。</p>}
+            {!selected.branchable && <p className="hint">{selected.can_promote ? "设为主线后可继续操作。" : "此记录暂不可续跑。"}</p>}
           </div>}
 
 

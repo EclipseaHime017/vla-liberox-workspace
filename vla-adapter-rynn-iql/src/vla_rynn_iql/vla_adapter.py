@@ -18,9 +18,7 @@ from .model_artifacts import parent_snapshot, decode_child, legacy_contract
 from .checkpoint_assets import resolve_revision, checkpoint_view
 
 
-ACTION_HORIZON = 8
 ACTION_DIM = 7
-PROPRIO_DIM = 8
 
 
 def resolve_stats_key(norm_stats: dict[str, Any], requested: str) -> str:
@@ -86,6 +84,8 @@ class VLAComponents:
     proprio_stats: dict[str, Any]
     parent: dict | None = None
     checkpoint_holder: Any = None
+    # Oriented HxWx3 frames -> processor-ready PIL images (see policy_image_pipeline).
+    policy_images: Any = None
 
 
 def _add_vla_path(config: LoadedConfig) -> None:
@@ -96,11 +96,48 @@ def _add_vla_path(config: LoadedConfig) -> None:
         sys.path.insert(0, str(root))
 
 
+def restrict_tensorflow_to_cpu() -> None:
+    """Upstream VLA-Adapter uses TensorFlow only for image preprocessing.
+
+    Hide GPUs from it before its first op; otherwise TensorFlow reserves most of
+    the GPU memory the PyTorch model needs.
+    """
+    import tensorflow as tf
+    try:
+        tf.config.set_visible_devices([], "GPU")
+    except RuntimeError:
+        pass  # already initialized by this process; the earlier setting stands
+
+
+def policy_image_pipeline(cfg: Any):
+    """The official LIBERO client image preprocessing, applied to oriented frames.
+
+    Inference runs ``prepare_observation`` (JPEG round trip and lanczos3 resize
+    to the model size) and then ``prepare_images_for_vla`` (90%-area center
+    crop, required by upstream because the base model was trained with random
+    crops). Post-training uses the same upstream functions so the processor
+    sees identical pixels on both sides.
+    """
+    def transform(images) -> list[Image.Image]:
+        # Resolved on first use: loading a model for inference never needs it.
+        from experiments.robot.openvla_utils import center_crop_image, resize_image_for_policy
+        from experiments.robot.robot_utils import get_image_resize_size
+        restrict_tensorflow_to_cpu()
+        size = get_image_resize_size(cfg)
+        result = []
+        for value in images:
+            image = Image.fromarray(resize_image_for_policy(np.ascontiguousarray(value), size)).convert("RGB")
+            result.append(center_crop_image(image) if cfg.center_crop else image)
+        return result
+    return transform
+
+
 def load_components(
     config: LoadedConfig, overlay: Path | None = None, *, training: bool = True
 ) -> VLAComponents:
     from .model_adaptation import configure_components
     _add_vla_path(config)
+    restrict_tensorflow_to_cpu()
     from experiments.robot.libero.run_libero_eval import GenerateConfig, initialize_model
 
     vla_cfg = model_config(config.raw)
@@ -121,7 +158,7 @@ def load_components(
         use_l1_regression=True, use_minivlm=True, num_images_in_input=len(contract["io"]["cameras"]),
         use_proprio=True, use_film=False, use_pro_version=True,
         load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=contract["io"]["native_action_horizon"],
-        seed=int(config.section("training")["seed"]), phase="Inference",
+        seed=int(config.section("training")["seed"]), phase="Inference", center_crop=True,
     )
     try:
         model, action_head, proprio_projector, _, processor = initialize_model(cfg)
@@ -144,7 +181,7 @@ def load_components(
         proprio_stats=model.norm_stats[stats_key]["proprio"],
         parent=policy.parent if policy is not None and policy.parent is not None else parent_snapshot(
             {**vla_cfg, "stats_key": stats_key}, revision, contract=contract),
-        checkpoint_holder=holder,
+        checkpoint_holder=holder, policy_images=policy_image_pipeline(cfg),
     )
     configure_components(components, vla_cfg, training=training)
     return components
@@ -192,7 +229,7 @@ def processor_inputs(
         )
     primary = components.processor(
         texts,
-        [Image.fromarray(value) for value in agents],
+        components.policy_images(agents),
         padding=True,
         return_tensors="pt",
     ).to(
@@ -200,7 +237,7 @@ def processor_inputs(
     )
     secondary = components.processor(
         texts,
-        [Image.fromarray(value) for value in wrists],
+        components.policy_images(wrists),
         padding=True,
         return_tensors="pt",
     ).to(
@@ -353,7 +390,8 @@ def load_overlay(path: Path) -> PolicyOverlay:
 
 
 def validate_overlay(policy: PolicyOverlay, base_checkpoint: str, stats_key: str) -> None:
-    expected = (base_checkpoint, stats_key, ACTION_HORIZON, ACTION_DIM, PROPRIO_DIM)
+    io = model_contract(policy.model_config or {})["io"]
+    expected = (base_checkpoint, stats_key, io["replay_horizon"], io["action_dim"], io["proprio_dim"])
     actual = (policy.base_checkpoint, policy.stats_key, policy.action_horizon, policy.action_dim, policy.proprio_dim)
     if actual != expected:
         raise ValueError(f"Policy overlay is incompatible: expected {expected}, got {actual}")
@@ -389,8 +427,12 @@ def overlay_public(path: Path) -> dict[str, Any]:
 
 def actor_losses(components, batch, device):
     prediction = predict_batch(components, batch, device)
-    error = (prediction.float() - batch["actions"].to(device).float()).abs()
-    valid = batch["action_mask"].to(device).float().unsqueeze(-1).expand_as(error)
+    target = batch.get("actor_actions", batch["actions"])
+    mask = batch.get("actor_action_mask", batch["action_mask"])
+    if prediction.shape[1] != target.shape[1]:
+        prediction = prediction[:, :target.shape[1]]
+    error = (prediction.float() - target.to(device).float()).abs()
+    valid = mask.to(device).float().unsqueeze(-1).expand_as(error)
     losses = (error * valid).sum((1, 2)) / valid.sum((1, 2)).clamp_min(1.0)
     return losses, prediction
 

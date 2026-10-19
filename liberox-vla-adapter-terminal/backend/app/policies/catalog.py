@@ -15,9 +15,6 @@ import yaml
 from .registry import model_module, policy_adapter
 
 
-ACTION_HORIZON = 8
-ACTION_DIM = 7
-PROPRIO_DIM = 8
 LOGGER = logging.getLogger(__name__)
 
 
@@ -120,11 +117,11 @@ class PolicyEntry:
 
     @property
     def inference(self) -> dict:
-        return model_module("base_models").execution_config(self.settings)
+        return model_module("base_models").execution_config(self.settings, trained=not self.is_base)
 
     def resolve_open_loop_steps(self, value: int | None = None) -> int:
         return model_module("base_models").resolve_open_loop_steps(
-            self.settings, value,
+            self.settings, value, trained=not self.is_base,
         )
 
     def public(self) -> dict[str, Any]:
@@ -193,7 +190,8 @@ class PolicyCatalog:
         cached = self._hash_cache.get(key)
         if cached is not None:
             return cached
-        digest = _sha256(path)
+        # Persisted across restarts, keyed by the same inode/size/mtime/ctime tuple.
+        digest = model_module("model_storage").cached_sha256(path)
         self._hash_cache = {candidate: value for candidate, value in self._hash_cache.items() if candidate[0] != key[0]}
         self._hash_cache[key] = digest
         return digest

@@ -2,7 +2,7 @@
 from pathlib import Path
 import re
 
-from .catalog import PolicyEntry, ACTION_HORIZON, ACTION_DIM, PROPRIO_DIM, _stable_hash
+from .catalog import PolicyEntry, _stable_hash
 from .registry import model_module
 
 PROVIDER = "backend.app.policies.vla_adapter:VLAAdapterPolicyProvider"
@@ -76,7 +76,8 @@ def load_overlay(catalog, manifest, raw, *, parent=None):
     if raw["stats_key"] not in allowed_stats:
         raise ValueError(f"Overlay {policy_id} has incompatible stats_key")
     dimensions = (raw["action_horizon"], raw["action_dim"], raw["proprio_dim"])
-    if dimensions != (ACTION_HORIZON, ACTION_DIM, PROPRIO_DIM):
+    io = model_module("model_artifacts").legacy_contract(settings)["io"]
+    if dimensions != (io["replay_horizon"], io["action_dim"], io["proprio_dim"]):
         raise ValueError(f"Overlay {policy_id} has incompatible action/proprio dimensions")
     compatibility = {
         "base_checkpoint": raw["base_checkpoint"],

@@ -51,7 +51,14 @@ async def branch(run_id: str, body: CreateBranchRequest, request: Request):
             translation_gain=body.translation_gain, rotation_gain=body.rotation_gain,
             **({"controller_id": body.controller_id} if body.controller_id is not None else {}),
             **({"control_frame": body.control_frame} if body.control_frame is not None else {}),
+            **({"max_steps": body.max_steps} if body.max_steps is not None else {}),
+            **({"policy_instruction": body.policy_instruction} if body.policy_instruction is not None else {}),
         )
+    except Exception as exc: raise http_error(exc) from exc
+
+@router.post("/sessions/{run_id}/promote")
+async def promote(run_id: str, request: Request):
+    try: return await run_in_threadpool(service(request).promote, run_id)
     except Exception as exc: raise http_error(exc) from exc
 
 @router.delete("/sessions/{run_id}")

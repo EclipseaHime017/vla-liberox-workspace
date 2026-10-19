@@ -17,6 +17,7 @@ export type TaskInfo = {
   level: string;
   task_name: string;
   prompt: string;
+  instructions?: Array<{ id: string; text: string }>;
   prompt_variant?: string | null;
   scene_level?: string;
   available?: boolean;
@@ -59,6 +60,8 @@ export type Bootstrap = {
   config: {
     max_steps: number; open_loop_steps: number; seed: number;
     disabled_policy_cameras: PolicyCameraId[]; control_hz: number; video_fps: number;
+    /** System-wide success rule; not configurable per dataset. */
+    success_consecutive_steps?: number;
     preview: {
       width: number; height: number; fps: number; layout: "2x2";
       stream_width: number; stream_height: number;
@@ -86,6 +89,7 @@ export type Draft = {
   id: string; task_id: string; max_steps: number; open_loop_steps: number;
   seed: number; init_state_index: number; disabled_policy_cameras: PolicyCameraId[];
   policy_id: string; policy_label: string;
+  policy_instruction?: string | null;
   preview_status: "PREPARING" | "RENDERING" | "READY" | "ERROR";
   preview_revision: number; preview_ready: boolean; preview_available: boolean;
   error: string | null; task: TaskInfo;
@@ -93,6 +97,9 @@ export type Draft = {
 
 export type PolicyBranchDraft = {
   parent_session_id: string;
+  control_mode?: "policy" | "manual";
+  policy_instruction?: string;
+  instructions?: Array<{ id: string; text: string }>;
   task_prompt: string;
   source_episode: string;
   resume_step: number;
@@ -104,6 +111,9 @@ export type PolicyBranchDraft = {
 
 export type Session = {
   id: string; kind: "original" | "branch"; task_id: string | null; level: string | null;
+  role?: "original" | "branch";
+  can_promote?: boolean;
+  policy_instruction?: string | null;
   task_name: string | null; task: string | null; parent_session_id: string | null;
   resume_step?: number | null;
   control_mode: string; manual_source: "browser" | "spacemouse" | "factr" | null;
@@ -121,6 +131,8 @@ export type Session = {
   max_steps: number; open_loop_steps: number; current_step: number; state_count: number;
   seed: number; init_state_index: number; disabled_policy_cameras: PolicyCameraId[];
   action_count: number; policy_queries: number; success: boolean; error: string | null;
+  /** Confirmed by the system-wide success_consecutive_steps (shared with batch tests and training). */
+  success_confirmed?: boolean; success_confirmed_step?: number | null;
   stopped_reason: string | null; measured_control_hz: number | null;
   simulated_duration_seconds: number; branchable: boolean; legacy: boolean; managed: boolean;
   preparation_phase: string | null; preparation_message: string | null;
@@ -401,6 +413,8 @@ export type EvaluationAggregate = {
   wilson_upper: number;
   completion_rate: number;
   by_init_state: Record<string, EvaluationBreakdown>;
+  /** Unweighted mean of per-init-state success rates; absent in older results. */
+  init_state_summary?: { states: number; state_mean_success_rate: number | null };
   by_seed: Record<string, EvaluationBreakdown>;
   by_combination: Record<string, EvaluationBreakdown>;
   first_success_step_mean: number | null;
@@ -520,6 +534,7 @@ export type ControllerStatus = {
 };
 
 export type FrameState = {
+  actual_instruction?: string;
   step: number; time_seconds: number; eef_position_m: number[]; eef_axis_angle_rad: number[];
   gripper_qpos: number[]; raw_action: number[] | null; env_action: number[] | null; success: boolean;
 };

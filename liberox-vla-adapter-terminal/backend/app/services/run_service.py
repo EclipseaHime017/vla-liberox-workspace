@@ -20,14 +20,14 @@ class RunService:
     def dataset_summary(self):
         method = getattr(self.worker, "dataset_summary", None)
         if method is None:
-            runs = self.list_runs()
-            successes = sum(bool(item.get("success")) for item in runs)
-            return {"runs": len(runs), "successes": successes, "success_rate": successes / len(runs) if runs else 0.0, "tasks": []}
+            from ..domain.run import summarize_runs
+            return summarize_runs(self.list_runs())
         return method()
     def get_run(self, run_id): return self.worker.get_public(run_id)
     def create_original(self, **kwargs): return self.worker.create_original(**kwargs)
     def stop(self, run_id): return self.worker.stop(run_id)
     def create_branch(self, run_id, *args, **kwargs): return self.worker.create_branch(run_id, *args, **kwargs)
+    def promote(self, run_id): return self.worker.promote(run_id)
     def delete(self, run_id, confirmation): return self.worker.delete_session(run_id, confirmation)
     def frame(self, run_id, step): return self.worker.render_frame(run_id, step)
     def frame_state(self, run_id, step): return self.worker.frame_state(run_id, step)
