@@ -102,16 +102,28 @@ distributed:
   pin_memory: true
   persistent_workers: true
 
+model_profiles:
+  vla_adapter:
+    training:
+      micro_batch_size: 64
+      gradient_accumulation_steps: 1
+    model:
+      backbone: lora
+      lora: {rank: 64}
+  pi05:
+    training:
+      micro_batch_size: 32
+      gradient_accumulation_steps: 1
+    model:
+      backbone: full
+
 overrides:
   model:
     family: vla_adapter
     base_id: base
-    backbone: frozen
   training:
     method: iql
     train_steps: 10000
-    micro_batch_size: 8
-    gradient_accumulation_steps: 4
     checkpoint_interval: 512
   reward: {}
 ```
@@ -122,8 +134,10 @@ overrides:
 
 - `gpu_ids` 指定参与训练的 GPU，支持单机 1–8 卡。已有 `CUDA_VISIBLE_DEVICES` 时，编号对应其可见设备列表。
 - `micro_batch_size` 是全局 batch，必须能被 GPU 数整除；每卡 batch 为全局 batch ÷ GPU 数。
-- actor 每次更新的有效 batch = micro batch × gradient accumulation。示例为每卡 1、全局 8、累积 4，有效 batch 为 32。
+- actor 每次更新的有效 batch = micro batch × gradient accumulation。默认不累积，VLA-Adapter 为全局 64、每卡 8；π₀.₅ 为全局 32、每卡 4（8 卡）。
 - `checkpoint_interval` 必须能被累积步数整除。调整 GPU 数不会自动调整训练步数或学习率。
+
+`model_profiles` 按所选模型家族提供服务器训练默认值，BC 和 IQL 共用；`overrides` 中显式填写的配置优先。训练仍为 10,000 steps，不调整学习率、优化器或奖励。取消累积后每步更新 actor，因此总更新次数和采样量高于旧默认配置。大 batch 和全量微调需要实测显存，不会自动降低 batch 或启用累积。
 
 ### 模型和训练方法
 
@@ -133,10 +147,9 @@ overrides:
 model:
   family: pi05
   base_id: pi05-libero-base
-  backbone: frozen
 ```
 
-VLA-Adapter 的 `backbone` 可选 `frozen/lora/full`；π₀.₅ 可选 `frozen/full`，其中 frozen 训练动作专家和投影层。其他模型配置见 [Model.md](docs/Model.md)。
+默认 VLA-Adapter 使用 LoRA rank 64，同时训练动作查询、动作头和 proprio projector；π₀.₅ 使用全量微调。两个家族的变体均沿用对应预设，`--model` 也会选择对应预设。VLA-Adapter 的 `backbone` 仍可选 `frozen/lora/full`；π₀.₅ 可选 `frozen/full`，其中 frozen 训练动作专家和投影层。其他模型配置见 [Model.md](docs/Model.md)。
 
 使用 BC 时，将 `training_config` 改为 `./training/bc.yaml`，同时设置 `overrides.training.method: bc`。BC 使用数据集中的动作，不读取奖励、不训练 Q/V；筛选训练样本应在准备数据集时完成。
 

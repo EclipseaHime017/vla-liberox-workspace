@@ -104,16 +104,28 @@ distributed:
   pin_memory: true
   persistent_workers: true
 
+model_profiles:
+  vla_adapter:
+    training:
+      micro_batch_size: 64
+      gradient_accumulation_steps: 1
+    model:
+      backbone: lora
+      lora: {rank: 64}
+  pi05:
+    training:
+      micro_batch_size: 32
+      gradient_accumulation_steps: 1
+    model:
+      backbone: full
+
 overrides:
   model:
     family: vla_adapter
     base_id: base
-    backbone: frozen
   training:
     method: iql
     train_steps: 10000
-    micro_batch_size: 8
-    gradient_accumulation_steps: 4
     checkpoint_interval: 512
   reward: {}
 ```
@@ -124,8 +136,10 @@ Relative paths are resolved against their configuration file. Set `runs_root` to
 
 - `gpu_ids` selects 1–8 GPUs on one machine. If `CUDA_VISIBLE_DEVICES` is already set, these indices refer to that visible-device list.
 - `micro_batch_size` is global and must be divisible by the GPU count. Per-GPU batch size is global batch ÷ GPU count.
-- Effective actor batch size = micro batch × gradient accumulation. The example uses one sample per GPU, global micro batch eight, and accumulation four, giving an effective batch of 32.
+- Effective actor batch size = micro batch × gradient accumulation. Defaults use no accumulation: VLA-Adapter uses global batch 64 (eight per GPU), while π₀.₅ uses 32 (four per GPU) on eight GPUs.
 - `checkpoint_interval` must be divisible by accumulation steps. Changing the GPU count does not automatically change training steps or learning rates.
+
+`model_profiles` supplies server defaults for the selected model family, shared by BC and IQL. Explicit `overrides` take precedence. Training remains at 10,000 steps; learning rates, optimizers, and rewards are unchanged. Without accumulation, the actor updates every step, increasing total actor updates and sampled windows over the old defaults. Large-batch/full-model GPU memory requirements must be measured; the runner never silently reduces the batch or enables accumulation.
 
 ### Model and training method
 
@@ -135,10 +149,9 @@ For π₀.₅, replace `overrides.model` with:
 model:
   family: pi05
   base_id: pi05-libero-base
-  backbone: frozen
 ```
 
-VLA-Adapter supports `frozen/lora/full`; π₀.₅ supports `frozen/full`, where frozen trains the action expert and projections. See [Model.md](docs/Model.md) for further model settings.
+By default, VLA-Adapter uses rank-64 LoRA along with trainable action queries, action head, and proprio projector; π₀.₅ uses full fine-tuning. Registered variants, including those selected with `--model`, use their family's profile. VLA-Adapter still supports `frozen/lora/full`; π₀.₅ supports `frozen/full`, where frozen trains the action expert and projections. See [Model.md](docs/Model.md) for further model settings.
 
 For BC, set `training_config: ./training/bc.yaml` and `overrides.training.method: bc`. BC learns from dataset actions without rewards or Q/V training. Select or filter samples when preparing the dataset, not in the training method.
 

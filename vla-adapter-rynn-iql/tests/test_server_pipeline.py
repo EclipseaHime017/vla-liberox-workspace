@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from vla_rynn_iql.config import PROJECT_ROOT
-from vla_rynn_iql.server_config import load_server_config, distributed_config, validate_global_batch
+from vla_rynn_iql.server_config import configure_server, load_server_config, distributed_config, validate_global_batch
 from vla_rynn_iql.server_pipeline import ServerRun, training_settings, execution_plan, visible_devices
 from test_server_inputs import global_runs
 
@@ -111,11 +111,11 @@ def test_config_preserves_global_final_and_overrides_training_only(configured, t
     server = configuration(tmp_path, dataset, configured)
     raw = training_settings(server, dataset)
     assert raw["training"]["train_steps"] == 10000
-    assert raw["training"]["micro_batch_size"] == 8
+    assert raw["training"]["micro_batch_size"] == 64
     assert raw["data"]["include_post_success"] == configured.raw["data"]["include_post_success"]
     assert raw["reward"]["source"] == "final"
     assert raw["reward"]["final_normalization"] == "initial_chunk_v1"
-    assert validate_global_batch(raw, server.distributed) == (8, 1)
+    assert validate_global_batch(raw, server.distributed) == (64, 8)
     raw["training"]["micro_batch_size"] = 7
     with pytest.raises(ValueError, match="divisible"):
         validate_global_batch(raw, server.distributed)
@@ -125,6 +125,110 @@ def test_config_preserves_global_final_and_overrides_training_only(configured, t
     assert training_settings(server, dataset, overrides=changed)["training"]["method"] == "bc"
     changed["training"]["method"] = "iql"
     assert training_settings(server, dataset, overrides=changed)["reward"]["gamma"] == .92
+
+
+@pytest.mark.parametrize("method", ["bc", "iql"])
+@pytest.mark.parametrize("model,family,batch,mode", [
+    ("base", "vla_adapter", 64, "lora"),
+    ("pi05-libero-base", "pi05", 32, "full"),
+    ("pi05-liberox-base", "pi05", 32, "full"),
+])
+def test_server_model_profiles_select_batch_and_adaptation(configured, tmp_path, method, model, family, batch, mode):
+    dataset, _, _ = global_runs(configured)
+    server = configuration(tmp_path, dataset, configured)
+    selected = configure_server(server.path, model=model, method=method)
+    raw = training_settings(selected, dataset)
+    assert raw["model"]["family"] == family
+    assert raw["model"]["base_id"] == model
+    assert raw["model"]["backbone"] == mode
+    if family == "vla_adapter":
+        assert raw["model"]["lora"] == {"rank": 64, "alpha": 64, "dropout": 0.0}
+        assert raw["model"]["action_head"] == raw["model"]["proprio_projector"] == "train"
+    assert raw["training"]["method"] == method
+    assert raw["training"]["gradient_accumulation_steps"] == 1
+    assert validate_global_batch(raw, selected.distributed) == (batch, batch // 8)
+    assert execution_plan(selected, dataset, raw, selected.distributed, "final")["actor_effective_batch_size"] == batch
+    reference = training_settings(replace(selected, model_profiles={}), dataset)
+    assert {key: value for key, value in raw["training"].items()
+            if key not in {"micro_batch_size", "gradient_accumulation_steps"}} == {
+        key: value for key, value in reference["training"].items()
+        if key not in {"micro_batch_size", "gradient_accumulation_steps"}}
+    for section in ("iql", "bc", "reward", "data", "logging", "paths"):
+        assert raw[section] == reference[section]
+
+
+def test_explicit_server_settings_override_model_profile(configured, tmp_path):
+    dataset, _, _ = global_runs(configured)
+    server = configuration(tmp_path, dataset, configured)
+    source = yaml.safe_load(server.path.read_text())
+    source["overrides"]["training"].update(micro_batch_size=16, gradient_accumulation_steps=2)
+    source["overrides"]["model"].update(backbone="lora", lora={"rank": 8})
+    server.path.write_text(yaml.safe_dump(source))
+    selected = configure_server(server.path, model="vla-adapter-pro-liberox-base")
+    raw = training_settings(selected, dataset)
+    assert raw["model"]["base_id"] == "vla-adapter-pro-liberox-base"
+    assert raw["model"]["lora"]["rank"] == 8
+    assert raw["training"]["gradient_accumulation_steps"] == 2
+    assert validate_global_batch(raw, selected.distributed) == (16, 2)
+    changed = copy.deepcopy(selected.overrides)
+    changed["model"]["backbone"] = "frozen"
+    assert training_settings(selected, dataset, overrides=changed)["model"]["backbone"] == "frozen"
+    pi05 = training_settings(configure_server(server.path, model="pi05-libero-base"), dataset)
+    assert pi05["model"]["backbone"] == "full"
+    assert "lora" not in pi05["model"]
+
+
+@pytest.mark.parametrize("model", ["vla-adapter-pro-liberox-base", "pi05-liberox-base"])
+def test_cli_model_replaces_sealed_checkpoint_stats_and_contract(configured, tmp_path, model):
+    from vla_rynn_iql.base_models import model_contract
+    from vla_rynn_iql.models import base_model_config
+    dataset, _, _ = global_runs(configured)
+    original = copy.deepcopy(configured.raw)
+    original["model"]["contract"] = model_contract(original["model"])
+    original["model"]["base_revision"] = "f" * 64
+    configured.path.write_text(yaml.safe_dump(original))
+    server = configuration(tmp_path, dataset, configured)
+    raw = training_settings(configure_server(server.path, model=model), dataset)
+    expected = base_model_config(model)
+    for key in ("family", "base_id", "base_checkpoint", "base_revision", "stats_key"):
+        assert raw["model"][key] == expected[key]
+    assert raw["model"]["contract"] == model_contract(expected)
+    assert raw["model"]["contract"]["observation"]["image_flip_horizontal"] is False
+
+
+def test_server_config_without_profiles_retains_legacy_settings(configured, tmp_path):
+    dataset, _, _ = global_runs(configured)
+    server = configuration(tmp_path, dataset, configured)
+    source = yaml.safe_load(server.path.read_text())
+    source.pop("model_profiles")
+    source["overrides"]["training"].update(micro_batch_size=8, gradient_accumulation_steps=4)
+    source["overrides"]["model"]["backbone"] = "frozen"
+    server.path.write_text(yaml.safe_dump(source))
+    loaded = load_server_config(server.path)
+    raw = training_settings(loaded, dataset)
+    assert loaded.model_profiles == {}
+    assert raw["training"]["gradient_accumulation_steps"] == 4
+    assert validate_global_batch(raw, loaded.distributed) == (8, 1)
+    assert raw["model"]["backbone"] == "frozen"
+
+
+@pytest.mark.parametrize("profiles", [
+    None, {"unknown": {}}, {"pi05": {"model": {"backbone": "lora"}}},
+    {"vla_adapter": {"training": {"micro_batch_size": True}}},
+    {"vla_adapter": {"training": {"gradient_accumulation_steps": 0}}},
+    {"vla_adapter": {"training": {"policy_peak_lr": .01}}},
+    {"vla_adapter": {"model": {"lora": {"rank": 0}}}},
+    {"vla_adapter": {"model": {"base_id": "base"}}},
+    {"vla_adapter": {"reward": {"gamma": .9}}},
+])
+def test_reject_invalid_server_model_profiles(configured, tmp_path, profiles):
+    dataset, _, _ = global_runs(configured)
+    server = configuration(tmp_path, dataset, configured)
+    source = yaml.safe_load(server.path.read_text())
+    source["model_profiles"] = profiles
+    server.path.write_text(yaml.safe_dump(source))
+    with pytest.raises((TypeError, ValueError)):
+        load_server_config(server.path)
 
 
 @pytest.mark.parametrize("section,field,value", [("reward", "alpha", .5),
@@ -153,6 +257,9 @@ def test_dry_run_writes_no_training_results(configured, tmp_path, monkeypatch):
     monkeypatch.setattr(script, "run_batch", lambda run: calls.append(run) or 0)
     assert script.main(["--config", str(server.path), "--model", "pi05-libero-base", "--method", "bc"]) == 0
     assert calls[0].raw["model"]["family"] == "pi05"
+    assert calls[0].raw["model"]["backbone"] == "full"
+    assert calls[0].raw["training"]["micro_batch_size"] == 32
+    assert calls[0].raw["training"]["gradient_accumulation_steps"] == 1
     assert calls[0].raw["training"]["method"] == "bc"
     assert calls[0].raw["reward"] == {}
 

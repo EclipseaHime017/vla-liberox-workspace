@@ -67,6 +67,22 @@ def test_queue_freezes_configuration_and_variant_observation(queued, monkeypatch
     assert seen[0]["model"]["base_revision"] == "a" * 64
 
 
+@pytest.mark.parametrize("model,batch,mode", [("base", 64, "lora"), ("pi05-libero-base", 32, "full")])
+def test_queue_freezes_selected_model_training_profile(queued, model, batch, mode):
+    from vla_rynn_iql.server_config import configure_server
+    queue, server = queued
+    selected = configure_server(server.path, model=model, method="bc")
+    job = queue.add(selected)
+    request = queue.request(job)
+    assert request["raw"]["training"]["micro_batch_size"] == batch
+    assert request["raw"]["training"]["gradient_accumulation_steps"] == 1
+    assert request["raw"]["model"]["backbone"] == mode
+    family = request["raw"]["model"]["family"]
+    selected.model_profiles[family]["training"]["micro_batch_size"] = 8
+    assert queue.request(job)["raw"] == request["raw"]
+    assert queue.request(job)["server"]["model_profiles"][family]["training"]["micro_batch_size"] == batch
+
+
 def test_fifo_continues_after_failure_and_retry_is_explicit(queued, monkeypatch):
     queue, server = queued
     first, second = queue.add(server), queue.add(server)

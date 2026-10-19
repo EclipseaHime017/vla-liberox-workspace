@@ -16,17 +16,30 @@ distributed:
   prefetch_factor: 2
   pin_memory: true
   persistent_workers: true
+# Global batches and trainable components are selected with the model family.
+# Explicit overrides below take precedence over these server-only defaults.
+model_profiles:
+  vla_adapter:
+    training:
+      micro_batch_size: 64  # eight GPUs each process eight chunks
+      gradient_accumulation_steps: 1
+    model:
+      backbone: lora
+      lora: {rank: 64}
+  pi05:
+    training:
+      micro_batch_size: 32  # eight GPUs each process four chunks
+      gradient_accumulation_steps: 1
+    model:
+      backbone: full
 overrides:
   training:
     method: iql  # iql | bc; BC never reads rewards
     train_steps: 10000
-    micro_batch_size: 8  # GLOBAL: eight GPUs each process one chunk
-    gradient_accumulation_steps: 4  # global actor effective batch = 32
     checkpoint_interval: 512
   model:
     family: vla_adapter  # vla_adapter | pi05
     base_id: base  # pi05-libero-base | pi05-liberox-base for pi05
-    backbone: frozen  # frozen | full; frozen trains the pi05 action expert; VLA also supports lora
   # Other model/training/iql/logging fields use the current shared configuration.
   # Copy complete run directories from the PC, including adjacent global evaluations.
   # Evaluator/fusion parameters come from each run's saved global reward.

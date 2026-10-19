@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 from .config import load_train_config, validate_train_config
+from .config_sources import merge_config
 from .io import atomic_json
 from .methods import training_method
 from .server_config import validate_global_batch
@@ -38,6 +39,11 @@ def visible_devices(gpu_ids, environ=None) -> str:
 
 def training_settings(server, task: GlobalTask, *, overrides=None, source=None) -> dict:
     changes = copy.deepcopy(server.overrides if overrides is None else overrides)
+    if server.model_profiles:
+        family = changes.get("model", {}).get("family")
+        if family is None:
+            family = load_train_config(server.training_config).section("model")["family"]
+        changes = merge_config(server.model_profiles.get(family, {}), changes)
     raw = load_train_config(server.training_config, overrides=changes, overrides_path=server.path).raw
     raw["data"].update(task_ids=[task.task_id], selection_manifest=None, stage_annotations_manifest=None)
     if task.dataset_defaults:

@@ -1,7 +1,7 @@
 """Server execution settings; model and algorithm settings remain in training/*.yaml."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -38,21 +38,57 @@ class ServerConfig:
     reward_source: str
     distributed: DistributedConfig
     overrides: dict[str, Any]
+    model_profiles: dict[str, dict] = field(default_factory=dict)
 
 
 def configure_server(path, *, task=None, runs_root=None, model=None, method=None):
     """Resolve common CLI overrides for direct and queued training."""
     from dataclasses import replace
+    from .base_models import base_model, model_contract
     from .models import base_model_config
     from .config_sources import merge_config
     server = load_server_config(path)
     overrides = server.overrides
     if model:
-        overrides = {**overrides, "model": base_model_config(model)}
+        base = base_model(model)
+        settings = overrides["model"]
+        family = settings.get("family")
+        if family is None:
+            from .config import load_train_config
+            family = load_train_config(server.training_config, overrides=overrides,
+                                       overrides_path=server.path).section("model")["family"]
+        identity = {"family", "base_id", "base_checkpoint", "base_revision", "stats_key", "contract"}
+        retained = {key: value for key, value in settings.items() if key not in identity} if family == base.family else {}
+        selected = {key: value for key, value in base_model_config(base.id).items() if key in identity}
+        selected["contract"] = model_contract(selected)
+        overrides = {**overrides, "model": {**retained, **selected}}
     if method:
         overrides = merge_config(overrides, {"training": {"method": method}})
     return replace(server, overrides=overrides, task_id=task or server.task_id,
                    runs_root=Path(runs_root).expanduser().resolve() if runs_root else server.runs_root)
+
+
+def model_profiles(raw) -> dict[str, dict]:
+    """Server-only batch and adaptation defaults, below explicit run overrides."""
+    from .models import MODELS, model_config
+    if not isinstance(raw, dict):
+        raise TypeError("model_profiles must be a mapping")
+    result = {}
+    for family, profile in raw.items():
+        if family not in MODELS:
+            raise ValueError(f"Unknown model_profiles family: {family}")
+        values = validate_overrides(profile)
+        allowed = {"training": {"micro_batch_size", "gradient_accumulation_steps"},
+                   "model": {"backbone", "lora", "action_head", "proprio_projector"}}
+        for section, settings in values.items():
+            if settings.keys() - allowed.get(section, set()):
+                raise ValueError(f"Invalid model_profiles.{family}.{section} keys")
+        for key, value in values["training"].items():
+            if type(value) is not int or value < 1:
+                raise ValueError(f"model_profiles.{family}.training.{key} must be a positive integer")
+        model_config({"model": {"family": family, **values["model"]}})
+        result[family] = {section: values[section] for section in allowed}
+    return result
 
 
 def distributed_config(raw: dict) -> DistributedConfig:
@@ -81,6 +117,7 @@ def load_server_config(path: Path) -> ServerConfig:
     import re
     path = path.expanduser().resolve()
     raw = yaml.load(path.read_text(), Loader=UniqueKeyLoader)
+    profiles = model_profiles(raw.pop("model_profiles", {}) if isinstance(raw, dict) else {})
     if isinstance(raw, dict) and raw.get("schema_version") == 3:
         environment = raw.pop("environment", None)
         if environment is not None and (not isinstance(environment, str) or not re.fullmatch(r"[\w.-]+", environment)):
@@ -107,7 +144,7 @@ def load_server_config(path: Path) -> ServerConfig:
         raise ValueError("Select server devices through distributed.gpu_ids, not training.device")
     return ServerConfig(path, **paths, task_id=task_id,
                         reward_source=raw["reward_source"], distributed=distributed_config(raw["distributed"]),
-                        overrides=overrides)
+                        overrides=overrides, model_profiles=profiles)
 
 
 def validate_global_batch(raw: dict, distributed: DistributedConfig) -> tuple[int, int]:
