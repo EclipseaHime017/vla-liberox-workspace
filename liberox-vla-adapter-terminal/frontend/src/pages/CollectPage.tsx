@@ -618,27 +618,29 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       <section className="workspace">
         <aside className="panel session-panel">
           <div className="panel-title"><h2>会话</h2><span>{visibleSessions.length}/{sessions.length}</span></div>
-          <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} policyInstruction={policyInstruction} onPolicyInstruction={(value, commit) => { setPolicyInstruction(value); if (commit) void updateDraft({ policy_instruction: value }); }} onBranchSteps={(value) => setPolicyBranchDraft((current) => current ? { ...current, target_steps: value } : current)} onBranchInstruction={(value) => setPolicyBranchDraft((current) => current ? { ...current, policy_instruction: value } : current)} onTask={(value) => { setPolicyInstruction(bootstrap.task_catalog.find((item) => item.task_id === value)?.prompt ?? ""); setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={changePolicy} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch()} onCancelBranch={() => setPolicyBranchDraft(null)} />
-          <div className="session-filter">
-            <p className="task-filter-heading">数据检索</p>
-            <TaskFilter tasks={bootstrap.task_catalog} value={sessionTaskFilter} disabled={Boolean(active) || Boolean(policyBranchDraft)} onChange={changeSessionTaskFilter} labelPrefix="检索" />
-          </div>
-          <div className="session-list">
-            {visibleSessions.map((session) => (
-              <div key={session.id} className={"session-entry " + (selectedId === session.id ? "selected" : "")}>
-                <button className="session-item" onClick={() => { setPolicyBranchDraft(null); setSelectedId(session.id); setSelectedStep(0); }}>
-                  <RunStatus run={session} />
-                </button>
-                {session.managed && <button
-                  className="delete-icon"
-                  title="永久删除此 UI 会话"
-                  aria-label={"删除会话 " + session.id}
-                  disabled={Boolean(active) || Boolean(policyBranchDraft) || controller?.state === "CALIBRATING" || busy}
-                  onClick={() => setDeleteTarget(session)}
-                >🗑</button>}
-              </div>
-            ))}
-            {!visibleSessions.length && <p className="session-empty">当前任务暂无可预览数据。</p>}
+          <div className="session-panel-body">
+            <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} policyInstruction={policyInstruction} onPolicyInstruction={(value, commit) => { setPolicyInstruction(value); if (commit) void updateDraft({ policy_instruction: value }); }} onBranchSteps={(value) => setPolicyBranchDraft((current) => current ? { ...current, target_steps: value } : current)} onBranchInstruction={(value) => setPolicyBranchDraft((current) => current ? { ...current, policy_instruction: value } : current)} onTask={(value) => { setPolicyInstruction(bootstrap.task_catalog.find((item) => item.task_id === value)?.prompt ?? ""); setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={changePolicy} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch()} onCancelBranch={() => setPolicyBranchDraft(null)} />
+            <div className="session-filter">
+              <p className="task-filter-heading">数据检索</p>
+              <TaskFilter tasks={bootstrap.task_catalog} value={sessionTaskFilter} disabled={Boolean(active) || Boolean(policyBranchDraft)} onChange={changeSessionTaskFilter} labelPrefix="检索" />
+            </div>
+            <div className="session-list">
+              {visibleSessions.map((session) => (
+                <div key={session.id} className={"session-entry " + (selectedId === session.id ? "selected" : "")}>
+                  <button className="session-item" onClick={() => { setPolicyBranchDraft(null); setSelectedId(session.id); setSelectedStep(0); }}>
+                    <RunStatus run={session} />
+                  </button>
+                  {session.managed && <button
+                    className="delete-icon"
+                    title="永久删除此 UI 会话"
+                    aria-label={"删除会话 " + session.id}
+                    disabled={Boolean(active) || Boolean(policyBranchDraft) || controller?.state === "CALIBRATING" || busy}
+                    onClick={() => setDeleteTarget(session)}
+                  >🗑</button>}
+                </div>
+              ))}
+              {!visibleSessions.length && <p className="session-empty">当前任务暂无可预览数据。</p>}
+            </div>
           </div>
         </aside>
 

@@ -70,6 +70,29 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("collection controller integration", () => {
+  it("keeps the full draft form, filters and history in one scroll body below the header", async () => {
+    const original = vi.mocked(api).getMockImplementation()!;
+    const draft = {id: "draft", task_id: "task", policy_id: "base", policy_label: "Base",
+      policy_instruction: "pick bowl", max_steps: 300, open_loop_steps: 8,
+      seed: 0, init_state_index: 0, disabled_policy_cameras: [], task: bootstrap.task,
+      preview_status: "READY", preview_revision: 1, preview_available: false};
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (path === "/api/draft") return draft;
+      return original(path, options);
+    });
+    render(<CollectPage />);
+    fireEvent.click(await screen.findByRole("button", {name: "创建仿真"}));
+    const start = await screen.findByRole("button", {name: "开始仿真"});
+    const body = start.closest(".session-panel-body")!;
+    expect(body).not.toBeNull();
+    expect(screen.getByLabelText("随机种子").closest(".session-panel-body")).toBe(body);
+    expect(screen.getByText("数据检索").closest(".session-panel-body")).toBe(body);
+    expect(screen.getByRole("button", {name: /原始 · source /}).closest(".session-panel-body")).toBe(body);
+    const header = screen.getByRole("heading", {name: "会话"}).closest(".panel-title")!;
+    expect(header.parentElement).toBe(body.parentElement);
+    expect(body.contains(header)).toBe(false);
+  });
+
   it("promotes human history and resumes its final state with a new instruction", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     let record = {...source, id: "human", kind: "branch", role: "branch", can_promote: true,

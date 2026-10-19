@@ -59,6 +59,8 @@ h2 { font-size: 16px; letter-spacing: -.01em; }
 .panel-title { min-height: 50px; padding: 0 17px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
 .panel-title span { color: var(--muted); font: 11px ui-monospace, SFMono-Regular, monospace; }
 .session-panel { position: sticky; top: 90px; max-height: calc(100vh - 110px); display: flex; flex-direction: column; }
+.session-panel > .panel-title { flex-shrink: 0; }
+.session-panel-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .new-run { padding: 15px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .new-run label { color: var(--muted); font-size: 14px; }
 .new-run input, .new-run select { width: 100%; margin-top: 5px; color: var(--text); background: rgba(255,255,255,.9); border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px; }
@@ -83,7 +85,7 @@ button { border: 1px solid var(--line); background: rgba(255,255,255,.9); border
 button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 5px 15px rgba(0,0,0,.08); }
 button.primary { color: #fff; background: var(--blue); border-color: var(--blue); }
 button.danger { color: var(--danger); background: #fff5f5; }
-.session-list { overflow: auto; padding: 6px; }
+.session-list { padding: 6px; }
 .session-entry { display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 2px; border: 1px solid transparent; border-radius: 10px; margin-bottom: 3px; }
 .session-entry.selected { background: var(--blue-soft); border-color: rgba(0,113,227,.16); }
 .session-item { width: 100%; display: grid; grid-template-columns: 10px 1fr auto; gap: 9px; align-items: center; text-align: left; border: 0; background: transparent; margin: 0; box-shadow: none !important; }
