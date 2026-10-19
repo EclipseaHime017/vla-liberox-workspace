@@ -61,7 +61,7 @@ def test_pi_overlay_roundtrip_and_base_protection(tmp_path, base_id, legacy, sch
     (directory / "actor.pt").write_bytes(b"fake-deltas")
     (directory / "pi05_identity.json").write_text(json.dumps(identity))
     compatibility = {"base_checkpoint": settings["base_checkpoint"], "stats_key": settings["stats_key"],
-                     "action_horizon": 8, "action_dim": 7, "proprio_dim": 8}
+                     "action_horizon": 10 if schema == 5 else 8, "action_dim": 7, "proprio_dim": 8}
     payload = {"schema_version": 4, "family": "pi05", "algorithm": "bc", "model_config": settings,
                "policy_id": "pi-test", "label": "test", "actor": "actor.pt", "base_identity": "pi05_identity.json",
                "dataset_sha256": "d" * 64, "reward_sha256": None, "training_step": 1,
@@ -82,9 +82,9 @@ def test_pi_overlay_roundtrip_and_base_protection(tmp_path, base_id, legacy, sch
     assert (entry.parent is not None) == (schema == 5)
     # A trained child defaults to its supervised replay length (C3); the base
     # variant still defaults to 10 and 10 remains an explicit choice.
-    default = 8 if base_id == "pi05-liberox-base" else 5
+    default = (10 if schema == 5 else 8) if base_id == "pi05-liberox-base" else 5
     assert entry.inference == {"open_loop_steps": default, "max_open_loop_steps": 10}
-    assert entry.public()["io"]["replay_horizon"] == 8
+    assert entry.public()["io"]["replay_horizon"] == (10 if schema == 5 else 8)
     assert entry.resolve_open_loop_steps() == default
     assert entry.resolve_open_loop_steps(10) == 10
     with pytest.raises(ValueError, match=r"\[1, 10\]"):

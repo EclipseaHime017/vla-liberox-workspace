@@ -26,6 +26,7 @@ class ActionDataset(Dataset):
                  proprio_stats: dict[str, Any], split: str = "train"):
         self.config = config
         self.image_orientation = image_orientation(model_contract(config.section("model"))["io"])
+        self.actor_horizon = model_contract(config.section("model"))["io"]["replay_horizon"]
         self.include_post_success = config.section("data").get("include_post_success", True)
         self.manifest = load_manifest(config)
         self.action_stats, self.proprio_stats = action_stats, proprio_stats
@@ -81,6 +82,16 @@ class ActionDataset(Dataset):
         chunk = self.chunks[episode["run_id"]][chunk_index]
         start, end, length = int(chunk["start"]), int(chunk["end"]), int(chunk["length"])
         trajectory = self._trajectory(episode)
+        # The actor learns a model-sized window from the same state. Ordinary
+        # re-planning boundaries end a critic transition, not actor supervision.
+        actor_end = min(start + self.actor_horizon, replay_end_step(episode, self.include_post_success))
+        hard_boundaries = {int(s["end"]) for s in episode["recorded_action_source_segments"]}
+        hard_boundaries.update(int(s["end"]) for s in (episode.get("trajectory_segments") or []))
+        hard_boundaries.update(int(step) for step in episode.get("handoff_steps", []))
+        if episode.get("resume_step") is not None:
+            hard_boundaries.add(int(episode["resume_step"]))
+        actor_end = min([actor_end] + [point for point in hard_boundaries if start < point < actor_end])
+        actor_length = actor_end - start
         frames = self._frames.episode(episode, self._frame_indices[episode["run_id"]])
         orientation = episode["observation_orientation"]
         agent = policy_view(frames.frame("agentview_image", start), orientation, self.image_orientation)
@@ -93,15 +104,23 @@ class ActionDataset(Dataset):
             from .pi05 import normalize
             proprio = normalize(raw_proprio, self.proprio_stats)
             encoded_actions = normalize(trajectory["env_action"][start:end], self.action_stats)
+            actor_encoded = normalize(trajectory["env_action"][start:actor_end], self.action_stats)
         else:
             proprio = normalize_with_stats(raw_proprio, self.proprio_stats)
             encoded_actions = env_to_dataset_actions(trajectory["env_action"][start:end], self.action_stats)
+            actor_encoded = env_to_dataset_actions(trajectory["env_action"][start:actor_end], self.action_stats)
         actions = np.zeros((self.manifest["action_horizon"], self.manifest["action_dim"]), dtype=np.float32)
         action_mask = np.zeros(self.manifest["action_horizon"], dtype=bool)
         actions[:length] = encoded_actions
         raw_actions = np.zeros_like(actions)
         raw_actions[:length] = trajectory["env_action"][start:end]
         action_mask[:length] = True
+        actor_actions = np.zeros((self.actor_horizon, self.manifest["action_dim"]), dtype=np.float32)
+        actor_raw_actions = np.zeros_like(actor_actions)
+        actor_mask = np.zeros(self.actor_horizon, dtype=bool)
+        actor_actions[:actor_length] = actor_encoded
+        actor_raw_actions[:actor_length] = trajectory["env_action"][start:actor_end]
+        actor_mask[:actor_length] = True
         # The selected replay endpoint is terminal in either mode. Reward arrays
         # retain full-recording indices and never need a model re-evaluation.
         terminal = end == replay_end_step(episode, self.include_post_success)
@@ -111,6 +130,9 @@ class ActionDataset(Dataset):
             "proprio": torch.from_numpy(proprio[start]),
             "actions": torch.from_numpy(actions),
             "action_mask": torch.from_numpy(action_mask),
+            "actor_actions": torch.from_numpy(actor_actions),
+            "actor_raw_actions": torch.from_numpy(actor_raw_actions),
+            "actor_action_mask": torch.from_numpy(actor_mask),
             "chunk_length": torch.tensor(length, dtype=torch.int64),
             "agent_image": torch.from_numpy(agent.copy()),
             "wrist_image": torch.from_numpy(wrist.copy()),

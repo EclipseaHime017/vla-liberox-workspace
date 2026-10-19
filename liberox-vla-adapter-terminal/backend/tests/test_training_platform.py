@@ -43,7 +43,20 @@ def make_run(
     episode = run_dir / "episodes" / "episode_000"
     episode.mkdir(parents=True)
     action_count = 17
-    np.savez_compressed(episode / "trajectory.npz", action=np.zeros((action_count, 7)))
+    raw_actions = np.zeros((action_count, 7), dtype=np.float32)
+    raw_actions[:, 6] = .5
+    done = np.zeros(action_count, dtype=bool)
+    if success:
+        done[-5:] = True
+    sources = ["policy"] * action_count
+    if kind == "branch":
+        sources[resume_step:] = [source] * (action_count - resume_step)
+    np.savez_compressed(episode / "trajectory.npz", action=np.zeros((action_count, 7)),
+        env_action=np.zeros((action_count, 7)), raw_action=raw_actions,
+        time_seconds=np.arange(action_count + 1) / 20,
+        eef_position=np.zeros((action_count + 1, 3)),
+        eef_axis_angle=np.zeros((action_count + 1, 3)),
+        gripper_qpos=np.zeros((action_count + 1, 2)), done=done, action_source=np.array(sources))
     np.savez_compressed(
         episode / "trajectory_observations.npz",
         agentview_image=np.zeros((action_count + 1, 2, 2, 3), dtype=np.uint8),
@@ -55,6 +68,11 @@ def make_run(
         "task_id": task_id,
         "status": "COMPLETED",
         "success": success,
+        "task": "pick the bowl", "task_name": "pick", "open_loop_steps": 8,
+        "control_mode": "manual" if source == "human" else "policy",
+        "resume_step": resume_step if kind == "branch" else None,
+        "parent_session_id": "root" if kind == "branch" else None,
+        "root_session_id": "root" if kind == "branch" else run_id,
     }
     (run_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     return {

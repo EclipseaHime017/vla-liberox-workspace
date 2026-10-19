@@ -258,6 +258,9 @@ def _save_checkpoint(
         "model_config": model_signature(config.raw),
         "model_identity": getattr(components, "identity", None),
         "model_parent": getattr(components, "parent", None),
+        "training_layout": {"chunking": manifest.get("chunking"),
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
@@ -383,6 +386,9 @@ def _restore_checkpoint(
             "existing complete reward evaluations can still be reused."
         )
     expected = {
+        "training_layout": {"chunking": manifest.get("chunking"),
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "base_checkpoint": config.section("model")["base_checkpoint"],
@@ -426,7 +432,10 @@ def train(config: LoadedConfig) -> Path:
         torch.cuda.set_device(device)
     LOG.info("Loading prepared replay for %s", method.name.upper())
     manifest = load_manifest(config)
-    for key in ("action_horizon", "action_dim", "proprio_dim"):
+    from .execution import CHUNKING_RULE
+    if manifest.get("chunking") != CHUNKING_RULE:
+        raise ValueError("Prepared replay uses legacy chunking; rerun Prepare and regenerate compatible rewards before training")
+    for key in ("action_dim", "proprio_dim"):
         if key in manifest and manifest[key] != config.section("data")[key]:
             raise ValueError(f"Prepared replay {key} does not match the selected model configuration")
     reward_index = load_reward_index(config) if method.requires_rewards else None
@@ -445,7 +454,7 @@ def train(config: LoadedConfig) -> Path:
                ActionDataset(config, components.action_stats, components.proprio_stats, "train"))
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
-    agent = build_algorithm(config, device)
+    agent = build_algorithm(config, device, transition_horizon=manifest["action_horizon"])
     actor_parameters = backend.trainable_parameters(components)
     counts = backend.parameter_counts(components)
     print(f"MODEL ready | config={model_signature(config.raw)} | parameters={counts}", flush=True)
@@ -495,6 +504,9 @@ def train(config: LoadedConfig) -> Path:
         "model_identity": getattr(components, "identity", None),
         "model_parent": getattr(components, "parent", None),
         "code_version": _code_version(),
+        "training_layout": {"chunking": manifest["chunking"],
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_hash,
@@ -583,8 +595,8 @@ def train(config: LoadedConfig) -> Path:
             actor_loss = agent.weight_actor_losses(losses, context)
             action_metrics = _action_diagnostics(
                 prediction,
-                critic_batch["actions"],
-                critic_batch["action_mask"],
+                batch.get("actor_actions", batch["actions"]).to(device),
+                batch.get("actor_action_mask", batch["action_mask"]).to(device),
             ) if prediction is not None else {"actor_flow_mse": float(losses.detach().mean())}
             (actor_loss / accumulation).backward()
             actor_loss_value = float(actor_loss.detach())

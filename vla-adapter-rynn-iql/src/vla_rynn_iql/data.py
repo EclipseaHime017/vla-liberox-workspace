@@ -16,11 +16,12 @@ import numpy as np
 
 from .config import LoadedConfig
 from .io import atomic_json, sha256_file, stable_hash
+from .execution import CHUNKING_RULE, execution_steps, query_steps
 
 
 LOG = logging.getLogger(__name__)
 MANIFEST_NAME = "dataset_manifest.json"
-MANIFEST_SCHEMA_VERSION = 4
+MANIFEST_SCHEMA_VERSION = 5
 REPLAY_POLICY = "full_recording_v1"
 
 
@@ -75,6 +76,8 @@ def build_semi_mdp_chunks(
     end: int,
     horizon: int,
     source_segments: list[dict[str, Any]],
+    inference_steps: list[int] | None = None,
+    extra_boundaries: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Build variable-duration transitions without crossing controller boundaries.
 
@@ -97,9 +100,17 @@ def build_semi_mdp_chunks(
         segment_lookup.append({
             "start": segment_start, "end": segment_end, "action_source": source,
         })
-        # Each controller/source segment owns its own horizon grid. A source
-        # change therefore starts a new macro-action sequence.
-        boundaries.update(range(segment_start, segment_end, horizon))
+        steps = int(segment.get("open_loop_steps", horizon))
+        if steps < 1:
+            raise ValueError("Execution segment has an invalid open_loop_steps")
+        queries = [value for value in (inference_steps or []) if segment_start <= value < segment_end]
+        if source in {"policy", "policy_requery"} and queries:
+            boundaries.update(queries)
+        else:
+            # A hard boundary may clip a grid, but must not change its phase.
+            origin = int(segment.get("grid_start", segment["start"]))
+            offset = max(0, (segment_start - origin + steps - 1) // steps)
+            boundaries.update(range(origin + offset * steps, segment_end, steps))
         boundaries.add(segment_end)
     covered = sum(segment["end"] - segment["start"] for segment in segment_lookup)
     if covered != end - first:
@@ -107,6 +118,7 @@ def build_semi_mdp_chunks(
             f"Action-source segments cover {covered} actions, expected {end - first}"
         )
 
+    boundaries.update(value for value in (extra_boundaries or set()) if first < value < end)
     ordered = sorted(boundaries)
     chunks: list[dict[str, Any]] = []
     segment_index = 0
@@ -350,12 +362,18 @@ def _materialize_export(run_dir: Path, cache_dir: Path) -> tuple[Path, Path]:
     reward = np.asarray([_column(r, ("reward",)) for r in action_rows], dtype=np.float32)
     done = np.asarray([str(r.get("done", "false")).lower() == "true" for r in action_rows], dtype=bool)
     action_source = np.asarray([r.get("action_source", "unknown") for r in action_rows])
+    inference_csv = episode / "trajectory_inference.csv"
+    query_indices = []
+    if inference_csv.is_file():
+        with inference_csv.open(newline="", encoding="utf-8") as stream:
+            query_indices = sorted({int(row["query_step"]) for row in csv.DictReader(stream)})
     np.savez_compressed(
         trajectory_path, time_seconds=time_seconds,
         eef_position=eef_position, eef_axis_angle=eef_axis_angle,
         gripper_qpos=gripper_qpos, raw_action=raw_action, env_action=env_action,
         reward=reward, done=done, action_source=action_source,
         action_codec=np.asarray([r.get("action_codec") or "vla_adapter_v1" for r in action_rows]),
+        inference_query_step=np.asarray(query_indices, dtype=np.int64),
     )
 
     try:
@@ -382,6 +400,63 @@ def _materialize_export(run_dir: Path, cache_dir: Path) -> tuple[Path, Path]:
     return trajectory_path, observations_path
 
 
+def _execution_segments(run: dict, metadata: dict, count: int, steps: int,
+                        visited: frozenset[str] = frozenset(), *,
+                        trajectory_path: Path | None = None) -> list[dict] | None:
+    """Recover producer cadence through saved prefixes without loading images."""
+    segments = metadata.get("trajectory_segments", run.get("trajectory_segments"))
+    resume = int(metadata.get("source_resume_step") or metadata.get("resume_step") or run.get("resume_step") or 0)
+    run_id = str(metadata.get("session_id") or metadata.get("id") or run.get("id") or "")
+    prompt = metadata.get("policy_instruction") or metadata.get("task") or run.get("task")
+    parent_path = metadata.get("source_trajectory") or run.get("source_trajectory")
+    if resume and trajectory_path is not None:
+        local_parent = trajectory_path.with_name("source_trajectory.npz")
+        if local_parent != trajectory_path and local_parent.is_file():
+            parent_path = str(local_parent)
+    needs_parent = resume and (segments is None or any(
+        s.get("open_loop_steps") is None and s["start"] < resume for s in segments))
+    if needs_parent and parent_path and not storage_path(parent_path).is_file():
+        raise ValueError("Copied prefix is missing execution settings and its saved source trajectory; "
+                         "restore the source recording to recover its model's open_loop_steps")
+    if segments is None and resume and parent_path and storage_path(parent_path).is_file():
+        segments = [dict(start=0, end=resume,
+                         origin_run_id=str(run.get("parent_session_id") or metadata.get("parent_session_id")
+                                           or metadata.get("root_session_id") or run.get("root_session_id") or run_id),
+                         policy_instruction=prompt),
+                    dict(start=resume, end=count, origin_run_id=run_id,
+                         policy_instruction=prompt, open_loop_steps=steps)]
+    if segments is None:
+        return None
+    if not isinstance(segments, list):
+        raise ValueError("trajectory_segments must be a list")
+    result = [dict(segment) for segment in segments]
+    missing = [segment for segment in result if segment.get("open_loop_steps") is None]
+    copied = [segment for segment in missing if segment["end"] <= resume]
+    parent_segments = []
+    parent_steps = None
+    if copied and parent_path and storage_path(parent_path).is_file():
+        parent_path = storage_path(parent_path)
+        if str(parent_path) in visited or len(visited) >= 32:
+            raise ValueError("Cyclic or excessively deep source trajectory chain")
+        with np.load(parent_path, allow_pickle=False) as parent:
+            parent_meta = json.loads(str(parent["metadata_json"].item())) if "metadata_json" in parent else {}
+            parent_count = len(parent["env_action"])
+        parent_steps, _ = execution_steps({}, parent_meta)
+        parent_segments = _execution_segments({}, parent_meta, parent_count, parent_steps,
+                                               visited | {str(parent_path)}, trajectory_path=parent_path) or []
+    resolved = []
+    for segment in result:
+        if segment in copied and parent_segments:
+            resolved.extend({**segment, **previous, "start": max(segment["start"], previous["start"]),
+                             "end": min(segment["end"], previous["end"])}
+                            for previous in parent_segments
+                            if previous["start"] < segment["end"] and previous["end"] > segment["start"])
+        else:
+            segment.setdefault("open_loop_steps", parent_steps if segment in copied and parent_steps is not None else steps)
+            resolved.append(segment)
+    return resolved
+
+
 def _load_run(run_json: Path, config: LoadedConfig, *,
               frozen_observations_sha256: str | None = None) -> dict[str, Any] | None:
     run_json = storage_path(run_json)
@@ -402,7 +477,7 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
     if frozen_observations_sha256 is not None and (not trajectory.is_file() or not observations.is_file()):
         raise ValueError("Frozen source files are unavailable; cannot reconstruct reward inputs")
     if not trajectory.is_file() or not observations.is_file():
-        cache = Path(config.section("paths")["work_dir"]) / "materialized" / str(run["id"])
+        cache = Path(config.section("paths")["work_dir"]) / "materialized-execution-v1" / str(run["id"])
         trajectory, observations = _materialize_export(run_json.parent, cache)
         observation_orientation = "vla_policy"
     prompt = run.get("task")
@@ -427,6 +502,7 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
         recorded_action_count = len(arrays["env_action"])
         if recorded_action_count < 1:
             raise ValueError(f"Trajectory must contain at least one action: {trajectory}")
+        queries = query_steps(arrays.get("inference_query_step", []), recorded_action_count)
         if len(arrays["eef_position"]) != recorded_action_count + 1:
             raise ValueError(f"N+1 state invariant failed: {trajectory}")
         for key, shape in {
@@ -526,12 +602,18 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
             "Run %s contains %d done=True actions but no streak of %d; treating it as failure",
             run["id"], raw_done_true_count, required_success_steps,
         )
+    steps, steps_source = execution_steps(run, metadata, config_path=run_json.parent / "config.yaml")
+    segments = _execution_segments(run, metadata, recorded_action_count, steps, trajectory_path=trajectory)
     return {
         "run_id": str(run["id"]),
         "root_run_id": str(run.get("root_session_id") or run["id"]),
         "parent_run_id": run.get("parent_session_id"),
         "kind": kind,
         "control_mode": str(run.get("control_mode", "policy")),
+        "open_loop_steps": steps,
+        "execution_steps_source": steps_source,
+        "inference_query_steps": queries,
+        "chunking": CHUNKING_RULE,
         "resume_step": resume if kind == "branch" else None,
         "task_id": str(run.get("task_id") or ""),
         "task_name": str(run.get("task_name") or ""),
@@ -552,9 +634,9 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
         "recorded_action_source_segments": action_source_segments(
             sources, recorded_action_count,
         ),
-        **({"trajectory_segments": metadata.get("trajectory_segments", run.get("trajectory_segments")),
+        **({"trajectory_segments": segments,
             "handoff_steps": metadata.get("handoff_steps", run.get("handoff_steps", []))}
-           if "trajectory_segments" in metadata or "trajectory_segments" in run else {}),
+           if segments is not None else {}),
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
@@ -571,7 +653,20 @@ def _split(root_run_id: str, seed: int, validation_fraction: float) -> str:
     return "validation" if value < validation_fraction else "train"
 
 
-def add_episode_chunks(episode: dict[str, Any], horizon: int) -> None:
+def transition_layout_summary(episodes: list[dict]) -> dict:
+    """Expose unusually wide critic inputs before a model or GPU is loaded."""
+    lengths = [int(c["length"]) for episode in episodes for c in episode["chunks"]]
+    summary = {"max_steps": max(lengths), "p95_steps": float(np.percentile(lengths, 95))}
+    if summary["max_steps"] > 128:
+        largest = sorted(((int(c["length"]), ep["run_id"], int(c["start"]), int(c["end"]))
+                          for ep in episodes for c in ep["chunks"]), reverse=True)[:5]
+        LOG.warning("Wide execution intervals: max=%s, p95=%.1f; all critic samples pad to this maximum. "
+                    "Check missing inference queries or recorded open_loop_steps. Largest intervals: %s",
+                    summary["max_steps"], summary["p95_steps"], largest)
+    return summary
+
+
+def add_episode_chunks(episode: dict[str, Any], horizon: int | None = None) -> None:
     """Describe the complete recording identically for Prepare and inheritance."""
     resume_step = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
     success_end = (int(episode["terminal_step"]) + 1 if episode["terminal_step"] is not None
@@ -581,6 +676,9 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int) -> None:
     if not isinstance(raw_handoffs, list) or any(type(step) is not int or not 0 <= step <= int(episode["recorded_action_count"]) for step in raw_handoffs):
         raise ValueError("handoff_steps must contain integer recording boundaries")
     handoffs = set(raw_handoffs) | ({resume_step} if resume_step else set())
+    execution_horizon = int(episode.get("open_loop_steps") or horizon or 0)
+    if execution_horizon < 1:
+        raise ValueError(f"Run {episode['run_id']} is missing its execution configuration")
     if segments is not None:
         if not isinstance(segments, list):
             raise ValueError("trajectory_segments must be a list")
@@ -598,28 +696,35 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int) -> None:
     def split_sources(sources):
         result = []
         for source in sources:
+            cuts_at = boundaries | ({success_end} if source["action_source"] == "human" else set())
             cuts = sorted({int(source["start"]), int(source["end"])} |
-                          {point for point in boundaries if source["start"] < point < source["end"]})
-            result.extend({**source, "start": start, "end": end} for start, end in zip(cuts, cuts[1:]))
+                          {point for point in cuts_at if source["start"] < point < source["end"]})
+            for start, end in zip(cuts, cuts[1:]):
+                producer = next((s for s in (segments or []) if s["start"] <= start < s["end"]), None)
+                result.append({**source, "start": start, "end": end,
+                    "grid_start": (max(start, success_end) if source["action_source"] == "human" and start >= success_end
+                                   else max(producer["start"], source["start"]) if producer else source["start"]),
+                    "open_loop_steps": producer.get("open_loop_steps", execution_horizon) if producer else execution_horizon})
         return result
-    chunks = build_semi_mdp_chunks(first=0, end=success_end, horizon=horizon,
-                                   source_segments=split_sources(episode["action_source_segments"]))
-    if success_end < int(episode["recorded_action_count"]):
-        chunks.extend(build_semi_mdp_chunks(first=success_end,
-            end=int(episode["recorded_action_count"]), horizon=horizon,
-            source_segments=split_sources(episode["recorded_action_source_segments"])))
+    chunks = build_semi_mdp_chunks(first=0, end=int(episode["recorded_action_count"]), horizon=execution_horizon,
+        source_segments=split_sources(episode["recorded_action_source_segments"]),
+        inference_steps=episode.get("inference_query_steps", []), extra_boundaries={success_end})
     for chunk in chunks:
+        producer_steps = execution_horizon
         if segments:
             segment = next(s for s in segments if s["start"] <= chunk["start"] < s["end"])
+            producer_steps = int(segment.get("open_loop_steps", execution_horizon))
             chunk.update(origin_run_id=segment["origin_run_id"], policy_instruction=segment["policy_instruction"])
-        if chunk["end"] in handoffs and chunk["length"] < horizon:
+        if chunk["end"] in handoffs and chunk["length"] < producer_steps:
             chunk["interrupted"] = True
     if episode["kind"] == "branch":
         for chunk in chunks:
             if int(chunk["end"]) > resume_step:
                 continue
             chunk["copied_prefix"] = True
-            if int(chunk["end"]) == resume_step and int(chunk["length"]) < horizon:
+            producer_steps = next((int(s.get("open_loop_steps", execution_horizon)) for s in (segments or [])
+                                   if s["start"] <= chunk["start"] < s["end"]), execution_horizon)
+            if int(chunk["end"]) == resume_step and int(chunk["length"]) < producer_steps:
                 chunk["transition_type"] = str(chunk["action_source"]) + "_interrupted"
                 chunk["interrupted"] = True
             else:
@@ -680,7 +785,6 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
     if not discovered:
         raise RuntimeError("No valid completed episodes were found")
 
-    horizon = int(config.section("data")["action_horizon"])
     seed = int(config.section("data")["split_seed"])
     fraction = float(config.section("data")["validation_fraction"])
     episodes = sorted(discovered.values(), key=lambda item: item["run_id"])
@@ -696,7 +800,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             selected[episode["run_id"]]["split"]
             if selected else _split(episode["root_run_id"], seed, fraction)
         )
-        add_episode_chunks(episode, horizon)
+        add_episode_chunks(episode)
     if not selected and all(ep["split"] == "validation" for ep in episodes):
         # Tiny smoke-test datasets still need at least one train root.
         root = episodes[0]["root_run_id"]
@@ -716,7 +820,7 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
     payload = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "replay_policy": REPLAY_POLICY,
-        "chunking": "variable_duration_action_source_v2_full_branch_prefix",
+        "chunking": CHUNKING_RULE,
         "source_dataset_id": None if selection_payload is None else selection_payload["id"],
         "source_dataset_sha256": None if selection_payload is None else selection_payload["dataset_sha256"],
         "config_sha256": config.digest,
@@ -727,9 +831,12 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             "trailing_action_count", "post_terminal_false_count", "recorded_success",
             "raw_done_true_count", "success_consecutive_steps", "success_streak_start",
             "action_source_segments", "recorded_action_source_segments", "chunks",
-            "evaluation_chunks", "split")}
+            "evaluation_chunks", "split", "chunking", "open_loop_steps",
+            "execution_steps_source", "inference_query_steps")}
             for ep in episodes]),
-        "action_horizon": horizon,
+        # Padding for the critic's transition actions, not actor supervision.
+        "action_horizon": max(c["length"] for ep in episodes for c in ep["chunks"]),
+        "transition_layout": transition_layout_summary(episodes),
         "action_dim": config.section("data")["action_dim"],
         "proprio_dim": config.section("data")["proprio_dim"],
         "control_hz": config.section("data")["control_hz"],
@@ -754,6 +861,7 @@ def load_manifest(config: LoadedConfig) -> dict[str, Any]:
         raise ValueError(
             "Unsupported dataset manifest schema; rerun prepare_dataset.py before annotation"
         )
+    transition_layout_summary(payload["episodes"])
     return payload
 
 

@@ -13,6 +13,9 @@ def legacy_contract(settings: dict) -> dict:
     """Exports/snapshots without a contract used the original 180° camera input."""
     contract = model_contract(settings)
     if "contract" not in settings:
+        # Pre-contract exports used eight-step supervision, regardless of the
+        # defaults of subsequently registered model families.
+        contract["io"]["replay_horizon"] = 8
         contract["io"].pop("image_orientation", None)
         contract["io"].update(image_flip_vertical=True, image_flip_horizontal=True)
     return contract

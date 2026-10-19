@@ -148,6 +148,8 @@ class TrainingDatasetService:
         if outcome is not None and outcome not in OUTCOMES:
             raise ValueError(f"Unknown outcome: {outcome}")
         result = []
+        from ..policies.registry import model_module
+        execution = model_module("execution")
         test_ids = self.labels.test_ids()
         allowed_tasks = None if task_ids is None else set(task_ids)
         for run in self.run_service.list_runs():
@@ -164,12 +166,12 @@ class TrainingDatasetService:
                 continue
             resume = int(run.get("resume_step") or 0) if run.get("kind") == "branch" else 0
             actions = max(0, int(run.get("action_count") or 0))
-            chunk_count = (
-                math.ceil(resume / 8) + math.ceil(max(0, actions - resume) / 8)
-                if run.get("kind") == "branch" and actions
-                else math.ceil(actions / 8) if actions else 0
-            )
-            if run.get("training_chunk_count") is not None:
+            try:
+                chunk_count = execution.nominal_chunk_count(run)
+            except ValueError:
+                # Prepare can additionally inspect the saved trajectory/config.
+                chunk_count = None
+            if run.get("training_chunk_count_rule") == execution.CHUNKING_RULE and run.get("training_chunk_count") is not None:
                 chunk_count = int(run["training_chunk_count"])
             public = {
                 **run,
@@ -370,7 +372,7 @@ class TrainingDatasetService:
             "eligible_count": len(all_runs),
             "selected_count": len(selected),
             "action_count": sum(run["training_action_count"] for run in selected),
-            "chunk_count": sum(run["training_chunk_count"] for run in selected),
+            "chunk_count": sum(run["training_chunk_count"] or 0 for run in selected),
             "categories": categories,
             "run_ids": [run["id"] for run in selected],
             "runs": selected,
@@ -577,7 +579,7 @@ class TrainingDatasetService:
                     "member_count": len(members),
                     "include_post_success": include_post_success,
                     "action_count": sum(member["action_count"] for member in members),
-                    "chunk_count": sum(member["chunk_count"] for member in members),
+                    "chunk_count": sum(member["chunk_count"] or 0 for member in members),
                     "categories": resolved["categories"],
                     "members": members,
                     "dataset_sha256": _stable_hash(immutable),

@@ -167,15 +167,28 @@ def compose_config(path: Path, *, method: str | None = None,
         if preset.keys() - allowed[kind]:
             raise ValueError(f"{kind} preset contains unrelated sections: {sorted(preset.keys() - allowed[kind])}")
         result = merge_config(result, preset)
+    explicit_geometry = {}
     for layer in layers[pivot:]:
         values = {key: value for key, value in layer.items() if key != "presets"}
         if family and values.get("model", {}).get("family", family) != family:
             values.pop("model")
+            # A sealed config from another family also contains its geometry.
+            # Keep run settings, but obtain model dimensions from the new preset.
+            values["data"] = {key: value for key, value in values.get("data", {}).items()
+                              if key not in {"action_horizon", "action_dim", "proprio_dim"}}
+        explicit_geometry.update({key: value for key, value in values.get("data", {}).items()
+                                  if key in {"action_horizon", "action_dim", "proprio_dim"}})
         result = merge_config(result, values)
     if method is not None:
         result.setdefault("training", {})["method"] = method
     if family is not None:
         result.setdefault("model", {})["family"] = family
+    from .base_models import model_contract
+    from .models import model_config
+    io = model_contract(model_config(result))["io"]
+    result.setdefault("data", {}).update(action_horizon=io["replay_horizon"],
+                                          action_dim=io["action_dim"], proprio_dim=io["proprio_dim"])
+    result["data"].update(explicit_geometry)
     return result
 
 

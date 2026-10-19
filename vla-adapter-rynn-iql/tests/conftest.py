@@ -51,6 +51,7 @@ def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | N
         "root_session_id": "root", "parent_session_id": "root" if kind == "branch" else None,
         "resume_step": resume, "control_mode": "manual" if action_source == "human" else "policy",
         "success": success,
+        "open_loop_steps": 8,
     }), encoding="utf-8")
 
 

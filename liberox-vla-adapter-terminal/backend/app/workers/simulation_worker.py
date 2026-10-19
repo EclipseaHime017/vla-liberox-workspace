@@ -1439,6 +1439,7 @@ class SimulationManager:
                 "state_count": record.state_count,
                 "action_count": record.action_count,
                 "training_chunk_count": record.training_chunk_count,
+                "training_chunk_count_rule": "recorded_execution_v1",
                 "policy_queries": record.policy_queries,
                 "trajectory": trajectory,
                 "success": record.success,
@@ -1535,6 +1536,7 @@ class SimulationManager:
             "manual_requested_control_frame": manifest.get("manual_requested_control_frame") or control_frame,
             "policy_instruction": manifest.get("policy_instruction") or manifest.get("task"),
             "training_chunk_count": manifest.get("training_chunk_count"),
+            "training_chunk_count_rule": manifest.get("training_chunk_count_rule"),
             "task_snapshot": manifest.get("task_snapshot"),
             "spacemouse_status": None,
             "spacemouse_connected": None,
@@ -2216,6 +2218,7 @@ class SimulationManager:
             "task_snapshot": record.task_snapshot,
             "trajectory_segments": record.trajectory_segments,
             "training_chunk_count": record.training_chunk_count,
+            "training_chunk_count_rule": "recorded_execution_v1",
             "handoff_steps": record.handoff_steps,
             "checkpoint": record.policy_base_checkpoint
             if record.control_mode == "policy"

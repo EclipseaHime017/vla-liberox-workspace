@@ -134,9 +134,10 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
 
     samples = []
     io = model_contract(components.settings)["io"]
+    raw_actions = batch.get("actor_raw_actions", batch["raw_actions"])
     for index, prompt in enumerate(batch["prompt"]):
         actions = np.zeros((io["native_action_horizon"], io["action_dim"]), dtype=np.float32)
-        actions[:batch["raw_actions"].shape[1]] = batch["raw_actions"][index].numpy()
+        actions[:raw_actions.shape[1]] = raw_actions[index].numpy()
         samples.append(components.input_transform({
             "observation/image": batch["agent_image"][index].numpy(),
             "observation/wrist_image": batch["wrist_image"][index].numpy(),
@@ -147,7 +148,7 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
     # Quantile statistics can promote NumPy actions to float64; OpenPI trains with float32 actions.
     inputs["actions"] = inputs["actions"].to(dtype=torch.float32)
     errors = components.model(Observation.from_dict(inputs), inputs["actions"])
-    return masked_flow_losses(errors, batch["action_mask"], io["action_dim"]), None
+    return masked_flow_losses(errors, batch.get("actor_action_mask", batch["action_mask"]), io["action_dim"]), None
 
 
 def trainable_parameters(components):

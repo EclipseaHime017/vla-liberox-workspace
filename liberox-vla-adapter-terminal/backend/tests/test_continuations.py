@@ -84,7 +84,16 @@ def test_multi_generation_chunk_summary_counts_all_boundaries(tmp_path):
             dict(start=4, end=8, origin_run_id="human", policy_instruction="second")])
     assert record.public()["training_chunk_count"] == 3
     assert record.trajectory_segments[-1] == dict(start=8, end=16,
-        origin_run_id="continued", policy_instruction="finish task")
+        origin_run_id="continued", policy_instruction="finish task", open_loop_steps=8)
+
+
+def test_old_ancestor_cadence_is_not_overwritten_by_latest_run():
+    metadata = dict(session_id="human", open_loop_steps=7, task="pick", trajectory_segments=[
+        dict(start=0, end=5, origin_run_id="root", policy_instruction="pick"),
+        dict(start=5, end=17, origin_run_id="human", policy_instruction="pick")])
+    segments = prefix_segments(metadata, 17, 12)
+    assert "open_loop_steps" not in segments[0]
+    assert segments[1]["open_loop_steps"] == 7
 
 
 def test_restart_keeps_promoted_role_and_frozen_task_removed_from_registry(tmp_path, monkeypatch):

@@ -14,7 +14,7 @@ def child(family="vla_adapter"):
     parent = parent_snapshot(settings, "a" * 64)
     return {"schema_version": 5, "family": family, "model_config": settings, "parent": parent,
             "base_checkpoint": settings["base_checkpoint"], "stats_key": settings["stats_key"],
-            "action_horizon": 8, "action_dim": 7, "proprio_dim": 8}
+            "action_horizon": parent["contract"]["io"]["replay_horizon"], "action_dim": 7, "proprio_dim": 8}
 
 
 def test_registry_is_lightweight_and_drives_every_base():
@@ -36,10 +36,11 @@ def test_execution_steps_are_separate_from_prediction_and_training(base_id, defa
     }
     assert base_models.resolve_open_loop_steps(settings, None) == default
     assert base_models.resolve_open_loop_steps(settings, maximum) == maximum
-    assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
+    supervision = base_models.model_contract(settings)["io"]["replay_horizon"]
+    assert supervision == maximum
     # Trained children do not execute the unsupervised tail by default.
     assert base_models.execution_config(settings, trained=True) == {
-        "open_loop_steps": min(default, 8), "max_open_loop_steps": maximum,
+        "open_loop_steps": min(default, supervision), "max_open_loop_steps": maximum,
     }
     assert base_models.resolve_open_loop_steps(settings, maximum, trained=True) == maximum
     with pytest.raises(ValueError, match="open_loop_steps"):

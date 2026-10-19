@@ -240,6 +240,9 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         missing_fields = sorted(required - settings.keys())
                         if missing_fields:
                             raise ValueError(f"缺少 reward 字段：{', '.join(missing_fields)}")
+                        prepared = json.loads(Path(version["prepared_manifest_path"]).read_text(encoding="utf-8"))
+                        if prepared.get("chunking") != offline_module(self.ui_config.offline_rl_root, "execution").CHUNKING_RULE:
+                            raise ValueError("旧切片布局，请重新生成评价／奖励")
                         raw["reward"].update(settings)
                         raw["reward"]["final_normalization"] = settings.get("final_normalization", "none")
                         availability["ready"] = bool(version.get("complete") and version.get("status") == "READY")
@@ -1233,6 +1236,9 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         raw["data"]["include_post_success"] = include_post_success
         raw["model"] = self.training_models.apply_model_parameters(raw, parameters)
         raw["model"] = offline_module(self.ui_config.offline_rl_root, "model_assets").pin_model(raw["model"])
+        model_io = offline_module(self.ui_config.offline_rl_root, "base_models").model_contract(raw["model"])["io"]
+        raw["data"].update(action_horizon=model_io["replay_horizon"], action_dim=model_io["action_dim"],
+                            proprio_dim=model_io["proprio_dim"])
         source = None
         if algorithm == "iql":
             raw["reward"].setdefault("final_normalization", "none")
@@ -1244,6 +1250,8 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         replay_counts = {}
         if reward_version is not None:
             prepared = json.loads(Path(reward_version["prepared_manifest_path"]).read_text(encoding="utf-8"))
+            if prepared.get("chunking") != offline_module(self.ui_config.offline_rl_root, "execution").CHUNKING_RULE:
+                raise ValueError("奖励使用旧的固定长度切片，请在数据集配置中重新生成评价／奖励后训练")
             replay_counts = _training_replay_counts(prepared, include_post_success)
         if algorithm == "iql":
             raw["reward"].update(

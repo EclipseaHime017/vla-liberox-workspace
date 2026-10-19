@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import math
 import os
 import random
 import re
@@ -19,6 +18,7 @@ import yaml
 from .config import TRAIN_SCHEMA, UniqueKeyLoader, load_train_config, reward_source
 from .data import MANIFEST_NAME, MANIFEST_SCHEMA_VERSION, confirmed_terminal_step, replay_chunks
 from .evaluation_store import valid_bound_evaluation
+from .execution import CHUNKING_RULE, execution_steps, nominal_chunk_count
 from .io import atomic_json, sha256_file, stable_hash
 from .methods import COMMON_TRAINING_KEYS
 from .models import DEFAULT_MODEL
@@ -301,7 +301,8 @@ def discover_candidates(
                     run_path=run_path.resolve(),
                     trajectory_path=trajectory,
                     observations_path=observations,
-                    chunk_count=run.get("training_chunk_count"),
+                    chunk_count=(run.get("training_chunk_count")
+                                 if run.get("training_chunk_count_rule") == CHUNKING_RULE else None),
                 ))
                 seen.add(run_id)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -388,6 +389,13 @@ def build_selection_manifest(
     data = raw["data"]
     members = []
     for item in selected:
+        count = item.chunk_count
+        if count is None:
+            run = json.loads(item.run_path.read_text(encoding="utf-8"))
+            with np.load(item.trajectory_path, allow_pickle=False) as arrays:
+                metadata = json.loads(str(arrays["metadata_json"].item())) if "metadata_json" in arrays else {}
+            steps, _ = execution_steps(run, metadata, config_path=item.run_path.parent / "config.yaml")
+            count = nominal_chunk_count({**run, "action_count": item.action_count, "open_loop_steps": steps})
         members.append({
             "run_id": item.run_id,
             "root_run_id": item.root_run_id,
@@ -397,8 +405,7 @@ def build_selection_manifest(
             "resume_step": item.resume_step,
             "end_step": item.action_count,
             "action_count": item.action_count,
-            "chunk_count": (item.chunk_count if item.chunk_count is not None else
-                math.ceil(item.resume_step / 8) + math.ceil(max(0, item.action_count - item.resume_step) / 8)),
+            "chunk_count": count,
             "split": _split(
                 item.root_run_id, int(data["split_seed"]), float(data["validation_fraction"])
             ),
@@ -434,14 +441,13 @@ def build_selection_manifest(
 
 
 def prepare_fingerprint(selection_manifest: dict[str, Any], raw: dict[str, Any]) -> str:
-    # Schema-4 evaluation tails already describe full replay and have reusable
-    # annotations. Keep their prepare identity stable across the replay policy change.
+    # Execution boundaries come from recordings, not the target actor geometry.
     data = raw["data"]
     return stable_hash({
         "selection_sha256": selection_manifest["dataset_sha256"],
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
         "data": {key: data[key] for key in (
-            "project_id", "action_horizon", "action_dim", "proprio_dim", "control_hz",
+            "project_id", "action_dim", "proprio_dim", "control_hz",
             "success_consecutive_steps", "validation_fraction", "split_seed", "allow_no_success",
         )},
     })

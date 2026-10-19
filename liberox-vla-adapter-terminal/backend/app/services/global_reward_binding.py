@@ -25,17 +25,6 @@ def _json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _saved_metadata(jobs, dataset: dict, member: dict, metadata: dict) -> tuple[dict, dict]:
-    """Reuse complete descriptors, otherwise reconstruct without old job folders."""
-    if (metadata.get("episode", {}).get("trajectory_path") and metadata.get("prepared")
-            and metadata["prepared"].get("success_consecutive_steps", dataset["success_consecutive_steps"])
-                == dataset["success_consecutive_steps"]):
-        return metadata["episode"], metadata["prepared"]
-    # Sidecars outlive their original temporary Prepare/cache directories.
-    # Reconstruct indices from the frozen control data; model outputs stay intact.
-    return reconstruct_episode(jobs, dataset, member)
-
-
 def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
                    run_ids: set[str] | None = None, use_dataset_labels: bool = True) -> tuple[list, list]:
     _, frozen = jobs.datasets._load(dataset["id"])
@@ -101,7 +90,9 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
             for name in ("trajectory", "observations"):
                 if member["artifacts"][name]["sha256"] != metadata[f"{name}_sha256"]:
                     raise ValueError("全局评价与冻结数据源不匹配")
-            episode, header = _saved_metadata(jobs, dataset, member, metadata)
+            # Sidecars outlive Prepare folders; verify arrays against the
+            # current execution layout reconstructed from frozen controls.
+            episode, header = reconstruct_episode(jobs, dataset, member)
             if episode.get("source_manifest_sha256") != member["artifacts"]["manifest"]["sha256"]:
                 raise ValueError("全局评价与冻结轨迹的任务清单不匹配")
             recipe = metadata.get("reward_config") or {}
@@ -151,7 +142,7 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
     raw = jobs._effective_config(dataset)
     episodes, entries = [], []
     for member, metadata, values, saved, header in records:
-        for field in ("action_horizon", "action_dim", "proprio_dim", "control_hz"):
+        for field in ("action_dim", "proprio_dim", "control_hz"):
             if field in header and header[field] != raw["data"][field]:
                 raise ValueError(f"Global reward {field} differs from training: {member['run_id']}")
         episode = copy.deepcopy(saved)
@@ -190,6 +181,7 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
         entry.update(reward_path=str(destination), annotation_path=str(destination))
     digest = hashlib.sha256(json.dumps(episodes, sort_keys=True).encode()).hexdigest()
     prepared = {**records[0][4], "episodes": episodes, "dataset_sha256": digest,
+        "action_horizon": max(c["length"] for ep in episodes for c in ep["chunks"]),
         "source_dataset_id": dataset["id"], "source_dataset_sha256": dataset["dataset_sha256"],
         "episode_count": len(episodes), "success_count": sum(bool(ep["success"]) for ep in episodes)}
     raw["reward"].update(entries[0]["saved_reward_config"])

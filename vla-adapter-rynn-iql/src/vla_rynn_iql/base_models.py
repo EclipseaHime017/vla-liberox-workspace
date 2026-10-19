@@ -28,7 +28,7 @@ def validate_contract(contract: dict, family: str) -> dict:
     # Validate the supported Panda bridge; YAML cannot change the robot controller.
     fixed = {"cameras": ["agentview", "robot0_eye_in_hand"], "image_size": 224,
              "proprio": "eef_position_axis_angle_gripper",
-             "proprio_dim": 8, "action_dim": 7, "replay_horizon": 8, "control_hz": 20}
+             "proprio_dim": 8, "action_dim": 7, "control_hz": 20}
     if any(io.get(key) != value for key, value in fixed.items()):
         raise ValueError("Model I/O is unsupported by the current Panda adapter")
     image_orientation(io)
@@ -36,6 +36,8 @@ def validate_contract(contract: dict, family: str) -> dict:
                 "action_dim", "replay_horizon", "control_hz"):
         if type(io[key]) is not int or io[key] < 1:
             raise ValueError(f"Invalid model I/O integer: {key}")
+    if io["replay_horizon"] > io["native_action_horizon"]:
+        raise ValueError("Model supervision horizon exceeds its native action output")
     if family == "vla_adapter":
         valid = (io["native_action_horizon"] == 8 and io["padded_action_dim"] == 7
                  and io["action_codec"] == "vla_adapter_pro" and architecture == {})

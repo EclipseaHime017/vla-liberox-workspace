@@ -59,7 +59,12 @@ def trajectory_segments(metadata: dict, count: int) -> list[dict]:
         cursor = segment["end"]
     if cursor != count:
         raise ValueError("Trajectory segments do not cover all actions")
-    return [dict(segment) for segment in segments]
+    result = [dict(segment) for segment in segments]
+    if metadata.get("open_loop_steps") is not None:
+        for segment in result:
+            if segment["origin_run_id"] == str(metadata.get("session_id") or metadata.get("id") or ""):
+                segment.setdefault("open_loop_steps", metadata["open_loop_steps"])
+    return result
 
 
 def prefix_segments(metadata: dict, count: int, end: int) -> list[dict]:

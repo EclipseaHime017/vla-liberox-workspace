@@ -18,9 +18,7 @@ from .model_artifacts import parent_snapshot, decode_child, legacy_contract
 from .checkpoint_assets import resolve_revision, checkpoint_view
 
 
-ACTION_HORIZON = 8
 ACTION_DIM = 7
-PROPRIO_DIM = 8
 
 
 def resolve_stats_key(norm_stats: dict[str, Any], requested: str) -> str:
@@ -392,7 +390,8 @@ def load_overlay(path: Path) -> PolicyOverlay:
 
 
 def validate_overlay(policy: PolicyOverlay, base_checkpoint: str, stats_key: str) -> None:
-    expected = (base_checkpoint, stats_key, ACTION_HORIZON, ACTION_DIM, PROPRIO_DIM)
+    io = model_contract(policy.model_config or {})["io"]
+    expected = (base_checkpoint, stats_key, io["replay_horizon"], io["action_dim"], io["proprio_dim"])
     actual = (policy.base_checkpoint, policy.stats_key, policy.action_horizon, policy.action_dim, policy.proprio_dim)
     if actual != expected:
         raise ValueError(f"Policy overlay is incompatible: expected {expected}, got {actual}")
@@ -428,8 +427,12 @@ def overlay_public(path: Path) -> dict[str, Any]:
 
 def actor_losses(components, batch, device):
     prediction = predict_batch(components, batch, device)
-    error = (prediction.float() - batch["actions"].to(device).float()).abs()
-    valid = batch["action_mask"].to(device).float().unsqueeze(-1).expand_as(error)
+    target = batch.get("actor_actions", batch["actions"])
+    mask = batch.get("actor_action_mask", batch["action_mask"])
+    if prediction.shape[1] != target.shape[1]:
+        prediction = prediction[:, :target.shape[1]]
+    error = (prediction.float() - target.to(device).float()).abs()
+    valid = mask.to(device).float().unsqueeze(-1).expand_as(error)
     losses = (error * valid).sum((1, 2)) / valid.sum((1, 2)).clamp_min(1.0)
     return losses, prediction
 

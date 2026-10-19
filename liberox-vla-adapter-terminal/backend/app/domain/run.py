@@ -116,17 +116,23 @@ class SimulationSession:
         start = int(self.resume_step or 0)
         if self.action_count > start:
             segments.append(dict(start=start, end=self.action_count, origin_run_id=self.id,
-                                 policy_instruction=self.policy_instruction or self.task_prompt))
+                                 policy_instruction=self.policy_instruction or self.task_prompt,
+                                 open_loop_steps=self.open_loop_steps))
         return segments
 
     @property
     def training_chunk_count(self) -> int:
-        """Nominal eight-step chunks; Prepare additionally handles success and deduplication."""
+        """Lightweight execution-grid count; Prepare adds success/query boundaries."""
         boundaries = {0, self.action_count, *(self.handoff_steps), int(self.resume_step or 0)}
         for segment in self.trajectory_segments:
             boundaries.update((segment["start"], segment["end"]))
         points = sorted(point for point in boundaries if 0 <= point <= self.action_count)
-        return sum((end - start + 7) // 8 for start, end in zip(points, points[1:]))
+        count = 0
+        for start, end in zip(points, points[1:]):
+            segment = next((s for s in self.trajectory_segments if s["start"] <= start < s["end"]), {})
+            steps = int(segment.get("open_loop_steps", self.open_loop_steps))
+            count += (end - start + steps - 1) // steps
+        return count
 
     def public(self, artifacts: dict[str, str] | None = None) -> dict[str, Any]:
         return {
@@ -178,6 +184,7 @@ class SimulationSession:
             "state_count": self.state_count,
             "action_count": self.action_count,
             "training_chunk_count": self.training_chunk_count,
+            "training_chunk_count_rule": "recorded_execution_v1",
             "policy_queries": self.policy_queries,
             "success": self.success,
             "success_confirmed": self.success_confirmed_step is not None,

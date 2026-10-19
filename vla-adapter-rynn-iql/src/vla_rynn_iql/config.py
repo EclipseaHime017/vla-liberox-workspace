@@ -13,6 +13,7 @@ import yaml
 
 from .methods import COMMON_TRAINING_KEYS, training_method
 from .models import model_config
+from .base_models import model_contract
 from .config_sources import UniqueKeyLoader, compose_config, migrate_fields, read_source
 
 
@@ -296,10 +297,12 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         data["stage_annotations_manifest"] = str(
             (stage_path if stage_path.is_absolute() else path.parent / stage_path).resolve()
         )
-    for name, expected in (("action_horizon", 8), ("action_dim", 7), ("proprio_dim", 8)):
+    io = model_contract(raw["model"])["io"]
+    for name, expected in (("action_horizon", io["replay_horizon"]),
+                           ("action_dim", io["action_dim"]), ("proprio_dim", io["proprio_dim"])):
         _number(data, name, low=1, integer=True)
         if data[name] != expected:
-            raise ValueError(f"data.{name} must match the platform replay value {expected}")
+            raise ValueError(f"data.{name} must match the selected model value {expected}")
     _number(data, "control_hz", low=1)
     if float(data["control_hz"]) != 20.0:
         raise ValueError("Version 1 requires data.control_hz=20")
