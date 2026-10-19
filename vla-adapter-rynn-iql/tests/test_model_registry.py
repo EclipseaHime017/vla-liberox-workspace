@@ -37,6 +37,11 @@ def test_execution_steps_are_separate_from_prediction_and_training(base_id, defa
     assert base_models.resolve_open_loop_steps(settings, None) == default
     assert base_models.resolve_open_loop_steps(settings, maximum) == maximum
     assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
+    # Trained children do not execute the unsupervised tail by default.
+    assert base_models.execution_config(settings, trained=True) == {
+        "open_loop_steps": min(default, 8), "max_open_loop_steps": maximum,
+    }
+    assert base_models.resolve_open_loop_steps(settings, maximum, trained=True) == maximum
     with pytest.raises(ValueError, match="open_loop_steps"):
         base_models.resolve_open_loop_steps(settings, maximum + 1)
 

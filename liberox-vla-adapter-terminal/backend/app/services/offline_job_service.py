@@ -1443,6 +1443,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         from ..policies.registry import model_module
         request = {**request, "open_loop_steps": model_module("base_models").resolve_open_loop_steps(
             policy_snapshot.get("model_config", {}), request.get("open_loop_steps"),
+            trained=policy_snapshot.get("manifest") is not None,
         )}
         state_count = int(self.manager.catalog.initial_state_count(task_id))
         requested_states = request.get("init_state_indices")

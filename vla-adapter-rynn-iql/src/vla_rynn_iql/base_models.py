@@ -212,18 +212,22 @@ def registered_defaults(family: str, base_id: str | None = None) -> dict:
             "base_revision": revision}
 
 
-def execution_config(settings: dict) -> dict:
+def execution_config(settings: dict, *, trained: bool = False) -> dict:
     """Variant execution defaults do not change weights or training configuration."""
     io = model_contract(settings)["io"]
     family = MODEL_FAMILIES[settings.get("family", "vla_adapter")]
     base = base_model(settings.get("base_id", family.default_base))
     maximum = io["native_action_horizon"]
-    # Replay length defines training supervision, not the model's output shape.
-    return {"open_loop_steps": min(base.inference["open_loop_steps"], maximum),
-            "max_open_loop_steps": maximum}
+    default = min(base.inference["open_loop_steps"], maximum)
+    if trained:
+        # Post-training supervises only the first replay_horizon actions of a
+        # chunk; by default a trained model does not execute the unsupervised
+        # tail. The model's output length remains the explicit maximum.
+        default = min(default, io["replay_horizon"])
+    return {"open_loop_steps": default, "max_open_loop_steps": maximum}
 
 
-def resolve_open_loop_steps(settings: dict, value: int | None) -> int:
-    inference = execution_config(settings)
+def resolve_open_loop_steps(settings: dict, value: int | None, *, trained: bool = False) -> int:
+    inference = execution_config(settings, trained=trained)
     return validate_open_loop_steps(inference["open_loop_steps"] if value is None else value,
                                     inference["max_open_loop_steps"])

@@ -171,7 +171,8 @@ def test_evaluation_resolves_and_validates_model_execution_steps(tmp_path, base_
                     model_config=settings, manifest=tmp_path / "policy.yaml" if trained else None)
     service.manager.policy_catalog.entry = lambda policy_id: entry
     result = service.preview_evaluation(evaluation_request(open_loop_steps=None))
-    assert result["config"]["open_loop_steps"] == default
+    # Trained children default to the supervised replay length (8); see C3.
+    assert result["config"]["open_loop_steps"] == (min(default, 8) if trained else default)
     result = service.preview_evaluation(evaluation_request(open_loop_steps=maximum))
     assert result["config"]["open_loop_steps"] == maximum
     with pytest.raises(ValueError, match="open_loop_steps"):

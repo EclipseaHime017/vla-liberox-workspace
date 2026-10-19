@@ -80,7 +80,9 @@ def test_pi_overlay_roundtrip_and_base_protection(tmp_path, base_id, legacy, sch
     assert entry.family == "pi05" and entry.action_head is None and entry.actor.is_file()
     assert catalog.entry("pi-test").content_sha256 == entry.content_sha256
     assert (entry.parent is not None) == (schema == 5)
-    default = 10 if base_id == "pi05-liberox-base" else 5
+    # A trained child defaults to its supervised replay length (C3); the base
+    # variant still defaults to 10 and 10 remains an explicit choice.
+    default = 8 if base_id == "pi05-liberox-base" else 5
     assert entry.inference == {"open_loop_steps": default, "max_open_loop_steps": 10}
     assert entry.public()["io"]["replay_horizon"] == 8
     assert entry.resolve_open_loop_steps() == default
