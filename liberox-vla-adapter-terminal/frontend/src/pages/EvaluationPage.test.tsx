@@ -33,6 +33,7 @@ const aggregate = {
   total_trials: 10, attempted_trials: 10, completed_trials: 10, successes: 7,
   failures: 3, errors: 0, success_rate: .7, wilson_lower: .4, wilson_upper: .89,
   completion_rate: 1, by_init_state: {}, by_seed: {}, by_combination: {},
+  init_state_summary: { states: 3, state_mean_success_rate: .65 },
   first_success_step_mean: 30, policy_queries_mean: 38, inference_latency_ms_mean: 50,
   measured_control_hz_mean: 20, elapsed_seconds_mean: 15,
 };
@@ -218,6 +219,7 @@ describe("evaluation page", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看详情" }));
     await waitFor(() => expect(mocks.getEvaluation).toHaveBeenCalledWith(record.id));
     expect(await screen.findByText(/Wilson 95% 置信区间/)).toBeTruthy();
+    expect(screen.getByText(/3 个 init state 的平均成功率 65.0%/)).toBeTruthy();
     expect(screen.getByLabelText("成功率 70.0%")).toBeTruthy();
   });
 

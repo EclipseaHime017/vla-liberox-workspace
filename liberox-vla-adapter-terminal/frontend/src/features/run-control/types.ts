@@ -412,6 +412,8 @@ export type EvaluationAggregate = {
   wilson_upper: number;
   completion_rate: number;
   by_init_state: Record<string, EvaluationBreakdown>;
+  /** Unweighted mean of per-init-state success rates; absent in older results. */
+  init_state_summary?: { states: number; state_mean_success_rate: number | null };
   by_seed: Record<string, EvaluationBreakdown>;
   by_combination: Record<string, EvaluationBreakdown>;
   first_success_step_mean: number | null;

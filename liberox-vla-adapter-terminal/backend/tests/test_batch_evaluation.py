@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from backend.app.evaluation.batch import (
+    init_state_summary,
     ConsecutiveSuccess,
     _apply_close_error,
     _episode,
@@ -176,6 +177,7 @@ def test_aggregation_counts_errors_in_denominator_and_groups_results():
     assert result["by_seed"]["1"]["success_rate"] == 0.5
     assert result["wilson_95"][0] < result["success_rate"] < result["wilson_95"][1]
     assert result["first_success_step_mean"] == 8
+    assert result["init_state_summary"]["states"] == len(result["by_init_state"])
 
 
 @pytest.mark.parametrize("base_id", ["base", "pi05-libero-base", "pi05-liberox-base"])
@@ -381,6 +383,14 @@ def test_trials_share_one_environment_and_rebuild_only_after_a_failure(tmp_path:
     assert names.count("create") == 2 and names.count("close") == 2
     assert names[-1] == "close"
 
+
+def test_init_state_summary_reports_state_rates_without_an_interval():
+    trials = [{"init_state_index": state, "seed": seed, "success": bool(value), "error": None}
+              for state, values in enumerate([[1] * 4, [1, 0, 0, 0], [0] * 2])
+              for seed, value in enumerate(values)]
+    summary = init_state_summary(trials)
+    # Unweighted mean of 1.0, 0.25 and 0.0; the pooled rate would be 5/10.
+    assert summary == {"states": 3, "state_mean_success_rate": pytest.approx(1.25 / 3)}
 
 def test_batch_success_rule_is_the_platform_confirmation_rule():
     from simulation_core import confirmed_success_step, success_confirm_steps

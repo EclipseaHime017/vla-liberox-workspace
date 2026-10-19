@@ -84,6 +84,7 @@ function EvaluationDetail({ record }: { record: EvaluationRecord }) {
         <div><strong>{aggregate?.errors ?? 0}</strong><span>错误</span></div>
         <div><strong>{percentage(aggregate?.completion_rate)}</strong><span>完成覆盖率</span></div>
         <p>Wilson 95% 置信区间：{percentage(aggregate?.wilson_lower)} – {percentage(aggregate?.wilson_upper)}。错误回合计入成功率分母。</p>
+        <p>该区间假设各回合相互独立。同一 init state 的回合结果可能相关，init state 较少时区间可能偏窄，请结合下方各 init state 的成功率判断{aggregate?.init_state_summary?.state_mean_success_rate != null && <>（{aggregate.init_state_summary.states} 个 init state 的平均成功率 {percentage(aggregate.init_state_summary.state_mean_success_rate)}）</>}。</p>
       </div>
     </div>
     <div className="surface evaluation-context">

@@ -313,6 +313,25 @@ def _group_summary(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def init_state_summary(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Per-init-state view of the success rate, without an interval.
+
+    Trials sharing an init state differ only in seed-placed fixtures and policy
+    sampling, so their outcomes can be strongly correlated, and the overall
+    Wilson interval (which assumes independent trials) can be too narrow. With
+    the few init states a batch test uses, no simple clustered interval has
+    reliable coverage, so only the unweighted mean of per-state rates is given
+    next to ``by_init_state``.
+    """
+    grouped: dict[int, list[bool]] = {}
+    for item in items:
+        grouped.setdefault(int(item["init_state_index"]), []).append(
+            bool(item.get("success")) and not bool(item.get("error")))
+    rates = [sum(values) / len(values) for values in grouped.values()]
+    return {"states": len(grouped),
+            "state_mean_success_rate": statistics.fmean(rates) if rates else None}
+
+
 def _numeric_summary(values: Sequence[float]) -> dict[str, float | None]:
     clean = sorted(float(value) for value in values if math.isfinite(float(value)))
     if not clean:
@@ -369,6 +388,7 @@ def aggregate_trials(
             "completion_coverage": len(items) / scheduled_trials,
             "completion_rate": len(items) / scheduled_trials,
             "by_init_state": groups(lambda item: str(item["init_state_index"])),
+            "init_state_summary": init_state_summary(items),
             "by_seed": groups(lambda item: str(item["seed"])),
             "by_combination": groups(
                 lambda item: f"{item['init_state_index']}:{item['seed']}"
