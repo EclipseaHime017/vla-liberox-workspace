@@ -77,3 +77,79 @@ def test_legacy_path_resolution_is_scoped_to_this_workspace(tmp_path, monkeypatc
     old = tmp_path / "weights/explicit"
     old.mkdir(parents=True)
     assert model_storage.local_model_directory(old) == old
+
+
+def test_digest_cache_reuses_content_and_detects_replaced_bytes(tmp_path, monkeypatch):
+    import os
+    source = tmp_path / "weights.bin"
+    source.write_bytes(b"first")
+    before = source.stat()
+    original = model_storage.sha256_file
+    calls = []
+
+    def count(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(model_storage, "sha256_file", count)
+    first = model_storage.cached_sha256(source)
+    assert model_storage.cached_sha256(source) == first and len(calls) == 1
+    source.write_bytes(b"other")
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert model_storage.cached_sha256(source) != first and len(calls) == 2
+    for entry in model_storage.digest_cache_root().glob("*.json"):
+        entry.write_text("broken")
+    assert model_storage.cached_sha256(source) == original(source) and len(calls) == 3
+
+
+def test_digest_cache_can_be_unwritable_and_rejects_changing_files(tmp_path, monkeypatch):
+    source = tmp_path / "weights.bin"
+    source.write_bytes(b"weights")
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_bytes(b"blocked")
+    assert model_storage.cached_sha256(source, blocked) == model_storage.sha256_file(source)
+    original = model_storage.sha256_file
+
+    def changed(path):
+        digest = original(path)
+        path.write_bytes(b"changed")
+        return digest
+
+    monkeypatch.setattr(model_storage, "sha256_file", changed)
+    with pytest.raises(ValueError, match="changed while hashing"):
+        model_storage.cached_sha256(source, tmp_path / "new-cache")
+
+
+def test_cold_digest_is_computed_only_once_across_processes(tmp_path, monkeypatch):
+    import multiprocessing
+    import time
+    context = multiprocessing.get_context("fork")
+    barrier, calls = context.Barrier(4), context.Value("i", 0)
+    source = tmp_path / "weights.bin"
+    source.write_bytes(b"shared weights")
+    original = model_storage.sha256_file
+
+    def count(path):
+        with calls.get_lock():
+            calls.value += 1
+        time.sleep(.05)
+        return original(path)
+
+    def worker():
+        barrier.wait(timeout=10)
+        assert model_storage.cached_sha256(source) == original(source)
+
+    monkeypatch.setattr(model_storage, "sha256_file", count)
+    processes = [context.Process(target=worker) for _ in range(4)]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15)
+            assert process.exitcode == 0
+        assert calls.value == 1
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.kill()
+            process.join()

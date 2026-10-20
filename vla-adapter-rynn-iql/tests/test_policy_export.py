@@ -11,8 +11,12 @@ from vla_rynn_iql.models import base_model_config
 from vla_rynn_iql.pi05_assets import identity_digest, OPENPI_COMMIT
 
 
-def make_policy(tmp_path, base_id, algorithm="iql"):
+def make_policy(tmp_path, base_id, algorithm="iql", *, replay_horizon=None):
     settings = base_model_config(base_id)
+    if replay_horizon is not None:
+        from vla_rynn_iql.base_models import model_contract
+        settings["contract"] = model_contract(settings)
+        settings["contract"]["io"]["replay_horizon"] = replay_horizon
     root = tmp_path / "source"
     root.mkdir()
     names = ({"action_head": "action_head.pt", "proprio_projector": "proprio_projector.pt"}
@@ -30,8 +34,9 @@ def make_policy(tmp_path, base_id, algorithm="iql"):
         (root / names["base_identity"]).write_text(json.dumps(identity))
         revision = identity_digest(identity)
     parent = parent_snapshot(settings, revision)
+    io = parent["contract"]["io"]
     geometry = {"base_checkpoint": settings["base_checkpoint"], "stats_key": settings["stats_key"],
-                "action_horizon": 8, "action_dim": 7, "proprio_dim": 8}
+                "action_horizon": io["replay_horizon"], "action_dim": io["action_dim"], "proprio_dim": io["proprio_dim"]}
     payload = {"schema_version": 5, "family": settings["family"], "model_config": settings,
                "parent": parent, **geometry, **names,
                "policy_id": "source", "label": "Trained policy", "training_step": 2,
@@ -100,3 +105,22 @@ def test_export_rejects_pi05_identity_not_bound_to_parent(tmp_path):
     source.write_text(yaml.safe_dump(payload))
     with pytest.raises(ValueError, match="identity conflicts"):
         export_policy(source, tmp_path / "deployment", "another/path")
+
+
+def test_old_pi05_child_keeps_eight_step_contract_after_registry_update(tmp_path):
+    from vla_rynn_iql.base_models import model_contract
+    from vla_rynn_iql.model_artifacts import legacy_contract
+    settings = base_model_config("pi05-libero-base")
+    assert model_contract(settings)["io"]["replay_horizon"] == 10
+    assert legacy_contract(settings)["io"]["replay_horizon"] == 8
+    explicit = {**settings, "contract": model_contract(settings)}
+    assert legacy_contract(explicit)["io"]["replay_horizon"] == 10
+    source, saved = make_policy(tmp_path, "pi05-libero-base", replay_horizon=8)
+    before = copy.deepcopy(saved["parent"])
+    native, parent = decode_child(saved)
+    assert native["action_horizon"] == 8 and parent == before
+    destination = export_policy(source, tmp_path / "old-deployment", "/relocated/base")
+    copied = yaml.safe_load(destination.read_text())
+    validate_policy(destination, copied)
+    assert copied["parent"]["contract"] == before["contract"]
+    assert copied["action_horizon"] == 8

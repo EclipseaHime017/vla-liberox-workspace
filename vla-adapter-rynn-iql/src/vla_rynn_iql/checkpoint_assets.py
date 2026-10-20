@@ -5,7 +5,7 @@ import shutil
 import tempfile
 
 from .io import sha256_file, stable_hash
-from .model_storage import download_repository, repository_metadata
+from .model_storage import cached_sha256, download_repository, repository_metadata
 
 
 def checkpoint_digest(root: Path, hash_file=sha256_file) -> str:
@@ -53,7 +53,7 @@ def checkpoint_view(checkpoint: str, revision: str):
                 shutil.copyfile(path, target)
             else:
                 target.symlink_to(path.resolve())
-        if local and checkpoint_digest(destination) != revision:
+        if local and checkpoint_digest(destination, cached_sha256) != revision:
             raise ValueError("Local base checkpoint changed while loading; select the model again")
         return holder
     except BaseException:

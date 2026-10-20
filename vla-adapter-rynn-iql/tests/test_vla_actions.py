@@ -5,6 +5,7 @@ import pytest
 import sys
 import torch
 import types
+from PIL import Image
 from types import SimpleNamespace
 
 from vla_rynn_iql.vla_adapter import (
@@ -141,6 +142,7 @@ def test_action_round_trip_preserves_motion_and_binary_gripper():
 def test_processor_inputs_batches_two_views_without_changing_sample_order():
     components = SimpleNamespace(
         processor=FakeProcessor(),
+        policy_images=lambda images: [Image.fromarray(value) for value in images],
         model=SimpleNamespace(device=torch.device("cpu"), dtype=torch.float32),
     )
     agent = np.zeros((3, 4, 5, 3), dtype=np.uint8)
@@ -160,6 +162,7 @@ def test_processor_inputs_batches_two_views_without_changing_sample_order():
 def test_processor_inputs_keeps_legacy_single_sample_and_rejects_mixed_prompts():
     components = SimpleNamespace(
         processor=FakeProcessor(),
+        policy_images=lambda images: [Image.fromarray(value) for value in images],
         model=SimpleNamespace(device=torch.device("cpu"), dtype=torch.float32),
     )
     image = np.zeros((4, 5, 3), dtype=np.uint8)
@@ -190,6 +193,7 @@ def test_frozen_hidden_and_action_helpers_preserve_batch_dimension(monkeypatch, 
     components = SimpleNamespace(
         processor=FakeProcessor(),
         model=FakePrismaticModel().requires_grad_(trainable),
+        policy_images=lambda images: [Image.fromarray(value) for value in images],
         action_head=FakeActionHead(),
         proprio_projector=object(),
     )

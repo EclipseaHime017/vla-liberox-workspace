@@ -158,7 +158,7 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
     predict(c).square().mean().backward()
     optimizer.step()
     checkpoint = _save_checkpoint(tmp_path / "checkpoints", 1, c, BehaviorCloning(), optimizer,
-        torch.Generator(), config, {"dataset_sha256": "d" * 64}, None)
+        torch.Generator(), config, {"dataset_sha256": "d" * 64, "action_horizon": 8}, None)
     expected = predict(c).detach()
     overlay_path = _publish_overlay(checkpoint, tmp_path / "registry", 1, config, c,
                                    {"dataset_sha256": "d" * 64}, None)
@@ -172,6 +172,7 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
         return fresh.model, fresh.action_head, fresh.proprio_projector, None, None
     monkeypatch.setattr(vla_adapter, "_initialize_components", lambda cfg, device: initialize(cfg))
     monkeypatch.setattr(vla_adapter, "_add_vla_path", lambda _: None)
+    monkeypatch.setattr(vla_adapter, "restrict_tensorflow_to_cpu", lambda: None)
     monkeypatch.setattr(vla_adapter, "resolve_revision", lambda *_: "a" * 40)
     monkeypatch.setattr(vla_adapter, "checkpoint_view", lambda *_: SimpleNamespace(name=str(tmp_path), cleanup=lambda: None))
     loaded = vla_adapter.load_components(config, overlay_path, training=False)

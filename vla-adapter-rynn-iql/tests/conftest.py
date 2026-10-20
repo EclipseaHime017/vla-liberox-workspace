@@ -10,6 +10,11 @@ import yaml
 from vla_rynn_iql.config import PROJECT_ROOT, load_train_config
 
 
+@pytest.fixture(autouse=True)
+def isolated_model_digest_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLA_DIGEST_CACHE_ROOT", str(tmp_path / "model-digests"))
+
+
 def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | None = None,
              action_source: str = "policy", action_count: int = 17, success: bool = False,
              success_from: int | None = None):
@@ -46,7 +51,7 @@ def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | N
         wrist_image=np.zeros((action_count + 1, 16, 16, 3), np.uint8),
     )
     (run_dir / "run.json").write_text(json.dumps({
-        "id": run_id, "kind": kind, "task_id": "LEVEL1::task", "task_name": "task",
+        "id": run_id, "kind": kind, "task_id": "LEVEL1::task", "task_name": "task", "policy_id": "base",
         "task": "do the task", "status": "COMPLETED", "error": None,
         "root_session_id": "root", "parent_session_id": "root" if kind == "branch" else None,
         "resume_step": resume, "control_mode": "manual" if action_source == "human" else "policy",

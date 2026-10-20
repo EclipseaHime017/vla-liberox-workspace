@@ -16,8 +16,9 @@ from vla_rynn_iql.model_adaptation import trainable_parameters
 
 
 class TinyQ(torch.nn.Module):
-    def __init__(self, *_):
+    def __init__(self, horizon=8, *_):
         super().__init__()
+        self.horizon = horizon
         self.linear = torch.nn.Linear(10, 1)
 
     def forward(self, pixels, proprio, actions, mask):
@@ -42,12 +43,12 @@ def tiny_predict(components, batch, device):
 
 def tiny_actor_losses(components, batch, device):
     prediction = tiny_predict(components, batch, device)
-    mask = batch["action_mask"][..., None]
-    loss = ((prediction - batch["actions"]).abs() * mask).sum((1, 2)) / (mask.sum((1, 2)) * 7)
+    mask = batch.get("actor_action_mask", batch["action_mask"])[..., None]
+    loss = ((prediction - batch.get("actor_actions", batch["actions"])).abs() * mask).sum((1, 2)) / (mask.sum((1, 2)) * 7)
     return loss, prediction
 
 
-def _worker(rank, world, rendezvous, raw, result):
+def _worker(rank, world, rendezvous, raw, result, horizon=8):
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank,
                             world_size=world, timeout=timedelta(seconds=45))
@@ -61,14 +62,16 @@ def _worker(rank, world, rendezvous, raw, result):
         iql.QNetwork, iql.ValueNetwork = TinyQ, TinyValue
         config = LoadedConfig(Path("test.yaml"), raw)
         torch.manual_seed(8)
-        reference = ImplicitQLearning(config, torch.device("cpu"))
+        reference = ImplicitQLearning(config, torch.device("cpu"), transition_horizon=horizon)
         torch.manual_seed(8)
-        parallel = DistributedAlgorithm(config, torch.device("cpu"))
+        parallel = DistributedAlgorithm(config, torch.device("cpu"), transition_horizon=horizon)
+        assert parallel.inner.agent.q1.module.horizon == reference.agent.q1.horizon == horizon
         torch.manual_seed(21)
         batch = {"pixels": torch.rand(4, 6, 4, 4), "next_pixels": torch.rand(4, 6, 4, 4),
             "proprio": torch.randn(4, 8), "next_proprio": torch.randn(4, 8),
-            "actions": torch.randn(4, 8, 7), "action_mask": torch.ones(4, 8),
-            "reward": -torch.rand(4), "chunk_length": torch.tensor([8, 3, 8, 4]),
+            "actions": torch.randn(4, horizon, 7), "action_mask": torch.ones(4, horizon),
+            "actor_actions": torch.randn(4, 8, 7), "actor_action_mask": torch.ones(4, 8),
+            "reward": -torch.rand(4), "chunk_length": torch.tensor([horizon, 3, horizon, 4]),
             "bootstrap_mask": torch.tensor([1., 1., 0., 1.])}
         local = {key: value[rank * 2:(rank + 1) * 2] for key, value in batch.items()}
         for step in range(3):
@@ -81,9 +84,9 @@ def _worker(rank, world, rendezvous, raw, result):
                     torch.testing.assert_close(left, right, atol=2e-6, rtol=2e-5)
         for optimizer in parallel.optimizers:
             optimizer.consolidate_state_dict(to=0)
-        packet = [parallel.checkpoint() if rank == 0 else None]
+        packet = [copy.deepcopy(parallel.checkpoint()) if rank == 0 else None]
         dist.broadcast_object_list(packet, src=0)
-        replacement = DistributedAlgorithm(config, torch.device("cpu"))
+        replacement = DistributedAlgorithm(config, torch.device("cpu"), transition_horizon=horizon)
         replacement.restore(packet[0])
         parallel.update(local, 2003)
         replacement.update(local, 2003)
@@ -124,8 +127,9 @@ def _worker(rank, world, rendezvous, raw, result):
         dist.destroy_process_group()
 
 
-def test_two_rank_iql_and_bc_numerical_alignment(configured, tmp_path):
-    mp.spawn(_worker, args=(2, str(tmp_path / "rendezvous"), configured.raw, str(tmp_path / "result")),
+@pytest.mark.parametrize("horizon", [5, 8])
+def test_two_rank_iql_and_bc_numerical_alignment(configured, tmp_path, horizon):
+    mp.spawn(_worker, args=(2, str(tmp_path / "rendezvous"), configured.raw, str(tmp_path / "result"), horizon),
              nprocs=2, join=True)
     assert (tmp_path / "result").read_text() == "ok"
 
@@ -237,7 +241,7 @@ def _checkpoint_worker(rank, world, rendezvous, raw, root, resume):
         optimizer = zero_optimizer(parameters(components), torch.optim.AdamW, lr=.001)
         algorithm = DistributedAlgorithm(config, torch.device("cpu"))
         generator = torch.Generator().manual_seed(raw["training"]["seed"] + 1)
-        manifest = {"dataset_sha256": "dataset", "episodes": []}
+        manifest = {"dataset_sha256": "dataset", "action_horizon": 8, "episodes": []}
         step = 0
         if resume:
             step = restore_distributed_checkpoint(Path(resume), components, algorithm, optimizer,

@@ -6,12 +6,22 @@
 
 | 模型 | Conda 环境 | 上游源码 | 固定版本 |
 | --- | --- | --- | --- |
-| VLA-Adapter | `vla-liberox`，Python 3.10 | `third_party/VLA-Adapter/` | commit `23fa0c9c159e2aa04341cdd3e924f44061311060`，Torch 2.7.0，Transformers 4.40.1 |
+| VLA-Adapter | `vla-liberox`，Python 3.10 | `third_party/VLA-Adapter/` | commit `23fa0c9c159e2aa04341cdd3e924f44061311060`，Torch 2.7.0，Transformers 4.40.1，TensorFlow 2.15.0 |
 | π₀.₅ | `pi05`，Python 3.11 | `third_party/OpenPI/` | commit `215abfb217dbac7d5f1273282331b9b1866c0479`，Torch 2.7.1，Transformers 4.53.2 |
 
 模型家族 YAML 管理训练环境和接口，变体管理权重及归一化配置。上游源码放在 third_party，不混入服务器训练实现；两个模型环境独立安装。
 
 server 从导出的数据读取轨迹和奖励，不需要安装仿真、控制器或网页依赖。复用已有 RynnValue、Stage、Final Reward 及 Robometer 结果也不需要评价模型环境。
+
+VLA-Adapter 源码、加载补丁 SHA256 及图像预处理依赖锁定在 `vla-adapter-rynn-iql/configs/dependency-lock.yaml`。安装时应用 README 中的完整补丁，包含本地 AutoClass 注册和 Hub 缓存识别。部署后在 `vla-liberox` 环境安装 pytest，并运行真实像素对比测试：
+
+```bash
+env CUDA_VISIBLE_DEVICES="" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  PYTHONPATH=vla-adapter-rynn-iql/src \
+  python -B -m pytest vla-adapter-rynn-iql/tests/test_server_image_pipeline.py -q
+```
+
+测试检查提交、补丁哈希及实际源码，拒绝未记录的改动；仅排除 Python 字节码和 egg-info 等安装生成物。TensorFlow、tensorflow-cpu 等发行包都按锁定版本检查，缺失或版本冲突会明确报错。随后比较训练与上游推理的实际 JPEG、缩放及裁剪结果，不加载模型权重；缺少上游源码时跳过真实像素测试。
 
 ## 本地目录
 

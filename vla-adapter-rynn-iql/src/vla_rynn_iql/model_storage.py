@@ -3,6 +3,7 @@ import os
 import json
 import re
 import tempfile
+import fcntl
 from pathlib import Path
 
 from .io import atomic_json, sha256_file, stable_hash
@@ -11,6 +12,59 @@ from .io import atomic_json, sha256_file, stable_hash
 MODELS_ROOT = Path(__file__).resolve().parents[3] / "models"
 OPENPI_CACHE_ROOT = MODELS_ROOT / ".cache/openpi"
 SOURCE_FILE = ".model-source.json"
+
+
+def digest_cache_root() -> Path:
+    return Path(os.environ.get("VLA_DIGEST_CACHE_ROOT", MODELS_ROOT / ".cache/digests"))
+
+
+def _signature(path: Path) -> dict:
+    stat = path.stat()
+    return {"path": str(path), "device": stat.st_dev, "inode": stat.st_ino, "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns}
+
+
+def cached_sha256(path: Path, cache_root: Path | None = None) -> str:
+    """Reuse content digests by file identity; serialize cold misses across ranks."""
+    resolved = Path(path).resolve()
+    entry = (cache_root or digest_cache_root()) / f"{stable_hash(str(resolved))[:32]}.json"
+
+    def cached(signature):
+        try:
+            value = json.loads(entry.read_text())
+        except (OSError, ValueError):
+            return None
+        if (isinstance(value, dict) and all(value.get(key) == item for key, item in signature.items())
+                and isinstance(value.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])):
+            return value["sha256"]
+
+    def compute():
+        signature = _signature(resolved)
+        digest = cached(signature)
+        if digest is None:
+            digest = sha256_file(resolved)
+            if _signature(resolved) != signature:
+                raise ValueError(f"Model file changed while hashing: {resolved}")
+            try:
+                atomic_json(entry, {**signature, "sha256": digest})
+            except OSError:
+                pass
+        return digest
+
+    digest = cached(_signature(resolved))
+    if digest is not None:
+        return digest
+    try:
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        lock = entry.with_suffix(".lock").open("a")
+    except OSError:
+        return compute()
+    with lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            return compute()
+        return compute()
 
 
 def local_model_directory(value: str | Path) -> Path:
@@ -29,7 +83,7 @@ def repository_directory(repo: str) -> Path:
 
 
 def deployment_digest(root: Path) -> str:
-    return stable_hash({str(path.relative_to(root)): sha256_file(path)
+    return stable_hash({str(path.relative_to(root)): cached_sha256(path)
                         for path in sorted(root.rglob("*")) if path.is_file()
                         and not any(part.startswith(".") for part in path.relative_to(root).parts)})
 

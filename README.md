@@ -81,6 +81,10 @@ scp -r ./task-export "$TRAIN_HOST:$TRAIN_REPO/dataset-root/imports/"
 
 Dataset exports retain their membership and train/validation splits. Complete runs directories are also supported, using their existing trajectory selection marks. ZIP inputs are temporarily extracted for training and cleaned up afterwards; manual extraction is unnecessary.
 
+Transitions follow recorded prediction/execution boundaries instead of fixed eight-step cuts. Actor supervision is configured independently: currently eight steps for VLA-Adapter and ten for π₀.₅, without crossing handoffs or instruction changes. Existing rewards are reused when their actual chunk boundaries match, regardless of the actor window. Mismatches require reward regeneration on main; rewards are never interpolated or silently replaced. Recordings made with disabled policy camera inputs are excluded from training.
+
+Both single- and multi-GPU training reject legacy prepared layouts, including direct use of an old `work_dir`. Rerun Prepare and regenerate incompatible evaluations on main before training.
+
 ## 3. Configure training
 
 Edit [server_pipeline.yaml](vla-adapter-rynn-iql/configs/server_pipeline.yaml). This example uses VLA-Adapter, IQL, and eight GPUs:
@@ -152,6 +156,8 @@ model:
 ```
 
 By default, VLA-Adapter uses rank-64 LoRA along with trainable action queries, action head, and proprio projector; π₀.₅ uses full fine-tuning. Registered variants, including those selected with `--model`, use their family's profile. VLA-Adapter still supports `frozen/lora/full`; π₀.₅ supports `frozen/full`, where frozen trains the action expert and projections. See [Model.md](docs/Model.md) for further model settings.
+
+VLA-Adapter training uses the upstream inference JPEG, resize, and center-crop pipeline, with TensorFlow preprocessing restricted to CPU. π₀.₅ retains its own input transforms. Start a new training run after input processing or training-window changes rather than resuming an old-layout checkpoint; existing checkpoints and exported policies are not rewritten.
 
 For BC, set `training_config: ./training/bc.yaml` and `overrides.training.method: bc`. BC learns from dataset actions without rewards or Q/V training. Select or filter samples when preparing the dataset, not in the training method.
 

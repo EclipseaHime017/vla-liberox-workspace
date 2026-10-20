@@ -43,7 +43,7 @@ def open_run_source(path: Path):
         with zipfile.ZipFile(path) as archive:
             for member in archive.infolist():
                 _export_file(root, member.filename.rstrip("/"))
-                if Path(member.filename).suffix in {".json", ".npz"}:
+                if Path(member.filename).suffix in {".json", ".npz", ".yaml"}:
                     archive.extract(member, root)
         exports = list(root.rglob("export.json"))
         if len(exports) > 1:
@@ -300,6 +300,33 @@ def saved_reward(run: GlobalRun, source: str) -> tuple[dict, Path]:
     return metadata, path.with_name(name)
 
 
+def _validate_reward_layout(metadata: dict, arrays, episode: dict) -> None:
+    """Reuse exact recorded intervals, allowing only absent legacy provenance."""
+    expected = episode["reward_boundaries"]
+    if "boundary_steps" not in arrays or not np.array_equal(arrays["boundary_steps"], expected):
+        saved = set(np.asarray(arrays["boundary_steps"]).tolist()) if "boundary_steps" in arrays else set()
+        missing = sorted(set(expected) - saved)
+        raise ValueError(f"Global evaluation reward_boundaries mismatch: {episode['run_id']}; "
+                         f"missing recorded boundaries={missing[:20]}. Regenerate rewards on main; "
+                         "server never interpolates or runs an evaluator")
+    chunks = episode.get("evaluation_chunks", episode["chunks"])
+    for key in ("final_reward", "pbrs_chunk_reward"):
+        if key in arrays and (arrays[key].shape != (len(chunks),) or not np.isfinite(arrays[key]).all()):
+            raise ValueError(f"Global evaluation {key} does not match recorded chunks: {episode['run_id']}")
+    for previous in (metadata.get("episode", {}), metadata.get("entry", {})):
+        saved_chunks = previous.get("evaluation_chunks")
+        if saved_chunks is None:
+            continue
+        if not isinstance(saved_chunks, list) or len(saved_chunks) != len(chunks):
+            raise ValueError(f"Global evaluation chunk count mismatch: {episode['run_id']}")
+        for saved, current in zip(saved_chunks, chunks):
+            if (not isinstance(saved, dict)
+                    or any(saved.get(key) != current.get(key) for key in ("start", "end", "length", "action_source"))
+                    or any(saved[key] != current.get(key) for key in (
+                        "transition_type", "interrupted", "copied_prefix", "origin_run_id", "policy_instruction") if key in saved)):
+                raise ValueError(f"Global evaluation chunk semantics mismatch: {episode['run_id']}")
+
+
 def _stage_from_labels(run: GlobalRun, episode: dict, directory: Path, raw: dict) -> tuple[dict, Path]:
     """Same implicit global Stage semantics as the PC: labels + configured p."""
     from .stage_rewards import (
@@ -388,7 +415,7 @@ def prepare_global_inputs(task: GlobalTask, directory: Path, raw: dict, source: 
                     "success_consecutive_steps"):
             if key in saved and saved[key] != episode[key]:
                 raise ValueError(f"Global evaluation {key} mismatch: {run.run_id}")
-        for key in ("action_horizon", "action_dim", "proprio_dim", "control_hz", "success_consecutive_steps"):
+        for key in ("action_dim", "proprio_dim", "control_hz", "success_consecutive_steps"):
             header = metadata.get("prepared", {})
             if key in header and header[key] != raw["data"][key]:
                 raise ValueError(f"Global evaluation {key} differs from training: {run.run_id}")
@@ -397,6 +424,7 @@ def prepare_global_inputs(task: GlobalTask, directory: Path, raw: dict, source: 
             raise ValueError(f"Global evaluation arrays missing or hash mismatch: {run.run_id}")
         recipe = {**metadata["reward_config"], "source": source}
         with np.load(values, allow_pickle=False) as arrays:
+            _validate_reward_layout(metadata, arrays, episode)
             if needs_rynnvalue(recipe):
                 validate_official_outputs({key: arrays[key] for key in OFFICIAL_OUTPUT_KEYS},
                                           len(episode["reward_boundaries"]))
@@ -412,7 +440,7 @@ def prepare_global_inputs(task: GlobalTask, directory: Path, raw: dict, source: 
         # Validate the original indices too, not just our freshly rebuilt metadata.
         for key, expected in _episode_reward_metadata(episode).items():
             previous = metadata.get("entry", {})
-            if key in previous and previous[key] != expected:
+            if key != "evaluation_chunks" and key in previous and previous[key] != expected:
                 raise ValueError(f"Global evaluation {key} mismatch: {run.run_id}")
         entry = {"run_id": run.run_id, **_episode_reward_metadata(episode),
                  "reward_path": str(destination), "annotation_path": str(destination),

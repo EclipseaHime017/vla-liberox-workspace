@@ -18,7 +18,8 @@ def checkpoint_identity(directory: Path, hash_file=sha256_file, *, base_id: str 
     metadata = json.loads((directory / IDENTITY_FILE).read_text())
     base = (base_model(base_id) if base_id is not None else
             next((entry for entry in BASE_MODELS.values() if entry.source == metadata.get("source")), None))
-    if base is None or base.family != "pi05":
+    from .base_models import family_adapter
+    if base is None or family_adapter(base.family).BACKEND != "vla_rynn_iql.pi05":
         raise ValueError("Unregistered π₀.₅ checkpoint source")
     contract = parent["contract"] if parent else (contract or base.contract)
     io = contract["io"]

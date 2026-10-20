@@ -89,7 +89,7 @@ def test_legacy_parent_encoding_is_equivalent_but_changed_view_is_not(base_id):
     assert parent_identity(current) != parent_identity(changed)
     raw = {"schema_version": 5, "family": settings["family"], "model_config": settings,
            "parent": legacy, "base_checkpoint": settings["base_checkpoint"], "stats_key": settings["stats_key"],
-           "action_horizon": 8, "action_dim": 7, "proprio_dim": 8}
+           "action_horizon": current["contract"]["io"]["replay_horizon"], "action_dim": 7, "proprio_dim": 8}
     decoded, saved_parent = decode_child(raw)
     original = base_models.BASE_MODELS[base_id]
     replacement = copy.deepcopy(original.contract)

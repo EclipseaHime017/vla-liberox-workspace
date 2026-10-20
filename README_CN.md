@@ -79,6 +79,10 @@ scp -r ./task-export "$TRAIN_HOST:$TRAIN_REPO/dataset-root/imports/"
 
 导出的数据集保留原成员和 train/validation 划分。也支持完整的 runs 目录，但会按其中已有的标记选择轨迹。ZIP 在运行时临时解压训练需要的文件，结束后清理，不需要手动解压。
 
+训练按记录中的预测／执行边界生成 transition，不再固定每 8 步切分。Actor 监督窗口由所选模型配置决定，当前 VLA-Adapter 为 8、π₀.₅ 为 10；窗口不会跨越接管或提示词切换。已有奖励的真实 chunk 边界一致时直接复用，不受 actor 窗口长度影响；边界不一致会提示在 main 重新生成奖励，不插值或静默替换。关闭过策略相机输入的消融记录不参与训练。
+
+单卡和多卡训练入口均拒绝旧切法的 Prepare 结果；直接使用旧 `work_dir` 时，也必须先重新 Prepare，并在 main 重新生成边界不兼容的评价。
+
 ## 3. 配置训练
 
 编辑 [server_pipeline.yaml](vla-adapter-rynn-iql/configs/server_pipeline.yaml)。下面是 VLA-Adapter、IQL、8 卡的配置示例：
@@ -150,6 +154,8 @@ model:
 ```
 
 默认 VLA-Adapter 使用 LoRA rank 64，同时训练动作查询、动作头和 proprio projector；π₀.₅ 使用全量微调。两个家族的变体均沿用对应预设，`--model` 也会选择对应预设。VLA-Adapter 的 `backbone` 仍可选 `frozen/lora/full`；π₀.₅ 可选 `frozen/full`，其中 frozen 训练动作专家和投影层。其他模型配置见 [Model.md](docs/Model.md)。
+
+VLA-Adapter 训练图像使用上游推理相同的 JPEG、缩放和中心裁剪流程，TensorFlow 预处理仅使用 CPU；π₀.₅ 保留自身的输入处理。输入处理或训练窗口发生变化后应新建训练 run，不恢复旧布局 checkpoint；原 checkpoint 和已导出模型不会改写。
 
 使用 BC 时，将 `training_config` 改为 `./training/bc.yaml`，同时设置 `overrides.training.method: bc`。BC 使用数据集中的动作，不读取奖励、不训练 Q/V；筛选训练样本应在准备数据集时完成。
 

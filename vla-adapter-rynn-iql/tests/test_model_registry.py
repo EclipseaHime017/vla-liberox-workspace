@@ -1,4 +1,6 @@
 from dataclasses import replace
+from types import ModuleType
+import sys
 import copy
 
 import pytest
@@ -8,12 +10,66 @@ from vla_rynn_iql import base_models, models
 from vla_rynn_iql.model_artifacts import parent_snapshot, decode_child
 
 
+def test_third_family_uses_registered_adapter_without_runtime_branches(tmp_path, monkeypatch):
+    template = next(iter(base_models.MODEL_FAMILIES.values())).implementation
+    spec = ModuleType("fixture_model_spec")
+    spec.__dict__.update({key: value for key, value in vars(template).items() if not key.startswith("__")})
+    spec.BACKEND = "fixture_model_backend"
+    spec.TRAINING_MODES = ("frozen",)
+    spec.DEFAULT_KEYS = {"environment", "backbone", "base_revision", "gain"}
+    spec.PARAMETER_PATHS = {"model_gain": ("gain",)}
+    spec.configure = lambda settings, **kwargs: settings
+    spec.signature = lambda settings: settings
+    spec.validate_contract = lambda io, architecture: io["image_size"] == 384 and io["native_action_horizon"] >= 8
+    spec.MANIFEST_SCHEMA = 6
+    spec.MANIFEST_FAMILY_FIELD = True
+    backend = ModuleType(spec.BACKEND)
+    backend.actor_losses = lambda batch: [1.0] * len(batch)
+    monkeypatch.setitem(sys.modules, spec.__name__, spec)
+    monkeypatch.setitem(sys.modules, backend.__name__, backend)
+    monkeypatch.setitem(base_models.ADAPTERS, "fixture-adapter", spec.__name__)
+    raw = family_files()
+    entry = copy.deepcopy(next(iter(raw.values())))
+    entry.update(model_name="independent-family", adapter="fixture-adapter", default_variant="custom-checkpoint",
+                 backbone_modes=["frozen"], defaults={"environment": "test", "backbone": "frozen", "base_revision": None, "gain": 2})
+    entry["variants"] = {"custom-checkpoint": next(iter(entry["variants"].values()))}
+    entry["io"].update(image_size=384, native_action_horizon=16, replay_horizon=12)
+    entry["variants"]["custom-checkpoint"]["inference"]["open_loop_steps"] = 12
+    raw["independent-family"] = entry
+    definitions, variants = base_models.load_registry(write_registry(tmp_path / "third", raw))
+    monkeypatch.setitem(base_models.MODEL_FAMILIES, "independent-family", definitions["independent-family"])
+    monkeypatch.setitem(base_models.BASE_MODELS, "custom-checkpoint", variants["custom-checkpoint"])
+    settings = models.base_model_config("custom-checkpoint")
+    assert settings["family"] == "independent-family" and settings["gain"] == 2
+    from vla_rynn_iql.config import load_train_config
+    for method in ("bc", "iql"):
+        config = load_train_config(method=method, family="independent-family")
+        assert config.section("model") == settings
+    assert models.model_backend({"model": settings}).actor_losses([1, 2]) == [1.0, 1.0]
+    exported = child("independent-family")
+    original = variants["custom-checkpoint"]
+    assert base_models.resolve_open_loop_steps(settings, 16) == 16
+    assert base_models.model_contract(settings)["io"]["replay_horizon"] == 12
+    changed = copy.deepcopy(original.contract)
+    changed["io"]["native_action_horizon"] = 32
+    monkeypatch.setitem(base_models.BASE_MODELS, original.id,
+                        replace(original, contract=changed, inference={"open_loop_steps": 24}))
+    decoded, _ = decode_child(exported)
+    assert decoded["schema_version"] == 6 and decoded["family"] == "independent-family"
+    from vla_rynn_iql.model_artifacts import validate_policy
+    with pytest.raises(ValueError, match="Unsupported deployment backend"):
+        validate_policy(tmp_path / "policy.yaml", exported)
+    assert base_models.execution_config(decoded["model_config"]) == {"open_loop_steps": 16, "max_open_loop_steps": 16}
+    with pytest.raises(ValueError, match="open_loop_steps"):
+        base_models.resolve_open_loop_steps(decoded["model_config"], 17)
+
+
 def child(family="vla_adapter"):
     settings = models.model_config({"model": {"family": family}})
     parent = parent_snapshot(settings, "a" * 64)
     return {"schema_version": 5, "family": family, "model_config": settings, "parent": parent,
             "base_checkpoint": settings["base_checkpoint"], "stats_key": settings["stats_key"],
-            "action_horizon": 8, "action_dim": 7, "proprio_dim": 8}
+            "action_horizon": parent["contract"]["io"]["replay_horizon"], "action_dim": 7, "proprio_dim": 8}
 
 
 def test_registry_is_lightweight_and_drives_every_base():
@@ -35,7 +91,7 @@ def test_execution_steps_are_separate_from_prediction_and_training(base_id, defa
     }
     assert base_models.resolve_open_loop_steps(settings, None) == default
     assert base_models.resolve_open_loop_steps(settings, maximum) == maximum
-    assert base_models.model_contract(settings)["io"]["replay_horizon"] == 8
+    assert base_models.model_contract(settings)["io"]["replay_horizon"] == maximum
     with pytest.raises(ValueError, match="open_loop_steps"):
         base_models.resolve_open_loop_steps(settings, maximum + 1)
 

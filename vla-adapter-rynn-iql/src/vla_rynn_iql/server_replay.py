@@ -75,7 +75,7 @@ def build_replay_cache(config, root: Path, action_stats: dict, proprio_stats: di
         "include_post_success": source.include_post_success, "transitions": transitions,
         "image_size": config.section("iql")["critic_image_size"] if transitions else None,
         "implementation": {name: sha256_file(Path(__file__).with_name(name)) for name in
-                           ("server_replay.py", "replay.py", "data.py", "image_transforms.py", "vla_adapter.py", "pi05.py")},
+                           ("server_replay.py", "replay.py", "data.py", "execution.py", "image_transforms.py", "vla_adapter.py", "pi05.py")},
     }
     # Source bytes, not timestamps or the original PC's absolute paths, bind the cache.
     for episode in source.manifest["episodes"]:
@@ -122,7 +122,8 @@ def build_replay_cache(config, root: Path, action_stats: dict, proprio_stats: di
                 descriptions[name] = {"shape": list(array.shape), "dtype": str(array.dtype),
                                        "sha256": sha256_file(temporary / f"{name}.npy")}
             metadata = {"schema_version": 1, "fingerprint": fingerprint, "identity": identity,
-                        "count": len(source), "arrays": descriptions, "records": records}
+                        "count": len(source), "arrays": descriptions, "records": records,
+                        "prompt_groups": source.prompt_groups}
             atomic_json(temporary / "cache.json", metadata)
             validate_cache(temporary, fingerprint)
             if target.exists():
@@ -166,11 +167,26 @@ class CachedReplayDataset(Dataset):
 
 class DistributedBatchSampler(Sampler):
     """Same global replacement-sampled batches at any world size, including resume."""
-    def __init__(self, size: int, batch: int, rank: int, world: int, seed: int, start: int, end: int):
+    def __init__(self, size: int, batch: int, rank: int, world: int, seed: int, start: int, end: int,
+                 prompt_groups: dict | None = None):
         if size < 1 or batch < world or batch % world or not 0 <= rank < world or not 0 <= start < end:
             raise ValueError("Invalid distributed batch sampler")
         self.size, self.batch, self.rank, self.world = size, batch, rank, world
         self.seed, self.start, self.end = seed, start, end
+        self.groups = {}
+        if batch > 1 and prompt_groups and len(prompt_groups) > 1:
+            if sorted(index for group in prompt_groups.values() for index in group) != list(range(size)):
+                raise ValueError("Prompt groups must partition the replay samples")
+            for group in prompt_groups.values():
+                pool = torch.tensor(group, dtype=torch.int64)
+                self.groups.update({index: pool for index in group})
+
+    def draw_batch(self, generator):
+        if self.groups:
+            anchor = int(torch.randint(self.size, (1,), generator=generator))
+            pool = self.groups[anchor]
+            return pool[torch.randint(len(pool), (self.batch,), generator=generator)]
+        return torch.randint(self.size, (self.batch,), generator=generator)
 
     def __len__(self):
         return self.end - self.start
@@ -179,6 +195,6 @@ class DistributedBatchSampler(Sampler):
         generator = torch.Generator().manual_seed(self.seed)
         local = self.batch // self.world
         for step in range(self.end):
-            batch = torch.randint(self.size, (self.batch,), generator=generator)
+            batch = self.draw_batch(generator)
             if step >= self.start:
                 yield batch[self.rank * local:(self.rank + 1) * local].tolist()

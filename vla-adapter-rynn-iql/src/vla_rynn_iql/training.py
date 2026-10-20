@@ -21,12 +21,12 @@ import yaml
 from torch.utils.data import default_collate
 
 from .config import LoadedConfig, reward_source
-from .data import load_manifest, training_replay_policy
+from .data import load_manifest, training_replay_policy, validate_training_manifest
 from .io import atomic_json, sha256_file, stable_hash
 from .algorithms import TrainingAlgorithm, build_algorithm
 from .methods import actor_lr_warmup, training_method
 from .models import model_backend, model_config, model_signature
-from .base_models import model_contract
+from .base_models import family_adapter, model_contract
 from .image_transforms import canonical_contract
 from .model_artifacts import legacy_contract, parent_identity
 from .monitoring import (
@@ -165,6 +165,14 @@ def _initialize_wandb(
 
 
 def _sample_batch(dataset: ActionDataset, batch_size: int, generator: torch.Generator):
+    groups = getattr(dataset, "prompt_groups", {})
+    if batch_size > 1 and len(groups) > 1:
+        anchor = int(torch.randint(len(dataset), (1,), generator=generator))
+        episode, chunk_index, _ = dataset.items[anchor]
+        prompt = dataset.chunks[episode["run_id"]][chunk_index].get("policy_instruction", episode["prompt"])
+        group = groups[prompt]
+        indices = [group[index] for index in torch.randint(len(group), (batch_size,), generator=generator).tolist()]
+        return default_collate([dataset[index] for index in indices])
     indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
     return default_collate([dataset[index] for index in indices])
 
@@ -248,8 +256,12 @@ def _save_checkpoint(
         "schema_version": 2, "step": step, "config_sha256": config.digest,
         "algorithm": training_method(config.raw).name,
         "model_config": model_signature(config.raw),
+        "model_contract": model_contract(config.section("model")),
         "model_identity": getattr(components, "identity", None),
         "model_parent": getattr(components, "parent", None),
+        "training_layout": {"chunking": manifest.get("chunking"),
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
@@ -276,8 +288,9 @@ def _publish_overlay(
 ) -> Path:
     method = training_method(config.raw).name
     prefix = "rynn-iql" if method == "iql" else method
-    if model_config(config.raw)["family"] != "vla_adapter":
-        prefix = f"{model_config(config.raw)['family']}-{prefix}"
+    model_prefix = family_adapter(config.section("model")["family"]).EXPORT_PREFIX
+    if model_prefix:
+        prefix = f"{model_prefix}-{prefix}"
     policy_id = f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     target = registry / policy_id
     target.mkdir(parents=True, exist_ok=False)
@@ -347,10 +360,12 @@ def _restore_checkpoint(
     previous_parent = metadata.get("model_parent")
     if previous_parent is not None and parent_identity(previous_parent) != parent_identity(getattr(components, "parent", None)):
         raise ValueError("Resume checkpoint uses a different parent model")
-    if previous_parent is None:
-        previous_contract = legacy_contract(metadata.get("model_config", {}))
-        if canonical_contract(previous_contract) != canonical_contract(model_contract(config.section("model"))):
-            raise ValueError("Resume checkpoint uses a different model input contract")
+    previous_contract = metadata.get("model_contract")
+    if previous_contract is None:
+        previous_contract = (previous_parent["contract"] if previous_parent is not None
+                             else legacy_contract(metadata.get("model_config", {})))
+    if canonical_contract(previous_contract) != canonical_contract(model_contract(config.section("model"))):
+        raise ValueError("Resume checkpoint uses a different model input contract")
     has_success_tail = any(
         episode.get("split") == "train" and episode.get("terminal_step") is not None
         and int(episode["recorded_action_count"]) > int(episode["terminal_step"]) + 1
@@ -364,6 +379,9 @@ def _restore_checkpoint(
             "existing complete reward evaluations can still be reused."
         )
     expected = {
+        "training_layout": {"chunking": manifest.get("chunking"),
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "base_checkpoint": config.section("model")["base_checkpoint"],
@@ -407,6 +425,7 @@ def train(config: LoadedConfig) -> Path:
         torch.cuda.set_device(device)
     LOG.info("Loading prepared replay for %s", method.name.upper())
     manifest = load_manifest(config)
+    validate_training_manifest(manifest, config)
     reward_index = load_reward_index(config) if method.requires_rewards else None
     reward_hash = reward_manifest_digest(reward_index) if reward_index is not None else None
     reward_mode = ("cumulative_primitive_steps" if config.section("reward")["accumulate_primitive_steps"]
@@ -423,7 +442,7 @@ def train(config: LoadedConfig) -> Path:
                ActionDataset(config, components.action_stats, components.proprio_stats, "train"))
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
-    agent = build_algorithm(config, device)
+    agent = build_algorithm(config, device, transition_horizon=manifest["action_horizon"])
     actor_parameters = backend.trainable_parameters(components)
     counts = backend.parameter_counts(components)
     print(f"MODEL ready | config={model_signature(config.raw)} | parameters={counts}", flush=True)
@@ -559,8 +578,8 @@ def train(config: LoadedConfig) -> Path:
             actor_loss = agent.weight_actor_losses(losses, context)
             action_metrics = _action_diagnostics(
                 prediction,
-                critic_batch["actions"],
-                critic_batch["action_mask"],
+                batch.get("actor_actions", batch["actions"]).to(device),
+                batch.get("actor_action_mask", batch["action_mask"]).to(device),
             ) if prediction is not None else {"actor_flow_mse": float(losses.detach().mean())}
             (actor_loss / accumulation).backward()
             actor_loss_value = float(actor_loss.detach())

@@ -10,7 +10,7 @@ import tempfile
 
 import yaml
 
-from .base_models import base_model, model_contract, validate_contract
+from .base_models import MODEL_FAMILIES, base_model, model_contract, validate_contract, family_adapter
 from .io import stable_hash, sha256_file
 from .config_sources import UniqueKeyLoader
 from .image_transforms import canonical_contract
@@ -19,6 +19,7 @@ from .image_transforms import canonical_contract
 def legacy_contract(settings: dict) -> dict:
     contract = model_contract(settings)
     if "contract" not in settings:
+        contract["io"]["replay_horizon"] = 8
         contract["observation"] = {"image_flip_vertical": True, "image_flip_horizontal": True}
     return contract
 
@@ -33,7 +34,7 @@ def parent_identity(parent: dict | None) -> dict | None:
 
 
 def parent_snapshot(settings: dict, revision: str, *, contract: dict | None = None) -> dict:
-    base = base_model(settings.get("base_id", "base" if settings["family"] == "vla_adapter" else "pi05-libero-base"))
+    base = base_model(settings.get("base_id", MODEL_FAMILIES[settings["family"]].default_base))
     value = {"id": base.id, "family": base.family, "checkpoint": settings["base_checkpoint"],
              "stats_key": settings["stats_key"], "revision": revision,
              "source": base.source, "source_revision": base.revision,
@@ -90,12 +91,21 @@ def decode_child(raw: dict) -> tuple[dict, dict | None]:
     if (value.get("action_horizon"), value.get("action_dim"), value.get("proprio_dim")) != (
             io["replay_horizon"], io["action_dim"], io["proprio_dim"]):
         raise ValueError("Child geometry conflicts with parent I/O")
-    if parent["family"] == "vla_adapter":
+    adapter = family_adapter(parent["family"])
+    if not adapter.MANIFEST_FAMILY_FIELD:
         value.pop("family")
-        value["schema_version"] = 3
-    else:
-        value["schema_version"] = 4
+    value["schema_version"] = adapter.MANIFEST_SCHEMA
     return value, parent
+
+
+def manifest_family(raw: dict) -> str:
+    if not isinstance(raw, dict):
+        raise ValueError("Model manifest must be a mapping")
+    family = raw.get("family") or (raw.get("model_config") or {}).get("family")
+    if family is None:
+        family = {1: "vla_adapter", 2: "vla_adapter", 3: "vla_adapter", 4: "pi05"}.get(raw.get("schema_version"))
+    family_adapter(family)
+    return family
 
 
 def validate_policy(path: Path, payload: dict) -> None:
@@ -108,16 +118,19 @@ def validate_policy(path: Path, payload: dict) -> None:
               "dataset_sha256", "reward_sha256", "training_step", "component_sha256",
               "compatibility_sha256"}
     settings = native["model_config"]
-    if parent["family"] == "vla_adapter":
+    backend = family_adapter(parent["family"]).BACKEND
+    if backend == "vla_rynn_iql.vla_adapter":
         required = common | {"action_head", "proprio_projector", "backbone"}
         names = {"action_head", "proprio_projector"}
         if (settings["backbone"] == "frozen") != (native.get("backbone") is None):
             raise ValueError("Policy backbone artifact conflicts with its model configuration")
         if native.get("backbone") is not None:
             names.add("backbone")
-    else:
+    elif backend == "vla_rynn_iql.pi05":
         required = common | {"family", "actor", "base_identity"}
         names = {"actor", "base_identity"}
+    else:
+        raise ValueError(f"Unsupported deployment backend: {backend}")
     if set(native) != required:
         raise ValueError("Invalid child policy manifest fields")
     for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
@@ -148,12 +161,12 @@ def validate_policy(path: Path, payload: dict) -> None:
         name = native[key]
         if not isinstance(name, str) or name in {".", ".."} or Path(name).name != name:
             raise ValueError(f"Unsafe policy component: {key}")
-        if parent["family"] == "pi05" and name != {"actor": "actor.pt", "base_identity": "pi05_identity.json"}[key]:
+        if backend == "vla_rynn_iql.pi05" and name != {"actor": "actor.pt", "base_identity": "pi05_identity.json"}[key]:
             raise ValueError(f"Unexpected policy component filename: {key}")
         component = path.parent / name
         if component.is_symlink() or not component.is_file() or sha256_file(component) != hashes[key]:
             raise ValueError(f"Policy component hash mismatch: {key}")
-    if parent["family"] == "pi05":
+    if backend == "vla_rynn_iql.pi05":
         from .pi05_assets import identity_digest
         identity = json.loads((path.parent / native["base_identity"]).read_text())
         if identity_digest(identity) != parent["revision"]:

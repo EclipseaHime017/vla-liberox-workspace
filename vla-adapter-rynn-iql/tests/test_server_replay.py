@@ -56,3 +56,17 @@ def test_distributed_sampling_same_global_order_and_resume():
     ranks = [list(DistributedBatchSampler(31, 8, rank, 2, 8, 0, 11)) for rank in range(2)]
     assert [left + right for left, right in zip(*ranks)] == reference
     assert list(DistributedBatchSampler(31, 8, 0, 1, 8, 7, 11)) == reference[7:]
+
+
+def test_instruction_grouped_sampling_is_global_and_resume_stable():
+    groups = {"pick": [0, 2, 4], "place": [1, 3, 5, 6]}
+    reference = list(DistributedBatchSampler(7, 8, 0, 1, 8, 0, 11, groups))
+    ranks = [list(DistributedBatchSampler(7, 8, rank, 2, 8, 0, 11, groups)) for rank in range(2)]
+    assert [left + right for left, right in zip(*ranks)] == reference
+    assert list(DistributedBatchSampler(7, 8, 0, 1, 8, 7, 11, groups)) == reference[7:]
+    assert all(any(set(batch) <= set(group) for group in groups.values()) for batch in reference)
+    sampler = DistributedBatchSampler(7, 8, 0, 1, 8, 0, 11, groups)
+    generator = torch.Generator().manual_seed(8)
+    assert [sampler.draw_batch(generator).tolist() for _ in range(11)] == reference
+    plain = list(DistributedBatchSampler(7, 1, 0, 1, 8, 0, 11))
+    assert list(DistributedBatchSampler(7, 1, 0, 1, 8, 0, 11, groups)) == plain

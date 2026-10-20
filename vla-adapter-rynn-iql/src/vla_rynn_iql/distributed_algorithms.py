@@ -86,8 +86,8 @@ def wrap(module, device, *, unused=False, meter=None, move_inputs=True):
 
 
 class DistributedAlgorithm:
-    def __init__(self, config, device, meter=None):
-        self.inner = build_algorithm(config, device)
+    def __init__(self, config, device, meter=None, *, transition_horizon=None):
+        self.inner = build_algorithm(config, device, transition_horizon=transition_horizon)
         self.optimizers = []
         agent = getattr(self.inner, "agent", None)
         if agent is None:  # BC: no Q/V, no reward evaluation.
