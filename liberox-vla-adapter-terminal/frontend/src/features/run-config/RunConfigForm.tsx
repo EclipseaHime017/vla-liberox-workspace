@@ -18,27 +18,9 @@ type Props = {
   onInitStateIndex: (value: number, commit: boolean) => void;
   onPolicyCamera: (camera: PolicyCameraId, enabled: boolean) => void;
   onBranchOpenLoop: (value: number) => void;
-  policyInstruction?: string;
-  onPolicyInstruction?: (value: string, commit: boolean) => void;
   onBranchSteps?: (value: number) => void;
-  onBranchInstruction?: (value: string) => void;
   onStartBranch: () => void; onCancelBranch: () => void;
 };
-
-function InstructionField({ instructions, value, disabled, onChange }: {
-  instructions: NonNullable<TaskInfo["instructions"]>; value: string; disabled: boolean;
-  onChange: (value: string, commit: boolean) => void;
-}) {
-  return <>
-    {instructions.length > 0 && <label>指令预设<select disabled={disabled}
-      value={instructions.find((item) => item.text === value)?.id ?? ""}
-      onChange={(event) => { const item = instructions.find((item) => item.id === event.target.value); if (item) onChange(item.text, true); }}>
-      <option value="">自定义</option>{instructions.map((item) => <option key={item.id} value={item.id}>{item.text}</option>)}
-    </select></label>}
-    <label className="branch-step-field">策略执行指令<Input value={value} disabled={disabled}
-      onChange={(event) => onChange(event.target.value, false)} onBlur={() => onChange(value, true)} /></label>
-  </>;
-}
 
 export function RunConfigForm(props: Props) {
   const policy = props.policies.find((item) => item.policy_id === (props.branchDraft?.policy_id ?? props.policyId));
@@ -68,9 +50,6 @@ export function RunConfigForm(props: Props) {
           value={props.branchDraft.target_steps} disabled={props.active || props.busy}
           onChange={(event) => props.onBranchSteps?.(Number(event.target.value))} />
       </label>
-      <InstructionField instructions={props.branchDraft.instructions ?? []}
-        value={props.branchDraft.policy_instruction ?? props.branchDraft.task_prompt}
-        disabled={props.active || props.busy} onChange={(value) => props.onBranchInstruction?.(value)} />
       {!manual && <label className="branch-step-field">每次预测执行步数
         <Input
           type="number"
@@ -83,7 +62,6 @@ export function RunConfigForm(props: Props) {
       </label>}
       <div className="button-row">
         <Button className="primary" disabled={props.active || props.busy || Boolean(invalidSteps)
-          || !(props.branchDraft.policy_instruction ?? props.branchDraft.task_prompt).trim()
           || (!manual && (!Number.isInteger(props.branchDraft.open_loop_steps) || props.branchDraft.open_loop_steps < 1
             || (maxOpenLoop !== undefined && props.branchDraft.open_loop_steps > maxOpenLoop)))}
           onClick={props.onStartBranch}>{manual ? "开始人工续跑" : "开始二次推理"}</Button>
@@ -91,9 +69,6 @@ export function RunConfigForm(props: Props) {
       </div>
     </> : !props.draft ? <Button className="primary create-draft" disabled={props.active || props.busy} onClick={props.onCreate}>创建仿真</Button> : <>
       <TaskSelector tasks={props.tasks} value={props.taskId} disabled={props.active || props.busy} onChange={props.onTask} labelPrefix="仿真" />
-      <InstructionField instructions={props.draft.task.instructions ?? []}
-        value={props.policyInstruction ?? props.draft.policy_instruction ?? props.draft.task.prompt}
-        disabled={props.active || props.busy} onChange={(value, commit) => props.onPolicyInstruction?.(value, commit)} />
       <label>策略模型<PolicySelector policies={props.policies} value={props.policyId} disabled={props.active || props.busy} onChange={props.onPolicy} /></label>
       <label>总控制步数<Input type="number" min={1} max={10000} value={props.maxSteps} disabled={props.active || props.busy} onChange={(event) => props.onMaxSteps(Number(event.target.value), false)} onBlur={() => props.onMaxSteps(props.maxSteps, true)} /></label>
       <label>每次预测执行步数<Input type="number" min={1} max={maxOpenLoop} value={props.openLoop} disabled={props.active || props.busy} onChange={(event) => props.onOpenLoop(Number(event.target.value), false)} onBlur={() => props.onOpenLoop(props.openLoop, true)} /></label>

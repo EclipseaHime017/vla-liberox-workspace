@@ -73,7 +73,7 @@ describe("collection controller integration", () => {
   it("keeps the full draft form, filters and history in one scroll body below the header", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     const draft = {id: "draft", task_id: "task", policy_id: "base", policy_label: "Base",
-      policy_instruction: "pick bowl", max_steps: 300, open_loop_steps: 8,
+      max_steps: 300, open_loop_steps: 8,
       seed: 0, init_state_index: 0, disabled_policy_cameras: [], task: bootstrap.task,
       preview_status: "READY", preview_revision: 1, preview_available: false};
     vi.mocked(api).mockImplementation(async (path, options) => {
@@ -86,6 +86,8 @@ describe("collection controller integration", () => {
     const body = start.closest(".session-panel-body")!;
     expect(body).not.toBeNull();
     expect(screen.getByLabelText("随机种子").closest(".session-panel-body")).toBe(body);
+    expect(screen.queryByLabelText("策略执行指令")).toBeNull();
+    expect(screen.queryByLabelText("指令预设")).toBeNull();
     expect(screen.getByText("数据检索").closest(".session-panel-body")).toBe(body);
     expect(screen.getByRole("button", {name: /原始 · source /}).closest(".session-panel-body")).toBe(body);
     const header = screen.getByRole("heading", {name: "会话"}).closest(".panel-title")!;
@@ -93,11 +95,11 @@ describe("collection controller integration", () => {
     expect(body.contains(header)).toBe(false);
   });
 
-  it("promotes human history and resumes its final state with a new instruction", async () => {
+  it("promotes human history and resumes its final state with the full task prompt", async () => {
     const original = vi.mocked(api).getMockImplementation()!;
     let record = {...source, id: "human", kind: "branch", role: "branch", can_promote: true,
       branchable: false, control_mode: "manual", manual_source: "factr"} as Session;
-    const task = {...bootstrap.task, instructions: [{id: "place", text: "place bowl on stove"}]};
+    const task = bootstrap.task;
     vi.mocked(api).mockImplementation(async (path, options) => {
       if (path === "/api/bootstrap") return {...bootstrap, task, task_catalog: [task]};
       if (path === "/api/sessions") return [record];
@@ -106,7 +108,7 @@ describe("collection controller integration", () => {
         return record;
       }
       if (path.includes("/frames/")) return {step: Number(path.split("/frames/")[1].split("/")[0]),
-        time_seconds: 0, actual_instruction: "instruction at selected state"};
+        time_seconds: 0};
       if (path === "/api/sessions/human/branches") return {...source, id: "continued", status: "READY"};
       return original(path, options);
     });
@@ -117,19 +119,16 @@ describe("collection controller integration", () => {
     expect(record.kind).toBe("branch");
     fireEvent.change(document.querySelector("input.timeline")!, {target: {value: "10"}});
     fireEvent.click(screen.getByRole("button", {name: "从此帧重新推理"}));
-    const instruction = await screen.findByLabelText("策略执行指令") as HTMLInputElement;
-    expect(instruction.value).toBe("instruction at selected state");
-    const start = screen.getByRole("button", {name: "开始二次推理"}) as HTMLButtonElement;
+    const start = await screen.findByRole("button", {name: "开始二次推理"}) as HTMLButtonElement;
+    expect(screen.queryByLabelText("策略执行指令")).toBeNull();
+    expect(screen.queryByLabelText("指令预设")).toBeNull();
     expect(start.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("目标总控制步数"), {target: {value: "20"}});
-    fireEvent.change(screen.getByLabelText("指令预设"), {target: {value: "place"}});
-    expect(instruction.value).toBe("place bowl on stove");
-    fireEvent.change(instruction, {target: {value: "finish placing bowl"}});
     expect((screen.getByLabelText(/任务（继承源会话）/) as HTMLInputElement).value).toBe("pick bowl");
     fireEvent.click(start);
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/human/branches", {
       method: "POST", body: JSON.stringify({resume_step: 10, control_mode: "policy", max_steps: 20,
-        policy_instruction: "finish placing bowl", open_loop_steps: 8}),
+        open_loop_steps: 8}),
     }));
   });
 
@@ -152,33 +151,6 @@ describe("collection controller integration", () => {
     fireEvent.click(screen.getByRole("button", {name: /原始 · other /}));
     await act(async () => { completeFrame!({step: 0, time_seconds: 0}); });
     expect(screen.queryByRole("button", {name: "开始二次推理"})).toBeNull();
-  });
-
-  it("keeps an edited instruction when an unrelated draft patch returns", async () => {
-    const original = vi.mocked(api).getMockImplementation()!;
-    const draft = {id: "draft", task_id: "task", policy_id: "base", policy_label: "Base",
-      policy_instruction: "original instruction", max_steps: 300, open_loop_steps: 8,
-      seed: 0, init_state_index: 0, disabled_policy_cameras: [], task: bootstrap.task,
-      preview_status: "READY", preview_revision: 1, preview_available: false};
-    let completePatch: ((value: typeof draft) => void) | undefined;
-    vi.mocked(api).mockImplementation(async (path, options) => {
-      if (path === "/api/bootstrap") return {...bootstrap, task_catalog: [bootstrap.task]};
-      if (path === "/api/draft") {
-        if (options?.method === "PATCH") return new Promise((resolve) => { completePatch = resolve; });
-        return draft;
-      }
-      return original(path, options);
-    });
-    render(<CollectPage />);
-    fireEvent.click(await screen.findByRole("button", {name: "创建仿真"}));
-    const seed = await screen.findByLabelText("随机种子");
-    fireEvent.change(seed, {target: {value: "7"}});
-    fireEvent.blur(seed);
-    await waitFor(() => expect(completePatch).toBeDefined());
-    const instruction = screen.getByLabelText("策略执行指令") as HTMLInputElement;
-    fireEvent.change(instruction, {target: {value: "new instruction being typed"}});
-    await act(async () => { completePatch!({...draft, seed: 7}); });
-    expect(instruction.value).toBe("new instruction being typed");
   });
 
   it("uses variant execution defaults when switching without changing training horizon", async () => {
@@ -310,7 +282,7 @@ describe("collection controller integration", () => {
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/source/branches", {
       method: "POST",
       body: JSON.stringify({ resume_step: 0, control_mode: "manual", max_steps: 10,
-        policy_instruction: "pick bowl", open_loop_steps: 8,
+        open_loop_steps: 8,
         controller_id: "factr", translation_gain: 0.25, rotation_gain: 0.25 }),
     }));
     await waitFor(() => expect((screen.getByLabelText("人工控制器") as HTMLSelectElement).disabled).toBe(true));
@@ -358,7 +330,7 @@ describe("collection controller integration", () => {
     fireEvent.click(await screen.findByRole("button", {name: "开始人工续跑"}));
     await waitFor(() => expect(api).toHaveBeenCalledWith("/api/sessions/source/branches", {
       method: "POST", body: JSON.stringify({resume_step: 0, control_mode: "manual", max_steps: 10,
-        policy_instruction: "pick bowl", open_loop_steps: 8,
+        open_loop_steps: 8,
         controller_id: "spacemouse", translation_gain: .5, rotation_gain: .25, control_frame: "tool"}),
     }));
   });

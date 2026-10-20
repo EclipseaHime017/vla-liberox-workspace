@@ -15,6 +15,22 @@ from backend.app.workers.simulation_worker import SimulationManager
 from vla_rynn_iql.base_models import resolve_open_loop_steps
 
 
+
+@pytest.mark.parametrize("model,payload", [
+    ("DraftRequest", dict(task_id="task", max_steps=10)),
+    ("UpdateDraftRequest", dict(max_steps=10)),
+    ("CreateBranchRequest", dict(resume_step=0, control_mode="policy", open_loop_steps=8)),
+])
+def test_simulation_requests_reject_removed_custom_instruction(model, payload):
+    from pydantic import ValidationError
+    from backend.app.api import models
+
+    request = getattr(models, model)
+    assert "policy_instruction" not in request.model_fields
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        request(**payload, policy_instruction="different task")
+
+
 def test_configured_task_catalog_validates_and_loads_selected_state(
     tmp_path: Path, monkeypatch
 ):

@@ -1,4 +1,4 @@
-"""Opt-in real MuJoCo validation of saved, multi-instruction continuation chains."""
+"""Opt-in real MuJoCo validation of saved continuation chains."""
 import os
 from pathlib import Path
 
@@ -14,7 +14,7 @@ from trajectory_utils import TrajectoryRecorder, load_trajectory, save_trajector
 
 
 @pytest.mark.skipif(os.environ.get("RUN_MUJOCO_SMOKE") != "1", reason="opt-in MuJoCo smoke test")
-def test_custom_scene_two_human_policy_cycles_keep_state_and_instructions(tmp_path, monkeypatch):
+def test_registered_scene_two_human_policy_cycles_keep_state_and_provenance(tmp_path, monkeypatch):
     import eval_pickplace_direct as direct
     root = Path(__file__).resolve().parents[2]
     monkeypatch.syspath_prepend(str(root / "third_party/LIBERO-X"))
@@ -27,8 +27,7 @@ def test_custom_scene_two_human_policy_cycles_keep_state_and_instructions(tmp_pa
     task_id = "custom::bowl"
     family = dict(schema_version=1, family_id="custom", label="Custom bowl", variants={"scene": dict(
         task_id=task_id, level="LEVEL1", task_name="custom_bowl", goal_prompt=goal,
-        bddl="custom.bddl", init="custom.init", instructions=[dict(id="grasp", text="grasp bowl"),
-                                                               dict(id="place", text="place bowl")])})
+        bddl="custom.bddl", init="custom.init")})
     (tmp_path / "family.yaml").write_text(yaml.safe_dump(family))
     (tmp_path / "registry.yaml").write_text(yaml.safe_dump(dict(schema_version=1,
         default_task_id=task_id, families={"custom": "family.yaml"})))
@@ -37,10 +36,9 @@ def test_custom_scene_two_human_policy_cycles_keep_state_and_instructions(tmp_pa
     (tmp_path / "custom.bddl").write_text("source changed after snapshot")
     scene, _ = frozen.paths(task_id)
     saved, metadata = None, None
-    expected_instructions = []
+    expected_origins = []
     for index, source in enumerate(("policy", "human", "policy_requery", "human", "policy_requery")):
         run_id = f"part-{index}"
-        instruction = "grasp bowl" if index < 2 else "place bowl"
         start = 0 if saved is None else len(saved["env_action"])
         env = direct.make_env(runtime, scene, 32, start + 5, 20, 0, "vla_views", 64, 32, True)
         try:
@@ -65,11 +63,11 @@ def test_custom_scene_two_human_policy_cycles_keep_state_and_instructions(tmp_pa
                 target_action_count=start + 3, action_source=source, open_loop_steps=2,
                 rate_limiter=direct.RealTimeControlLimiter(20., False), **arguments)
             segments.append(dict(start=start, end=recorder.action_count,
-                                 origin_run_id=run_id, policy_instruction=instruction))
+                                 origin_run_id=run_id))
             metadata = dict(session_id=run_id, root_session_id="part-0",
                 parent_session_id=None if index == 0 else f"part-{index-1}",
                 source_resume_step=start if index else None, task=goal,
-                policy_instruction=instruction, trajectory_segments=segments,
+                trajectory_segments=segments,
                 handoff_steps=list(range(3, recorder.action_count, 3)))
             # Reconstruct both observation streams using the frozen scene.
             direct.postprocess_recorded_trajectory(runtime, env, recorder, combined_path=None,
@@ -79,10 +77,10 @@ def test_custom_scene_two_human_policy_cycles_keep_state_and_instructions(tmp_pa
             directory.mkdir()
             paths = save_trajectory_bundle(recorder, directory / "trajectory", metadata, create_plot=False)
             saved, metadata = load_trajectory(Path(paths["trajectory"]))
-            expected_instructions.extend([instruction] * 3)
-            actual = [segment["policy_instruction"] for segment in metadata["trajectory_segments"]
+            expected_origins.extend([run_id] * 3)
+            actual = [segment["origin_run_id"] for segment in metadata["trajectory_segments"]
                       for _ in range(segment["start"], segment["end"])]
-            assert actual == expected_instructions and metadata["task"] == goal
+            assert actual == expected_origins and metadata["task"] == goal
             assert len(saved["sim_state"]) == len(saved["env_action"]) + 1
             with np.load(paths["trajectory_observations"]) as images:
                 assert len(images["agentview_image"]) == len(images["wrist_image"]) == len(saved["sim_state"])

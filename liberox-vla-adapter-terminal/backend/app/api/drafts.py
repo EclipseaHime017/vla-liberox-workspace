@@ -18,7 +18,6 @@ async def create_draft(body: DraftRequest, request: Request):
         seed=body.seed,
         init_state_index=body.init_state_index,
         disabled_policy_cameras=body.disabled_policy_cameras,
-        **({"policy_instruction": body.policy_instruction} if body.policy_instruction is not None else {}),
     )
     except Exception as exc: raise http_error(exc) from exc
 
@@ -32,7 +31,6 @@ async def update_draft(body: UpdateDraftRequest, request: Request):
         seed=body.seed,
         init_state_index=body.init_state_index,
         disabled_policy_cameras=body.disabled_policy_cameras,
-        **({"policy_instruction": body.policy_instruction} if body.policy_instruction is not None else {}),
     )
     except Exception as exc: raise http_error(exc) from exc
 

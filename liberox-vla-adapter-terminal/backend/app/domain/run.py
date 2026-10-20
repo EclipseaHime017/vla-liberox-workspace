@@ -45,7 +45,6 @@ class SimulationSession:
     task_level: str | None = None
     task_name: str | None = None
     task_prompt: str | None = None
-    policy_instruction: str | None = None
     task_snapshot: str | None = None
     prefix_segments: list[dict[str, Any]] = field(default_factory=list, repr=False)
     handoff_steps: list[int] = field(default_factory=list)
@@ -116,7 +115,6 @@ class SimulationSession:
         start = int(self.resume_step or 0)
         if self.action_count > start:
             segments.append(dict(start=start, end=self.action_count, origin_run_id=self.id,
-                                 policy_instruction=self.policy_instruction or self.task_prompt,
                                  open_loop_steps=self.open_loop_steps))
         return segments
 
@@ -142,7 +140,6 @@ class SimulationSession:
             "level": self.task_level,
             "task_name": self.task_name,
             "task": self.task_prompt,
-            "policy_instruction": self.policy_instruction or self.task_prompt,
             "task_snapshot": self.task_snapshot,
             "parent_session_id": self.parent_session_id,
             "root_session_id": self.root_session_id,
@@ -220,7 +217,6 @@ class SimulationDraft:
     init_state_index: int = 0
     disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
-    policy_instruction: str | None = None
     policy_label: str | None = None
     policy_content_sha256: str | None = None
     preview_status: str = "PREPARING"
@@ -238,7 +234,6 @@ class SimulationDraft:
             "init_state_index": self.init_state_index,
             "disabled_policy_cameras": list(self.disabled_policy_cameras),
             "policy_id": self.policy_id,
-            "policy_instruction": self.policy_instruction or task["prompt"],
             "policy_label": self.policy_label,
             "preview_status": self.preview_status,
             "preview_revision": self.preview_revision,

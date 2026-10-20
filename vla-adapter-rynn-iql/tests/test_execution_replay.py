@@ -93,20 +93,20 @@ def test_layout_and_prepare_cache_do_not_depend_on_target_supervision(configured
     assert ActionDataset(config, _stats(7), _stats(8))[0]["actor_actions"].shape == (50, 7)
 
 
-def test_actor_stops_at_instruction_origin_boundary_not_at_query(configured, tmp_path):
+def test_actor_stops_at_producer_boundary_not_at_query(configured, tmp_path):
     config, path, trajectory = recording(configured, tmp_path, steps=5, queries=[0, 5, 10, 15])
     with np.load(trajectory) as source:
         arrays = dict(source)
     arrays["metadata_json"] = np.asarray(json.dumps({"trajectory_segments": [
-        dict(start=0, end=7, origin_run_id="first", policy_instruction="pick", open_loop_steps=5),
-        dict(start=7, end=17, origin_run_id="second", policy_instruction="place", open_loop_steps=5),
+        dict(start=0, end=7, origin_run_id="first", open_loop_steps=5),
+        dict(start=7, end=17, origin_run_id="second", open_loop_steps=5),
     ]}))
     np.savez(trajectory, **arrays)
     prepared(config)
     dataset = ActionDataset(config, _stats(7), _stats(8))
     assert dataset[0]["actor_action_mask"].sum() == 7
     assert dataset[1]["actor_action_mask"].sum() == 2
-    assert dataset[2]["prompt"] == "place"
+    assert dataset[2]["prompt"] == "do the task"
     assert dataset[2]["actor_action_mask"].sum() == 10
 
 

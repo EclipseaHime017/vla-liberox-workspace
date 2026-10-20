@@ -52,7 +52,6 @@ async def branch(run_id: str, body: CreateBranchRequest, request: Request):
             **({"controller_id": body.controller_id} if body.controller_id is not None else {}),
             **({"control_frame": body.control_frame} if body.control_frame is not None else {}),
             **({"max_steps": body.max_steps} if body.max_steps is not None else {}),
-            **({"policy_instruction": body.policy_instruction} if body.policy_instruction is not None else {}),
         )
     except Exception as exc: raise http_error(exc) from exc
 

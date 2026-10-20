@@ -9,7 +9,7 @@
 ```text
 vla-liberox-workspace/
 ├── configs/                         # 平台、仿真和控制器配置
-│   └── tasks/                       # 任务家族、场景和执行指令注册
+│   └── tasks/                       # 任务家族和场景注册
 ├── tasks/                           # 自备 BDDL 和初始状态
 ├── liberox-vla-adapter-terminal/
 │   ├── frontend/                    # 网页界面
@@ -215,9 +215,9 @@ python liberox-vla-adapter-terminal/scripts/run_ui.py
 
 已有记录可以播放录像、拖动到指定位置，再选择重新推理或人工接管。人工接管前选择 SpaceMouse 或 FACTR，完成校准后启动；SpaceMouse 可以切换世界坐标／工具坐标，并通过滑杆调整灵敏度。接管结果会保存为新记录，原记录不变。
 
-完成的分支可点击「设为主线」后继续操作。续跑配置支持修改执行指令和总步数，也可以从最后一帧继续；总步数包含已经保存的前缀。执行指令只用于策略输入，完整任务的成功和奖励目标保持固定。
+完成的分支可点击「设为主线」后继续操作。续跑可调整总步数，也可以从最后一帧继续；总步数包含已经保存的前缀。策略统一使用所选任务的完整提示词。
 
-通过 `configs/tasks/registry.yaml` 注册自定义场景和指令，配置方法见 [任务配置](docs/Task.md)。
+通过 `configs/tasks/registry.yaml` 注册任务场景，配置方法见 [任务配置](docs/Task.md)。
 
 当前提供放碗、开抽屉、叠碗及两个长程组合任务。前三类提供 LEVEL1–4 的可用场景，两个长程任务使用 LEVEL1。
 

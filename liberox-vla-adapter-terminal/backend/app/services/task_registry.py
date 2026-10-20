@@ -43,38 +43,28 @@ def _sha(path):
 
 @dataclass(frozen=True)
 class RegistryTaskEntry(TaskEntry):
-    instructions: tuple = ()
     bddl_sha256: str = ""
     init_sha256: str = ""
     task_revision_sha256: str = ""
 
     def metadata(self, init_state_count):
         return {**super().metadata(init_state_count), "goal_prompt": self.prompt,
-                "instructions": [dict(item) for item in self.instructions],
                 "bddl_sha256": self.bddl_sha256, "init_sha256": self.init_sha256,
                 "task_revision_sha256": self.task_revision_sha256}
 
 
-def _identity(entry):
-    return dict(task_id=entry.task_id, level=entry.level, task_name=entry.task_name,
+def _identity(entry, legacy_instructions=None):
+    identity = dict(task_id=entry.task_id, level=entry.level, task_name=entry.task_name,
                 goal_prompt=entry.prompt, prompt_variant=entry.prompt_variant,
                 family_id=entry.family_id, family_label=entry.family_label,
-                instructions=list(entry.instructions), bddl_sha256=entry.bddl_sha256,
-                init_sha256=entry.init_sha256)
+                bddl_sha256=entry.bddl_sha256, init_sha256=entry.init_sha256)
+    if legacy_instructions is not None:
+        identity["instructions"] = legacy_instructions
+    return identity
 
 
 def _definition(meta):
     goal = _string(meta.get("goal_prompt", meta.get("prompt")), "goal_prompt")
-    instructions = meta.get("instructions", [{"id": "full", "text": goal}])
-    if not isinstance(instructions, list) or not instructions:
-        raise ValueError("instructions must be a non-empty list")
-    for instruction in instructions:
-        if not isinstance(instruction, dict) or set(instruction) != {"id", "text"}:
-            raise ValueError("instructions require id and text")
-        _string(instruction["id"], "instruction.id")
-        _string(instruction["text"], "instruction.text")
-    if len({item["id"] for item in instructions}) != len(instructions):
-        raise ValueError("Duplicate instruction id")
     if meta.get("level") not in {f"LEVEL{i}" for i in range(1, 6)}:
         raise ValueError("Task level must be LEVEL1..LEVEL5")
     name = _string(meta.get("task_name"), "task_name")
@@ -83,16 +73,18 @@ def _definition(meta):
     _string(meta.get("task_id"), "task_id")
     _string(meta.get("family_id"), "family_id")
     _string(meta.get("family_label"), "family_label")
-    return goal, instructions, name
+    return goal, name
 
 
-def _entry(meta, bddl, init):
-    goal, instructions, name = _definition(meta)
+def _entry(meta, bddl, init, *, schema_version=2):
+    goal, name = _definition(meta)
     entry = RegistryTaskEntry(_string(meta.get("task_id"), "task_id"), meta["level"], name,
         goal, bddl, init, meta.get("prompt_variant"),
         _string(meta.get("family_id"), "family_id"), _string(meta.get("family_label"), "family_label"),
-        tuple(dict(item) for item in instructions), _sha(bddl), _sha(init))
-    digest = hashlib.sha256(json.dumps(_identity(entry), sort_keys=True,
+        _sha(bddl), _sha(init))
+    # Version-one snapshots retain their original identity for hash verification only.
+    identity = _identity(entry, meta["instructions"] if schema_version == 1 else None)
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
         separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
     return replace(entry, task_revision_sha256=digest)
 
@@ -124,7 +116,7 @@ class RegistryTaskCatalog(ConfiguredTaskCatalog):
             for value in family["variants"].values():
                 required = {"task_id", "level", "task_name", "goal_prompt", "bddl", "init"}
                 if (not isinstance(value, dict) or not required <= value.keys()
-                        or value.keys() - required - {"optional", "prompt_variant", "instructions"}):
+                        or value.keys() - required - {"optional", "prompt_variant"}):
                     raise ValueError(f"Invalid task variant: {family_path}")
                 task_id = _string(value["task_id"], "task_id")
                 if task_id in self._task_ids:
@@ -166,7 +158,7 @@ class TaskSnapshot(ConfiguredTaskCatalog):
         if path.is_symlink():
             raise ValueError("Task snapshot manifest must not be a symlink")
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        if manifest.get("schema_version") != 1:
+        if manifest.get("schema_version") not in (1, 2):
             raise ValueError("Invalid task snapshot version")
         paths = []
         for key in ("bddl", "init"):
@@ -177,7 +169,7 @@ class TaskSnapshot(ConfiguredTaskCatalog):
             if resource.is_symlink():
                 raise ValueError("Task snapshot resource must not be a symlink")
             paths.append(resource.resolve())
-        entry = _entry(manifest["task"], *paths)
+        entry = _entry(manifest["task"], *paths, schema_version=manifest["schema_version"])
         if entry.task_revision_sha256 != manifest["task_revision_sha256"]:
             raise ValueError("Task snapshot hash mismatch")
         result = cls.__new__(cls)
@@ -190,9 +182,10 @@ class TaskSnapshot(ConfiguredTaskCatalog):
 
 
 def freeze_task(catalog, task_id, directory):
-    meta = catalog.metadata(task_id)
+    schema_version = catalog.manifest["schema_version"] if isinstance(catalog, TaskSnapshot) else 2
+    meta = catalog.manifest["task"] if isinstance(catalog, TaskSnapshot) else catalog.metadata(task_id)
     bddl, init = catalog.paths(task_id)
-    current = _entry(meta, bddl, init)
+    current = _entry(meta, bddl, init, schema_version=schema_version)
     expected = getattr(catalog.entry(task_id), "task_revision_sha256", "")
     if expected and expected != current.task_revision_sha256:
         raise ValueError("Task resources changed; reload the task registry")
@@ -207,11 +200,13 @@ def freeze_task(catalog, task_id, directory):
     try:
         shutil.copyfile(bddl, temporary / "task.bddl")
         shutil.copyfile(init, temporary / "initial_states.init")
-        frozen = _entry(meta, temporary / "task.bddl", temporary / "initial_states.init")
+        frozen = _entry(meta, temporary / "task.bddl", temporary / "initial_states.init",
+                        schema_version=schema_version)
         if frozen.task_revision_sha256 != current.task_revision_sha256:
             raise ValueError("Task resources changed while freezing")
-        manifest = dict(schema_version=1, task_revision_sha256=frozen.task_revision_sha256,
-            task=_identity(frozen), files={"bddl": "task.bddl", "init": "initial_states.init"})
+        manifest = dict(schema_version=schema_version, task_revision_sha256=frozen.task_revision_sha256,
+            task=_identity(frozen, meta["instructions"] if schema_version == 1 else None),
+            files={"bddl": "task.bddl", "init": "initial_states.init"})
         (temporary / "task.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
         staged = TaskSnapshot.load(catalog.runtime, temporary / "task.json")
         staged.initial_state_count(task_id)

@@ -10,9 +10,6 @@ variants:
     bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL1/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.bddl
     init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL1/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.init
     optional: false
-    instructions:
-    - id: full
-      text: open the top drawer of the wooden cabinet
   level2_2:
     task_id: LEVEL2::EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet
     level: LEVEL2
@@ -21,9 +18,6 @@ variants:
     bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL2/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.bddl
     init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL2/EXTENSION_KITCHEN_SCENE1_open_the_top_drawer_of_the_wooden_cabinet.init
     optional: true
-    instructions:
-    - id: full
-      text: open the top drawer of the wooden cabinet
   level3_3:
     task_id: LEVEL3::EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet
     level: LEVEL3
@@ -32,9 +26,6 @@ variants:
     bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL3/EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet.bddl
     init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL3/EXTENSION_KITCHEN_SCENE1_LEVEL3__T7_open_the_top_drawer_of_the_wooden_cabinet.init
     optional: true
-    instructions:
-    - id: full
-      text: open the top drawer of the wooden cabinet
   level4_4:
     task_id: LEVEL4::EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet
     level: LEVEL4
@@ -43,6 +34,3 @@ variants:
     bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL4/EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet.bddl
     init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL4/EXTENSION_KITCHEN_SCENE1_LEVEL4__T7_open_the_top_drawer_of_the_wooden_cabinet.init
     optional: true
-    instructions:
-    - id: full
-      text: open the top drawer of the wooden cabinet

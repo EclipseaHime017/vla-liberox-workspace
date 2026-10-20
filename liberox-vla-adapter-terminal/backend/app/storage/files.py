@@ -126,7 +126,6 @@ def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
                 "id": session_id,
                 "kind": "branch" if is_branch else "original",
                 "task_id": metadata.get("task_id"),
-                "policy_instruction": metadata.get("policy_instruction") or metadata.get("task"),
                 "task_snapshot": metadata.get("task_snapshot"),
                 "parent_session_id": parent_id,
                 "root_session_id": metadata.get("root_session_id"),

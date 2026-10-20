@@ -51,8 +51,8 @@ from ..recording.episode_recorder import EpisodeRecorderFactory
 from ..services.controller_service import SpaceMouseControllerService
 from ..services.task_catalog import ConfiguredTaskCatalog
 from ..services.task_registry import RegistryTaskCatalog, TaskSnapshot, freeze_task
-from ..services.run_continuation import (continuation_public, promote_run, instruction_at,
-                                         prefix_segments)
+from ..services.run_continuation import continuation_public, promote_run, prefix_segments
+from vla_rynn_iql.execution import validate_task_prompt
 from ..simulators.libero_x import LiberoXSimulator
 from ..storage.files import (
     atomic_write_bytes,
@@ -607,7 +607,6 @@ class SimulationManager:
         manual_rotation_gain: float | None = None,
         controller_id: str | None = None,
         control_frame: str | None = None,
-        policy_instruction: str | None = None,
     ) -> SimulationSession:
         eval_config = getattr(self, "eval_config", None)
         default_seed = int(getattr(eval_config, "seed", 0))
@@ -634,9 +633,6 @@ class SimulationManager:
         task_catalog = self.catalog if parent is None else self._task_catalog_for(parent)
         task_catalog.initial_state(task_id, init_state_index)
         task = task_catalog.metadata(task_id)
-        policy_instruction = task["prompt"] if policy_instruction is None else policy_instruction.strip()
-        if not policy_instruction:
-            raise ValueError("policy_instruction must not be empty")
         if parent is not None and control_mode == "manual":
             policy = SimpleNamespace(
                 policy_id=policy_id, label=parent.get("policy_label"),
@@ -692,7 +688,6 @@ class SimulationManager:
             task_level=task["level"],
             task_name=task["task_name"],
             task_prompt=task["prompt"],
-            policy_instruction=policy_instruction,
             task_snapshot=task_snapshot,
             parent_session_id=None if parent is None else parent["id"],
             root_session_id=session_id if parent is None else (parent.get("root_session_id") or parent["id"]),
@@ -884,7 +879,6 @@ class SimulationManager:
         seed: int | None = None,
         init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
-        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         record = self._new_record(
             kind="original",
@@ -896,7 +890,6 @@ class SimulationManager:
             seed=seed,
             init_state_index=init_state_index,
             disabled_policy_cameras=disabled_policy_cameras,
-            policy_instruction=policy_instruction,
         )
         if initial_jpeg is not None:
             record.latest_jpeg = initial_jpeg
@@ -947,7 +940,6 @@ class SimulationManager:
         seed: int | None = None,
         init_state_index: int = 0,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
-        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         gpu_guard = getattr(self, "gpu_guard", None)
         if gpu_guard is not None and getattr(self, "work_queue", None) is None:
@@ -976,7 +968,6 @@ class SimulationManager:
                 init_state_index=init_state_index,
                 disabled_policy_cameras=disabled_policy_cameras,
                 policy_id=policy.policy_id,
-                policy_instruction=policy_instruction,
                 policy_label=policy.label,
                 policy_content_sha256=getattr(policy, "content_sha256", None),
             )
@@ -995,7 +986,6 @@ class SimulationManager:
         seed: int | None = None,
         init_state_index: int | None = None,
         disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
-        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             if self.active_session_id is not None:
@@ -1004,10 +994,6 @@ class SimulationManager:
                 raise KeyError("draft")
             draft = self.draft
             next_task_id = task_id if task_id is not None else draft.task_id
-            if policy_instruction is not None and not policy_instruction.strip():
-                raise ValueError("policy_instruction must not be empty")
-            next_instruction = (policy_instruction.strip() if policy_instruction is not None else
-                                None if next_task_id != draft.task_id else draft.policy_instruction)
             next_max_steps = max_steps if max_steps is not None else draft.max_steps
             next_open_loop = (
                 open_loop_steps if open_loop_steps is not None else draft.open_loop_steps
@@ -1040,7 +1026,6 @@ class SimulationManager:
                 or next_init_state_index != draft.init_state_index
             )
             draft.task_id = next_task_id
-            draft.policy_instruction = next_instruction
             draft.max_steps = next_max_steps
             draft.open_loop_steps = next_open_loop
             draft.seed = next_seed
@@ -1099,7 +1084,6 @@ class SimulationManager:
                 seed=draft.seed,
                 init_state_index=draft.init_state_index,
                 disabled_policy_cameras=draft.disabled_policy_cameras,
-                **({"policy_instruction": draft.policy_instruction} if draft.policy_instruction is not None else {}),
             )
         except Exception:
             with self.lock:
@@ -1118,7 +1102,6 @@ class SimulationManager:
         controller_id: str | None = None,
         control_frame: str | None = None,
         max_steps: int | None = None,
-        policy_instruction: str | None = None,
     ) -> dict[str, Any]:
         if control_frame is not None:
             validate_control_frame(control_frame)
@@ -1131,6 +1114,8 @@ class SimulationManager:
             raise ValueError("The source session must finish before branching")
         if parent.get("trajectory"):
             _, source_metadata = load_trajectory(Path(parent["trajectory"]))
+            validate_task_prompt(parent, parent.get("task"), context=f"Run {parent_id}")
+            validate_task_prompt(source_metadata, parent.get("task"), context=f"Trajectory {parent_id}")
             parent = dict(parent)
             fallback_seed = parent.get("seed")
             if fallback_seed is None:
@@ -1201,8 +1186,6 @@ class SimulationManager:
             manual_rotation_gain=rotation_gain,
             controller_id=controller_id,
             control_frame=control_frame,
-            policy_instruction=(instruction_at(source_metadata, action_count, resume_step)
-                                if policy_instruction is None and parent.get("trajectory") else policy_instruction),
         )
         try:
             if getattr(self, "work_queue", None) is not None:
@@ -1357,7 +1340,6 @@ class SimulationManager:
                     "level": record.task_level,
                     "task_name": record.task_name,
                     "prompt": record.task_prompt,
-                    "policy_instruction": record.policy_instruction or record.task_prompt,
                     "snapshot": record.task_snapshot,
                     "init_state_index": record.init_state_index,
                 },
@@ -1410,7 +1392,6 @@ class SimulationManager:
                 "level": record.task_level,
                 "task_name": record.task_name,
                 "task": record.task_prompt,
-                "policy_instruction": record.policy_instruction or record.task_prompt,
                 "task_snapshot": record.task_snapshot,
                 "trajectory_segments": record.trajectory_segments,
                 "handoff_steps": record.handoff_steps,
@@ -1534,7 +1515,6 @@ class SimulationManager:
             ),
             "manual_control_frame": control_frame,
             "manual_requested_control_frame": manifest.get("manual_requested_control_frame") or control_frame,
-            "policy_instruction": manifest.get("policy_instruction") or manifest.get("task"),
             "training_chunk_count": manifest.get("training_chunk_count"),
             "training_chunk_count_rule": manifest.get("training_chunk_count_rule"),
             "task_snapshot": manifest.get("task_snapshot"),
@@ -1944,7 +1924,7 @@ class SimulationManager:
                 current_observation = self.simulator.observations(env, current_observation)
                 return current_observation, self.provider.predict(
                     current_observation,
-                    record.policy_instruction or record.task_prompt or task.prompt,
+                    record.task_prompt or task.prompt,
                     record.disabled_policy_cameras,
                 )
 
@@ -2215,7 +2195,6 @@ class SimulationManager:
             "task_name": record.task_name,
             "level": record.task_level,
             "bddl": str(bddl),
-            "policy_instruction": record.policy_instruction or record.task_prompt,
             "task_snapshot": record.task_snapshot,
             "trajectory_segments": record.trajectory_segments,
             "training_chunk_count": record.training_chunk_count,
@@ -2349,7 +2328,6 @@ class SimulationManager:
         has_action = action_count > 0 and step < action_count
         return {
             "step": step,
-            "actual_instruction": instruction_at(metadata, action_count, step),
             "time_seconds": float(trajectory["time_seconds"][step]),
             "eef_position_m": trajectory["eef_position"][step].tolist(),
             "eef_axis_angle_rad": trajectory["eef_axis_angle"][step].tolist(),

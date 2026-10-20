@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,8 +15,7 @@ def custom_catalog(tmp_path, monkeypatch):
     (tmp_path / "scene.bddl").write_text("(:language complete both steps)")
     (tmp_path / "states.init").write_bytes(b"states")
     variant = dict(task_id="custom::two_steps", level="LEVEL1", task_name="two_steps",
-                   goal_prompt="complete both steps", bddl="scene.bddl", init="states.init",
-                   instructions=[dict(id="first", text="open drawer"), dict(id="second", text="place bowl")])
+                   goal_prompt="complete both steps", bddl="scene.bddl", init="states.init")
     family = dict(schema_version=1, family_id="custom", label="Custom task", variants={"scene": variant})
     (tmp_path / "family.yaml").write_text(yaml.safe_dump(family))
     (tmp_path / "registry.yaml").write_text(yaml.safe_dump(dict(schema_version=1,
@@ -28,11 +29,11 @@ def custom_catalog(tmp_path, monkeypatch):
     return RegistryTaskCatalog(runtime, tmp_path / "registry.yaml"), reads
 
 
-def test_custom_task_instructions_and_scene_snapshot_are_independent_of_registry_edits(tmp_path, monkeypatch):
+def test_task_snapshot_is_independent_of_registry_edits(tmp_path, monkeypatch):
     catalog, reads = custom_catalog(tmp_path, monkeypatch)
     task = catalog.metadata(catalog.default_task_id)
     assert task["prompt"] == "complete both steps"
-    assert [item["text"] for item in task["instructions"]] == ["open drawer", "place bowl"]
+    assert "instructions" not in task
     catalog.list_tasks()
     catalog.list_tasks()
     assert len(reads) == 1
@@ -51,11 +52,23 @@ def test_custom_task_instructions_and_scene_snapshot_are_independent_of_registry
         TaskSnapshot.load(catalog.runtime, frozen.manifest_path)
 
 
-def test_invalid_instruction_ids_are_rejected(tmp_path, monkeypatch):
+def test_legacy_snapshot_identity_is_preserved_without_exposing_instruction_presets(tmp_path, monkeypatch):
     catalog, _ = custom_catalog(tmp_path, monkeypatch)
-    path = tmp_path / "family.yaml"
-    raw = yaml.safe_load(path.read_text())
-    raw["variants"]["scene"]["instructions"][1]["id"] = "first"
-    path.write_text(yaml.safe_dump(raw))
-    with pytest.raises(ValueError, match="Duplicate instruction"):
-        RegistryTaskCatalog(catalog.runtime, tmp_path / "registry.yaml")
+    frozen = freeze_task(catalog, catalog.default_task_id, tmp_path / "old/task_snapshot")
+    manifest = json.loads(frozen.manifest_path.read_text())
+    assert manifest["schema_version"] == 2 and "instructions" not in manifest["task"]
+    manifest["schema_version"] = 1
+    manifest["task"]["instructions"] = [dict(id="full", text="complete both steps")]
+    revision = hashlib.sha256(json.dumps(manifest["task"], sort_keys=True,
+        separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    manifest["task_revision_sha256"] = revision
+    frozen.manifest_path.write_text(json.dumps(manifest))
+    before = frozen.manifest_path.read_bytes()
+    legacy_snapshot = TaskSnapshot.load(catalog.runtime, frozen.manifest_path)
+    assert legacy_snapshot.metadata(catalog.default_task_id)["task_revision_sha256"] == revision
+    assert "instructions" not in legacy_snapshot.metadata(catalog.default_task_id)
+    continued = freeze_task(legacy_snapshot, catalog.default_task_id, tmp_path / "continued/task_snapshot")
+    assert continued.manifest == manifest
+    assert frozen.manifest_path.read_bytes() == before
+    for original, copy in zip(frozen.paths(catalog.default_task_id), continued.paths(catalog.default_task_id)):
+        assert original.read_bytes() == copy.read_bytes()

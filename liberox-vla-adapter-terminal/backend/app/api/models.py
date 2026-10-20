@@ -44,7 +44,6 @@ class StageAnnotationRequest(StrictModel):
 class DraftRequest(StrictModel):
     task_id: str = Field(min_length=1)
     policy_id: str = Field(default="base", min_length=1)
-    policy_instruction: StrictStr | None = Field(default=None, min_length=1, max_length=10000)
     max_steps: int = Field(ge=1, le=10000)
     open_loop_steps: StrictInt | None = Field(default=None, ge=1)
     seed: int | None = Field(default=None, ge=0, le=2147483647)
@@ -60,7 +59,6 @@ class DraftRequest(StrictModel):
 class UpdateDraftRequest(StrictModel):
     task_id: str | None = Field(default=None, min_length=1)
     policy_id: str | None = Field(default=None, min_length=1)
-    policy_instruction: StrictStr | None = Field(default=None, min_length=1, max_length=10000)
     max_steps: int | None = Field(default=None, ge=1, le=10000)
     open_loop_steps: StrictInt | None = Field(default=None, ge=1)
     seed: int | None = Field(default=None, ge=0, le=2147483647)
@@ -72,7 +70,6 @@ class UpdateDraftRequest(StrictModel):
         if (
             self.task_id is None
             and self.policy_id is None
-            and self.policy_instruction is None
             and self.max_steps is None
             and self.open_loop_steps is None
             and self.seed is None
@@ -89,7 +86,6 @@ class CreateBranchRequest(StrictModel):
     control_mode: Literal["policy", "manual"]
     open_loop_steps: StrictInt = Field(ge=1)
     max_steps: StrictInt | None = Field(default=None, ge=1, le=10000)
-    policy_instruction: StrictStr | None = Field(default=None, min_length=1, max_length=10000)
     translation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
     rotation_gain: float | None = Field(default=None, ge=0.05, le=1.0)
     controller_id: Literal["spacemouse", "factr"] | None = None

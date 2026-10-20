@@ -16,7 +16,7 @@ import numpy as np
 
 from .config import LoadedConfig
 from .io import atomic_json, sha256_file, stable_hash
-from .execution import CHUNKING_RULE, execution_steps, query_steps
+from .execution import CHUNKING_RULE, execution_steps, query_steps, validate_task_prompt
 
 
 LOG = logging.getLogger(__name__)
@@ -407,7 +407,9 @@ def _execution_segments(run: dict, metadata: dict, count: int, steps: int,
     segments = metadata.get("trajectory_segments", run.get("trajectory_segments"))
     resume = int(metadata.get("source_resume_step") or metadata.get("resume_step") or run.get("resume_step") or 0)
     run_id = str(metadata.get("session_id") or metadata.get("id") or run.get("id") or "")
-    prompt = metadata.get("policy_instruction") or metadata.get("task") or run.get("task")
+    prompt = run.get("task") or metadata.get("task")
+    validate_task_prompt(run, prompt, context=f"Run {run_id}")
+    validate_task_prompt(metadata, prompt, context=f"Trajectory {run_id}")
     parent_path = metadata.get("source_trajectory") or run.get("source_trajectory")
     if resume and trajectory_path is not None:
         local_parent = trajectory_path.with_name("source_trajectory.npz")
@@ -421,10 +423,9 @@ def _execution_segments(run: dict, metadata: dict, count: int, steps: int,
     if segments is None and resume and parent_path and storage_path(parent_path).is_file():
         segments = [dict(start=0, end=resume,
                          origin_run_id=str(run.get("parent_session_id") or metadata.get("parent_session_id")
-                                           or metadata.get("root_session_id") or run.get("root_session_id") or run_id),
-                         policy_instruction=prompt),
+                                           or metadata.get("root_session_id") or run.get("root_session_id") or run_id)),
                     dict(start=resume, end=count, origin_run_id=run_id,
-                         policy_instruction=prompt, open_loop_steps=steps)]
+                         open_loop_steps=steps)]
     if segments is None:
         return None
     if not isinstance(segments, list):
@@ -671,6 +672,7 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int | None = None) -> N
     resume_step = int(episode["resume_step"] or 0) if episode["kind"] == "branch" else 0
     success_end = (int(episode["terminal_step"]) + 1 if episode["terminal_step"] is not None
                    else int(episode["recorded_action_count"]))
+    validate_task_prompt(episode, episode.get("prompt"), context=f"Run {episode['run_id']}")
     segments = episode.get("trajectory_segments")
     raw_handoffs = episode.get("handoff_steps", [])
     if not isinstance(raw_handoffs, list) or any(type(step) is not int or not 0 <= step <= int(episode["recorded_action_count"]) for step in raw_handoffs):
@@ -686,12 +688,11 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int | None = None) -> N
         for segment in segments:
             if (not isinstance(segment, dict) or type(segment.get("start")) is not int or type(segment.get("end")) is not int
                     or segment["start"] != cursor or not cursor < segment["end"] <= int(episode["recorded_action_count"])
-                    or not isinstance(segment.get("origin_run_id"), str) or not segment["origin_run_id"]
-                    or not isinstance(segment.get("policy_instruction"), str) or not segment["policy_instruction"].strip()):
-                raise ValueError(f"Invalid instruction/origin segments: {episode['run_id']}")
+                    or not isinstance(segment.get("origin_run_id"), str) or not segment["origin_run_id"]):
+                raise ValueError(f"Invalid origin segments: {episode['run_id']}")
             cursor = segment["end"]
         if cursor != int(episode["recorded_action_count"]):
-            raise ValueError("Instruction/origin segments do not cover the recording")
+            raise ValueError("Origin segments do not cover the recording")
     boundaries = handoffs | ({int(s["start"]) for s in segments} if segments else set())
     def split_sources(sources):
         result = []
@@ -714,7 +715,7 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int | None = None) -> N
         if segments:
             segment = next(s for s in segments if s["start"] <= chunk["start"] < s["end"])
             producer_steps = int(segment.get("open_loop_steps", execution_horizon))
-            chunk.update(origin_run_id=segment["origin_run_id"], policy_instruction=segment["policy_instruction"])
+            chunk["origin_run_id"] = segment["origin_run_id"]
         if chunk["end"] in handoffs and chunk["length"] < producer_steps:
             chunk["interrupted"] = True
     if episode["kind"] == "branch":
@@ -861,6 +862,8 @@ def load_manifest(config: LoadedConfig) -> dict[str, Any]:
         raise ValueError(
             "Unsupported dataset manifest schema; rerun prepare_dataset.py before annotation"
         )
+    for episode in payload["episodes"]:
+        validate_task_prompt(episode, episode.get("prompt"), context=f"Prepared run {episode['run_id']}")
     transition_layout_summary(payload["episodes"])
     return payload
 

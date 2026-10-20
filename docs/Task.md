@@ -1,6 +1,6 @@
 # 任务配置
 
-任务由场景和完整目标确定。策略执行指令可以是其中一个子任务，也可以手动输入；切换执行指令不改变完整任务的成功条件或奖励目标。
+任务由场景和完整目标确定。策略推理、奖励评价和训练统一使用所选任务的完整提示词。
 
 ## 目录
 
@@ -42,20 +42,11 @@ variants:
     bddl: ../../tasks/my_scene/scene.bddl
     init: ../../tasks/my_scene/initial_states.init
     optional: false
-    instructions:
-      - id: full
-        text: place the bowl in the drawer and close the drawer
-      - id: open
-        text: open the drawer
-      - id: place
-        text: place the bowl in the drawer
-      - id: close
-        text: close the drawer
 ```
 
 `task_id` 是稳定且全局唯一的场景任务标识，不随显示名称或指令修改而改变。`level` 使用 LEVEL1–4；同一个家族可以配置多个难度和场景。资源路径相对所在 YAML 解析。`optional: true` 的任务缺少资源时显示不可用；默认任务必须可用。
 
-`goal_prompt` 描述完整任务，应与 BDDL 的成功条件一致。环境通过 BDDL 判断成功；RynnValue 和 Robometer 使用完整目标评价整条轨迹。`instructions` 是策略执行指令的预设，ID 在当前变体内唯一，内容可在采集和续跑时编辑。
+`goal_prompt` 描述完整任务，应与 BDDL 的成功条件一致。环境通过 BDDL 判断成功，模型推理及 RynnValue、Robometer 评价使用该完整目标。
 
 ## 使用与检查
 
@@ -66,10 +57,10 @@ conda activate vla-liberox
 python liberox-vla-adapter-terminal/scripts/run_ui.py
 ```
 
-在控制台创建仿真，通过“任务 → 难度 → 提示词”选择新场景；选择初始状态和执行指令，检查预览后开始。也可以在测试页面对新场景运行小规模测试。
+在控制台创建仿真，通过“任务 → 难度 → 提示词”选择新场景；选择初始状态，检查预览后开始。也可以在测试页面对新场景运行小规模测试。
 
 完成的分支可点击“设为主线”，然后从任意已保存帧重新推理或人工接管，包括最后一帧。续跑总步数包含前缀；已到原上限时，需要增大总步数。每次续跑保存新记录，原记录保持不变。
 
 新记录保存任务配置、BDDL 和初始状态的快照。之后修改注册文件不会改变这些历史记录的场景。提升为主线只改变操作角色，不改变人工／策略来源、旧评价或数据集引用。
 
-轨迹按段记录实际执行指令和动作出处，BC／IQL 使用各段指令训练策略，完整任务奖励继续使用 `goal_prompt`。相同血缘保持在同一训练／验证分组，复制前缀按真实动作出处去重。
+轨迹按段记录动作出处，训练和奖励均使用完整任务目标。相同血缘保持在同一训练／验证分组，复制前缀按真实动作出处去重。历史记录若使用了不同的自定义指令，会明确拒绝训练或续跑，不改写原始记录。
