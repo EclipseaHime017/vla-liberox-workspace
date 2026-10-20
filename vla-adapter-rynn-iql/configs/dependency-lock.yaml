@@ -5,8 +5,14 @@ rynnvalue:
   model: Alibaba-DAMO-Academy/RynnValue-4B
   hf_revision: 3f73b5d2b5e53b21f248c8791004dde6a8cf2b92
 vla_adapter:
+  repository: https://github.com/OpenHelix-Team/VLA-Adapter.git
+  git_commit: 23fa0c9c159e2aa04341cdd3e924f44061311060
+  patch:
+    path: ../../liberox-vla-adapter-terminal/patches/vla_adapter_hf_local_autoclass.patch
+    sha256: b6a5f8e21da1c15d2a5bea0cfd4ccca11440f3e5177622e942ac3f9ab4751500
   base_checkpoint: VLA-Adapter/LIBERO-Object-Pro
   transformers: 4.40.1
+  tensorflow: 2.15.0
 monitoring:
   tensorboard: ">=2.15,<3"
   wandb: ">=0.19,<1"

@@ -28,6 +28,21 @@
 
 未使用的上游不必安装。Git 只保留 `third_party/.gitkeep`，源码、运行环境和权重不随平台提交。新增外部仓库也放在 `third_party/<仓库名>/`，并在对应模块配置其路径，不在业务页面硬编码路径。
 
+## 环境一致性检查
+
+VLA-Adapter 固定为 commit `23fa0c9c159e2aa04341cdd3e924f44061311060` 和 TensorFlow `2.15.0`，并应用 README 中的完整加载补丁。`vla-adapter-rynn-iql/configs/dependency-lock.yaml` 同时记录源码、补丁路径及 SHA256。
+
+在 `vla-liberox` 环境安装 pytest 后，执行：
+
+```bash
+env CUDA_VISIBLE_DEVICES="" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  PYTHONPATH=vla-adapter-rynn-iql/src \
+  python -B -m pytest vla-adapter-rynn-iql/tests/test_upstream_environment.py \
+  vla-adapter-rynn-iql/tests/test_vla_actions.py -q
+```
+
+真实像素测试先校验环境，再比较训练和上游推理的 JPEG、缩放及裁剪结果，不加载模型权重。除字节码和 egg-info 等生成物外，源码不得包含未记录的修改；缺少上游源码时跳过真实像素测试。检查支持 tensorflow、tensorflow-cpu 等发行包，缺失、版本冲突或与锁定版本不符时会明确报错。main 与 server 各自在本机执行同等检查。
+
 ## 已安装设备迁移
 
 先停止平台和训练进程，再移动已有目录；目标目录已存在时先核对内容，不合并覆盖：

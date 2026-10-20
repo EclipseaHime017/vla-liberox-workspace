@@ -98,6 +98,8 @@ npm --prefix liberox-vla-adapter-terminal/frontend run build
 
 这里使用支持 RTX 50 系列的 CUDA 12.8 PyTorch 包，需要匹配的 NVIDIA 驱动。不要再安装 `third_party/LIBERO-X/requirements.txt`，它会替换当前环境的依赖。无需安装 FlashAttention。
 
+上述补丁包含本地 OpenVLA 类注册和 Hub 缓存识别；源码提交、补丁哈希及 TensorFlow 版本统一锁定，环境核验见 [依赖说明](docs/DEPENDENCIES.md#环境一致性检查)。
+
 默认模型为 `VLA-Adapter/LIBERO-Object-Pro`。第一次加载时自动下载到 `models/VLA-Adapter-LIBERO-Object-Pro/`，以后直接复用。模型配置位于 `vla-adapter-rynn-iql/configs/models/vla_adapter.yaml`。
 
 首次运行 LIBERO 若询问是否自定义数据集路径，输入 `N` 即可。

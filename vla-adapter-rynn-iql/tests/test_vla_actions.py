@@ -226,6 +226,10 @@ def test_training_images_match_the_official_inference_preprocessing():
     root = Path(__file__).resolve().parents[2] / "third_party/VLA-Adapter"
     if not (root / "experiments/robot/openvla_utils.py").is_file():
         pytest.skip("VLA-Adapter checkout is unavailable")
+    from vla_rynn_iql.upstream_environment import verify_vla_adapter_environment
+    from vla_rynn_iql.vla_adapter import restrict_tensorflow_to_cpu
+    verify_vla_adapter_environment(root)
+    restrict_tensorflow_to_cpu()
     sys.path.insert(0, str(root))
     try:
         from experiments.robot.openvla_utils import prepare_images_for_vla, resize_image_for_policy
