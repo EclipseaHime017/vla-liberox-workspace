@@ -36,7 +36,7 @@ def test_rejects_ambiguous_family_configuration(tmp_path, families):
         load_ui_config(path)
 
 
-def test_default_catalog_adds_two_level1_composite_tasks_without_changing_existing_scenes(monkeypatch):
+def test_default_catalog_covers_all_registered_families_and_levels_without_loading_simulators(monkeypatch):
     root = Path(__file__).resolve().parents[3]
     config = load_ui_config(root / "configs/ui_config.yaml")
     # Read the actual BDDL prompts without importing MuJoCo, VLA or GPU libraries.
@@ -50,18 +50,26 @@ def test_default_catalog_adds_two_level1_composite_tasks_without_changing_existi
     monkeypatch.setattr(tasks_module.direct, "load_initial_states", load_states)
     catalog = RegistryTaskCatalog(SimpleNamespace(parse_bddl_file=parse), config.task_registry)
     entries = catalog.list_tasks()
-    assert len(entries) == 15
+    registry = yaml.safe_load(config.task_registry.read_text())
+    families = {key: yaml.safe_load((config.task_registry.parent / value).read_text())
+                for key, value in registry["families"].items()}
+    assert len(entries) == sum(len(family["variants"]) for family in families.values())
     assert all(entry["available"] for entry in entries)
     assert {entry["level"] for entry in entries} == {f"LEVEL{i}" for i in range(1, 5)}
-    assert {entry["family_id"] for entry in entries} == {
-        "bowl_on_stove", "open_top_drawer", "stack_bowls",
-        "bowl_in_drawer_and_close", "stove_off_and_sort_bowls",
-    }
-    assert len({(e["family_id"], e["level"], e["prompt"]) for e in entries}) == 15
-    assert {level: sum(e["level"] == level for e in entries)
-            for level in ("LEVEL1", "LEVEL2", "LEVEL3", "LEVEL4")} == {
-                "LEVEL1": 5, "LEVEL2": 3, "LEVEL3": 3, "LEVEL4": 4,
-            }
+    assert {entry["family_id"] for entry in entries} == set(families)
+    assert len({(e["family_id"], e["level"], e["prompt"]) for e in entries}) == len(entries)
+    for family_id, family in families.items():
+        variants = [entry for entry in entries if entry["family_id"] == family_id]
+        assert {entry["level"] for entry in variants} == {f"LEVEL{i}" for i in range(1, 5)}
+        assert {entry["family_label"] for entry in variants} == {family["label"]}
+        for entry in variants:
+            bddl, init = catalog.paths(entry["task_id"])
+            assert bddl.is_file() and init.is_file()
+            assert bddl.stem == init.stem == entry["task_name"]
+            assert bddl.parent.name == init.parent.name == entry["level"]
+            assert entry["prompt"] == parse(bddl)["language"]
+            assert entry["init_state_index_max"] == 9
+            assert catalog.initial_state(entry["task_id"], 9).shape == (5,)
     bowl = [e for e in entries if e["family_id"] == "bowl_on_stove"]
     assert len(bowl) == 5 and len({e["family_label"] for e in bowl}) == 1
     assert len([e for e in bowl if e["level"] == "LEVEL4"]) == 2
@@ -77,16 +85,18 @@ def test_default_catalog_adds_two_level1_composite_tasks_without_changing_existi
         ),
     }
     for family, (name, prompt) in new_tasks.items():
-        entry, = [e for e in entries if e["family_id"] == family]
+        entry, = [e for e in entries if e["family_id"] == family and e["level"] == "LEVEL1"]
         assert entry["task_id"] == f"LEVEL1::{name}"
         assert entry["prompt"] == prompt
-        assert entry["init_state_index_max"] == 9
-        bddl, init = catalog.paths(entry["task_id"])
-        assert bddl.is_file() and init.is_file()
-        assert catalog.initial_state(entry["task_id"], 9).shape == (5,)
+    drawer_level4, = [e for e in entries if e["family_id"] == "bowl_in_drawer_and_close" and e["level"] == "LEVEL4"]
+    assert drawer_level4["prompt"] == "place the cream cheese in the bottom drawer of the white cabinet and close the drawer"
+    sorting = [e for e in entries if e["family_id"] == "stove_off_and_sort_bowls" and e["level"] in {"LEVEL3", "LEVEL4"}]
+    assert len(sorting) == 2 and sorting[0]["prompt"] == sorting[1]["prompt"]
+    assert len({e["task_revision_sha256"] for e in sorting}) == 2
+    assert len({catalog.paths(e["task_id"])[1] for e in sorting}) == 2
     # Listing and selecting scenes reuse cached metadata; no simulator is loaded.
     catalog.list_tasks()
-    assert len(reads) == len(set(reads)) == 15
+    assert len(reads) == len(set(reads)) == len(entries)
 
 
 def test_task_set_filters_before_pagination_counts_and_status_checks(tmp_path, monkeypatch):

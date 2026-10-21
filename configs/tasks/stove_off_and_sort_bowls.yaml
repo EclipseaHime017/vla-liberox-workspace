@@ -11,3 +11,30 @@ variants:
     bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL1/EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side.bddl
     init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL1/EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side.init
     optional: true
+  level2_2:
+    task_id: LEVEL2::EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side
+    level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side
+    goal_prompt: turn off the stove and place the smallest bowl in the left side of the drainer and the medium bowl
+      in the right side
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL2/EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL2/EXTENSION_KITCHEN_SCENE32_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side.init
+    optional: true
+  level3_3:
+    task_id: LEVEL3::EXTENSION_KITCHEN_SCENE32_LEVEL3__T192_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side
+    level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE32_LEVEL3__T192_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side
+    goal_prompt: turn off the stove and place the smallest bowl in the left side of the drainer and the medium bowl
+      in the right side
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL3/EXTENSION_KITCHEN_SCENE32_LEVEL3__T192_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL3/EXTENSION_KITCHEN_SCENE32_LEVEL3__T192_turn_off_stove_and_smallest_bowl_left_side_drainer_and_medium_bowl_right_side.init
+    optional: true
+  level4_4:
+    task_id: LEVEL4::EXTENSION_KITCHEN_SCENE32_LEVEL4__T192_turn_off_the_stove_and_place_the_smallest_bowl_in_the_left_side_of_the_drainer_and_the_medium_bowl_in_the_right_side
+    level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE32_LEVEL4__T192_turn_off_the_stove_and_place_the_smallest_bowl_in_the_left_side_of_the_drainer_and_the_medium_bowl_in_the_right_side
+    goal_prompt: turn off the stove and place the smallest bowl in the left side of the drainer and the medium bowl
+      in the right side
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL4/EXTENSION_KITCHEN_SCENE32_LEVEL4__T192_turn_off_the_stove_and_place_the_smallest_bowl_in_the_left_side_of_the_drainer_and_the_medium_bowl_in_the_right_side.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL4/EXTENSION_KITCHEN_SCENE32_LEVEL4__T192_turn_off_the_stove_and_place_the_smallest_bowl_in_the_left_side_of_the_drainer_and_the_medium_bowl_in_the_right_side.init
+    optional: true

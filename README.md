@@ -1,28 +1,29 @@
 # LIBERO-X Local Data Studio
 
-Current release: **v0.7.2**
+Current release: **v0.8.0**
 
-Release highlights: official π₀.₅-LIBERO inference and BC/IQL post-training,
-a unified work queue, and stricter model identity and dataset integrity checks.
+Release highlights: isolated model-variant contracts, mainline continuation,
+execution-aligned post-training, and 21 task scenes across LEVEL1–4.
+See the [categorized update summary](README_CN.md#4-v080-更新汇总).
 
 Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse / FACTR takeover,
 offline post-training, and reproducible batch policy testing for five
-Franka/LIBERO-X task families: three with LEVEL1–4 variants and two LEVEL1
-longer-horizon composite tasks.
+Franka/LIBERO-X task families, all with LEVEL1–4 variants, including two
+longer-horizon composite task families.
 
 - Backend: FastAPI application service with a background simulation worker.
 - Frontend: React + TypeScript, served by FastAPI after a Vite production build.
-- Storage: portable run directories plus a rebuildable SQLite catalog.
+- Storage: portable run directories plus a SQLite catalog that also retains user labels.
 - Compatibility: the existing evaluation, intervention, and SpaceMouse CLI scripts remain available.
 - Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
 - Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
 - FACTR Franka: GUI and CLI share official calibration and gravity compensation, with one reference capture and explicit ON/OFF. Joint following includes slow leader alignment; GUI records measured end-effector action labels, trajectories and dual-camera video through the standard manual-data pipeline. Physical acceptance is still required.
-- Three cascading selectors resolve task purpose → difficulty → exact prompt, covering 15 physical scenes; the same hierarchy filters sessions, datasets, training datasets and test history. The new LEVEL1 tasks place a yellow bowl inside an open drawer and close it, or turn off the stove and sort two bowls into the drainer. Purpose groups are explicitly configured in `ui_config.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
-- Run drafts can choose a simulation seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact. Simulation, dataset selection/split, training and test-schedule seeds have distinct roles. Changing the simulation seed does not select a new benchmark init state or inherit the training RNG.
+- Three cascading selectors resolve task purpose → difficulty → exact prompt, covering 21 scenes; the same hierarchy filters sessions, datasets, training datasets and test history. The composite families cover placing an object in a drawer and closing it, or turning off the stove and sorting two bowls into the drainer. Prompts follow official variants, including cream cheese as the LEVEL4 drawer target. Families are registered in `configs/tasks/registry.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
+- Run drafts can choose a simulation seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact, and these ablation runs are excluded from ordinary training. Simulation, dataset selection/split, training and test-schedule seeds have distinct roles. A simulation seed can change fixture placement but does not select another benchmark init state or inherit the training RNG.
 - Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) supports BC/IQL with model-specific adaptation and objectives; it preserves recorded data and publishes hash-checked overlays to `policy-registry/`.
 - π₀.₅-LIBERO: official OpenPI runs in an isolated `pi05` environment, with BF16 checkpoint conversion, action-expert or full-model tuning, and strict base/normalization identity checks. See [installation and configuration](README_CN.md#23-π₀₅). VLA-Adapter remains available; missing or changed models never silently select another policy.
 - Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#34-评价与打包数据集).
-- Model registry: a dedicated sidebar page inspects base/overlay metadata and matching training history, and safely renames, copies, or removes local IQL overlays.
+- Model registry: a dedicated sidebar page inspects base/overlay metadata and safely renames, copies, or removes local training overlays. Base policies have no local training record; a trained policy links only to the job that produced it, with its effective YAML available directly.
 - Unified work queue: inference simulations, dataset processing, annotation, training and testing share FIFO scheduling and a cross-process resource lease. Manual takeover is never queued and requires free resources. Detached jobs persist across backend restarts; interrupted in-process tasks must be registered again. Each training job pins its configuration, model and rewards; UI checkpoint resume is hidden while CLI resume remains available.
 - Branch separation: `main` owns PC collection, GUI, single-GPU training and portable dataset/evaluation exports. The `server` branch alone owns the full-screen terminal, multi-GPU DDP + ZeRO-1 training, mmap cache and distributed checkpoints. Shared data contracts and training algorithms flow from `main` to `server`; server-specific execution does not merge back into `main`. See [transfer and branch instructions](docs/RUN_COMMANDS.md).
 - Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage](README_CN.md#34-评价与打包数据集).
@@ -209,11 +210,13 @@ rollout media or trajectories. “Random environments” are the finite
 `init_state_index` values belonging to that exact BDDL task, not other scenes;
 environment seeds form the second randomization axis. The backend freezes a
 reproducible, balanced schedule before launch, then runs every normal episode to
-`max_steps`. A success is latched only after five consecutive `done=true`
-control steps, while the remainder of the episode still executes.
+`max_steps`. A success is latched after the system-configured number of consecutive
+`done=true` control steps (five by default), while the remainder of the episode
+still executes. Results include per-init-state success rates; the Wilson interval
+assumes independent episodes and can be narrow when only a few states are tested.
 
-The default mode is wall-clock-limited to 20 Hz; accelerated mode removes only
-that wall-clock wait and keeps the MuJoCo control-frequency semantics unchanged.
+The default mode removes real-time wall-clock waits while keeping the MuJoCo
+control-frequency semantics unchanged; real-time pacing remains optional.
 Each test stores one lightweight `evaluation.json` under the project
 `evaluations/` tree. Detached-job diagnostics (`job.json`, `job.log`, and the
 validated effective YAML) remain in `jobs/`; no video, observation, action,

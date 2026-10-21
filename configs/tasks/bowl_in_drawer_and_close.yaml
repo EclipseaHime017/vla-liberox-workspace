@@ -1,6 +1,6 @@
 schema_version: 1
 family_id: bowl_in_drawer_and_close
-label: place the bowl in the drawer and close it
+label: place the object in the drawer and close it
 variants:
   level1_1:
     task_id: LEVEL1::EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
@@ -9,4 +9,28 @@ variants:
     goal_prompt: place the yellow bowl in the bottom drawer of the white cabinet and close the drawer
     bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL1/EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.bddl
     init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL1/EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.init
+    optional: true
+  level2_2:
+    task_id: LEVEL2::EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    level: LEVEL2
+    task_name: EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    goal_prompt: place the yellow bowl in the bottom drawer of the white cabinet and close the drawer
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL2/EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL2/EXTENSION_KITCHEN_SCENE5_place_the_yellow_bowl_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.init
+    optional: true
+  level3_3:
+    task_id: LEVEL3::EXTENSION_KITCHEN_SCENE5_LEVEL3__T32_yellow_bowl_bottom_drawer_white_cabinet_and_close_drawer
+    level: LEVEL3
+    task_name: EXTENSION_KITCHEN_SCENE5_LEVEL3__T32_yellow_bowl_bottom_drawer_white_cabinet_and_close_drawer
+    goal_prompt: place the yellow bowl in the bottom drawer of the white cabinet and close the drawer
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL3/EXTENSION_KITCHEN_SCENE5_LEVEL3__T32_yellow_bowl_bottom_drawer_white_cabinet_and_close_drawer.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL3/EXTENSION_KITCHEN_SCENE5_LEVEL3__T32_yellow_bowl_bottom_drawer_white_cabinet_and_close_drawer.init
+    optional: true
+  level4_4:
+    task_id: LEVEL4::EXTENSION_KITCHEN_SCENE5_LEVEL4__T32_place_the_cream_cheese_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    level: LEVEL4
+    task_name: EXTENSION_KITCHEN_SCENE5_LEVEL4__T32_place_the_cream_cheese_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer
+    goal_prompt: place the cream cheese in the bottom drawer of the white cabinet and close the drawer
+    bddl: ../../third_party/LIBERO-X/libero/libero_x/bddl/LEVEL4/EXTENSION_KITCHEN_SCENE5_LEVEL4__T32_place_the_cream_cheese_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.bddl
+    init: ../../third_party/LIBERO-X/libero/libero_x/init/LEVEL4/EXTENSION_KITCHEN_SCENE5_LEVEL4__T32_place_the_cream_cheese_in_the_bottom_drawer_of_the_white_cabinet_and_close_the_drawer.init
     optional: true
