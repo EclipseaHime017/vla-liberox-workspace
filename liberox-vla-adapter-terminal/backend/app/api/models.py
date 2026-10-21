@@ -130,6 +130,8 @@ class SelectionQuota(StrictModel):
 
 
 class DatasetSelectionRequest(StrictModel):
+    policy_family: StrictStr | None = Field(default=None, min_length=1)
+    policy_id: StrictStr | None = Field(default=None, min_length=1)
     mode: Literal["random", "sequential", "rule", "manual"]
     size: int | None = Field(default=None, ge=1)
     seed: int = Field(default=0, ge=0, le=2147483647)
@@ -174,6 +176,8 @@ class DeleteTrainingDatasetRequest(StrictModel):
 
 
 class TrajectoryEvaluationRequest(StrictModel):
+    policy_family: StrictStr | None = Field(default=None, min_length=1)
+    policy_id: StrictStr | None = Field(default=None, min_length=1)
     task_id: StrictStr = Field(min_length=1)
     run_ids: list[StrictStr] | None = None
     overwrite: StrictBool | None = None

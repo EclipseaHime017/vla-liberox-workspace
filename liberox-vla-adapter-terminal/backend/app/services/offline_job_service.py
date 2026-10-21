@@ -489,6 +489,19 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
     def get(self, job_id: str) -> dict[str, Any]:
         return self._reconcile(job_id)
 
+    def configuration(self, job_id: str) -> dict[str, str]:
+        path, job = self._load_job(job_id)
+        if job["kind"] != "training":
+            raise ValueError("Only training jobs have a training configuration")
+        config = path.with_name("effective_config.yaml")
+        if (config.is_symlink() or config.resolve().parent != (self.jobs_root.resolve() / job_id)):
+            raise ValueError("Training configuration is outside its job directory")
+        if not config.is_file():
+            raise FileNotFoundError("该训练记录的 effective_config.yaml 已不存在")
+        if config.stat().st_size > 2_000_000:
+            raise ValueError("Training configuration is too large to display")
+        return {"filename": config.name, "text": config.read_text(encoding="utf-8")}
+
     def delete_job(self, job_id: str, confirmation: str, *, delete_exported_models: bool = False) -> dict:
         from .job_cleanup import delete_job
         return delete_job(self, job_id, confirmation, delete_exported_models=delete_exported_models)
@@ -769,10 +782,12 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         run_ids: list[str] | None,
         overwrite: bool,
         evaluators: list[str] | None = None,
+        policy_family: str | None = None, policy_id: str | None = None,
     ) -> dict[str, Any]:
         """Evaluate selected trajectories independently from frozen datasets."""
         with self.lock:
-            runs = self.datasets.list_runs(task_id=task_id, eligible=True)
+            runs = self.datasets.list_runs(task_id=task_id, eligible=True,
+                **{key: value for key, value in dict(policy_family=policy_family, policy_id=policy_id).items() if value})
             available = {item["id"]: item for item in runs}
             # A task-wide batch is a data-maintenance operation and excludes
             # held-out tests by default. Explicitly selected trajectories may

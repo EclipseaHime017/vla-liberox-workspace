@@ -26,7 +26,12 @@ export type TaskInfo = {
   init_state_index_max: number;
 };
 
+export type PolicyScope = { policy_family: string; policy_id: string };
+export type PolicyOption = { policy_id: string; label: string; family: string; family_label?: string };
+export type TrainingConfiguration = { filename: string; text: string };
+
 export type PolicyInfo = {
+  family?: string; family_label?: string;
   model_components?: Array<{ label: string; parameter?: string; description?: string }>;
   io?: { native_action_horizon: number; replay_horizon: number };
   observation?: { image_flip_vertical: boolean; image_flip_horizontal: boolean };
@@ -112,7 +117,7 @@ export type Session = {
   task_name: string | null; task: string | null; parent_session_id: string | null;
   resume_step?: number | null;
   control_mode: string; manual_source: "browser" | "spacemouse" | "factr" | null;
-  policy_id: string; policy_label: string | null; policy_base_checkpoint: string | null;
+  policy_id: string; policy_family?: string | null; policy_label: string | null; policy_base_checkpoint: string | null;
   policy_overlay: string | null; policy_compatibility_sha256: string | null;
   manual_translation_gain: number | null; manual_rotation_gain: number | null;
   manual_control_frame?: ControlFrame | null;
@@ -153,6 +158,8 @@ export type Session = {
 };
 
 export type PaginatedRuns = {
+  success_count?: number;
+  policy_options?: PolicyOption[];
   items: Session[]; total: number; eligible_count: number; evaluated_count: number;
   rynn_evaluated_count: number; robometer_evaluated_count: number;
   both_evaluated_count: number; test_count: number;
@@ -269,6 +276,7 @@ export type RynnValueEvaluation = {
 };
 
 export type DatasetSelection = {
+  policy_family?: string; policy_id?: string;
   mode: "random" | "sequential" | "rule" | "manual";
   size?: number | null; seed: number; order: "oldest" | "newest";
   source_types: Array<"inference" | "manual" | "policy_requery">;
@@ -340,6 +348,7 @@ export type OfflineJob = {
   parameters: Record<string, unknown>; log_size: number;
   metrics?: Record<string, number | string | null>;
   training_summary?: Record<string, unknown>;
+  model_relation?: "source" | "output";
   evaluation_summary?: EvaluationAggregate & { evaluation_id?: string };
 };
 

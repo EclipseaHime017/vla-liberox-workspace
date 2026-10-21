@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import shutil
 import tempfile
@@ -12,7 +14,7 @@ from typing import Any
 import yaml
 
 from ..core.exceptions import ConflictError
-from ..storage.files import atomic_write_yaml
+from ..storage.files import atomic_write_json, atomic_write_yaml
 
 
 class PolicyManagementService:
@@ -39,7 +41,7 @@ class PolicyManagementService:
         entry = self._entry(policy_id)
         result = entry.public()
         if entry.is_base:
-            result.update(manifest=None, components=[], training_records=[])
+            result.update(manifest=None, components=[], training_records=self._training_records(entry, {}))
             return result
         assert entry.manifest is not None
         manifest = self._load_manifest(entry.manifest)
@@ -53,22 +55,6 @@ class PolicyManagementService:
             for name, path in entry.component_paths.items()
             if path is not None
         ]
-        records: list[dict[str, Any]] = []
-        if self.jobs is not None:
-            for job in self.jobs.list():
-                if job.get("kind") != "training":
-                    continue
-                summary = job.get("training_summary") or {}
-                overlay = str(
-                    summary.get("policy_overlay") or summary.get("overlay_path")
-                    or summary.get("policy_manifest") or ""
-                )
-                if (
-                    policy_id == job.get("parameters", {}).get("policy_id")
-                    or (overlay and Path(overlay).parent.name == policy_id)
-                    or job.get("parameters", {}).get("dataset_sha256") == manifest.get("dataset_sha256")
-                ):
-                    records.append(job)
         result.update(
             manifest={
                 key: manifest.get(key) for key in (
@@ -78,9 +64,70 @@ class PolicyManagementService:
                 )
             },
             components=components,
-            training_records=records,
+            training_records=self._training_records(entry, manifest),
         )
         return result
+
+    @staticmethod
+    def _training_source(entry) -> dict:
+        manifest = yaml.safe_load(entry.manifest.read_text(encoding="utf-8")) if entry.manifest else {}
+        fingerprint = hashlib.sha256(json.dumps({key: value for key, value in manifest.items()
+            if key not in {"policy_id", "label"}}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        result = {"source_policy_id": entry.policy_id,
+                  "source_manifest": str(entry.manifest.resolve()) if entry.manifest else None,
+                  "manifest_sha256": fingerprint}
+        path = entry.manifest.with_name("provenance.json") if entry.manifest else None
+        if path is not None and path.is_file():
+            source = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(source, dict) or not isinstance(source.get("source_policy_id"), str)
+                    or not isinstance(source.get("source_manifest"), str)
+                    or source.get("manifest_sha256") != fingerprint):
+                raise ValueError("Copied-model training provenance does not match its weights")
+            result = source
+        return result
+
+    def _training_records(self, entry, manifest: dict) -> list[dict]:
+        if self.jobs is None:
+            return []
+        source = self._training_source(entry)
+        records = []
+        for job in self.jobs.list():
+            if job.get("kind") != "training":
+                continue
+            settings = job.get("parameters", {}).get("model") or {}
+            if entry.is_base:
+                matches = (settings.get("base_id") == entry.policy_id and settings.get("family") == entry.family
+                           and settings.get("base_checkpoint") == entry.base_checkpoint)
+                if entry.base_revision and settings.get("base_revision") != entry.base_revision:
+                    matches = False
+            else:
+                summary = job.get("training_summary") or {}
+                exported = summary.get("policy_overlay") or summary.get("overlay_path") or summary.get("policy_manifest")
+                matches = bool(exported and Path(exported).resolve() == Path(source["source_manifest"]).resolve())
+                if not matches and job.get("output_path"):
+                    for marker in Path(job["output_path"]).glob("*/export.json"):
+                        try:
+                            owner = json.loads(marker.read_text())
+                            if (owner.get("policy_id") == source["source_policy_id"]
+                                    and Path(str(owner.get("registry", ""))).resolve() / owner["policy_id"] / "policy.yaml"
+                                    == Path(source["source_manifest"]).resolve()):
+                                matches = True
+                                break
+                        except (OSError, ValueError, AttributeError):
+                            continue
+                for key, summary_key in (("dataset_sha256", "dataset_sha256"), ("training_step", "steps"), ("algorithm", "algorithm")):
+                    expected = manifest.get(key, "iql" if key == "algorithm" else None)
+                    if summary.get(summary_key) is not None and summary[summary_key] != expected:
+                        matches = False
+            if matches:
+                records.append({**job, "model_relation": "source" if entry.is_base else "output"})
+        return records
+
+    def configuration(self, policy_id: str, job_id: str) -> dict[str, str]:
+        detail = self.detail(policy_id)
+        if not any(job["id"] == job_id for job in detail["training_records"]):
+            raise KeyError("该训练记录不属于所选模型")
+        return self.jobs.configuration(job_id)
 
     def _assert_mutable(self, policy_id: str) -> tuple[Any, Path]:
         entry = self._entry(policy_id)
@@ -157,6 +204,7 @@ class PolicyManagementService:
                 shutil.copy2(component, destination)
             assert entry.manifest is not None
             payload = self._load_manifest(entry.manifest)
+            atomic_write_json(temporary / "provenance.json", self._training_source(entry))
             payload["policy_id"] = target_id
             payload["label"] = clean
             atomic_write_yaml(temporary / "policy.yaml", payload)

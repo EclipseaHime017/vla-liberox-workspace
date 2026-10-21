@@ -143,6 +143,7 @@ class PolicyEntry:
             "training_step": self.training_step,
             "compatibility_sha256": self.compatibility_sha256,
             "family": self.family,
+            "family_label": model_module("base_models").MODEL_FAMILIES[self.family].label,
             "content_sha256": self.content_sha256,
             "base_revision": self.base_revision,
         }

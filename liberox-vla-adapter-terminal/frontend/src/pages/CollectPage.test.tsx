@@ -423,3 +423,41 @@ describe("collection controller integration", () => {
     expect((screen.getByRole("slider", {name: "旋转增益"}) as HTMLInputElement).value).toBe("0.7");
   });
 });
+
+
+it("does not reselect hidden sessions after changing model filters while polling", async () => {
+  const original = vi.mocked(api).getMockImplementation()!;
+  const recorded = {...source, policy_family: "custom"};
+  let blockPoll = false;
+  let completePoll: ((value: Session[]) => void) | undefined;
+  vi.mocked(api).mockImplementation(async (path, options) => {
+    if (path === "/api/bootstrap") return {...bootstrap, policy_catalog: [
+      {policy_id: "base", label: "Custom", family: "custom"},
+      {policy_id: "other", label: "Other", family: "future"},
+    ]};
+    if (path === "/api/sessions") {
+      if (blockPoll) return new Promise((resolve) => {completePoll = resolve;});
+      return [recorded];
+    }
+    return original(path, options);
+  });
+  const callbacks: Array<() => void> = [];
+  const timer = vi.spyOn(window, "setInterval").mockImplementation((handler) => {
+    if (typeof handler === "function") callbacks.push(handler as () => void);
+    return 1;
+  });
+  render(<CollectPage />);
+  await screen.findByRole("button", {name: /原始 · source /});
+  try {
+    blockPoll = true;
+    await act(async () => {callbacks.forEach((callback) => callback());});
+    expect(completePoll).toBeDefined();
+    fireEvent.change(screen.getByLabelText("检索模型家族"), {target: {value: "future"}});
+    blockPoll = false;
+    await act(async () => {completePoll!([recorded]);});
+    await act(async () => {callbacks.forEach((callback) => callback());});
+    expect(screen.queryByRole("button", {name: /原始 · source /})).toBeNull();
+    expect(screen.queryByRole("button", {name: "从此帧重新推理"})).toBeNull();
+    expect((screen.getByLabelText("检索模型家族") as HTMLSelectElement).value).toBe("future");
+  } finally {timer.mockRestore();}
+});

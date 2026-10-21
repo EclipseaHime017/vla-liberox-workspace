@@ -3,7 +3,7 @@ import type {
   Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, EvaluationConfig,
   EvaluationFilters, EvaluationPreview, EvaluationRecord, OfflineJob, Session,
   PaginatedRuns, PolicyDetail, PolicyInfo, TensorBoardStatus, TrajectoryDetail,
-  TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe, RewardParameters,
+  TrainingDataset, TrainingDefaults, StageAnnotation, StageKeyframe, RewardParameters, PolicyScope, TrainingConfiguration,
   RewardSource, TrainingRewardSource, EvaluationOperation, DatasetExportStatus,
 } from "./types";
 
@@ -15,14 +15,16 @@ export const repairDatasetStorage = () => api<{
   layout: "dated" | "mixed" | "undated" | "empty";
   removed_date_dirs: number; retained_date_dirs: string[];
 }>("/api/datasets/storage/repair", { method: "POST" });
-function taskQuery(taskId?: string, taskIds?: string[]) {
+function taskQuery(taskId?: string, taskIds?: string[], policyScope?: PolicyScope) {
   const query = new URLSearchParams();
   if (taskId) query.set("task_id", taskId);
+  if (policyScope?.policy_family) query.set("policy_family", policyScope.policy_family);
+  if (policyScope?.policy_id) query.set("policy_id", policyScope.policy_id);
   if (taskIds !== undefined) (taskIds.length ? taskIds : [""]).forEach((id) => query.append("task_ids", id));
   return query;
 }
-export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5, taskIds?: string[]) => {
-  const query = taskQuery(taskId, taskIds);
+export const listDatasetRuns = (taskId: string, page = 1, pageSize = 5, taskIds?: string[], policyScope?: PolicyScope) => {
+  const query = taskQuery(taskId, taskIds, policyScope);
   query.set("page", String(page)); query.set("page_size", String(pageSize));
   return api<PaginatedRuns>(`/api/datasets/runs?${query}`);
 };
@@ -49,6 +51,7 @@ export const setTrajectoryTestLabel = (runId: string, isTest: boolean) => api<{
 });
 export const evaluateTrajectories = (body: {
   task_id: string; run_ids: string[] | null; overwrite: boolean;
+  policy_family?: string; policy_id?: string;
   evaluators: Array<"rynnvalue" | "robometer">;
 }) => api<{
   kind: "trajectory_evaluation"; status: string; job: OfflineJob | null;
@@ -90,8 +93,8 @@ export const deleteTrainingDataset = (id: string, force = false) => api<{
   method: "DELETE", body: JSON.stringify({ confirm_dataset_id: id, force }),
 });
 
-export const listTrainingDatasets = (taskId?: string, taskIds?: string[]) => {
-  const query = taskQuery(taskId, taskIds);
+export const listTrainingDatasets = (taskId?: string, taskIds?: string[], policyScope?: PolicyScope) => {
+  const query = taskQuery(taskId, taskIds, policyScope);
   return api<TrainingDataset[]>("/api/training-datasets" + (query.size ? `?${query}` : ""));
 };
 export const verifyTrainingDataset = (id: string) => api<OfflineJob>(
@@ -155,6 +158,9 @@ export const startTensorBoard = () => api<TensorBoardStatus>(
 export const listModels = () => api<PolicyInfo[]>("/api/models");
 export const getModel = (id: string) => api<PolicyDetail>(
   `/api/models/${encodeURIComponent(id)}`,
+);
+export const getModelTrainingConfig = (id: string, jobId: string) => api<TrainingConfiguration>(
+  `/api/models/${encodeURIComponent(id)}/training/${encodeURIComponent(jobId)}/config`,
 );
 export const renameModel = (id: string, label: string) => api<PolicyDetail>(
   `/api/models/${encodeURIComponent(id)}`,

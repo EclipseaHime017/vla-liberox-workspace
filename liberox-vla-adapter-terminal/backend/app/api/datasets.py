@@ -28,6 +28,8 @@ async def summary(request: Request): return service(request).dataset_summary()
 async def runs(
     request: Request,
     task_id: str | None = Query(default=None),
+    policy_family: str | None = Query(default=None, min_length=1),
+    policy_id: str | None = Query(default=None, min_length=1),
     source_type: str | None = Query(default=None),
     outcome: str | None = Query(default=None),
     eligible: bool | None = Query(default=None),
@@ -41,6 +43,7 @@ async def runs(
             task_id, source_type, outcome, eligible,
             page=page, page_size=page_size,
             **({"task_ids": task_ids} if task_ids is not None else {}),
+            **{key: value for key, value in dict(policy_family=policy_family, policy_id=policy_id).items() if value},
         )
     except Exception as exc:
         raise http_error(exc) from exc
@@ -108,6 +111,7 @@ async def evaluate_trajectories(body: TrajectoryEvaluationRequest, request: Requ
             run_ids=None if body.run_ids is None else list(body.run_ids),
             overwrite=False if body.overwrite is None else body.overwrite,
             evaluators=list(body.evaluators),
+            **body.model_dump(include={"policy_family", "policy_id"}, exclude_none=True),
         )
     except Exception as exc:
         raise http_error(exc) from exc

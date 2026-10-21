@@ -55,6 +55,7 @@ from ..services.run_continuation import continuation_public, promote_run, prefix
 from vla_rynn_iql.execution import validate_task_prompt
 from ..simulators.libero_x import LiberoXSimulator
 from ..storage.files import (
+    recorded_policy_family,
     atomic_write_bytes,
     atomic_write_csv,
     atomic_write_json,
@@ -347,6 +348,16 @@ class SimulationManager:
             item = self._public_from_persisted(directory, manifest_data, summary_data)
             indexed.append(item)
             indexed_ids.add(session_id)
+        by_id = {item["id"]: item for item in indexed}
+        for item in indexed:
+            current, visited = item, set()
+            while not item.get("policy_family") and current.get("parent_session_id") not in visited:
+                parent_id = current.get("parent_session_id")
+                visited.add(parent_id)
+                current = by_id.get(parent_id)
+                if current is None or current.get("policy_id") != item.get("policy_id"):
+                    break
+                item["policy_family"] = current.get("policy_family")
         with self.lock:
             self.legacy_sessions = {
                 item["id"]: item
@@ -635,7 +646,7 @@ class SimulationManager:
         task = task_catalog.metadata(task_id)
         if parent is not None and control_mode == "manual":
             policy = SimpleNamespace(
-                policy_id=policy_id, label=parent.get("policy_label"),
+                policy_id=policy_id, label=parent.get("policy_label"), family=parent.get("policy_family"),
                 base_checkpoint=parent.get("policy_base_checkpoint"), manifest=parent.get("policy_overlay"),
                 compatibility_sha256=parent.get("policy_compatibility_sha256"),
                 content_sha256=parent.get("policy_content_sha256"),
@@ -680,6 +691,7 @@ class SimulationManager:
             disabled_policy_cameras=disabled_policy_cameras,
             policy_id=policy.policy_id,
             policy_label=policy.label,
+            policy_family=getattr(policy, "family", None),
             policy_base_checkpoint=policy.base_checkpoint,
             policy_overlay=None if policy.manifest is None else str(policy.manifest),
             policy_compatibility_sha256=policy.compatibility_sha256,
@@ -1344,7 +1356,7 @@ class SimulationManager:
                     "init_state_index": record.init_state_index,
                 },
                 "policy": {
-                    "provider": policy.family if policy is not None else None,
+                    "provider": record.policy_family,
                     "policy_id": record.policy_id,
                     "label": record.policy_label,
                     "base_checkpoint": record.policy_base_checkpoint,
@@ -1407,6 +1419,7 @@ class SimulationManager:
                 "manual_requested_control_frame": record.manual_requested_control_frame,
                 "policy_id": record.policy_id,
                 "policy_label": record.policy_label,
+                "policy_family": record.policy_family,
                 "policy_base_checkpoint": record.policy_base_checkpoint,
                 "policy_overlay": record.policy_overlay,
                 "policy_compatibility_sha256": record.policy_compatibility_sha256,
@@ -1496,8 +1509,9 @@ class SimulationManager:
             "control_mode": summary.get(
                 "control_mode", manifest.get("control_mode", "policy")
             ),
-            "policy_id": manifest.get("policy_id", "base"),
+            "policy_id": manifest.get("policy_id") or "",
             "policy_label": manifest.get("policy_label"),
+            "policy_family": recorded_policy_family(directory, manifest),
             "policy_base_checkpoint": manifest.get(
                 "policy_base_checkpoint", manifest.get("checkpoint")
             ),
@@ -2205,6 +2219,7 @@ class SimulationManager:
             else None,
             "policy_id": record.policy_id,
             "policy_label": record.policy_label,
+            "policy_family": record.policy_family,
             "policy_base_checkpoint": record.policy_base_checkpoint,
             "policy_overlay": record.policy_overlay,
             "policy_compatibility_sha256": record.policy_compatibility_sha256,

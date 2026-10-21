@@ -39,6 +39,14 @@ async def model_detail(policy_id: str, request: Request):
         raise http_error(exc) from exc
 
 
+@router.get("/{policy_id}/training/{job_id}/config")
+async def training_config(policy_id: str, job_id: str, request: Request):
+    try:
+        return await run_in_threadpool(_service(request).configuration, policy_id, job_id)
+    except Exception as exc:
+        raise http_error(exc) from exc
+
+
 @router.patch("/{policy_id}")
 async def rename_model(policy_id: str, body: RenamePolicyRequest, request: Request):
     try:

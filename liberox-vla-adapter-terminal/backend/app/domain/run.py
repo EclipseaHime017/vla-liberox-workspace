@@ -35,6 +35,7 @@ class SimulationSession:
     disabled_policy_cameras: tuple[str, ...] = ()
     policy_id: str = "base"
     policy_label: str | None = None
+    policy_family: str | None = None
     policy_base_checkpoint: str | None = None
     policy_overlay: str | None = None
     policy_compatibility_sha256: str | None = None
@@ -148,6 +149,7 @@ class SimulationSession:
             "control_mode": self.control_mode,
             "policy_id": self.policy_id,
             "policy_label": self.policy_label,
+            "policy_family": self.policy_family,
             "policy_base_checkpoint": self.policy_base_checkpoint,
             "policy_overlay": self.policy_overlay,
             "policy_compatibility_sha256": self.policy_compatibility_sha256,

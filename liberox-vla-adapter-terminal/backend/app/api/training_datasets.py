@@ -19,8 +19,12 @@ router = APIRouter(prefix="/api/training-datasets", tags=["training-datasets"])
 
 @router.get("")
 async def list_datasets(request: Request, task_id: str | None = Query(default=None),
-                        task_ids: list[str] | None = Query(default=None)):
-    return training_dataset_service(request).list(task_id, **({"task_ids": task_ids} if task_ids is not None else {}))
+                        task_ids: list[str] | None = Query(default=None),
+                        policy_family: str | None = Query(default=None, min_length=1),
+                        policy_id: str | None = Query(default=None, min_length=1)):
+    return training_dataset_service(request).list(task_id,
+        **({"task_ids": task_ids} if task_ids is not None else {}),
+        **{key: value for key, value in dict(policy_family=policy_family, policy_id=policy_id).items() if value})
 
 
 @router.get("/{dataset_id}")

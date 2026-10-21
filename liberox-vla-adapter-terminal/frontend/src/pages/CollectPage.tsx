@@ -7,7 +7,7 @@ import {
 } from "../features/simulation-view/controls";
 import { api, ApiError } from "../api/client";
 import { sessionWebSocket } from "../api/websocket";
-import { ACTIVE, TERMINAL, type Bootstrap, type ControllerId, type ControllerStatus, type ControlFrame, type Draft, type FrameState, type PolicyBranchDraft, type PolicyCameraId, type Session, type TaskInfo } from "../features/run-control/types";
+import { ACTIVE, TERMINAL, type Bootstrap, type ControllerId, type ControllerStatus, type ControlFrame, type Draft, type FrameState, type PolicyBranchDraft, type PolicyCameraId, type PolicyScope, type Session, type TaskInfo } from "../features/run-control/types";
 import { Info, Metric } from "../features/metrics/MetricsPanel";
 import { ControllerSettings } from "../features/run-control/ControllerSettings";
 import { calibrateController, setControllerGravity, CONTROLLER_LABELS, controllerConnection, getControllers } from "../features/run-control/controller";
@@ -17,6 +17,8 @@ import { SessionMonitor } from "../features/run-control/SessionMonitor";
 import { runOutcome } from "../features/run-control/formatters";
 import { formatComputeDevice } from "../features/run-control/formatters";
 import { TaskFilter } from "../features/run-config/TaskSelector";
+import { PolicyFilter } from "../features/run-config/PolicyFilter";
+import { ALL_POLICY_SCOPE, filterByPolicyScope, policyOptions, recordedPolicyOptions } from "../features/run-config/policyScope";
 import { ALL_TASK_SCOPE, filterByTaskScope, scopeForTask, type TaskScope } from "../features/run-config/taskHierarchy";
 import { useSimulationStream } from "../features/simulation-view/useSimulationStream";
 
@@ -40,6 +42,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
   const [taskId, setTaskId] = useState("");
   const [policyId, setPolicyId] = useState("base");
   const [sessionTaskFilter, setSessionTaskFilter] = useState<TaskScope>(ALL_TASK_SCOPE);
+  const [sessionPolicyFilter, setSessionPolicyFilter] = useState<PolicyScope>(ALL_POLICY_SCOPE);
   const [translationGain, setTranslationGain] = useState(0.5);
   const [rotationGain, setRotationGain] = useState(0.25);
   const [controlFrame, setControlFrame] = useState<ControlFrame>("world");
@@ -73,8 +76,8 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
     [sessions, selectedId],
   );
   const visibleSessions = useMemo(
-    () => filterByTaskScope(sessions, bootstrap?.task_catalog ?? [], sessionTaskFilter),
-    [sessions, bootstrap, sessionTaskFilter],
+    () => filterByPolicyScope(filterByTaskScope(sessions, bootstrap?.task_catalog ?? [], sessionTaskFilter), sessionPolicyFilter),
+    [sessions, bootstrap, sessionTaskFilter, sessionPolicyFilter],
   );
   const active = sessions.find((session) => ACTIVE.has(session.status)) ?? null;
   const manualSessionActive = Boolean(
@@ -191,16 +194,21 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
   }, [active?.id, active?.manual_source]);
 
   useEffect(() => {
+    let current = true;
     const timer = window.setInterval(() => {
       api<Session[]>("/api/sessions")
         .then((history) => {
+          if (!current) return;
           setSessions(history);
-          if (!selectedId && history[0]) setSelectedId(history[0].id);
+          const visible = filterByPolicyScope(filterByTaskScope(history, bootstrap?.task_catalog ?? [], sessionTaskFilter), sessionPolicyFilter);
+          if (!visible.some((item) => item.id === selectedId)) {
+            setSelectedId(visible[0]?.id ?? ""); setSelectedStep(0); setFrameState(null);
+          }
         })
-        .catch((reason) => setError(String(reason)));
+        .catch((reason) => { if (current) setError(String(reason)); });
     }, 1000);
-    return () => window.clearInterval(timer);
-  }, [selectedId]);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [selectedId, sessionTaskFilter, sessionPolicyFilter, bootstrap]);
 
   useEffect(() => {
     let cancelled = false;
@@ -375,6 +383,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       setDraft(null);
       setSessions((current) => [session, ...current]);
       setSessionTaskFilter(session.task_id ? scopeForTask(bootstrap?.task_catalog ?? [], session.task_id) : ALL_TASK_SCOPE);
+      setSessionPolicyFilter(ALL_POLICY_SCOPE);
       setSelectedId(session.id);
       setSelectedStep(0);
     } catch (reason) { reportFailure(reason); }
@@ -512,7 +521,7 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
       const remaining = sessions.filter((item) => item.id !== deleteTarget.id);
       setSessions(remaining);
       if (selectedId === deleteTarget.id) {
-        setSelectedId(filterByTaskScope(remaining, bootstrap?.task_catalog ?? [], sessionTaskFilter)[0]?.id ?? "");
+        setSelectedId(filterByPolicyScope(filterByTaskScope(remaining, bootstrap?.task_catalog ?? [], sessionTaskFilter), sessionPolicyFilter)[0]?.id ?? "");
         setSelectedStep(0);
       }
       setDeleteTarget(null);
@@ -528,9 +537,15 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
   const changeSessionTaskFilter = (value: TaskScope) => {
     setSessionTaskFilter(value);
     setPolicyBranchDraft(null);
-    const next = filterByTaskScope(sessions, bootstrap?.task_catalog ?? [], value)[0] ?? null;
+    const next = filterByPolicyScope(filterByTaskScope(sessions, bootstrap?.task_catalog ?? [], value), sessionPolicyFilter)[0] ?? null;
     setSelectedId(next?.id ?? "");
-    setSelectedStep(0);
+    setSelectedStep(0); setFrameState(null);
+  };
+
+  const changeSessionPolicyFilter = (value: PolicyScope) => {
+    setSessionPolicyFilter(value); setPolicyBranchDraft(null);
+    const next = filterByPolicyScope(filterByTaskScope(sessions, bootstrap?.task_catalog ?? [], sessionTaskFilter), value)[0];
+    setSelectedId(next?.id ?? ""); setSelectedStep(0); setFrameState(null);
   };
 
   if (!bootstrap) return <div className="loading">正在初始化 LIBERO-X 控制台…</div>;
@@ -610,6 +625,9 @@ function CollectPage({ statusTarget = null }: { statusTarget?: HTMLElement | nul
             <RunConfigForm draft={draft} branchDraft={policyBranchDraft} tasks={bootstrap.task_catalog} policies={bootstrap.policy_catalog} active={Boolean(active)} busy={busy} taskId={taskId} policyId={policyId} maxSteps={maxSteps} openLoop={openLoop} seed={seed} initStateIndex={initStateIndex} disabledPolicyCameras={disabledPolicyCameras} onCreate={createDraft} onStart={startDraft} onCancel={cancelDraft} onStop={stop} onBranchSteps={(value) => setPolicyBranchDraft((current) => current ? { ...current, target_steps: value } : current)} onTask={(value) => { setTaskId(value); setInitStateIndex(0); void updateDraft({ task_id: value, init_state_index: 0 }); }} onPolicy={changePolicy} onMaxSteps={(value, commit) => { setMaxSteps(value); if (commit) void updateDraft({ max_steps: value }); }} onOpenLoop={(value, commit) => { setOpenLoop(value); if (commit) void updateDraft({ open_loop_steps: value }); }} onSeed={(value, commit) => { setSeed(value); if (commit) void updateDraft({ seed: value }); }} onInitStateIndex={(value, commit) => { setInitStateIndex(value); if (commit) void updateDraft({ init_state_index: value }); }} onPolicyCamera={(camera, enabled) => { const next = enabled ? disabledPolicyCameras.filter((value) => value !== camera) : [...disabledPolicyCameras, camera]; setDisabledPolicyCameras(next); void updateDraft({ disabled_policy_cameras: next }); }} onBranchOpenLoop={(value) => setPolicyBranchDraft((current) => current ? { ...current, open_loop_steps: value } : current)} onStartBranch={() => void branch()} onCancelBranch={() => setPolicyBranchDraft(null)} />
             <div className="session-filter">
               <p className="task-filter-heading">数据检索</p>
+              <PolicyFilter options={policyOptions(bootstrap.policy_catalog, recordedPolicyOptions(sessions))}
+                value={sessionPolicyFilter} onChange={changeSessionPolicyFilter}
+                disabled={Boolean(active) || Boolean(policyBranchDraft)} labelPrefix="检索" />
               <TaskFilter tasks={bootstrap.task_catalog} value={sessionTaskFilter} disabled={Boolean(active) || Boolean(policyBranchDraft)} onChange={changeSessionTaskFilter} labelPrefix="检索" />
             </div>
             <div className="session-list">

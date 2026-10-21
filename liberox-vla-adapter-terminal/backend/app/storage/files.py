@@ -97,6 +97,23 @@ def legacy_session_id(path: Path) -> str:
     return f"legacy-{digest}"
 
 
+def recorded_policy_family(directory: Path, metadata: dict) -> str | None:
+    """Old runs saved their family in the small config, not in run.json."""
+    if isinstance(metadata.get("policy_family"), str) and metadata["policy_family"].strip():
+        return metadata["policy_family"]
+    try:
+        raw = yaml.safe_load((directory / "config.yaml").read_text(encoding="utf-8"))
+        policy = raw.get("policy") or {}
+        for key in ("policy_id", "content_sha256"):
+            recorded = metadata.get("policy_content_sha256" if key == "content_sha256" else key)
+            if recorded and policy.get(key) and recorded != policy[key]:
+                return None
+        family = policy.get("family") or policy.get("provider")
+        return family if isinstance(family, str) and family.strip() else None
+    except (OSError, ValueError, AttributeError, yaml.YAMLError):
+        return None
+
+
 def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
     """Return valid trajectories without changing legacy directories."""
     found: dict[Path, dict[str, Any]] = {}
@@ -132,8 +149,9 @@ def scan_trajectories(roots: Iterable[Path]) -> list[dict[str, Any]]:
                 "source_trajectory": source,
                 "resume_step": metadata.get("source_resume_step"),
                 "control_mode": metadata.get("control_mode", "policy"),
-                "policy_id": metadata.get("policy_id", "base"),
+                "policy_id": metadata.get("policy_id") or "",
                 "policy_label": metadata.get("policy_label"),
+                "policy_family": recorded_policy_family(run_directory, metadata),
                 "policy_base_checkpoint": metadata.get(
                     "policy_base_checkpoint", metadata.get("checkpoint")
                 ),

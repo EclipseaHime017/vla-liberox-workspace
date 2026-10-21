@@ -8,7 +8,7 @@ import {
 } from "../features/run-control/api";
 import type {
   AnnotationDataset, Bootstrap, DatasetPreview, DatasetSelection, DatasetSummary, OfflineJob,
-  PaginatedRuns, Session, TrainingDataset, TrajectoryDetail as TrajectoryDetailData,
+  PaginatedRuns, PolicyOption, PolicyScope, Session, TrainingDataset, TrajectoryDetail as TrajectoryDetailData,
 } from "../features/run-control/types";
 import { SuccessRateChart } from "../features/metrics/SuccessRateChart";
 import { RunTable } from "../features/dataset/RunTable";
@@ -19,6 +19,8 @@ import { TrajectoryDetail } from "../features/dataset/TrajectoryDetail";
 import { FrozenDatasetCard } from "../features/dataset/FrozenDatasetCard";
 import { StorageRepair } from "../features/dataset/StorageRepair";
 import { TaskFilter } from "../features/run-config/TaskSelector";
+import { PolicyFilter } from "../features/run-config/PolicyFilter";
+import { ALL_POLICY_SCOPE, policyOptions, policyScopeParameters } from "../features/run-config/policyScope";
 import { ALL_TASK_SCOPE, filterByTaskScope, scopeForTask, taskIdsForScope, type TaskScope } from "../features/run-config/taskHierarchy";
 
 const sources = ["inference", "manual", "policy_requery"] as const;
@@ -42,6 +44,8 @@ export function DatasetPage() {
   const [summary, setSummary] = useState<DatasetSummary | null>(null);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [taskScope, setTaskScope] = useState<TaskScope>(ALL_TASK_SCOPE);
+  const [policyScope, setPolicyScope] = useState<PolicyScope>(ALL_POLICY_SCOPE);
+  const [recordedModels, setRecordedModels] = useState<PolicyOption[]>([]);
   const taskId = taskScope.task_id;
   const [runs, setRuns] = useState<Session[]>([]);
   const [runPage, setRunPage] = useState<PaginatedRuns | null>(null);
@@ -79,14 +83,15 @@ export function DatasetPage() {
     const request = ++listRequest.current;
     const ids = taskIdsForScope(bootstrap.task_catalog, taskScope);
     setRunsLoading(true); setDatasetsLoading(true);
-    const runsRequest = (nextTask ? listDatasetRuns(nextTask, nextPage, nextPageSize) : listDatasetRuns("", nextPage, nextPageSize, ids))
+    const runsRequest = (nextTask ? listDatasetRuns(nextTask, nextPage, nextPageSize, undefined, policyScope) : listDatasetRuns("", nextPage, nextPageSize, ids, policyScope))
       .then((nextRuns) => {
         if (request !== listRequest.current) return;
         setRunPage(nextRuns); setRuns(nextRuns.items);
+        setRecordedModels(nextRuns.policy_options ?? []);
         if (nextRuns.page !== nextPage) setPage(nextRuns.page);
       })
       .finally(() => { if (request === listRequest.current) setRunsLoading(false); });
-    const metadataRequest = Promise.all([nextTask ? listTrainingDatasets(nextTask) : listTrainingDatasets(undefined, ids), listOfflineJobs()])
+    const metadataRequest = Promise.all([nextTask ? listTrainingDatasets(nextTask, undefined, policyScope) : listTrainingDatasets(undefined, ids, policyScope), listOfflineJobs()])
       .then(([nextDatasets, jobs]) => {
         if (request !== listRequest.current) return;
         setDatasets(nextDatasets);
@@ -110,7 +115,7 @@ export function DatasetPage() {
   useEffect(() => {
     if (bootstrap) void refresh(taskId, page, pageSize).catch((reason) => setError(String(reason)));
     return () => { listRequest.current += 1; };
-  }, [taskScope, page, pageSize, bootstrap]);
+  }, [taskScope, policyScope, page, pageSize, bootstrap]);
   useEffect(() => {
     if (!detail?.global_evaluation_pending) {
       globalPoll.current = { runId: "", attempts: 0 }; return;
@@ -141,6 +146,9 @@ export function DatasetPage() {
     const successes = groups.reduce((total, group) => total + group.successes, 0);
     return { runs, success_rate: runs ? successes / runs : 0 };
   }, [summary, bootstrap, taskScope]);
+  const filteredCount = runPage?.total ?? taskStats.runs;
+  const filteredRate = runPage?.success_count == null ? taskStats.success_rate
+    : filteredCount ? runPage.success_count / filteredCount : 0;
   const robometerCapability = bootstrap?.evaluation_capabilities?.robometer;
   const eligible = runs.filter((run) => run.training_eligible);
   const eligibleCount = runPage?.eligible_count ?? eligible.length;
@@ -162,6 +170,7 @@ export function DatasetPage() {
     setBuilder(true); setPreview(null); setError("");
     if (parent) {
       setTaskScope(scopeForTask(bootstrap?.task_catalog ?? [], parent.task_id)); setPage(1);
+      setPolicyScope(ALL_POLICY_SCOPE);
       setParentId(parent.id); setName(`${parent.name} · 派生`);
       setParentSuccessSteps(parent.success_consecutive_steps ?? null);
       setValidationFraction(parent.validation_fraction ?? 0.2);
@@ -176,7 +185,7 @@ export function DatasetPage() {
   };
   const makePreview = async () => {
     setBusy(true); setError("");
-    try { setPreview(await previewTrainingDataset(taskId, selection)); }
+    try { setPreview(await previewTrainingDataset(taskId, { ...selection, ...policyScopeParameters(policyScope) })); }
     catch (reason) { setError(String(reason)); }
     finally { setBusy(false); }
   };
@@ -184,7 +193,7 @@ export function DatasetPage() {
     if (!preview) return;
     setBusy(true); setError("");
     const body = {
-      name, selection, validation_fraction: validationFraction,
+      name, selection: { ...selection, ...policyScopeParameters(policyScope) }, validation_fraction: validationFraction,
       split_seed: splitSeed,
       include_post_success: includePostSuccess,
     };
@@ -201,7 +210,7 @@ export function DatasetPage() {
     setBusy(true); setError("");
     try {
       const result = await evaluateTrajectories({
-        task_id: taskId, run_ids: runIds, overwrite, evaluators,
+        task_id: taskId, run_ids: runIds, overwrite, evaluators, ...policyScopeParameters(policyScope),
       });
       if (result.job) setAnnotationJob(result.job);
       else window.alert(result.message ?? `已跳过 ${result.skipped_count} 条已有评价`);
@@ -275,13 +284,19 @@ export function DatasetPage() {
     <div className="page-heading"><p className="eyebrow">DATASET CATALOG</p><h1>数据集</h1><p>打包轨迹并配置评价，重新评价即可更新当前结果，无需重复标记关键帧。测试标签数据不会进入新的训练包。</p></div>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     {summary && <>
-      <div className="dataset-overview surface"><SuccessRateChart rate={taskStats?.success_rate ?? 0} /><div className="dataset-stats"><div><strong>{taskStats?.runs ?? 0}</strong><span>当前任务运行</span></div><div><strong>{eligibleCount}</strong><span>可训练轨迹</span></div><div><strong>{runPage?.rynn_evaluated_count ?? 0} / {runPage?.robometer_evaluated_count ?? 0}</strong><span>RynnValue / Robometer</span></div><div><strong>{datasets.length}</strong><span>冻结数据集</span></div></div></div>
+      <div className="dataset-overview surface"><SuccessRateChart rate={filteredRate} /><div className="dataset-stats"><div><strong>{filteredCount}</strong><span>筛选后运行</span></div><div><strong>{eligibleCount}</strong><span>可训练轨迹</span></div><div><strong>{runPage?.rynn_evaluated_count ?? 0} / {runPage?.robometer_evaluated_count ?? 0}</strong><span>RynnValue / Robometer</span></div><div><strong>{datasets.length}</strong><span>冻结数据集</span></div></div></div>
       <div className="dataset-section-tabs surface"><button className={section === "evaluation" ? "active" : ""} onClick={() => { setSection("evaluation"); setBuilder(false); }}>轨迹评价</button><button className={section === "package" ? "active" : ""} onClick={() => setSection("package")}>打包训练数据集</button></div>
       <div className="surface dataset-browser">
         <div className="dataset-toolbar">
-          <TaskFilter tasks={bootstrap?.task_catalog ?? []} value={taskScope} onChange={(value) => {
+          <div className="data-filter-row"><TaskFilter tasks={bootstrap?.task_catalog ?? []} value={taskScope} disabled={busy} onChange={(value) => {
             setTaskScope(value); setPage(1); setBuilder(false); setEvaluationSelection([]); setRunPage(null); setRuns([]);
+            setSelection(initialSelection()); setPreview(null);
           }} labelPrefix="数据" />
+          <PolicyFilter options={policyOptions(bootstrap?.policy_catalog ?? [], recordedModels)}
+            value={policyScope} disabled={busy} labelPrefix="数据" onChange={(value) => {
+              setPolicyScope(value); setPage(1); setBuilder(false); setEvaluationSelection([]);
+              setSelection(initialSelection()); setPreview(null); setRunPage(null); setRuns([]);
+            }} /></div>
           <span>{runPage?.total ?? 0} 条记录</span>
           {section === "evaluation" ? <div className="evaluation-actions">
             <label><input type="checkbox" checked={evaluators.includes("rynnvalue")} onChange={(event) => setEvaluators((current) => event.target.checked ? [...current, "rynnvalue"] : current.filter((value) => value !== "rynnvalue"))} />RynnValue</label>
@@ -315,7 +330,7 @@ export function DatasetPage() {
       </div>}
 
       {section === "package" && <div className="surface frozen-datasets">
-        <div className="panel-title"><strong>已打包数据集</strong><span>{datasets.length}</span></div>
+        <div className="panel-title"><strong>已打包数据集{policyScope.policy_family ? "（包含所选模型）" : ""}</strong><span>{datasets.length}</span></div>
         {datasetsLoading && !datasets.length ? <div className="empty-table">正在加载冻结数据集…</div> : datasets.length ? datasets.map((dataset) => <FrozenDatasetCard key={dataset.id} dataset={dataset} disabled={busy} exportEnabled
           robometerUnavailable={robometerCapability?.available === false ? robometerCapability.reason ?? "Robometer 环境未配置" : undefined}
           onRemove={() => void removeDataset(dataset)} onDerive={() => openBuilder(dataset)} onRefresh={refresh}

@@ -16,6 +16,7 @@ from ..storage.paths import storage_path
 from typing import Any, Iterable
 
 from ..core.exceptions import ConflictError
+from ..domain.policy_scope import matches_policy, policy_options
 from ..storage.files import atomic_write_json
 from ..storage.repositories import RunLabelRepository, TrainingDatasetRepository
 
@@ -142,6 +143,8 @@ class TrainingDatasetService:
         outcome: str | None = None,
         eligible: bool | None = None,
         *, task_ids: list[str] | None = None,
+        policy_family: str | None = None, policy_id: str | None = None,
+        _run_views: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
         if source_type is not None and source_type not in SOURCE_TYPES:
             raise ValueError(f"Unknown source_type: {source_type}")
@@ -152,7 +155,9 @@ class TrainingDatasetService:
         execution = model_module("execution")
         test_ids = self.labels.test_ids()
         allowed_tasks = None if task_ids is None else set(task_ids)
-        for run in self.run_service.list_runs():
+        for run in self.run_service.list_runs() if _run_views is None else _run_views:
+            if not matches_policy(run, policy_family, policy_id):
+                continue
             if task_id and run.get("task_id") != task_id:
                 continue
             if allowed_tasks is not None and run.get("task_id") not in allowed_tasks:
@@ -197,16 +202,21 @@ class TrainingDatasetService:
         page: int = 1,
         page_size: int = 5,
         task_ids: list[str] | None = None,
+        policy_family: str | None = None, policy_id: str | None = None,
     ) -> dict[str, Any]:
         if type(page) is not int or page < 1:
             raise ValueError("page must be a positive integer")
         if type(page_size) is not int or not 1 <= page_size <= 50:
             raise ValueError("page_size must be in [1, 50]")
-        values = self.list_runs(task_id, source_type, outcome, eligible, task_ids=task_ids)
+        run_views = self.run_service.list_runs()
+        options = policy_options([run for run in run_views
+            if (not task_id or run.get("task_id") == task_id)
+            and (task_ids is None or run.get("task_id") in task_ids)])
+        values = self.list_runs(task_id, source_type, outcome, eligible, task_ids=task_ids,
+                                policy_family=policy_family, policy_id=policy_id, _run_views=run_views)
         total = len(values)
         pages = max(1, math.ceil(total / page_size))
-        if page > pages and total:
-            page = pages
+        page = min(page, pages)
         start = (page - 1) * page_size
         eligible_count = sum(
             bool(item.get("training_eligible")) and not bool(item.get("is_test"))
@@ -240,6 +250,8 @@ class TrainingDatasetService:
         return {
             "items": items,
             "total": total,
+            "success_count": sum(item["outcome"] == "success" for item in values),
+            "policy_options": options,
             "eligible_count": eligible_count,
             "evaluated_count": evaluated_count,
             "rynn_evaluated_count": evaluated_count,
@@ -253,6 +265,10 @@ class TrainingDatasetService:
 
     @staticmethod
     def _validate_selection(selection: dict[str, Any]) -> None:
+        for name in ("policy_family", "policy_id"):
+            value = selection.get(name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"selection.{name} must be a non-empty string")
         mode = selection.get("mode")
         if mode not in {"random", "sequential", "rule", "manual"}:
             raise ValueError("selection.mode must be random, sequential, rule, or manual")
@@ -309,7 +325,8 @@ class TrainingDatasetService:
         # Test-labelled trajectories are deliberately held out from every new
         # frozen training dataset, including explicit/manual selections.
         all_runs = [
-            run for run in self.list_runs(task_id=task_id, eligible=True)
+            run for run in self.list_runs(task_id=task_id, eligible=True,
+                **{key: selection[key] for key in ("policy_family", "policy_id") if selection.get(key)})
             if not run["is_test"]
         ]
         source_types = set(selection.get("source_types") or SOURCE_TYPES)
@@ -425,6 +442,9 @@ class TrainingDatasetService:
         root_id = str(run.get("root_session_id") or run.get("parent_session_id") or run["id"])
         return {
             "run_id": run["id"],
+            "policy_id": run.get("policy_id"),
+            "policy_family": run.get("policy_family"),
+            "policy_label": run.get("policy_label"),
             "root_run_id": root_id,
             "parent_run_id": run.get("parent_session_id"),
             "source_type": run["source_type"],
@@ -737,7 +757,7 @@ class TrainingDatasetService:
                 key: member.get(key) for key in (
                     "run_id", "root_run_id", "parent_run_id", "source_type",
                     "outcome", "resume_step", "end_step", "action_count",
-                    "chunk_count", "split",
+                    "chunk_count", "split", "policy_id", "policy_family", "policy_label",
                 )
             }
             for member in payload.get("members", [])
@@ -909,8 +929,11 @@ class TrainingDatasetService:
                 })
         return self._public(payload)
 
-    def list(self, task_id: str | None = None, *, task_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    def list(self, task_id: str | None = None, *, task_ids: list[str] | None = None,
+             policy_family: str | None = None, policy_id: str | None = None) -> list[dict[str, Any]]:
         values = []
+        run_models = ({run["id"]: run for run in self.run_service.list_runs()}
+                      if policy_family or policy_id else {})
         allowed_tasks = None if task_ids is None else set(task_ids)
         for path in sorted(self.root.glob("*/dataset.json")):
             try:
@@ -918,6 +941,11 @@ class TrainingDatasetService:
             except Exception:
                 continue
             if (not task_id or value["task_id"] == task_id) and (allowed_tasks is None or value["task_id"] in allowed_tasks):
+                if (policy_family or policy_id) and not any(matches_policy(
+                    {**run_models.get(member["run_id"], {}), **{key: member[key]
+                     for key in ("policy_id", "policy_family") if member.get(key)}}, policy_family, policy_id)
+                    for member in value.get("members", [])):
+                    continue
                 values.append(value)
         return sorted(values, key=lambda item: item["created_at"], reverse=True)
 

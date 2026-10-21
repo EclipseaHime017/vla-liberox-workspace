@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { copyModel, deleteModel, getModel, listModels, renameModel } from "../features/run-control/api";
 import type { PolicyDetail, PolicyInfo } from "../features/run-control/types";
 import { Badge } from "../components/ui/Badge";
+import { ModelTrainingRecords } from "../features/training/ModelTrainingRecords";
 
 export function ModelsPage() {
   const [models, setModels] = useState<PolicyInfo[]>([]);
@@ -9,17 +10,36 @@ export function ModelsPage() {
   const [detail, setDetail] = useState<PolicyDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const request = useRef(0);
   const refresh = async (policyId = selected) => {
-    const values = await listModels();
-    setModels(values);
-    const target = values.some((value) => value.policy_id === policyId) ? policyId : values[0]?.policy_id;
-    if (target) { setSelected(target); setDetail(await getModel(target)); }
+    const token = ++request.current;
+    setBusy(true);
+    try {
+      const values = await listModels();
+      if (request.current !== token) return;
+      setModels(values);
+      const target = values.some((value) => value.policy_id === policyId) ? policyId : values[0]?.policy_id;
+      setSelected(target ?? "");
+      setDetail(null);
+      if (target) {
+        const next = await getModel(target);
+        if (request.current === token) setDetail(next);
+      }
+    } catch (reason) { if (request.current === token) throw reason; }
+    finally { if (request.current === token) setBusy(false); }
   };
-  useEffect(() => { void refresh().catch((reason) => setError(String(reason))); }, []);
+  useEffect(() => {
+    void refresh().catch((reason) => setError(String(reason)));
+    return () => { request.current += 1; };
+  }, []);
   const choose = async (id: string) => {
-    setSelected(id); setBusy(true); setError("");
-    try { setDetail(await getModel(id)); } catch (reason) { setError(String(reason)); }
-    finally { setBusy(false); }
+    const token = ++request.current;
+    setSelected(id); setDetail(null); setBusy(true); setError("");
+    try {
+      const next = await getModel(id);
+      if (request.current === token) setDetail(next);
+    } catch (reason) { if (request.current === token) setError(String(reason)); }
+    finally { if (request.current === token) setBusy(false); }
   };
   const rename = async () => {
     if (!detail || detail.kind === "base") return;
@@ -49,9 +69,10 @@ export function ModelsPage() {
     <div className="page-heading"><p className="eyebrow">MODEL REGISTRY</p><h1>模型</h1><p>浏览基础模型与训练 overlay，管理显示名称、副本和训练来源。</p></div>
     {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
     <div className="models-layout">
-      <aside className="surface model-list"><div className="panel-title"><strong>模型库</strong><span>{models.length}</span></div>{models.map((model) => <button key={model.policy_id} className={selected === model.policy_id ? "active" : ""} onClick={() => void choose(model.policy_id)}><span><strong>{model.label}</strong><code>{model.policy_id}</code></span><Badge tone={model.kind === "base" ? "neutral" : "green"}>{model.kind === "base" ? "BASE" : (model.algorithm ?? "iql").toUpperCase()}</Badge></button>)}</aside>
+      <aside className="surface model-list"><div className="panel-title"><strong>模型库</strong><span>{models.length}</span></div>{models.map((model) => <button key={model.policy_id} disabled={busy && Boolean(detail)} className={selected === model.policy_id ? "active" : ""} onClick={() => void choose(model.policy_id)}><span><strong>{model.label}</strong><code>{model.policy_id}</code></span><Badge tone={model.kind === "base" ? "neutral" : "green"}>{model.kind === "base" ? "BASE" : (model.algorithm ?? "iql").toUpperCase()}</Badge></button>)}</aside>
       <main className="surface model-detail">{busy && !detail ? <div className="empty-table">加载模型信息…</div> : detail ? <>
         <div className="model-detail-head"><div><p className="eyebrow">{detail.kind}</p><h2>{detail.label}</h2><code>{detail.policy_id}</code></div><div>{detail.kind !== "base" && <><button disabled={busy} onClick={() => void rename()}>重命名</button><button disabled={busy} onClick={() => void duplicate()}>复制模型</button><button className="danger" disabled={busy} onClick={() => void remove()}>删除</button></>}</div></div>
+        <ModelTrainingRecords policyId={detail.policy_id} jobs={detail.training_records} />
         <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd><dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
         {detail.model_config && <dl className="model-properties">
           <dt>上下翻转</dt><dd>{detail.observation?.image_flip_vertical ? "On" : "Off"}</dd>
@@ -67,7 +88,6 @@ export function ModelsPage() {
           </>}
         </dl>}
         {detail.components.length > 0 && <section><h3>模型组件</h3><div className="component-list">{detail.components.map((component) => <div key={component.name}><strong>{component.name}</strong><span>{(component.size_bytes / 1024 / 1024).toFixed(2)} MiB</span><code>{component.sha256.slice(0, 16)}…</code></div>)}</div></section>}
-        <section><h3>训练记录</h3>{detail.training_records.length ? <div className="model-training-records">{detail.training_records.map((job) => <article key={job.id}><div><strong>{job.id}</strong><Badge tone={job.status === "COMPLETED" ? "green" : job.status === "FAILED" ? "red" : "neutral"}>{job.status}</Badge></div><p>数据集 {job.dataset_id ?? "—"} · {job.created_at ? new Date(job.created_at).toLocaleString() : "—"}</p><code>{String(job.output_path ?? "")}</code></article>)}</div> : <div className="empty-table">没有匹配的本机训练记录；从其他设备复制的 overlay 仍可正常推理。</div>}</section>
       </> : <div className="empty-table">模型库为空</div>}</main>
     </div>
   </section>;

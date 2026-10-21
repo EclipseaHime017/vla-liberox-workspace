@@ -229,20 +229,20 @@ describe("dataset evaluation configuration", () => {
     vi.mocked(api.getBootstrap).mockResolvedValue({ task: tasks[0], task_catalog: tasks } as unknown as Bootstrap);
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
     render(<DatasetPage />);
-    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenCalledWith("LEVEL1::bowl", 1, 5));
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenCalledWith("LEVEL1::bowl", 1, 5, undefined, { policy_family: "", policy_id: "" }));
     vi.mocked(api.listDatasetRuns).mockClear();
     fireEvent.change(screen.getByLabelText("数据任务"), { target: { value: "bowl" } });
-    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenCalledWith("", 1, 5, tasks.slice(0, 3).map((task) => task.task_id)));
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenCalledWith("", 1, 5, tasks.slice(0, 3).map((task) => task.task_id), { policy_family: "", policy_id: "" }));
     expect(api.listDatasetRuns).toHaveBeenCalledTimes(1);
     expect((screen.getByRole("button", { name: "批量评价" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByLabelText("数据提示词") as HTMLSelectElement).disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("数据难度"), { target: { value: "LEVEL4" } });
-    await waitFor(() => expect(api.listTrainingDatasets).toHaveBeenLastCalledWith(undefined, ["LEVEL4::cyan", "LEVEL4::grey"]));
+    await waitFor(() => expect(api.listTrainingDatasets).toHaveBeenLastCalledWith(undefined, ["LEVEL4::cyan", "LEVEL4::grey"], { policy_family: "", policy_id: "" }));
     fireEvent.change(screen.getByLabelText("数据提示词"), { target: { value: "LEVEL4::grey" } });
-    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenLastCalledWith("LEVEL4::grey", 1, 5));
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenLastCalledWith("LEVEL4::grey", 1, 5, undefined, { policy_family: "", policy_id: "" }));
     expect((screen.getByRole("button", { name: "批量评价" }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.change(screen.getByLabelText("数据任务"), { target: { value: "" } });
-    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenLastCalledWith("", 1, 5, undefined));
+    await waitFor(() => expect(api.listDatasetRuns).toHaveBeenLastCalledWith("", 1, 5, undefined, { policy_family: "", policy_id: "" }));
   });
 
   it("freezes membership without launching any evaluator", async () => {
@@ -423,4 +423,44 @@ describe("dataset evaluation configuration", () => {
     expect(api.getTrajectoryDetail).toHaveBeenLastCalledWith("run");
     expect(screen.queryByRole("button", { name: "详情" })).toBeNull();
   });
+});
+
+
+it("uses the same model scope for paging, batch evaluation and frozen selections", async () => {
+  const choices = [{family: "custom", policy_id: "alpha", label: "Alpha"}];
+  vi.mocked(api.getBootstrap).mockResolvedValue({task: {task_id: "task"},
+    task_catalog: [{task_id: "task", prompt: "pick bowl"}], policy_catalog: [
+      {policy_id: "alpha", label: "Alpha", family: "custom"},
+    ]} as unknown as Bootstrap);
+  vi.mocked(api.listTrainingDatasets).mockResolvedValue([]);
+  vi.mocked(api.listDatasetRuns).mockImplementation(async (_task, _page, _size, _ids, scope) => ({
+    items: [{id: "run", kind: "original", status: "COMPLETED", training_eligible: true, action_count: 10}],
+    total: scope?.policy_family ? 1 : 8, success_count: scope?.policy_id ? 0 : 1,
+    eligible_count: 1, page: 1, pages: 1, page_size: 5, policy_options: choices,
+  }) as Awaited<ReturnType<typeof api.listDatasetRuns>>);
+  vi.mocked(api.evaluateTrajectories).mockResolvedValue({job: null, message: "Done"} as Awaited<ReturnType<typeof api.evaluateTrajectories>>);
+  vi.spyOn(window, "alert").mockImplementation(() => {});
+  vi.mocked(api.previewTrainingDataset).mockResolvedValue({selected_count: 1, action_count: 10, chunk_count: 2,
+    categories: {}, run_ids: ["run"]} as Awaited<ReturnType<typeof api.previewTrainingDataset>>);
+  vi.mocked(api.createTrainingDataset).mockResolvedValue({id: "created", kind: "dataset", status: "QUEUED"} as Awaited<ReturnType<typeof api.createTrainingDataset>>);
+  render(<DatasetPage />);
+  fireEvent.click(await screen.findByLabelText("选择 run"));
+  fireEvent.change(screen.getByLabelText("数据模型家族"), {target: {value: "custom"}});
+  fireEvent.change(screen.getByLabelText("数据具体模型"), {target: {value: "alpha"}});
+  const scope = {policy_family: "custom", policy_id: "alpha"};
+  await waitFor(() => expect(api.listDatasetRuns).toHaveBeenLastCalledWith("task", 1, 5, undefined, scope));
+  expect((screen.getByRole("button", {name: "评价所选（仅补缺失）"}) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByLabelText("成功率 0.0%")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name: "批量评价"}));
+  await waitFor(() => expect(api.evaluateTrajectories).toHaveBeenCalledWith(expect.objectContaining({...scope, run_ids: null})));
+  fireEvent.click(screen.getByRole("button", {name: "打包训练数据集"}));
+  fireEvent.click(screen.getByRole("button", {name: "创建训练数据集"}));
+  fireEvent.click(screen.getByRole("button", {name: "预览选择结果"}));
+  await waitFor(() => expect(api.previewTrainingDataset).toHaveBeenCalledWith("task", expect.objectContaining(scope)));
+  const freeze = screen.getByRole("button", {name: "冻结数据集"});
+  await waitFor(() => expect((freeze as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(freeze);
+  await waitFor(() => expect(api.createTrainingDataset).toHaveBeenCalledWith(expect.objectContaining({
+    selection: expect.objectContaining(scope),
+  })));
 });
