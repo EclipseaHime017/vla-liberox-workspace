@@ -9,6 +9,22 @@ from .base_models import BASE_MODELS, execution_config
 CHUNKING_RULE = "recorded_execution_v1"
 
 
+def validate_task_prompt(source: dict, prompt: str | None, *, context: str) -> None:
+    """Reject old custom-language data rather than silently relabelling its actions."""
+    records = [source]
+    for name in ("trajectory_segments", "chunks", "evaluation_chunks"):
+        values = source.get(name)
+        if isinstance(values, list):
+            records.extend(value for value in values if isinstance(value, dict))
+    for record in records:
+        value = record.get("policy_instruction")
+        if value is not None and (
+            not isinstance(value, str) or not isinstance(prompt, str) or value.strip() != prompt.strip()
+        ):
+            raise ValueError(f"{context}: recorded custom instruction differs from the full task prompt; "
+                             "this recording cannot be used for training or continuation")
+
+
 def _steps(value) -> int:
     if type(value) is not int or value < 1:
         raise ValueError("Recorded open_loop_steps must be a positive integer")

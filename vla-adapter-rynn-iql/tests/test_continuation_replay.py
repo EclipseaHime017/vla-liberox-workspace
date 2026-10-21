@@ -14,7 +14,7 @@ from test_replay import FakeAnnotator, _stats
 
 
 @pytest.mark.parametrize("flip_horizontal", [False, True])
-def test_instruction_segments_train_actor_but_keep_full_task_reward(configured, flip_horizontal):
+def test_producer_segments_keep_full_task_prompt_for_actor_and_reward(configured, flip_horizontal):
     source = Path(configured.section("paths")["dataset_sources"][0])
     contract = model_contract(configured.section("model"))
     contract["observation"] = dict(image_flip_vertical=True, image_flip_horizontal=flip_horizontal)
@@ -28,9 +28,9 @@ def test_instruction_segments_train_actor_but_keep_full_task_reward(configured, 
     path = next(source.rglob("branch/run.json"))
     run = json.loads(path.read_text())
     run["trajectory_segments"] = [
-        dict(start=0, end=5, origin_run_id="root", policy_instruction="first step"),
-        dict(start=5, end=10, origin_run_id="earlier-human", policy_instruction="second step"),
-        dict(start=10, end=22, origin_run_id="branch", policy_instruction="finish task")]
+        dict(start=0, end=5, origin_run_id="root"),
+        dict(start=5, end=10, origin_run_id="earlier-human"),
+        dict(start=10, end=22, origin_run_id="branch")]
     run["resume_step"], run["handoff_steps"] = 10, [5, 10]
     path.write_text(json.dumps(run))
     prepare_dataset(configured)
@@ -50,14 +50,14 @@ def test_instruction_segments_train_actor_but_keep_full_task_reward(configured, 
     for kind in (ActionDataset, ReplayDataset):
         dataset = kind(configured, _stats(7), _stats(8), split="train")
         actual = [dataset[index]["prompt"] for index in range(len(dataset))]
-        assert "second step" in actual and "finish task" in actual
+        assert set(actual) == {"do the task"}
         expected = image[::-1, ::-1] if flip_horizontal else image[::-1]
         np.testing.assert_array_equal(dataset[0]["agent_image"].numpy(), expected)
         np.testing.assert_array_equal(dataset[0]["wrist_image"].numpy(), expected + 1)
         generator = torch.Generator().manual_seed(7)
         for _ in range(10):
             batch = _sample_batch(dataset, 4, generator)
-            assert len(set(batch["prompt"])) == 1
+            assert set(batch["prompt"]) == {"do the task"}
 
 
 def test_exact_origin_dedup_keeps_distinct_human_attempts_and_short_interruptions():
@@ -81,3 +81,54 @@ def test_invalid_handoff_boundaries_are_rejected(boundary):
         action_source_segments=[dict(start=0, end=10, action_source="policy")])
     with pytest.raises(ValueError, match="integer recording boundaries"):
         add_episode_chunks(episode, 8)
+
+
+@pytest.mark.parametrize("source_kind", ["run", "trajectory", "segment"])
+@pytest.mark.parametrize("matches_task", [False, True])
+def test_old_recordings_never_silently_relabel_custom_actions(configured, source_kind, matches_task):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    path = next(source.rglob("branch/run.json"))
+    run = json.loads(path.read_text())
+    instruction = "do the task" if matches_task else "a different task"
+    metadata = dict(task="do the task")
+    if source_kind == "run":
+        run["policy_instruction"] = instruction
+        path.write_text(json.dumps(run))
+    elif source_kind == "trajectory":
+        metadata["policy_instruction"] = instruction
+    else:
+        metadata["trajectory_segments"] = [
+            dict(start=0, end=22, origin_run_id="branch", open_loop_steps=8,
+                 policy_instruction=instruction)]
+    trajectory = path.parent / "episodes/episode_000/trajectory.npz"
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = dict(archive)
+    arrays["metadata_json"] = np.asarray(json.dumps(metadata))
+    np.savez_compressed(trajectory, **arrays)
+    before = path.read_bytes(), trajectory.read_bytes()
+    if matches_task:
+        prepare_dataset(configured)
+        dataset = ActionDataset(configured, _stats(7), _stats(8))
+        assert {dataset[index]["prompt"] for index in range(len(dataset))} == {"do the task"}
+        assert all("policy_instruction" not in chunk
+                   for episode in dataset.manifest["episodes"] for chunk in episode["chunks"])
+    else:
+        with pytest.raises(ValueError, match="custom instruction differs from the full task prompt"):
+            prepare_dataset(configured)
+    assert (path.read_bytes(), trajectory.read_bytes()) == before
+
+
+@pytest.mark.parametrize("section", ["chunks", "evaluation_chunks", "trajectory_segments"])
+def test_prepared_data_rejects_old_custom_language(configured, section):
+    prepared = prepare_dataset(configured)
+    manifest = load_manifest(configured)
+    episode = manifest["episodes"][0]
+    if section == "trajectory_segments":
+        episode[section] = [dict(policy_instruction="different task")]
+    else:
+        episode[section][0]["policy_instruction"] = "different task"
+    prepared.manifest.write_text(json.dumps(manifest))
+    before = prepared.manifest.read_bytes()
+    with pytest.raises(ValueError, match="custom instruction differs from the full task prompt"):
+        load_manifest(configured)
+    assert prepared.manifest.read_bytes() == before

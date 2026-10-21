@@ -19,6 +19,7 @@ import numpy as np
 
 from .config import LoadedConfig, needs_rynnvalue, needs_stage
 from .data import load_manifest, prepare_dataset
+from .execution import validate_task_prompt
 from .io import atomic_json, sha256_file, stable_hash
 from .methods import training_method
 from .rewards import (
@@ -302,6 +303,8 @@ def saved_reward(run: GlobalRun, source: str) -> tuple[dict, Path]:
 
 def _validate_reward_layout(metadata: dict, arrays, episode: dict) -> None:
     """Reuse exact recorded intervals, allowing only absent legacy provenance."""
+    context = f"Global evaluation {episode['run_id']}"
+    validate_task_prompt(metadata, episode.get("prompt"), context=context)
     expected = episode["reward_boundaries"]
     if "boundary_steps" not in arrays or not np.array_equal(arrays["boundary_steps"], expected):
         saved = set(np.asarray(arrays["boundary_steps"]).tolist()) if "boundary_steps" in arrays else set()
@@ -314,6 +317,7 @@ def _validate_reward_layout(metadata: dict, arrays, episode: dict) -> None:
         if key in arrays and (arrays[key].shape != (len(chunks),) or not np.isfinite(arrays[key]).all()):
             raise ValueError(f"Global evaluation {key} does not match recorded chunks: {episode['run_id']}")
     for previous in (metadata.get("episode", {}), metadata.get("entry", {})):
+        validate_task_prompt(previous, episode.get("prompt"), context=context)
         saved_chunks = previous.get("evaluation_chunks")
         if saved_chunks is None:
             continue
@@ -323,7 +327,7 @@ def _validate_reward_layout(metadata: dict, arrays, episode: dict) -> None:
             if (not isinstance(saved, dict)
                     or any(saved.get(key) != current.get(key) for key in ("start", "end", "length", "action_source"))
                     or any(saved[key] != current.get(key) for key in (
-                        "transition_type", "interrupted", "copied_prefix", "origin_run_id", "policy_instruction") if key in saved)):
+                        "transition_type", "interrupted", "copied_prefix", "origin_run_id") if key in saved)):
                 raise ValueError(f"Global evaluation chunk semantics mismatch: {episode['run_id']}")
 
 

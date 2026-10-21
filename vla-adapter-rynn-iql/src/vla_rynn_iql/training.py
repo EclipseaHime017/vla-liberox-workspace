@@ -169,7 +169,7 @@ def _sample_batch(dataset: ActionDataset, batch_size: int, generator: torch.Gene
     if batch_size > 1 and len(groups) > 1:
         anchor = int(torch.randint(len(dataset), (1,), generator=generator))
         episode, chunk_index, _ = dataset.items[anchor]
-        prompt = dataset.chunks[episode["run_id"]][chunk_index].get("policy_instruction", episode["prompt"])
+        prompt = episode["prompt"]
         group = groups[prompt]
         indices = [group[index] for index in torch.randint(len(group), (batch_size,), generator=generator).tolist()]
         return default_collate([dataset[index] for index in indices])

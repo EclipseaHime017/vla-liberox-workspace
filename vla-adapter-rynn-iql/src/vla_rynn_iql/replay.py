@@ -36,7 +36,7 @@ class ActionDataset(Dataset):
                                                include_post_success=self.include_post_success)]
         self.prompt_groups: dict[str, list[int]] = {}
         for index, (episode, chunk_index, _) in enumerate(self.items):
-            prompt = self.chunks[episode["run_id"]][chunk_index].get("policy_instruction", episode["prompt"])
+            prompt = episode["prompt"]
             self.prompt_groups.setdefault(prompt, []).append(index)
         if split == "train" and not self.items:
             raise RuntimeError("Training replay is empty")
@@ -119,7 +119,7 @@ class ActionDataset(Dataset):
             "chunk_length": torch.tensor(length, dtype=torch.int64),
             "agent_image": torch.from_numpy(agent.copy()),
             "wrist_image": torch.from_numpy(wrist.copy()),
-            "prompt": chunk.get("policy_instruction", episode["prompt"]),
+            "prompt": episode["prompt"],
             "run_id": episode["run_id"],
             "start": start,
             "action_source": str(chunk["action_source"]),
