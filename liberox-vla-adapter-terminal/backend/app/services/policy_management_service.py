@@ -87,40 +87,39 @@ class PolicyManagementService:
         return result
 
     def _training_records(self, entry, manifest: dict) -> list[dict]:
-        if self.jobs is None:
+        if entry.is_base or self.jobs is None:
             return []
         source = self._training_source(entry)
         records = []
         for job in self.jobs.list():
             if job.get("kind") != "training":
                 continue
-            settings = job.get("parameters", {}).get("model") or {}
-            if entry.is_base:
-                matches = (settings.get("base_id") == entry.policy_id and settings.get("family") == entry.family
-                           and settings.get("base_checkpoint") == entry.base_checkpoint)
-                if entry.base_revision and settings.get("base_revision") != entry.base_revision:
+            summary = job.get("training_summary") or {}
+            exported = summary.get("policy_overlay") or summary.get("overlay_path") or summary.get("policy_manifest")
+            matches = bool(exported and Path(exported).resolve() == Path(source["source_manifest"]).resolve())
+            if not matches and job.get("output_path"):
+                for marker in Path(job["output_path"]).glob("*/export.json"):
+                    try:
+                        owner = json.loads(marker.read_text())
+                        if (owner.get("policy_id") == source["source_policy_id"]
+                                and Path(str(owner.get("registry", ""))).resolve() / owner["policy_id"] / "policy.yaml"
+                                == Path(source["source_manifest"]).resolve()):
+                            matches = True
+                            break
+                    except (OSError, ValueError, AttributeError):
+                        continue
+            for key, summary_key in (("dataset_sha256", "dataset_sha256"), ("training_step", "steps"), ("algorithm", "algorithm")):
+                expected = manifest.get(key, "iql" if key == "algorithm" else None)
+                if summary.get(summary_key) is not None and summary[summary_key] != expected:
                     matches = False
-            else:
-                summary = job.get("training_summary") or {}
-                exported = summary.get("policy_overlay") or summary.get("overlay_path") or summary.get("policy_manifest")
-                matches = bool(exported and Path(exported).resolve() == Path(source["source_manifest"]).resolve())
-                if not matches and job.get("output_path"):
-                    for marker in Path(job["output_path"]).glob("*/export.json"):
-                        try:
-                            owner = json.loads(marker.read_text())
-                            if (owner.get("policy_id") == source["source_policy_id"]
-                                    and Path(str(owner.get("registry", ""))).resolve() / owner["policy_id"] / "policy.yaml"
-                                    == Path(source["source_manifest"]).resolve()):
-                                matches = True
-                                break
-                        except (OSError, ValueError, AttributeError):
-                            continue
-                for key, summary_key in (("dataset_sha256", "dataset_sha256"), ("training_step", "steps"), ("algorithm", "algorithm")):
-                    expected = manifest.get(key, "iql" if key == "algorithm" else None)
-                    if summary.get(summary_key) is not None and summary[summary_key] != expected:
-                        matches = False
             if matches:
-                records.append({**job, "model_relation": "source" if entry.is_base else "output"})
+                records.append({**job, "model_relation": "output"})
+        if len(records) > 1:
+            raise ConflictError(
+                "所选模型匹配到多个训练记录，无法唯一确定训练来源：" + "、".join(job["id"] for job in records),
+                code="AMBIGUOUS_MODEL_TRAINING_RECORD",
+                context={"policy_id": entry.policy_id, "job_ids": [job["id"] for job in records]},
+            )
         return records
 
     def configuration(self, policy_id: str, job_id: str) -> dict[str, str]:

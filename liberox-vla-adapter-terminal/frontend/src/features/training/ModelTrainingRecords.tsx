@@ -40,7 +40,7 @@ function TrainingRecord({ policyId, job }: { policyId: string; job: OfflineJob }
   return <article className="model-training-record" aria-label={title}>
     <header className="model-training-record-head">
       <div><strong>{title}</strong>
-        <span>{job.model_relation === "source" ? "从此基模后训练" : "生成当前模型"}</span></div>
+        <span>生成当前模型</span></div>
       <Badge tone={job.status === "COMPLETED" ? "green" : job.status === "FAILED" ? "red" : "neutral"}>{job.status}</Badge>
     </header>
     <dl className="model-training-summary">

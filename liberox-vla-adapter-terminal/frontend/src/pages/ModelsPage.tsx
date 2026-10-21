@@ -72,7 +72,7 @@ export function ModelsPage() {
       <aside className="surface model-list"><div className="panel-title"><strong>模型库</strong><span>{models.length}</span></div>{models.map((model) => <button key={model.policy_id} disabled={busy && Boolean(detail)} className={selected === model.policy_id ? "active" : ""} onClick={() => void choose(model.policy_id)}><span><strong>{model.label}</strong><code>{model.policy_id}</code></span><Badge tone={model.kind === "base" ? "neutral" : "green"}>{model.kind === "base" ? "BASE" : (model.algorithm ?? "iql").toUpperCase()}</Badge></button>)}</aside>
       <main className="surface model-detail">{busy && !detail ? <div className="empty-table">加载模型信息…</div> : detail ? <>
         <div className="model-detail-head"><div><p className="eyebrow">{detail.kind}</p><h2>{detail.label}</h2><code>{detail.policy_id}</code></div><div>{detail.kind !== "base" && <><button disabled={busy} onClick={() => void rename()}>重命名</button><button disabled={busy} onClick={() => void duplicate()}>复制模型</button><button className="danger" disabled={busy} onClick={() => void remove()}>删除</button></>}</div></div>
-        <ModelTrainingRecords policyId={detail.policy_id} jobs={detail.training_records} />
+        <ModelTrainingRecords policyId={detail.policy_id} jobs={detail.kind === "base" ? [] : detail.training_records} />
         <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd><dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
         {detail.model_config && <dl className="model-properties">
           <dt>上下翻转</dt><dd>{detail.observation?.image_flip_vertical ? "On" : "Off"}</dd>

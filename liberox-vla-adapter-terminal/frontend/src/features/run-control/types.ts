@@ -348,7 +348,7 @@ export type OfflineJob = {
   parameters: Record<string, unknown>; log_size: number;
   metrics?: Record<string, number | string | null>;
   training_summary?: Record<string, unknown>;
-  model_relation?: "source" | "output";
+  model_relation?: "output";
   evaluation_summary?: EvaluationAggregate & { evaluation_id?: string };
 };
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from backend.app.core.exceptions import ConflictError
 from backend.app.services.offline_job_service import OfflineJobService
 from backend.app.services.policy_management_service import PolicyManagementService
 from backend.app.storage.files import recorded_policy_family
@@ -105,6 +106,23 @@ def test_training_records_match_actual_outputs_not_dataset_or_input_model(tmp_pa
     assert (tmp_path / copied["policy_id"] / "provenance.json").is_file()
 
 
+def test_model_training_source_must_be_unique_without_picking_a_record(tmp_path):
+    _overlay(tmp_path)
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
+    records = [dict(id=identifier, kind="training", parameters={}, training_summary={
+        "policy_overlay": str(tmp_path / "trained/policy.yaml")}) for identifier in ("first", "second")]
+    jobs = SimpleNamespace(list=lambda: records, configuration=lambda _: pytest.fail("Ambiguous sources must not expose a YAML"))
+    management = PolicyManagementService(SimpleNamespace(policy_catalog=catalog), jobs)
+    for operation in (lambda: management.detail("trained"), lambda: management.configuration("trained", "first")):
+        with pytest.raises(ConflictError) as error:
+            operation()
+        assert error.value.code == "AMBIGUOUS_MODEL_TRAINING_RECORD"
+        assert error.value.context == {"policy_id": "trained", "job_ids": ["first", "second"]}
+    records.reverse()
+    with pytest.raises(ConflictError):
+        management.configuration("trained", "second")
+
+
 def test_yaml_reader_returns_historical_text_and_rejects_unsafe_or_missing_files(tmp_path):
     jobs = object.__new__(OfflineJobService)
     jobs.jobs_root = tmp_path / "jobs"
@@ -127,15 +145,20 @@ def test_yaml_reader_returns_historical_text_and_rejects_unsafe_or_missing_files
         jobs.configuration("train")
 
 
-def test_base_history_checks_checkpoint_and_known_revision():
-    entry = SimpleNamespace(policy_id="custom-base", family="custom", is_base=True,
-                            manifest=None, base_checkpoint="/models/current", base_revision="new")
-    settings = dict(base_id="custom-base", family="custom", base_checkpoint="/models/current", base_revision="new")
-    records = [dict(id="correct", kind="training", parameters={"model": settings}),
-               dict(id="wrong-checkpoint", kind="training", parameters={"model": {**settings, "base_checkpoint": "/models/old"}}),
-               dict(id="wrong-revision", kind="training", parameters={"model": {**settings, "base_revision": "old"}})]
-    management = PolicyManagementService(SimpleNamespace(policy_catalog=None), SimpleNamespace(list=lambda: records))
-    assert [job["id"] for job in management._training_records(entry, {})] == ["correct"]
+@pytest.mark.parametrize("training_count", [0, 1, 2])
+def test_base_model_has_no_training_records_even_when_used_by_training_jobs(tmp_path, training_count):
+    catalog = PolicyCatalog(tmp_path, base_models=BASE_MODELS)
+    base = catalog.entry("base")
+    settings = dict(base_id=base.policy_id, family=base.family,
+                    base_checkpoint=base.base_checkpoint, base_revision=base.base_revision)
+    records = [dict(id=f"train-{index}", kind="training", parameters={"model": settings},
+                    training_summary={"policy_overlay": str(tmp_path / f"trained-{index}" / "policy.yaml")})
+               for index in range(training_count)]
+    jobs = SimpleNamespace(list=lambda: records, configuration=lambda _: pytest.fail("Base models must not expose a training YAML"))
+    management = PolicyManagementService(SimpleNamespace(policy_catalog=catalog), jobs)
+    assert management.detail("base")["training_records"] == []
+    with pytest.raises(KeyError, match="不属于所选模型"):
+        management.configuration("base", "train-0")
 
 
 def test_unrecorded_policy_id_is_not_assumed_to_be_base(tmp_path, monkeypatch):

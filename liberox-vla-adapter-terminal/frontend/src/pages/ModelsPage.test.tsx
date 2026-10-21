@@ -39,6 +39,16 @@ const job = { id: "train-17", kind: "training", status: "COMPLETED", dataset_id:
     task_id: "place bowl", model: { base_id: "registered-base" }, reward: null },
 } as unknown as OfflineJob;
 
+it("keeps base models empty even if an older backend returns source training jobs", async () => {
+  const model: PolicyDetail = { ...detail("base", [job]), kind: "base", training_step: null };
+  vi.mocked(listModels).mockResolvedValue([model]); vi.mocked(getModel).mockResolvedValue(model);
+  render(<ModelsPage />);
+  await screen.findByText("没有关联的本机训练记录。");
+  expect(screen.queryByRole("article")).toBeNull();
+  expect(screen.queryByRole("button", { name: "查看训练 YAML" })).toBeNull();
+  expect(getModelTrainingConfig).not.toHaveBeenCalled();
+});
+
 it("shows readable training history and opens its exact effective YAML", async () => {
   const model = detail("trained", [job]);
   vi.mocked(listModels).mockResolvedValue([model]); vi.mocked(getModel).mockResolvedValue(model);
