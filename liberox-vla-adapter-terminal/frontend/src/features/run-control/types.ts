@@ -339,7 +339,7 @@ export type DatasetIntegrityReport = {
 type IntegrityCounts = { total: number; ready: number; missing: number; invalid: number };
 
 export type OfflineJob = {
-  id: string; kind: "annotation" | "trajectory_evaluation" | "training" | "evaluation" | "simulation" | "dataset" | "verification" | "export" | "publication";
+  id: string; kind: "annotation" | "trajectory_evaluation" | "training" | "evaluation" | "simulation" | "dataset" | "verification" | "export" | "publication" | "critic_diagnostic";
   status: "QUEUED" | "STARTING" | "RUNNING" | "STOPPING" | "COMPLETED" | "FAILED" | "CANCELED";
   dataset_id: string | null; created_at: string; started_at: string | null; completed_at: string | null;
   stage: string; stage_label: string; error: string | null; output_path: string;

@@ -22,6 +22,19 @@ const job: OfflineJob = {
 afterEach(cleanup);
 
 describe("offline job monitor", () => {
+  it("keeps critic-only diagnostics free of actor training metrics", () => {
+    render(<JobMonitor initial={{ ...job, kind: "critic_diagnostic", stage_label: "训练 Critic",
+      metrics: { q_loss: .1, actor_loss: 99, actor_learning_rate: 1e-4 } }} />);
+    act(() => socket.onmessage?.({ data: JSON.stringify({
+      job: { ...job, kind: "critic_diagnostic", stage_label: "训练 Critic", metrics: { actor_loss: 99 } },
+      logs: { text: "critic step 10\n" },
+    }) }));
+    expect(screen.getByText("critic step 10")).toBeTruthy();
+    expect(screen.queryByText("Actor loss")).toBeNull();
+    expect(screen.queryByText("Policy LR")).toBeNull();
+    expect(screen.queryByText("IQL")).toBeNull();
+  });
+
   it("shows verification progress then scoped reward results instead of waiting for process logs", () => {
     render(<JobMonitor initial={{ ...job, kind: "verification", status: "QUEUED", stage_label: "等待前序任务完成" }} />);
     expect(screen.getByRole("status").textContent).toBe("等待前序任务完成");

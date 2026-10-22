@@ -54,7 +54,7 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
     if (follow.current && monitor.current) monitor.current.scrollTop = monitor.current.scrollHeight;
   }, [text]);
   const lines = useMemo(() => text.split(/\r?\n/).filter(Boolean).map(displayLine), [text]);
-  const metric = job.metrics;
+  const metric = job.kind === "critic_diagnostic" ? undefined : job.metrics;
   const warmup = Number(job.parameters.critic_warmup_steps ?? 0);
   const isBC = job.parameters.algorithm === "bc";
   const phase = job.kind === "annotation" || !metric

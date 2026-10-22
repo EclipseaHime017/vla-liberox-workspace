@@ -126,6 +126,37 @@ def model_backend(raw: dict[str, Any]):
     return import_module(MODELS[model_config(raw)["family"]].backend)
 
 
+def replay_stats(settings: dict[str, Any]) -> tuple[dict, dict]:
+    """Read a model's replay normalization assets without constructing its actor."""
+    import math
+
+    configured = model_config({"model": settings}, partial=True)
+    values = family_adapter(configured["family"]).replay_stats(configured)
+    io = model_contract(configured)["io"]
+    result = []
+    for name, stats, size in zip(("action", "proprio"), values, (io["action_dim"], io["proprio_dim"])):
+        if not isinstance(stats, dict):
+            raise ValueError(f"Invalid {name} normalization statistics")
+        stats = copy.deepcopy(stats)
+        for key in ("q01", "q99"):
+            value = stats.get(key)
+            if (not isinstance(value, list) or len(value) < size
+                    or any(isinstance(item, bool) or not isinstance(item, (int, float))
+                           or not math.isfinite(item) for item in value[:size])):
+                raise ValueError(f"Invalid {name} normalization {key}")
+            stats[key] = value[:size]
+        if any(hi < lo for lo, hi in zip(stats["q01"], stats["q99"])):
+            raise ValueError(f"Invalid {name} normalization quantile order")
+        if "mask" in stats:
+            if not isinstance(stats["mask"], list) or len(stats["mask"]) < size or any(
+                type(item) is not bool for item in stats["mask"][:size]
+            ):
+                raise ValueError(f"Invalid {name} normalization mask")
+            stats["mask"] = stats["mask"][:size]
+        result.append(stats)
+    return tuple(result)
+
+
 def training_ui(family: str) -> dict:
     definition = MODELS[family]
     value = copy.deepcopy(definition.implementation.TRAINING_UI)

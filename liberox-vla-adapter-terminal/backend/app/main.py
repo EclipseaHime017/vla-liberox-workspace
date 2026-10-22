@@ -14,7 +14,7 @@ import eval_pickplace_direct as direct
 
 from .api import (
     controller, datasets, drafts, evaluations, offline_jobs, policies, runs,
-    training_datasets, websocket,
+    tools, training_datasets, websocket,
 )
 from .api.models import (
     CreateBranchRequest,
@@ -27,6 +27,7 @@ from .core.frontend import frontend_build_info
 from .services.run_service import RunService
 from .services.dataset_export_service import DatasetExportService
 from .services.offline_job_service import OfflineJobService
+from .services.critic_diagnostic_service import CriticDiagnosticService
 from .services.training_dataset_service import TrainingDatasetService
 from .services.trajectory_evaluation_service import TrajectoryEvaluationService
 from .services.robometer_evaluation_service import RobometerEvaluationService
@@ -77,6 +78,7 @@ def create_app(
                     app.state.robometer_evaluation_service,
                     stage_annotations=app.state.stage_annotation_service,
                 )
+                app.state.critic_diagnostic_service = CriticDiagnosticService(app.state.offline_job_service)
                 worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
                 worker.work_queue = app.state.offline_job_service
                 app.state.dataset_export_service = DatasetExportService(
@@ -88,6 +90,7 @@ def create_app(
                 app.state.trajectory_evaluation_service = None
                 app.state.robometer_evaluation_service = None
                 app.state.offline_job_service = None
+                app.state.critic_diagnostic_service = None
                 app.state.stage_annotation_service = None
             try:
                 yield
@@ -119,6 +122,7 @@ def create_app(
     app.include_router(training_datasets.router)
     app.include_router(evaluations.router)
     app.include_router(offline_jobs.router)
+    app.include_router(tools.router)
     app.include_router(policies.router)
     app.include_router(websocket.router)
 

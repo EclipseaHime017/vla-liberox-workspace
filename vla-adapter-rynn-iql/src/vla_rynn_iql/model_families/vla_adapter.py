@@ -78,3 +78,24 @@ def resolve_revision(settings, hash_file=None, *, parent=None):
     from ..checkpoint_assets import resolve_revision as resolve
     kwargs = {} if hash_file is None else {"hash_file": hash_file}
     return resolve(settings["base_checkpoint"], parent["revision"] if parent else settings.get("base_revision"), **kwargs)
+
+
+def replay_stats(settings):
+    import json
+    from pathlib import Path
+    from ..model_storage import local_model_directory, repository_directory
+
+    root = local_model_directory(settings["base_checkpoint"])
+    if not root.is_dir() and not Path(settings["base_checkpoint"]).is_absolute():
+        root = repository_directory(settings["base_checkpoint"])
+    path = root / "dataset_statistics.json"
+    if path.is_file():
+        stats = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        stats = json.loads((root / "config.json").read_text(encoding="utf-8")).get("norm_stats", {})
+    key = settings["stats_key"]
+    if key not in stats:
+        key += "_no_noops"
+    if key not in stats:
+        raise ValueError(f"Replay normalization key {settings['stats_key']!r} is missing: {root}")
+    return stats[key]["action"], stats[key]["proprio"]

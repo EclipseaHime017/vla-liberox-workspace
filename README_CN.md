@@ -292,6 +292,12 @@ python vla-adapter-rynn-iql/scripts/train_terminal.py \
 
 确认终端显示的执行计划后输入 `y` 开始。无人值守运行时加 `--yes`。多卡服务器训练使用独立的 `server` 分支，启动命令见 [快速启动指令](docs/RUN_COMMANDS.md)。
 
+### 3.8 Critic 诊断工具
+
+进入「工具 → IQL Critic 诊断」，选择已有数据集及已生成的奖励、任务和模型，设置 rollout 步数、critic 训练步数及 batch size 后提交。任务进入统一队列，先用所选模型采集独立轨迹，再仅训练 Q/V，不更新或导出 actor。结果中可查看 Matplotlib 曲线，下载逐 chunk 的 Q/V、优势、CSV/NPZ、critic checkpoint 和配置。
+
+训练与验证曲线可对照数据集已有奖励的有限轨迹回报；新 rollout 不生成奖励，只展示 critic 估计。IQL 的 V 是数据动作上的 expectile，不是所选策略的真实回报，Q/V 也不是理想真值。工具产物只保存在其任务目录，删除工具任务即可一并清理，不加入普通运行记录、数据集或模型库。
+
 ## 4. v0.8.0 更新汇总
 
 以下汇总 v0.7.2 发布提交之后至本版的 main 更新。BC/IQL、π₀.₅ 接入、统一队列和 Final Reward 已在此前提供，本版重点是完善配置、数据链路和运行可靠性。

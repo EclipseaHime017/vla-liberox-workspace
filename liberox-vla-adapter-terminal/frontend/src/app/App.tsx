@@ -10,8 +10,9 @@ import { SettingsPage } from "../pages/SettingsPage";
 import { TrainingPage } from "../pages/TrainingPage";
 import { EvaluationPage } from "../pages/EvaluationPage";
 import { ModelsPage } from "../pages/ModelsPage";
+import { ToolsPage } from "../pages/ToolsPage";
 
-const titles: Record<PageId, string> = { collect: "LIBERO-X仿真与干预控制台", runs: "运行记录", dataset: "数据管理", models: "模型管理", training: "离线训练", evaluation: "策略测试", settings: "系统设置" };
+const titles: Record<PageId, string> = { collect: "LIBERO-X仿真与干预控制台", runs: "运行记录", dataset: "数据管理", models: "模型管理", training: "离线训练", evaluation: "策略测试", tools: "测试工具", settings: "系统设置" };
 
 export default function App() {
   const [page, setPage] = useState<PageId>("collect");
@@ -26,7 +27,7 @@ export default function App() {
     <Header title={titles[page]} buildId={buildId} statusRef={setStatusTarget} showStatus={page === "collect"} />
     <PageLayout wide={page === "collect"}>
       <div hidden={page !== "collect"}><CollectPage statusTarget={statusTarget} /></div>
-      {page === "runs" && <RunsPage />}{page === "dataset" && <DatasetPage />}{page === "models" && <ModelsPage />}{page === "training" && <TrainingPage />}{page === "evaluation" && <EvaluationPage />}{page === "settings" && <SettingsPage />}
+      {page === "runs" && <RunsPage />}{page === "dataset" && <DatasetPage />}{page === "models" && <ModelsPage />}{page === "training" && <TrainingPage />}{page === "evaluation" && <EvaluationPage />}{page === "tools" && <ToolsPage />}{page === "settings" && <SettingsPage />}
     </PageLayout>
   </div></div>;
 }

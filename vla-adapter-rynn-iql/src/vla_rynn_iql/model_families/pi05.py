@@ -55,3 +55,13 @@ def resolve_revision(settings, hash_file=None, *, parent=None):
     if settings.get("base_revision") not in (None, revision):
         raise ValueError("Selected model weights differ from the configured revision")
     return revision
+
+
+def replay_stats(settings):
+    import json
+    from ..model_storage import local_model_directory
+
+    root = local_model_directory(settings["base_checkpoint"])
+    path = root / "assets" / settings["stats_key"] / "norm_stats.json"
+    stats = json.loads(path.read_text(encoding="utf-8"))["norm_stats"]
+    return tuple({**stats[key], "codec": "openpi_quantile"} for key in ("actions", "state"))
