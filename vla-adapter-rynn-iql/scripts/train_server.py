@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""YAML-driven server training for SSH, nohup and Slurm jobs."""
+"""YAML-driven single-node server training, also used by the PBS launcher."""
 import argparse
 import json
 import signal

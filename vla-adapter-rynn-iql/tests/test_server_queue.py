@@ -67,7 +67,7 @@ def test_queue_freezes_configuration_and_variant_observation(queued, monkeypatch
     assert seen[0]["model"]["base_revision"] == "a" * 64
 
 
-@pytest.mark.parametrize("model,batch,mode", [("base", 64, "lora"), ("pi05-libero-base", 32, "full")])
+@pytest.mark.parametrize("model,batch,mode", [("base", 64, "lora"), ("pi05-libero-base", 64, "full")])
 def test_queue_freezes_selected_model_training_profile(queued, model, batch, mode):
     from vla_rynn_iql.server_config import configure_server
     queue, server = queued

@@ -1,4 +1,4 @@
-"""One account-wide training lease, retained by the launched supervisor."""
+"""Account-wide exclusion, with opt-in disjoint GPU leases for PBS experiments."""
 from __future__ import annotations
 
 import fcntl
@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import re
 import uuid
 
 from .io import atomic_json
@@ -50,9 +51,20 @@ def _members(*, write=True):
 def register_worker(token: str):
     """Join before any CUDA work; stale launchers cannot join a newer lease."""
     with _members() as state:
-        if not token or state.get("token") != token or not state.get("accepting", True):
+        record = _record(state, token)
+        if not record or not record.get("accepting", True):
             raise TrainingBusy("Training lease changed before worker startup; refusing GPU work")
-        state.setdefault("workers", []).append(process_identity(os.getpid()))
+        record.setdefault("workers", []).append(process_identity(os.getpid()))
+
+
+def _record(state, token):
+    if not token:
+        return None
+    return state if state.get("token") == token else state.get("scopes", {}).get(token)
+
+
+def _active(record):
+    return any(process_alive(item) for item in [record.get("owner"), *record.get("workers", [])])
 
 
 def signal_worker(identity, command):
@@ -78,48 +90,79 @@ def signal_worker(identity, command):
 
 
 class TrainingLease:
-    def __init__(self):
+    def __init__(self, devices=None):
+        if devices is not None:
+            devices = tuple(sorted(devices))
+            if (not devices or len(set(devices)) != len(devices) or any(
+                    not isinstance(item, str) or not re.fullmatch(
+                        r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", item)
+                    for item in devices)):
+                raise ValueError("Shared training leases require distinct full physical GPU UUIDs")
+        self.devices = devices
         self.token = None
+        self._gpu_fds = []
         root = LEASE_ROOT
         root.mkdir(mode=0o700, exist_ok=True)
         if root.is_symlink() or root.stat().st_uid != os.getuid():
             raise ValueError("Unsafe server training lease directory")
         self.fd = os.open(root / "training.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(self.fd, (fcntl.LOCK_SH if devices else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+            for device in devices or ():
+                descriptor = os.open(root / f"{device}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                self._gpu_fds.append(descriptor)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with _members() as state:
-                if any(process_alive(item) for item in [state.get("owner"), *state.get("workers", [])]):
-                    raise TrainingBusy("Previous server worker is still active; waiting prevents overlapping GPU jobs")
+                records = [state, *state.get("scopes", {}).values()]
+                for record in records:
+                    overlap = devices is None or record.get("devices") is None or set(devices) & set(record["devices"])
+                    if overlap and _active(record):
+                        raise TrainingBusy("Previous server worker is still active on the requested resources")
                 self.token = uuid.uuid4().hex
-                state.clear()
-                state.update(token=self.token, owner=process_identity(os.getpid()), workers=[], accepting=True)
+                record = dict(token=self.token, owner=process_identity(os.getpid()), workers=[],
+                              accepting=True, devices=devices)
+                if devices is None:
+                    state.clear()
+                    state.update(record)
+                else:
+                    scopes = {token: value for token, value in state.get("scopes", {}).items() if _active(value)}
+                    scopes[self.token] = record
+                    state["scopes"] = scopes
         except BlockingIOError:
             self.close()
-            raise TrainingBusy("Another server training is active for this local account") from None
+            raise TrainingBusy("Another server training holds the requested resources") from None
         except BaseException:
             self.close()
             raise
 
     def workers(self):
         with _members(write=False) as state:
-            if state.get("token") != self.token:
-                return []
-            return [item for item in state.get("workers", []) if process_alive(item)]
+            record = _record(state, self.token) or {}
+            return [item for item in record.get("workers", []) if process_alive(item)]
 
     def retire(self):
         with _members() as state:
-            if state.get("token") == self.token:
-                state["accepting"] = False
+            record = _record(state, self.token)
+            if record is not None:
+                record["accepting"] = False
+
+    @property
+    def fds(self):
+        return (self.fd, *self._gpu_fds)
 
     def close(self):
         if self.fd is not None:
             try:
                 if self.token is not None:
                     with _members() as state:
-                        if state.get("token") == self.token:
-                            state["owner"] = None
-                            state["accepting"] = False
+                        record = _record(state, self.token)
+                        if record is not None:
+                            record["owner"] = None
+                            record["accepting"] = False
             finally:
+                for descriptor in self._gpu_fds:
+                    os.close(descriptor)
+                self._gpu_fds.clear()
                 os.close(self.fd)
                 self.fd = None
 

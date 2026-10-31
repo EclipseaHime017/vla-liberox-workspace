@@ -130,8 +130,8 @@ def test_config_preserves_global_final_and_overrides_training_only(configured, t
 @pytest.mark.parametrize("method", ["bc", "iql"])
 @pytest.mark.parametrize("model,family,batch,mode", [
     ("base", "vla_adapter", 64, "lora"),
-    ("pi05-libero-base", "pi05", 32, "full"),
-    ("pi05-liberox-base", "pi05", 32, "full"),
+    ("pi05-libero-base", "pi05", 64, "full"),
+    ("pi05-liberox-base", "pi05", 64, "full"),
 ])
 def test_server_model_profiles_select_batch_and_adaptation(configured, tmp_path, method, model, family, batch, mode):
     dataset, _, _ = global_runs(configured)
@@ -258,7 +258,7 @@ def test_dry_run_writes_no_training_results(configured, tmp_path, monkeypatch):
     assert script.main(["--config", str(server.path), "--model", "pi05-libero-base", "--method", "bc"]) == 0
     assert calls[0].raw["model"]["family"] == "pi05"
     assert calls[0].raw["model"]["backbone"] == "full"
-    assert calls[0].raw["training"]["micro_batch_size"] == 32
+    assert calls[0].raw["training"]["micro_batch_size"] == 64
     assert calls[0].raw["training"]["gradient_accumulation_steps"] == 1
     assert calls[0].raw["training"]["method"] == "bc"
     assert calls[0].raw["reward"] == {}

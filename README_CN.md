@@ -4,7 +4,7 @@ server 跟随 main 的发布版本号，当前两者均为 **v0.8.0**。两个�
 
 操作顺序：安装环境 → 上传数据集 → 配置训练 → 运行脚本 → 下载训练模型。除上传和下载外，以下命令均在服务器的仓库根目录执行。
 
-[指令速查](docs/RUN_COMMANDS.md) · [依赖说明](docs/DEPENDENCIES.md)
+[指令速查](docs/RUN_COMMANDS.md) · [依赖说明](docs/DEPENDENCIES.md) · [HPC 提交](vla-adapter-rynn-iql/hpc/README.md)
 
 ## 1. 环境配置
 
@@ -25,7 +25,7 @@ git switch server
 git pull --ff-only origin server
 ```
 
-服务器需要 NVIDIA GPU、Conda 和 Git，以及支持 CUDA 12.8 的驱动。按使用的模型安装对应环境。
+服务器需要 NVIDIA GPU、Conda 和 Git，以及支持 CUDA 12.8 的驱动。按使用的模型安装对应环境；在 PBS 集群上，先申请 CPU 交互作业，再在计算节点执行安装，不在登录节点安装或训练。
 
 ### VLA-Adapter
 
@@ -55,6 +55,8 @@ conda activate pi05
 ```
 
 安装脚本将固定版本的 OpenPI 放在 `third_party/OpenPI/`；权重默认以 BF16 转换到 `models/pi05_libero_torch/`。已有转换权重时直接复制完整目录，不必再次转换。其他已注册变体使用对应的 `--base-model` ID。
+
+NSCC 的 glibc 2.28 不能使用锁定的 Rerun PyPI wheel。先运行 `conda install -n pi05 -c conda-forge rerun-sdk=0.23.1=py311h7435ce4_0 numpy=1.26.4 pyarrow=20.0.0`，再为上述安装命令追加 `--preserve-package rerun-sdk`；安装器会检查其版本与上游锁一致。
 
 两个环境互不混装。训练入口可在已安装的训练环境中运行，实际训练进程按模型配置选择环境。复用导出的评价和奖励，不需要安装 RynnValue 或 Robometer 环境。
 
@@ -118,7 +120,7 @@ model_profiles:
       lora: {rank: 64}
   pi05:
     training:
-      micro_batch_size: 32
+      micro_batch_size: 64
       gradient_accumulation_steps: 1
     model:
       backbone: full
@@ -140,7 +142,7 @@ overrides:
 
 - `gpu_ids` 指定参与训练的 GPU，支持单机 1–8 卡。已有 `CUDA_VISIBLE_DEVICES` 时，编号对应其可见设备列表。
 - `micro_batch_size` 是全局 batch，必须能被 GPU 数整除；每卡 batch 为全局 batch ÷ GPU 数。
-- actor 每次更新的有效 batch = micro batch × gradient accumulation。默认不累积，VLA-Adapter 为全局 64、每卡 8；π₀.₅ 为全局 32、每卡 4（8 卡）。
+- actor 每次更新的有效 batch = micro batch × gradient accumulation。两个模型默认均为全局 64，不累积；8 卡时每卡 8，4 卡时每卡 16。
 - `checkpoint_interval` 必须能被累积步数整除。调整 GPU 数不会自动调整训练步数或学习率。
 
 `model_profiles` 按所选模型家族提供服务器训练默认值，BC 和 IQL 共用；`overrides` 中显式填写的配置优先。训练仍为 10,000 steps，不调整学习率、优化器或奖励。取消累积后每步更新 actor，因此总更新次数和采样量高于旧默认配置。大 batch 和全量微调需要实测显存，不会自动降低 batch 或启用累积。
@@ -194,7 +196,35 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
   --model pi05-libero-base --method bc
 ```
 
-入口自动完成输入校验、奖励读取、mmap 缓存和 DDP + ZeRO-1 启动。远程长训练建议在 tmux 中执行，断开 SSH 不会中断训练。
+入口自动完成输入校验、奖励读取、mmap 缓存和 DDP + ZeRO-1 启动。普通服务器可在 tmux 中运行；PBS 服务器必须通过调度器申请计算节点，不在登录节点训练。
+
+### PBS：一个作业并行运行多项实验
+
+PBS 功能位于 [hpc/](vla-adapter-rynn-iql/hpc/README.md)，普通服务器继续使用上面的 `train_server.py`。编辑 [pbs_pipeline.yaml](vla-adapter-rynn-iql/hpc/configs/pbs_pipeline.yaml)，填写 PBS 项目、数据集路径和每项实验的 GPU 分组。每项独立选择 `config`、`model`、`method`、`reward_source` 及 `overrides`，可以对比不同模型、奖励或数据集。
+
+示例申请单节点 4 卡，RynnValue 与 Final Reward 两个实验各用 2 卡，均为 π₀.₅-LIBERO-X、全局 batch 64、10000 steps、累积 1。每项训练有独立日志、checkpoint 和导出模型，不会合并成一次训练。每卡 batch 为 32，能否容纳 π₀.₅ 全量训练需要实测；也可申请单节点 8 卡并改为各用 4 卡。脚本不会自动缩小 batch。
+
+```bash
+# 保存本次配置快照、检查参数并生成 job.pbs；不提交作业
+python vla-adapter-rynn-iql/hpc/train_pbs.py prepare
+
+# 确认配置和资源后，显式提交一个 PBS 作业
+python vla-adapter-rynn-iql/hpc/train_pbs.py submit
+
+# 另一组实验仅在前一个作业成功后运行，填写 qsub 返回的完整 ID
+python vla-adapter-rynn-iql/hpc/train_pbs.py submit --config /path/to/next.yaml --afterok 123.pbs101
+
+qstat -f 123.pbs101
+qdel 123.pbs101
+```
+
+`prepare` 固定模型、方法及训练参数配置，不运行模型。提交后在计算节点读取数据、生成训练输入，并行启动各项实验。输出位于 `outputs/pbs/pbs_<时间>_<ID>/`，各项训练在 `runs/<实验名>/`，总体状态在 `result.json`。模型、数据和输出应放在持久存储或 Scratch，不放在任务结束后会清空的 `$TMPDIR`。
+
+`queue` 可使用 `normal@pbs101` 或 `ai@pbs102` 指定路由队列所属调度器。NSCC 的 normal GPU 池也提供四卡 A100 40GB；ai 池需要项目单独获准访问。`--afterok` 建立 PBS 依赖队列：前一组任一训练失败，下一组不会自动开始；提交后用 `qstat -f` 确认依赖已生效。
+
+PBS 入口只接受单节点、由调度器提供的完整 GPU UUID 列表；按配置分配互不重叠的卡。它不启动后台队列，不在登录节点运行训练。收到停止信号或距离配置时限剩余 5 分钟时，向各训练请求安全保存；直接强杀或节点故障只能使用此前完整 checkpoint。
+
+单节点 8 卡需要 `select=1:ngpus=8`，不能替换成两台 4 卡节点。申请前确认账号可用的八卡路由，不直接指定内部执行队列绕过路由。参考 [官方 GPU 指南](https://help.nscc.sg/wp-content/uploads/2024/05/ASP2A-AI-System_QuickStart-7-March-2024.pdf)。
 
 ### 训练队列
 
@@ -214,6 +244,8 @@ python vla-adapter-rynn-iql/scripts/train_queue.py list
 使用 `train_queue.py stop` 停止接收下一项，当前训练完成后退出，待执行任务保留。`train_queue.py cancel <任务ID>` 取消排队任务或安全停止正在训练的任务；`retry <任务ID>` 用同一配置追加一次重试。失败后继续下一项，异常退出的任务不会自动重复训练。没有新任务时后台队列保持待机，可继续入队。
 
 直接训练与所有队列共用本机当前账号的训练锁，避免互相争用 GPU；进程异常退出后仍有训练 worker 存活时不会启动另一项。代码更新后先停止并重新启动队列 worker。需要前台运行时使用 `train_queue.py run`；Ctrl+C 会安全停止当前训练及队列。
+
+PBS 并行入口使用按物理 GPU UUID 隔离的锁；不同卡可以并行，同卡或普通独占训练仍会互斥，取消其中一项不会终止另一项的进程。
 
 ### 查看进度、停止和恢复
 

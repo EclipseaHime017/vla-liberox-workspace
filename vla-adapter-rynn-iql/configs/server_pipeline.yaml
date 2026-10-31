@@ -28,7 +28,7 @@ model_profiles:
       lora: {rank: 64}
   pi05:
     training:
-      micro_batch_size: 32  # eight GPUs each process four chunks
+      micro_batch_size: 64  # eight GPUs each process eight chunks
       gradient_accumulation_steps: 1
     model:
       backbone: full

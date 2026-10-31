@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 from .io import sha256_file, stable_hash
-from .base_models import BASE_MODELS, base_model
 from .model_storage import local_model_directory
 
 OPENPI_COMMIT = "215abfb217dbac7d5f1273282331b9b1866c0479"
@@ -14,11 +13,11 @@ IDENTITY_FILE = "pi05_identity.json"
 
 def checkpoint_identity(directory: Path, hash_file=sha256_file, *, base_id: str | None = None,
                         parent: dict | None = None, contract: dict | None = None) -> dict:
+    from .base_models import BASE_MODELS, base_model, family_adapter
     directory = local_model_directory(directory).resolve()
     metadata = json.loads((directory / IDENTITY_FILE).read_text())
     base = (base_model(base_id) if base_id is not None else
             next((entry for entry in BASE_MODELS.values() if entry.source == metadata.get("source")), None))
-    from .base_models import family_adapter
     if base is None or family_adapter(base.family).BACKEND != "vla_rynn_iql.pi05":
         raise ValueError("Unregistered π₀.₅ checkpoint source")
     contract = parent["contract"] if parent else (contract or base.contract)

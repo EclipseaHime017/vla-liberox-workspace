@@ -106,19 +106,24 @@ def execution_plan(server, task, raw, distributed, source):
 
 class ServerRun:
     """A subprocess lifecycle with durable status and cooperative safe cancellation."""
-    def __init__(self, server, task, raw, distributed, source, *, directory=None):
+    def __init__(self, server, task, raw, distributed, source, *, directory=None, devices=None):
         self.server, self.task, self.raw = server, task, raw
         self.distributed, self.source = distributed, source
         self.process = None
         self.log = None
         self.directory = directory
         self.lease = None
+        self.devices = devices
         self.cancel_at = None
         self.terminated_at = None
         self.state = execution_plan(server, task, raw, distributed, source)
+        if devices is not None:
+            if len(devices) != distributed.world_size:
+                raise ValueError("GPU lease must match the configured world size")
+            self.state["cuda_visible_devices"] = ",".join(devices)
 
     def start(self):
-        self.lease = TrainingLease()
+        self.lease = TrainingLease(self.devices) if self.devices is not None else TrainingLease()
         identifier = f"server_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
         self.directory = self.directory or self.server.output_root / identifier
         try:
@@ -143,7 +148,8 @@ class ServerRun:
                     f"--nproc-per-node={self.distributed.world_size}", str(worker),
                     "--config", str(config_path), "--execution", str(execution)]
             env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = visible_devices(self.distributed.gpu_ids, env)
+            env["CUDA_VISIBLE_DEVICES"] = (",".join(self.devices) if self.devices is not None
+                                           else visible_devices(self.distributed.gpu_ids, env))
             env.setdefault("OMP_NUM_THREADS", "2")
             env.setdefault("MKL_NUM_THREADS", "2")
             env["PYTHONUNBUFFERED"] = "1"
@@ -151,7 +157,7 @@ class ServerRun:
             self.log = (self.directory / "training.log").open("w")
             self.process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
                 stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True,
-                pass_fds=(self.lease.fd,))
+                pass_fds=self.lease.fds)
             self.state["process"] = process_identity(self.process.pid)
             self.state.update(status="RUNNING", pid=self.process.pid, argv=argv)
             self._save()

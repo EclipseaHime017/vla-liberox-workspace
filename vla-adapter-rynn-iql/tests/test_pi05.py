@@ -177,7 +177,7 @@ def test_liberox_conversion_pins_source_and_copies_its_own_stats(tmp_path, monke
     assert identity["source_revision"] == base.revision
     assert identity["conversion_precision"] == "bfloat16"
     assert (output / base.norm_file).read_text() == norm.read_text()
-    assert not (output / pi05_assets.base_model("pi05-libero-base").norm_file).exists()
+    assert not (output / base_model("pi05-libero-base").norm_file).exists()
     with pytest.raises(SystemExit, match="Refusing to overwrite"):
         script.main()
     assert len(calls) == 1
