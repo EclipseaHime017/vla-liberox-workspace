@@ -73,7 +73,8 @@ def test_parallel_request_freezes_independent_model_method_reward_and_scale(pbs_
 
 
 @pytest.mark.parametrize("change", [
-    {"queue": "aiq5"}, {"walltime": "25:00:00"}, {"walltime": "00:00:10"},
+    {"queue": "aiq5"}, {"queue": "glong@pbs101"},
+    {"walltime": "120:00:01"}, {"walltime": "121:00:00"}, {"walltime": "00:00:10"},
     {"gpus": True}, {"project": "x\n#PBS -q internal"}, {"extra": True},
 ])
 def test_invalid_pbs_settings_are_rejected(pbs_request, change):
@@ -82,6 +83,23 @@ def test_invalid_pbs_settings_are_rejected(pbs_request, change):
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises((ValueError, TypeError)):
         pbs.load_pbs_config(path)
+
+
+@pytest.mark.parametrize("walltime,seconds", [
+    ("00:10:00", 600), ("24:00:00", 86400), ("24:00:01", 86401),
+    ("72:00:00", 259200), ("120:00:00", 432000),
+])
+def test_long_walltime_is_preserved_through_normal_routing(pbs_request, walltime, seconds):
+    path, raw, _ = pbs_request
+    raw["walltime"] = walltime
+    path.write_text(yaml.safe_dump(raw))
+    directory, manifest = pbs.stage_submission(path)
+    assert pbs.walltime_seconds(walltime) == seconds
+    assert manifest["settings"]["walltime"] == walltime
+    script = (directory / "job.pbs").read_text()
+    assert "#PBS -q normal@pbs101" in script
+    assert f"#PBS -l walltime={walltime}" in script
+    assert pbs.verified_request(directory) == manifest
 
 
 @pytest.mark.parametrize("ids", [[0, 1, 2, 3], [4, 5, 6, 8], [4, 4], []])

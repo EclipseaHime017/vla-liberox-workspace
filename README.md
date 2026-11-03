@@ -6,7 +6,7 @@ Workflow: install environments → upload a dataset → configure training → r
 
 [中文说明](README_CN.md)
 
-[Command reference](docs/RUN_COMMANDS.md) · [Dependencies](docs/DEPENDENCIES.md)
+[Command reference](docs/RUN_COMMANDS.md) · [Dependencies](docs/DEPENDENCIES.md) · [NSCC / PBS training](vla-adapter-rynn-iql/hpc/README.md)
 
 ## 1. Environment setup
 
@@ -27,7 +27,7 @@ git switch server
 git pull --ff-only origin server
 ```
 
-You need NVIDIA GPUs, Conda, Git, and a driver supporting CUDA 12.8. Install the environment for each model you intend to use. On PBS clusters, perform installation inside an allocated CPU job, not on a login node.
+You need NVIDIA GPUs, Conda, Git, and a driver supporting CUDA 12.8. Install the environment for each model you intend to use.
 
 ### VLA-Adapter
 
@@ -57,8 +57,6 @@ conda activate pi05
 ```
 
 The installer places pinned OpenPI sources in `third_party/OpenPI/`. Weights are converted to BF16 by default in `models/pi05_libero_torch/`. Copy an existing complete converted directory instead of converting it again. Other registered variants use their corresponding `--base-model` ID.
-
-NSCC's glibc 2.28 cannot use the locked Rerun PyPI wheel. First run `conda install -n pi05 -c conda-forge rerun-sdk=0.23.1=py311h7435ce4_0 numpy=1.26.4 pyarrow=20.0.0`, then append `--preserve-package rerun-sdk` to the installer command above. The installer verifies that its version matches the upstream lock.
 
 Keep the environments separate. Run the launcher from an installed training environment; workers use the environment declared by the selected model. Reusing exported evaluations and rewards does not require RynnValue or Robometer installations.
 
@@ -198,35 +196,7 @@ python vla-adapter-rynn-iql/scripts/train_server.py \
   --model pi05-libero-base --method bc
 ```
 
-The launcher validates inputs, loads rewards, prepares the mmap cache, and starts DDP + ZeRO-1. Use tmux on ordinary servers. On PBS clusters, request compute nodes through the scheduler; never train on a login node.
-
-### Parallel experiments in one PBS job
-
-PBS support lives in [hpc/](vla-adapter-rynn-iql/hpc/README.md); ordinary servers continue using `train_server.py`. Edit [pbs_pipeline.yaml](vla-adapter-rynn-iql/hpc/configs/pbs_pipeline.yaml) with your project, dataset paths and GPU groups. Each experiment independently selects its server configuration, model, method, reward source and overrides.
-
-The example requests one four-GPU node, split into RynnValue and Final Reward experiments with two GPUs each. Both use π₀.₅-LIBERO-X, global batch 64, 10,000 steps and no accumulation, with separate logs, checkpoints and exports. Local batch 32 requires a real memory test for full fine-tuning. An eight-GPU node can instead be split 4+4. Batch size is never silently reduced.
-
-```bash
-# Freeze configurations and render job.pbs without submitting
-python vla-adapter-rynn-iql/hpc/train_pbs.py prepare
-
-# Explicitly reserve resources through PBS
-python vla-adapter-rynn-iql/hpc/train_pbs.py submit
-
-# Run another pair only after the previous PBS job succeeds
-python vla-adapter-rynn-iql/hpc/train_pbs.py submit --config /path/to/next.yaml --afterok 123.pbs101
-
-qstat -f 123.pbs101
-qdel 123.pbs101
-```
-
-`prepare` snapshots configuration without model execution. Input preparation and parallel training run on the allocated compute node. Results are under `outputs/pbs/pbs_<timestamp>_<ID>/runs/<experiment>/`, with overall status in `result.json`. Keep models, datasets and outputs on persistent storage or Scratch, not job-local `$TMPDIR`.
-
-Use a scheduler-qualified routing queue such as `normal@pbs101` or `ai@pbs102`. NSCC's normal GPU pool also provides four A100 40GB GPUs per node; the AI pool requires separate project authorization. `--afterok` establishes a PBS dependency: failure of either experiment prevents the next allocation from starting. Verify the dependency using `qstat -f` after submission.
-
-The foreground launcher requires a single node and scheduler-provided full GPU UUIDs. GPU groups must be disjoint and cover the allocation. It requests safe checkpoints on termination or five minutes before the configured walltime; forced kills and node failures can only retain earlier complete checkpoints. Do not run the persistent background queue inside a PBS allocation.
-
-Eight GPUs require `select=1:ngpus=8`, not two four-GPU nodes. Confirm your project's eight-GPU routing before submitting rather than bypassing it through an internal execution queue. See the [official GPU guide](https://help.nscc.sg/wp-content/uploads/2024/05/ASP2A-AI-System_QuickStart-7-March-2024.pdf).
+The launcher validates inputs, loads rewards, prepares the mmap cache, and starts DDP + ZeRO-1. Use tmux to keep direct training running after terminal disconnects.
 
 ### Training queue
 
@@ -246,8 +216,6 @@ State defaults to `vla-adapter-rynn-iql/outputs/server-queue/`, with daemon outp
 `train_queue.py stop` finishes the active job and stops before the next, preserving pending jobs. `cancel <job-ID>` cancels a pending job or safely stops an active one; `retry <job-ID>` appends an explicit retry with the same configuration. Failures do not block later jobs; interrupted jobs are never automatically repeated. An empty daemon stays idle and accepts further submissions.
 
 Direct training and all queues share one local-account training lease. Surviving workers continue to block competing jobs after supervisor failure. Stop and restart the queue worker after code updates. Use `train_queue.py run` for foreground execution; Ctrl+C safely stops the active training and the worker.
-
-The PBS parallel launcher uses physical-GPU leases: disjoint devices may run concurrently, while overlapping devices and ordinary exclusive training remain mutually exclusive. Cancelling one experiment never targets its sibling's workers.
 
 ### Progress, stopping, and resuming
 

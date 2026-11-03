@@ -36,12 +36,12 @@ def implementation_fingerprint():
 
 
 def walltime_seconds(value):
-    if not isinstance(value, str) or not re.fullmatch(r"\d{2}:\d{2}:\d{2}", value):
+    if not isinstance(value, str) or not re.fullmatch(r"\d{2,3}:\d{2}:\d{2}", value):
         raise ValueError("PBS walltime must be HH:MM:SS")
     hours, minutes, seconds = map(int, value.split(":"))
     total = hours * 3600 + minutes * 60 + seconds
-    if minutes >= 60 or seconds >= 60 or not 600 <= total <= 86400:
-        raise ValueError("PBS walltime must be between 00:10:00 and 24:00:00")
+    if minutes >= 60 or seconds >= 60 or not 600 <= total <= 120 * 3600:
+        raise ValueError("PBS walltime must be between 00:10:00 and 120:00:00")
     return total
 
 
