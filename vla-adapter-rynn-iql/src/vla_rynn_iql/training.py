@@ -37,6 +37,7 @@ from .monitoring import (
 )
 from .replay import ActionDataset, ReplayDataset
 from .rewards import load_reward_index, reward_manifest_digest
+from .training_diagnostics import due as diagnostics_due, weight_statistics, validation_metrics, validation_dataset
 
 
 LOG = logging.getLogger(__name__)
@@ -440,6 +441,9 @@ def train(config: LoadedConfig) -> Path:
     dataset = (ReplayDataset(config, components.action_stats, components.proprio_stats, "train",
                              reward_index=reward_index) if method.requires_transitions else
                ActionDataset(config, components.action_stats, components.proprio_stats, "train"))
+    validation = (validation_dataset(config, components)
+                  if logging_cfg.get("diagnostics", {}).get("enabled", False) else None)
+    diagnostic_episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
     agent = build_algorithm(config, device, transition_horizon=manifest["action_horizon"])
@@ -619,6 +623,10 @@ def train(config: LoadedConfig) -> Path:
             metric["cuda_peak_memory_gib"] = float(
                 metric["cuda_peak_memory_bytes"]
             ) / (1024.0 ** 3)
+            if diagnostics_due(logging_cfg, step + 1):
+                if context is not None:
+                    metric.update(weight_statistics(context, batch, diagnostic_episodes))
+                metric.update(validation_metrics(backend, components, validation, device, micro_batch_size))
             should_report = progress.update(metric)
             metrics_file.write(json.dumps(metric, sort_keys=True) + "\n")
             metrics_file.flush()

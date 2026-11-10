@@ -230,6 +230,14 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raw["data"].setdefault("stage_annotations_manifest", None)
         raw["data"].setdefault("include_post_success", True)
     schema = {**TRAIN_SCHEMA}
+    if "diagnostics" in raw.get("logging", {}):
+        diagnostics = raw["logging"]["diagnostics"]
+        if not isinstance(diagnostics, dict):
+            raise TypeError("logging.diagnostics must be a mapping")
+        diagnostics.setdefault("enabled", False)
+        diagnostics.setdefault("interval_steps", 100)
+        schema["logging"] = {**TRAIN_SCHEMA["logging"], "diagnostics": {
+            "enabled": None, "interval_steps": None}}
     if not method.requires_rewards:
         schema.update(reward=None, iql={})
     _validate_schema(raw, schema)
@@ -368,4 +376,8 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     )
     _number(logging_cfg, "flush_seconds", low=1, high=3600)
     _number(logging_cfg, "console_interval_steps", low=1, integer=True)
+    if "diagnostics" in logging_cfg:
+        if type(logging_cfg["diagnostics"]["enabled"]) is not bool:
+            raise TypeError("logging.diagnostics.enabled must be boolean")
+        _number(logging_cfg["diagnostics"], "interval_steps", low=1, integer=True)
     return LoadedConfig(path, raw)
