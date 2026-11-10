@@ -219,6 +219,31 @@ def load_components(
     return components
 
 
+def evaluation_policy(config, manifest, parent):
+    """Use the official inference pipeline and the child's frozen image contract."""
+    from .base_models import model_observation
+    from .image_transforms import image_orientation, vla_adapter_observation
+    from .upstream_environment import verify_vla_adapter_environment
+
+    verify_vla_adapter_environment(Path(config.section("paths")["vla_adapter_root"]))
+    components = load_components(config, overlay=manifest, training=False)
+    from experiments.robot.libero.run_libero_eval import prepare_observation, process_action
+    from experiments.robot.robot_utils import get_action, get_image_resize_size
+    cfg = components.cfg
+    resize = get_image_resize_size(cfg)
+    orientation = image_orientation(model_observation(model_config(config.raw)))
+
+    def predict(observation, prompt):
+        prepared, _ = prepare_observation(vla_adapter_observation(observation, orientation), resize)
+        return get_action(cfg, components.model, prepared, prompt,
+                          processor=components.processor, action_head=components.action_head,
+                          proprio_projector=components.proprio_projector,
+                          noisy_action_projector=None, use_film=cfg.use_film,
+                          use_minivlm=cfg.use_minivlm)
+
+    return predict, lambda action: process_action(action.copy(), cfg.model_family)
+
+
 def qwen_prompt(task: str) -> str:
     return (
         "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant."

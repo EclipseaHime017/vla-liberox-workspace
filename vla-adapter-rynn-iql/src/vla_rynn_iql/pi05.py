@@ -188,3 +188,27 @@ def export_actor(components, settings, directory, *, checkpoint=None):
     return {"schema_version": 4, "family": "pi05", "actor": "actor.pt", "base_identity": IDENTITY_FILE,
             "component_sha256": {"actor": sha256_file(directory / "actor.pt"),
                                  "base_identity": sha256_file(directory / IDENTITY_FILE)}}
+
+
+def evaluation_policy(config, manifest, parent):
+    """Load a validated export with the same inference transforms as main."""
+    from openpi.policies.policy import Policy
+    from .image_transforms import image_orientation, observation_config, orient_image
+    from .evaluation_runtime import proprio_from_observation
+
+    settings = model_config(config.raw)
+    components = load_components(config, training=False, parent=parent)
+    restore_actor(components, settings, manifest.parent)
+    policy = Policy(components.model, transforms=[components.input_transform],
+                    output_transforms=[components.output_transform], is_pytorch=True,
+                    pytorch_device="cuda:0", sample_kwargs={"num_steps": settings["num_inference_steps"]})
+    orientation = image_orientation(observation_config(model_contract(settings)))
+
+    def predict(observation, prompt):
+        return policy.infer({
+            "observation/image": orient_image(observation["agentview_image"], orientation),
+            "observation/wrist_image": orient_image(observation["robot0_eye_in_hand_image"], orientation),
+            "observation/state": proprio_from_observation(observation), "prompt": prompt,
+        })["actions"]
+
+    return predict, lambda action: np.clip(action, -1.0, 1.0)

@@ -44,4 +44,8 @@ qdel 123.pbs101
 
 # 回归
 conda run --no-capture-output -n vla-liberox python -m pytest vla-adapter-rynn-iql/tests vla-adapter-rynn-iql/hpc/tests -q
+
+# 批量闭环评测：先编辑 policies 和 tasks；在已分配的 GPU 节点执行
+python vla-adapter-rynn-iql/scripts/evaluate_server.py --config vla-adapter-rynn-iql/configs/server_evaluation.yaml --check-render
+python vla-adapter-rynn-iql/scripts/evaluate_server.py --config vla-adapter-rynn-iql/configs/server_evaluation.yaml
 ```

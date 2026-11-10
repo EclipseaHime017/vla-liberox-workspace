@@ -1,6 +1,6 @@
 # LIBERO-X 服务器训练
 
-server 跟随 main 的发布版本号，当前两者均为 **v0.8.0**。两个分支独立维护：server 只负责命令行训练，不合并 main 的运行流程。
+server 跟随 main 的发布版本号，当前两者均为 **v0.8.0**。两个分支独立维护：server 提供命令行训练和闭环评测。
 
 操作顺序：安装环境 → 上传数据集 → 配置训练 → 运行脚本 → 下载训练模型。除上传和下载外，以下命令均在服务器的仓库根目录执行。
 
@@ -268,7 +268,31 @@ scp -r "$TRAIN_HOST:$TRAIN_REPO/vla-adapter-rynn-iql/outputs/deploy/$POLICY_ID" 
 
 下载后保留 `policy-registry/<模型ID>/` 的目录名和全部文件。需要继续训练时，另外保留服务器上的 run 和 checkpoints；只用于本地推理则无需下载训练 checkpoint。
 
-## 6. 服务器架构
+## 6. 批量测试训练模型
+
+在需要评测的模型环境中安装仿真依赖，并准备 LIBERO-X：
+
+```bash
+git clone https://github.com/meituan/LIBERO-X.git third_party/LIBERO-X
+git -C third_party/LIBERO-X checkout f528726421c7211d8eb05fe48e9e5e2535ccc813
+python -m pip install -r vla-adapter-rynn-iql/requirements-eval.txt
+```
+
+已有对应仓库时跳过克隆。编辑 [server_evaluation.yaml](vla-adapter-rynn-iql/configs/server_evaluation.yaml)，在 `policies` 中填写训练导出的 `policy.yaml` 路径，在 `tasks` 中选择任务和回合长度；通过 `trials` 配置测试次数。`open_loop_steps: null` 使用模型变体的默认执行步数。
+
+```bash
+# 先验证真实场景渲染；使用 YAML 中的 check_environment，不加载模型。
+python vla-adapter-rynn-iql/scripts/evaluate_server.py --config vla-adapter-rynn-iql/configs/server_evaluation.yaml --check-render
+
+# 依次测试所有模型和任务；每个模型使用其注册的环境。
+python vla-adapter-rynn-iql/scripts/evaluate_server.py --config vla-adapter-rynn-iql/configs/server_evaluation.yaml
+```
+
+结果位于 `vla-adapter-rynn-iql/outputs/evaluations/`：`summary.json` 汇总各模型成功率，子目录的 `result.json` 保存逐回合结果，`worker.log` 保存运行日志。成功判定与 main 一致：连续 5 个控制步成功后计为成功，仍执行完整回合。模型之间复用相同的初始状态和随机种子安排，评测与训练共用资源锁。
+
+无桌面服务器使用 EGL 渲染，需要 NVIDIA 图形库；也可显式选择 `osmesa` 使用 CPU 渲染。环境要求及 PBS 使用方式见 [闭环评测说明](docs/EVALUATION.md)。
+
+## 7. 服务器架构
 
 ```text
 server_pipeline.yaml + train_server.py / train_queue.py

@@ -1,6 +1,6 @@
 # LIBERO-X server training
 
-server tracks the main release version; both are currently **v0.8.0**. The branches are maintained independently: version alignment does not merge main's runtime workflow into server.
+server tracks the main release version; both are currently **v0.8.0**. The branches are maintained independently; server provides command-line training and closed-loop evaluation.
 
 Workflow: install environments → upload a dataset → configure training → run the launcher → download the trained model. Run commands from the server repository root unless marked as local.
 
@@ -270,7 +270,31 @@ scp -r "$TRAIN_HOST:$TRAIN_REPO/vla-adapter-rynn-iql/outputs/deploy/$POLICY_ID" 
 
 Keep the name and all files of `policy-registry/<policy-ID>/`. Retain server run directories and checkpoints for further training; local inference does not require training checkpoints.
 
-## 6. Server architecture
+## 6. Batch checkpoint evaluation
+
+Install simulation dependencies in every model environment used for evaluation:
+
+```bash
+git clone https://github.com/meituan/LIBERO-X.git third_party/LIBERO-X
+git -C third_party/LIBERO-X checkout f528726421c7211d8eb05fe48e9e5e2535ccc813
+python -m pip install -r vla-adapter-rynn-iql/requirements-eval.txt
+```
+
+Skip cloning if the checkout already exists. Edit [server_evaluation.yaml](vla-adapter-rynn-iql/configs/server_evaluation.yaml): list exported `policy.yaml` paths under `policies`, select scenes and horizons under `tasks`, and set `trials`. Leave `open_loop_steps: null` to use each variant's execution default.
+
+```bash
+# Test real scene rendering in check_environment, without loading a checkpoint.
+python vla-adapter-rynn-iql/scripts/evaluate_server.py --config vla-adapter-rynn-iql/configs/server_evaluation.yaml --check-render
+
+# Evaluate every checkpoint and task sequentially in each model's registered environment.
+python vla-adapter-rynn-iql/scripts/evaluate_server.py --config vla-adapter-rynn-iql/configs/server_evaluation.yaml
+```
+
+Results appear under `vla-adapter-rynn-iql/outputs/evaluations/`: `summary.json` contains success rates, each child `result.json` contains individual trials, and `worker.log` contains diagnostics. The default success rule matches main: five consecutive successful control steps latch success, while the full episode still runs. Models share the same initial-state/seed schedule, and evaluation uses the training resource lock.
+
+Headless GPU rendering requires NVIDIA EGL libraries. Explicit `osmesa` mode uses CPU rendering. See [evaluation setup](docs/EVALUATION.md) for container and PBS requirements.
+
+## 7. Server architecture
 
 ```text
 server_pipeline.yaml + train_server.py / train_queue.py
