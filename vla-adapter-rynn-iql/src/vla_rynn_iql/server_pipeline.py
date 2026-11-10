@@ -62,6 +62,7 @@ def training_settings(server, task: GlobalTask, *, overrides=None, source=None) 
         # default discount/reduction; explicit training overrides take priority.
         if records:
             saved = records[0]
+            raw["reward"].pop("base_coefficient", None)
             raw["reward"].update(saved.get("annotation_config", {}))
             raw["reward"].update(saved["reward_config"])
             raw["reward"]["final_normalization"] = saved["reward_config"].get("final_normalization", "none")

@@ -230,6 +230,10 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raw["data"].setdefault("stage_annotations_manifest", None)
         raw["data"].setdefault("include_post_success", True)
     schema = {**TRAIN_SCHEMA}
+    if raw["reward"].get("base_coefficient") is None:
+        raw["reward"].pop("base_coefficient", None)
+    elif method.requires_rewards:
+        schema["reward"] = {**schema["reward"], "base_coefficient": None}
     for section, key in (("data", "bootstrap_failed_end"), ("reward", "zero_success_potential")):
         if key in raw.get(section, {}):
             if type(raw[section][key]) is not bool:
@@ -317,6 +321,12 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
             raise ValueError("Reward parameters must be finite")
         if reward["fusion_mode"] not in {"additive", "multiplicative"}:
             raise ValueError("reward.fusion_mode must be additive or multiplicative")
+        if "base_coefficient" in reward:
+            _number(reward, "base_coefficient", low=0)
+            if not math.isfinite(reward["base_coefficient"]):
+                raise ValueError("reward.base_coefficient must be finite")
+            if reward_source(reward) != "final" or reward["fusion_mode"] != "additive":
+                raise ValueError("reward.base_coefficient requires additive Final Reward")
         if reward["final_normalization"] not in {"none", "initial_chunk_v1"}:
             raise ValueError("Unsupported reward.final_normalization")
         if type(reward["accumulate_primitive_steps"]) is not bool:
