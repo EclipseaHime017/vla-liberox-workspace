@@ -257,6 +257,11 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raw["data"].setdefault("stage_annotations_manifest", None)
         raw["data"].setdefault("include_post_success", True)
     schema = {**TRAIN_SCHEMA}
+    for section, key in (("data", "bootstrap_failed_end"), ("reward", "zero_success_potential")):
+        if key in raw.get(section, {}):
+            if type(raw[section][key]) is not bool:
+                raise TypeError(f"{section}.{key} must be boolean")
+            schema[section] = {**schema[section], key: None}
     if not method.requires_rewards:
         schema.update(reward=None, iql={})
     _validate_schema(raw, schema)

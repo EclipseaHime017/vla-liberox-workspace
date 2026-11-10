@@ -120,6 +120,8 @@ class ActionDataset(Dataset):
         # The selected replay endpoint is terminal in either mode. Reward arrays
         # retain full-recording indices and never need a model re-evaluation.
         terminal = end == replay_end_step(episode, self.include_post_success)
+        if self.config.section("data").get("bootstrap_failed_end", False) and episode.get("terminal_step") is None:
+            terminal = False
         sample = {
             "raw_proprio": torch.from_numpy(raw_proprio[start].astype(np.float32)),
             "raw_actions": torch.from_numpy(raw_actions),

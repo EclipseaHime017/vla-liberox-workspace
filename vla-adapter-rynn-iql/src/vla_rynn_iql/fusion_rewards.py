@@ -88,7 +88,8 @@ def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
         start, length, end = int(chunk["start"]), int(chunk["length"]), int(chunk["end"])
         if lookup is not None:
             b, f, original = chunk_reward_components(
-                done, start, length, lookup[start], lookup[end], gamma, kappa, cumulative, True)
+                done, start, length, lookup[start], lookup[end], gamma, kappa, cumulative, True,
+                bool(recipe.get("zero_success_potential", False)))
         else:
             b = (sparse_primitive_return(done, start, length, gamma) if cumulative
                  else sparse_macro_reward(done, start, length))
