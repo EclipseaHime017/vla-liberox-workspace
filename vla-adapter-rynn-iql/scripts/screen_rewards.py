@@ -208,16 +208,27 @@ def analyze(dataset_path, reward_path, *, gamma, split="train", include_post_suc
                "human_return": human, "policy_return": policy, "difference": human - policy}
         comparisons.append(row)
         grouped.setdefault(parent_id, []).append(row)
-    weights, ambiguities = [], []
+    weights, ambiguities, parent_return_groups = [], [], []
     for parent, rows in grouped.items():
-        if len({r["handoff_step"] for r in rows}) != 1:
-            ambiguities.append({"parent": parent, "reason": "different takeover states; one policy return is undefined"})
+        policy_values = [r["policy_return"] for r in rows]
+        parent_return_groups.append({"parent": parent, "branch_count": len(rows),
+            "handoff_steps": sorted({r["handoff_step"] for r in rows}),
+            "parent_chunk_starts": sorted({r["parent_chunk_start"] for r in rows}),
+            "human_returns": summary([r["human_return"] for r in rows]),
+            "paired_covering_policy_returns": summary(policy_values),
+            "unique_policy_return_count": len(set(policy_values)),
+            "interpretation": "Group-level return reference, not same-state V or an advantage proof."})
+        if len(set(policy_values)) != 1:
+            ambiguities.append({"parent": parent,
+                "reason": "multiple covering-chunk policy returns; no prescribed single policy return for 10+1 pooling",
+                "policy_return_count": len(set(policy_values))})
             continue
         policy = rows[0]["policy_return"]
         human = [r["human_return"] for r in rows]
         value = expectile(human + [policy], tau)
         weight = np.exp(np.minimum(beta * (np.asarray(human + [policy]) - value), np.log(20.)))
         weights.append({"parent": parent, "branch_count": len(rows), "value": value,
+                        "interpretation": "group-level return expectile, not same-state V(s)",
                         "human_weights": weight[:-1].tolist(), "policy_weight": float(weight[-1])})
 
     # Exclude copied prefixes represented by their original producer, matching replay selection.
@@ -258,6 +269,7 @@ def analyze(dataset_path, reward_path, *, gamma, split="train", include_post_suc
                                 "difference": summary(differences), "human_return": summary([r["human_return"] for r in comparisons]),
                                 "policy_return": summary([r["policy_return"] for r in comparisons])},
             "expectile_groups": weights, "expectile_ambiguities": ambiguities,
+            "parent_return_groups": parent_return_groups,
             "human_weights": summary([w for group in weights for w in group["human_weights"]]),
             "policy_weights": summary([group["policy_weight"] for group in weights]),
             "reward_groups": {name: summary(values) for name, values in categories.items()},

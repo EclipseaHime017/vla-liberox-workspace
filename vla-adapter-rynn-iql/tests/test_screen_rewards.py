@@ -62,6 +62,25 @@ class RewardScreenTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum"):
                 screen.analyze(dataset, rewards, gamma=.9)
 
+    def test_group_reference_does_not_select_a_policy_return(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset, rewards = self.fixture(root)
+            data, reward = json.loads(dataset.read_text()), json.loads(rewards.read_text())
+            branch = dict(data["episodes"][1], run_id="b2", resume_step=20,
+                          chunks=[dict(c, copied_prefix=i < 2, action_source="policy" if i < 2 else "human")
+                                  for i, c in enumerate(data["episodes"][1]["chunks"])])
+            data["episodes"].append(branch)
+            reward["episodes"].append(dict(reward["episodes"][1], run_id="b2"))
+            dataset.write_text(json.dumps(data)); rewards.write_text(json.dumps(reward))
+            report = screen.analyze(dataset, rewards, gamma=.9)
+            self.assertEqual(len(report["comparisons"]), 2)
+            self.assertEqual(report["expectile_groups"], [])
+            group = report["parent_return_groups"][0]
+            self.assertEqual(group["unique_policy_return_count"], 2)
+            self.assertEqual(group["parent_chunk_starts"], [10, 20])
+            self.assertEqual(group["paired_covering_policy_returns"]["count"], 2)
+
     def test_explicit_path_map_preserves_manifests_and_checks_boundaries(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
