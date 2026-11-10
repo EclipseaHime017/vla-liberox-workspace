@@ -52,8 +52,8 @@ class RewardScreenTests(unittest.TestCase):
             self.assertEqual(trimmed["reward_groups"]["human_post_success"]["count"], 0)
             with self.assertRaisesRegex(ValueError, "Explicit terminal V"):
                 screen.analyze(dataset, rewards, gamma=.9, bootstrap_failures=True)
-            explicit = screen.analyze(dataset, rewards, gamma=.9, bootstrap_failures=True, tail_values={"p": -10})
-            self.assertAlmostEqual(explicit["comparisons"][0]["policy_return"], -10.)
+            with self.assertRaisesRegex(ValueError, "identity-bound"):
+                screen.analyze(dataset, rewards, gamma=.9, bootstrap_failures=True, tail_values={"p": -10})
 
     def test_hash_mismatch_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -79,15 +79,60 @@ def full_chunks(episode):
     return chunks
 
 
+def validated_tail_values(payload, dataset, dataset_path, reward_path, *, gamma, split,
+                          primitive_discount, critic_sha256):
+    if not isinstance(payload, dict) or payload.get("kind") != "frozen_critic_tail_values":
+        raise ValueError("Explicit terminal V requires an identity-bound frozen critic export")
+    if (not critic_sha256 or len(critic_sha256) != 64 or payload.get("critic_sha256") != critic_sha256
+            or payload.get("schema_version") != 1 or payload.get("dataset_sha256") != dataset["dataset_sha256"]
+            or payload.get("dataset_manifest_sha256") != digest(dataset_path)
+            or payload.get("reward_manifest_sha256") != digest(reward_path)
+            or payload.get("chunking") != dataset.get("chunking")
+            or payload.get("gamma") != gamma or payload.get("primitive_discount") is not primitive_discount
+            or payload.get("split") not in {split, "all"}):
+        raise ValueError("Tail critic/dataset/reward/gamma/split identity mismatch")
+    for key in ("training_config_sha256", "summary_sha256", "normalization_sha256"):
+        if not isinstance(payload.get(key), str) or len(payload[key]) != 64:
+            raise ValueError(f"Tail export missing identity: {key}")
+    expected = {e["run_id"]: e for e in dataset["episodes"] if e.get("terminal_step") is None
+                and (payload["split"] == "all" or e["split"] == payload["split"])}
+    values = {}
+    for row in payload.get("rows", []):
+        rid = row["run_id"]
+        if rid not in expected or rid in values:
+            raise ValueError("Unexpected/duplicate tail endpoint")
+        episode = expected[rid]
+        if (row.get("observation_step") != episode["recorded_action_count"]
+                or row.get("last_chunk_start") != full_chunks(episode)[-1]["start"]
+                or any(row.get(k) != episode.get(k) for k in
+                       ("split", "root_run_id", "parent_run_id", "trajectory_sha256", "observations_sha256"))):
+            raise ValueError(f"Tail endpoint identity mismatch: {rid}")
+        for key in ("trajectory_sha256", "observations_sha256", "next_pixels_sha256", "next_proprio_sha256"):
+            if not isinstance(row.get(key), str) or len(row[key]) != 64:
+                raise ValueError(f"Tail endpoint missing evidence: {key}")
+        value = float(row["tail_v"])
+        if not np.isfinite(value):
+            raise ValueError("Nonfinite tail V")
+        values[rid] = value
+    if set(values) != set(expected):
+        raise ValueError("Missing failure tail endpoint")
+    return values
+
+
 def analyze(dataset_path, reward_path, *, gamma, split="train", include_post_success=True,
             beta=3.0, tau=.8, primitive_discount=False, bootstrap_failures=False, tail_values=None,
-            path_map=None):
+            path_map=None, tail_critic_sha256=None):
     dataset_path, reward_path = Path(dataset_path), Path(reward_path)
     dataset, manifest = json.loads(dataset_path.read_text()), json.loads(reward_path.read_text())
     if manifest.get("complete") is False or not dataset.get("dataset_sha256") or dataset["dataset_sha256"] != manifest.get("dataset_sha256"):
         raise ValueError("Incomplete reward version or dataset identity mismatch")
     if not np.isfinite(beta) or beta < 0:
         raise ValueError("beta must be finite and nonnegative")
+    tail_evidence = None
+    if bootstrap_failures:
+        tail_evidence = tail_values
+        tail_values = validated_tail_values(tail_values, dataset, dataset_path, reward_path,
+            gamma=gamma, split=split, primitive_discount=primitive_discount, critic_sha256=tail_critic_sha256)
     episodes = {item["run_id"]: item for item in dataset["episodes"]}
     rewards = {item["run_id"]: item for item in manifest["episodes"]}
     if len(episodes) != len(dataset["episodes"]) or len(rewards) != len(manifest["episodes"]):
@@ -204,6 +249,11 @@ def analyze(dataset_path, reward_path, *, gamma, split="train", include_post_suc
                          "beta": beta, "expectile": tau, "primitive_discount": primitive_discount,
                          "bootstrap_failures": bootstrap_failures},
             "inputs": inputs, "comparisons": comparisons,
+            "tail_evidence": None if tail_evidence is None else {
+                "critic_sha256": tail_evidence["critic_sha256"],
+                "summary_sha256": tail_evidence["summary_sha256"],
+                "payload_sha256": hashlib.sha256(json.dumps(tail_evidence, sort_keys=True).encode()).hexdigest(),
+                "caveat": tail_evidence.get("caveat")},
             "handoff_summary": {"count": len(comparisons), "human_higher_fraction": float(np.mean(np.asarray(differences) > 0)) if differences else None,
                                 "difference": summary(differences), "human_return": summary([r["human_return"] for r in comparisons]),
                                 "policy_return": summary([r["policy_return"] for r in comparisons])},
@@ -223,7 +273,8 @@ def main():
     parser.add_argument("--exclude-post-success", action="store_true")
     parser.add_argument("--primitive-discount", action="store_true")
     parser.add_argument("--bootstrap-failures", action="store_true")
-    parser.add_argument("--tail-values", type=Path, help="JSON mapping run_id to explicit V at recording endpoint")
+    parser.add_argument("--tail-values", type=Path, help="Identity-bound export_critic_tail_values.py JSON")
+    parser.add_argument("--tail-critic-sha256", help="Independently recorded frozen critic checksum")
     parser.add_argument("--path-map", type=Path, help="Read-only source path mapping; relative targets resolve from this JSON file")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -237,7 +288,7 @@ def main():
                      include_post_success=not args.exclude_post_success, primitive_discount=args.primitive_discount,
                      bootstrap_failures=args.bootstrap_failures,
                      tail_values=json.loads(args.tail_values.read_text()) if args.tail_values else None,
-                     path_map=path_map)
+                     path_map=path_map, tail_critic_sha256=args.tail_critic_sha256)
     if args.path_map:
         result["path_map_sha256"] = digest(args.path_map)
     with args.output.open("x") as target:
