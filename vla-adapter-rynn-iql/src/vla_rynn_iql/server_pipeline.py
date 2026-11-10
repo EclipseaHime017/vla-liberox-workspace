@@ -97,6 +97,7 @@ def execution_plan(server, task, raw, distributed, source):
         "reward_source": source if training_method(raw).requires_rewards else None,
         "reward": raw["reward"] if training_method(raw).requires_rewards else None,
         "include_post_success": raw["data"]["include_post_success"],
+        "bootstrap_failed_end": raw["data"].get("bootstrap_failed_end", False),
         "distributed": asdict(distributed), "global_micro_batch_size": global_batch,
         "cuda_visible_devices": visible_devices(distributed.gpu_ids),
         "per_gpu_micro_batch_size": local,

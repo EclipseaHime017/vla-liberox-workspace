@@ -73,6 +73,7 @@ def build_replay_cache(config, root: Path, action_stats: dict, proprio_stats: di
         "action_stats": action_stats, "proprio_stats": proprio_stats,
         "model_contract": model_contract(model_config(config.raw)),
         "include_post_success": source.include_post_success, "transitions": transitions,
+        "bootstrap_failed_end": config.section("data").get("bootstrap_failed_end", False),
         "image_size": config.section("iql")["critic_image_size"] if transitions else None,
         "implementation": {name: sha256_file(Path(__file__).with_name(name)) for name in
                            ("server_replay.py", "replay.py", "data.py", "execution.py", "image_transforms.py", "vla_adapter.py", "pi05.py")},
