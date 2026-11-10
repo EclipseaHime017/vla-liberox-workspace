@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from vla_rynn_iql.critic_weight_summary import summarize, summarize_files, VALUES, REWARDS
+from vla_rynn_iql.critic_weight_summary import summarize, summarize_files, beta_comparison, VALUES, REWARDS
 from vla_rynn_iql.data import iter_unique_replay_chunks, prepare_dataset, replay_chunks
 
 
@@ -110,6 +110,9 @@ def test_real_manifest_selection_and_exclusive_readonly_output(configured, tmp_p
     payload = summarize_files(configured, configured, directory, target)
     assert payload["counts"] == summary["counts"]
     assert payload["diagnostic_budget"] == {"train_steps": 10000, "batch_size": 64, "seed": 7}
+    assert set(payload["beta_comparison"]) == {"3.0", "0.3"}
+    for key in ("3.0", "0.3"):
+        assert payload["beta_comparison"][key]["groups_by_split"]["train"]["all"]["count"] == summary["counts"]["train"]
     assert len(payload["input_sha256"]) == 5
     assert all(p.read_bytes() == data for p, data in protected.items())
     with pytest.raises(FileExistsError):
@@ -118,3 +121,23 @@ def test_real_manifest_selection_and_exclusive_readonly_output(configured, tmp_p
     (directory / "summary.json").write_text(json.dumps(summary))
     with pytest.raises(ValueError, match="configuration identity"):
         summarize_files(configured, configured, directory, tmp_path / "other.json")
+
+
+def test_two_beta_same_rows_cap_fraction_and_quantiles(inputs):
+    validated = summarize(*inputs)["rows"]
+    for index, row in enumerate(validated):
+        row["advantage"] = [-1., 0., 2., 20.][index % 4]
+    protected = copy.deepcopy(validated)
+    result = beta_comparison(validated)
+    assert validated == protected
+    for beta in (3., .3):
+        actual = result[str(beta)]["groups_by_split"]["train"]["all"]
+        a = np.asarray([row["advantage"] for row in validated if row["split"] == "train"])
+        weights = np.minimum(np.exp(beta * a), 20.)
+        assert actual["mean"] == pytest.approx(weights.mean())
+        assert actual["p05"] == pytest.approx(np.quantile(weights, .05))
+        assert actual["p50"] == pytest.approx(np.quantile(weights, .5))
+        assert actual["p95"] == pytest.approx(np.quantile(weights, .95))
+        assert actual["cap_fraction"] == pytest.approx(np.mean(weights == 20))
+    with pytest.raises(ValueError, match="cap=20"):
+        beta_comparison(validated, maximum=10)

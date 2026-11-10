@@ -25,6 +25,28 @@ def statistics(values):
             **dict(zip(("p05", "p50", "p95"), map(float, np.quantile(data, [.05, .5, .95]))))}
 
 
+def beta_comparison(rows, *, maximum=20.):
+    """R10: same validated frozen-critic rows, no refitting or split pooling."""
+    if maximum != 20:
+        raise ValueError("R10 requires the frozen cap=20")
+    output = {}
+    for beta in (3., .3):
+        groups = {}
+        for split in ("train", "validation", "rollout"):
+            groups[split] = {}
+            for group in ("all", *GROUPS):
+                selected = [row for row in rows if row["split"] == split
+                            and (group == "all" or group in row["groups"])]
+                advantages = np.asarray([row["advantage"] for row in selected], dtype=np.float64)
+                capped = advantages >= np.log(maximum) / beta
+                weights = np.exp(np.minimum(advantages, np.log(maximum) / beta) * beta)
+                weights[capped] = maximum
+                groups[split][group] = {**statistics(weights),
+                    "cap_fraction": float(capped.mean()) if len(capped) else None}
+        output[str(beta)] = {"beta": beta, "cap": maximum, "groups_by_split": groups}
+    return output
+
+
 def summarize(rows, training, probe, diagnostic, *, include_post_success=True,
               probe_include_post_success=True, beta=3., maximum=20.):
     if (not np.isfinite(beta) or beta < 0 or not np.isfinite(maximum) or maximum <= 0):
@@ -145,6 +167,9 @@ def summarize_files(training_config, probe_config, result: Path, output: Path):
     payload["input_sha256"] = before
     payload["diagnostic_budget"] = {key: diagnostic[key] for key in ("train_steps", "batch_size", "seed")}
     payload["reward_config"] = diagnostic["reward_config"]
+    payload["beta_comparison"] = beta_comparison(payload["rows"],
+        maximum=training_config.section("iql")["max_advantage_weight"])
+    payload["beta_comparison_note"] = "Same frozen Q/V/A rows; post-hoc only, not T2-D final-critic evidence."
     if before != {str(path): sha256_file(path) for path in paths}:
         raise ValueError("Diagnostic inputs changed during summarization")
     if any(output.resolve() == path.resolve() for path in paths):
