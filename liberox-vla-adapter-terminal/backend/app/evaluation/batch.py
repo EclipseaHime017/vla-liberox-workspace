@@ -25,6 +25,8 @@ from typing import Any, Callable, Sequence
 import numpy as np
 import yaml
 
+from .goal_conditions import GoalConditionTracker, aggregate_goal_conditions
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -382,6 +384,7 @@ def aggregate_trials(
     overall.update(
         {
             "total_trials": scheduled_trials,
+            "goal_conditions": aggregate_goal_conditions(items),
             "attempted_trials": len(items),
             "completed_trials": len(items) - overall["errors"],
             "scheduled_trials": scheduled_trials,
@@ -612,6 +615,8 @@ def _episode(
     started = time.monotonic()
     observation = simulator.restore(env, initial_state)
     observation = simulator.observations(env, observation)
+    goals = GoalConditionTracker(env)
+    goals.observe(0)
     limiter = direct.RealTimeControlLimiter(float(control_hz), realtime)
     queue: deque[np.ndarray] = deque()
     tracker = ConsecutiveSuccess(success_streak)
@@ -623,6 +628,7 @@ def _episode(
     progress = progress if progress is not None else {}
     progress.update(
         steps=0,
+        goal_conditions=goals.snapshot(),
         first_success_step=None,
         max_done_streak=0,
         final_done=False,
@@ -662,11 +668,13 @@ def _episode(
         observation, _reward, done, _info = env.step(env_action.tolist())
         final_done = bool(done)
         tracker.observe(final_done, step_index + 1)
+        goals.observe(step_index + 1)
         step_times.append(step_started)
         if len(step_times) >= 2 and step_times[-1] - step_times[-2] > 1.1 / control_hz:
             deadline_misses += 1
         progress.update(
             steps=step_index + 1,
+            goal_conditions=goals.snapshot(),
             first_success_step=tracker.first_confirmed_step,
             max_done_streak=tracker.maximum,
             final_done=final_done,
@@ -682,6 +690,7 @@ def _episode(
         "success": tracker.success,
         "error": None,
         "steps": max_steps,
+        "goal_conditions": goals.snapshot(),
         "first_success_step": tracker.first_confirmed_step,
         "max_done_streak": tracker.maximum,
         "final_done": final_done,
@@ -882,6 +891,7 @@ def run_evaluation(
                     "success": False,
                     "error": f"{type(exc).__name__}: {exc}",
                     "steps": int(episode_progress.get("steps", 0)),
+                    "goal_conditions": episode_progress.get("goal_conditions"),
                     "first_success_step": episode_progress.get("first_success_step"),
                     "max_done_streak": int(
                         episode_progress.get("max_done_streak", 0)
