@@ -267,6 +267,7 @@ def _save_checkpoint(
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
         "replay_policy": training_replay_policy(config.section("data").get("include_post_success", True)),
+        "bootstrap_failed_end": config.section("data").get("bootstrap_failed_end", False),
         "base_checkpoint": config.section("model")["base_checkpoint"],
         "stats_key": components.stats_key,
         "code_version": _code_version(),
@@ -373,6 +374,8 @@ def _restore_checkpoint(
         for episode in manifest["episodes"]
     )
     replay_policy = training_replay_policy(config.section("data").get("include_post_success", True))
+    if metadata.get("bootstrap_failed_end", False) != config.section("data").get("bootstrap_failed_end", False):
+        raise ValueError("Resume checkpoint uses a different failed-end bootstrap policy")
     if has_success_tail and metadata.get("replay_policy") != replay_policy:
         raise ValueError(
             "Resume checkpoint used a different replay policy for post-success actions. "

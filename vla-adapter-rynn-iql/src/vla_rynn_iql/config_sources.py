@@ -73,6 +73,8 @@ def validate_overrides(value: Any) -> dict:
                    else model_fields if section == "model"
                    else {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"} if section == "vla"
                    else TRAIN_SCHEMA[section].keys() | (COMMON_TRAINING_KEYS if section == "iql" else set()))
+        allowed = set(allowed) | {"data": {"bootstrap_failed_end"},
+                                  "reward": {"zero_success_potential"}}.get(section, set())
         if section == "logging":
             allowed = set(allowed) | {"diagnostics"}
         if fields.keys() - allowed:

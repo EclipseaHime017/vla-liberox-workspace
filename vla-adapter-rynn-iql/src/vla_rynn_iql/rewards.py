@@ -38,7 +38,7 @@ OFFICIAL_INFERENCE_CONFIG_KEYS = frozenset({
 REWARD_DERIVATION_CONFIG_KEYS = frozenset({
     "rynnvalue", "gamma", "shaping_weight", "accumulate_primitive_steps",
 })
-TRAINING_REDUCTION_CONFIG_KEYS = frozenset({"gamma", "accumulate_primitive_steps"})
+TRAINING_REDUCTION_CONFIG_KEYS = frozenset({"gamma", "accumulate_primitive_steps", "zero_success_potential"})
 OFFICIAL_OUTPUT_KEYS = (
     "absolute_temporal_distance_seconds",
     "absolute_value_entropy_nats",
@@ -63,6 +63,8 @@ def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
         for key in sorted(REWARD_DERIVATION_CONFIG_KEYS)
     }
     source = reward_source(reward_config)
+    if reward_config.get("zero_success_potential", False):
+        result["zero_success_potential"] = True
     result["rynnvalue"] = needs_rynnvalue(reward_config)
     result["accumulate_primitive_steps"] = effective_cumulative(reward_config)
     # Preserve RynnValue's existing manifest/checkpoint identity exactly.
@@ -679,6 +681,7 @@ def chunk_reward_components(
     shaping_weight: float,
     accumulate_primitive_steps: bool = False,
     rynnvalue: bool = True,
+    zero_success_potential: bool = False,
 ) -> tuple[float, float, float]:
     """Return sparse, raw PBRS shape, and final rewards for one chunk."""
     sparse = (
@@ -687,6 +690,12 @@ def chunk_reward_components(
         else sparse_macro_reward(done, start, length)
     )
     phi_start, phi_end = -float(value_start), -float(value_end)
+    if zero_success_potential:
+        # done marks actions; observation k is after action k-1.
+        if start > 0 and bool(done[start - 1]):
+            phi_start = 0.0
+        if bool(done[start + length - 1]):
+            phi_end = 0.0
     duration = length if accumulate_primitive_steps else 1
     pbrs_shaping = (gamma ** duration) * phi_end - phi_start
     dense = shaping_weight * pbrs_shaping if rynnvalue else 0.0
@@ -1123,6 +1132,7 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
                 float(derivation_cfg["shaping_weight"]),
                 bool(derivation_cfg["accumulate_primitive_steps"]),
                 bool(derivation_cfg["rynnvalue"]),
+                bool(derivation_cfg.get("zero_success_potential", False)),
             )
             for chunk in evaluation_chunks
         ]
@@ -1337,8 +1347,10 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
         effective = recipe
         if pinned.get("binding_kind") == "global_trajectory_snapshots":
             effective = {**entry["saved_reward_config"], **{
-                key: recipe[key] for key in TRAINING_REDUCTION_CONFIG_KEYS}}
-            if all(effective[key] == entry["saved_reward_config"].get(key)
+                key: recipe.get(key, False) for key in TRAINING_REDUCTION_CONFIG_KEYS}}
+            if not effective.get("zero_success_potential", False):
+                effective.pop("zero_success_potential", None)
+            if all(effective.get(key) == entry["saved_reward_config"].get(key)
                    for key in TRAINING_REDUCTION_CONFIG_KEYS):
                 generated.append((entry, episode, None))
                 continue
@@ -1372,7 +1384,8 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
             components = np.asarray([
                 chunk_reward_components(done, int(chunk["start"]), int(chunk["length"]),
                     lookup[int(chunk["start"])], lookup[int(chunk["end"])], gamma,
-                    float(effective["shaping_weight"]), cumulative, True)
+                    float(effective["shaping_weight"]), cumulative, True,
+                    bool(effective.get("zero_success_potential", False)))
                 for chunk in chunks
             ], dtype=np.float32)
             arrays["sparse_reward"], arrays["pbrs_shaping_reward"], final = components.T
