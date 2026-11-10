@@ -152,6 +152,7 @@ def train_distributed(config: LoadedConfig, distributed, cache_root: Path, run_d
 
 
 def _train(config, distributed, cache_root, run_dir, device, stopping):
+    from .training_diagnostics import due as diagnostics_due, weight_statistics, validation_metrics, validation_dataset
     rank, world = dist.get_rank(), dist.get_world_size()
     cfg = config.section("training")
     seed, accumulation, total = cfg["seed"], cfg["gradient_accumulation_steps"], cfg["train_steps"]
@@ -176,6 +177,9 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
     cache_info = rank_zero_call(lambda: tuple(map(str, build_replay_cache(
         config, cache_root, components.action_stats, components.proprio_stats, reward))))
     dataset = CachedReplayDataset(Path(cache_info[0]))
+    validation = (validation_dataset(config, components)
+                  if config.section("logging").get("diagnostics", {}).get("enabled", False) else None)
+    diagnostic_episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     meter = CommunicationMeter()
     algorithm = DistributedAlgorithm(config, device, meter, transition_horizon=manifest["action_horizon"])
     # Pro retains a legacy FiLM block not used by every prediction path, even
@@ -291,6 +295,11 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
                 data_wait_seconds=data_time, critic_seconds=critic_time, actor_seconds=actor_time,
                 gradient_communication_seconds=meter.seconds - communication_before)
             metrics = _reduce_metrics(metrics, device, float(tensors.get("actor_action_mask", tensors["action_mask"]).sum()))
+            if diagnostics_due(logs, step + 1):
+                if context is not None:
+                    metrics.update(weight_statistics(context, batch, diagnostic_episodes, distributed=True))
+                metrics.update(validation_metrics(backend, components, validation, device, local_batch,
+                                                  distributed=True))
             metrics.update(step=step + 1, algorithm=method.name, world_size=world,
                 micro_batch_size=global_batch, local_micro_batch_size=local_batch,
                 actor_effective_batch_size=global_batch * accumulation,
