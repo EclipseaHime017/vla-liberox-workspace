@@ -62,6 +62,37 @@ class RewardScreenTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum"):
                 screen.analyze(dataset, rewards, gamma=.9)
 
+    def test_fixed_median_handoff_heuristic_not_paired_policy_average(self):
+        grouped, series = {}, {}
+        for parent in range(5):
+            # Median is exactly boundary 10, so [10,20), not preceding [0,10).
+            steps = [1, 2, 3, 4, 9, 11, 12, 13, 14, 15]
+            name = str(parent)
+            grouped[name] = [{"branch": f"{name}-{i}", "handoff_step": step,
+                              "human_return": -float(i), "policy_return": -999.}
+                             for i, step in enumerate(steps)]
+            series[name] = ([{"start": 0, "end": 10}, {"start": 10, "end": 20}], None, [-20., -10.])
+        result = screen.median_handoff_reference(grouped, series)
+        self.assertEqual(result["branch_count"], 50)
+        self.assertEqual(result["human_weights"]["count"], 50)
+        self.assertEqual(result["policy_weights"]["count"], 5)
+        for group in result["groups"]:
+            self.assertEqual(group["median_handoff_step"], 10.)
+            self.assertEqual(group["parent_chunk_start"], 10)
+            self.assertEqual(group["policy_return"], -10.)
+            self.assertAlmostEqual(group["expectile"], screen.expectile(list(-np.arange(10.)) + [-10.], .8))
+        grouped["0"].pop()
+        with self.assertRaisesRegex(ValueError, "all 50"):
+            screen.median_handoff_reference(grouped, series)
+
+    def test_reference_cannot_be_used_for_train40_or_bootstrap_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset, rewards = self.fixture(Path(directory))
+            with self.assertRaisesRegex(ValueError, "requires all"):
+                screen.analyze(dataset, rewards, gamma=.9, plan_v4_reference=True)
+            with self.assertRaisesRegex(ValueError, "all 50"):
+                screen.analyze(dataset, rewards, gamma=.9, split="all", plan_v4_reference=True)
+
     def test_group_reference_does_not_select_a_policy_return(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -50,6 +50,46 @@ def expectile(values, tau):
     return (lo + hi) / 2
 
 
+def median_handoff_reference(grouped, series):
+    """PLAN v4 R11: a declared 10+1 group heuristic, never same-state V(s)."""
+    if len(grouped) != 5 or any(len(rows) != 10 for rows in grouped.values()):
+        raise ValueError("PLAN v4 reference requires all 50 branches in 5 groups of 10")
+    groups = []
+    for parent, rows in sorted(grouped.items()):
+        steps = [row["handoff_step"] for row in rows]
+        middle = float(np.median(steps))
+        chunks, _, returns = series[parent]
+        indices = [i for i, chunk in enumerate(chunks) if chunk["start"] <= middle < chunk["end"]]
+        if len(indices) != 1:
+            raise ValueError("Median handoff does not identify exactly one parent chunk")
+        index = indices[0]
+        values = np.asarray([row["human_return"] for row in rows] + [float(returns[index])], dtype=np.float64)
+        value = float(values.mean())
+        for iteration in range(1000):
+            coefficients = np.where(values >= value, .8, .2)
+            updated = float(np.dot(coefficients, values) / coefficients.sum())
+            if abs(updated - value) <= 1e-12:
+                value = updated
+                break
+            value = updated
+        else:
+            raise ValueError("Weighted-mean expectile iteration did not converge")
+        weight = np.exp(np.minimum(3. * (values - value), np.log(20.)))
+        groups.append({"parent": parent, "branches": [r["branch"] for r in rows],
+            "branch_count": 10, "handoff_steps": steps, "median_handoff_step": middle,
+            "parent_chunk_index": index, "parent_chunk_start": chunks[index]["start"],
+            "parent_chunk_end": chunks[index]["end"], "parent_offset": middle - chunks[index]["start"],
+            "human_returns": values[:-1].tolist(), "policy_return": float(values[-1]),
+            "expectile": value, "expectile_iterations": iteration + 1,
+            "human_weights": weight[:-1].tolist(), "policy_weight": float(weight[-1])})
+    return {"definition": "plan_v4_median_handoff_10_plus_1", "split": "all", "branch_count": 50,
+        "parent_count": 5, "beta": 3., "tau": .8, "cap": 20., "groups": groups,
+        "human_weights": summary([v for group in groups for v in group["human_weights"]]),
+        "policy_weights": summary([group["policy_weight"] for group in groups]),
+        "interpretation": "Group-level return heuristic, NOT same-state V(s) or trained critic advantage.",
+        "p3_comparisons_changed": False}
+
+
 def summary(values):
     values = np.asarray(values, dtype=np.float64)
     if not len(values):
@@ -121,13 +161,16 @@ def validated_tail_values(payload, dataset, dataset_path, reward_path, *, gamma,
 
 def analyze(dataset_path, reward_path, *, gamma, split="train", include_post_success=True,
             beta=3.0, tau=.8, primitive_discount=False, bootstrap_failures=False, tail_values=None,
-            path_map=None, tail_critic_sha256=None):
+            path_map=None, tail_critic_sha256=None, plan_v4_reference=False):
     dataset_path, reward_path = Path(dataset_path), Path(reward_path)
     dataset, manifest = json.loads(dataset_path.read_text()), json.loads(reward_path.read_text())
     if manifest.get("complete") is False or not dataset.get("dataset_sha256") or dataset["dataset_sha256"] != manifest.get("dataset_sha256"):
         raise ValueError("Incomplete reward version or dataset identity mismatch")
     if not np.isfinite(beta) or beta < 0:
         raise ValueError("beta must be finite and nonnegative")
+    if plan_v4_reference and (split != "all" or beta != 3. or tau != .8 or primitive_discount
+                              or bootstrap_failures or not include_post_success):
+        raise ValueError("PLAN v4 reference requires all, beta3, tau.8, macro discount, original full recording/tail0")
     tail_evidence = None
     if bootstrap_failures:
         tail_evidence = tail_values
@@ -272,6 +315,7 @@ def analyze(dataset_path, reward_path, *, gamma, split="train", include_post_suc
             "parent_return_groups": parent_return_groups,
             "human_weights": summary([w for group in weights for w in group["human_weights"]]),
             "policy_weights": summary([group["policy_weight"] for group in weights]),
+            "plan_v4_reference": median_handoff_reference(grouped, series) if plan_v4_reference else None,
             "reward_groups": {name: summary(values) for name, values in categories.items()},
             "normalization_scales": summary(scales)}
 
@@ -285,6 +329,7 @@ def main():
     parser.add_argument("--exclude-post-success", action="store_true")
     parser.add_argument("--primitive-discount", action="store_true")
     parser.add_argument("--bootstrap-failures", action="store_true")
+    parser.add_argument("--plan-v4-reference", action="store_true", help="Fixed all50 median-handoff 10+1 reference, beta3/tau.8")
     parser.add_argument("--tail-values", type=Path, help="Identity-bound export_critic_tail_values.py JSON")
     parser.add_argument("--tail-critic-sha256", help="Independently recorded frozen critic checksum")
     parser.add_argument("--path-map", type=Path, help="Read-only source path mapping; relative targets resolve from this JSON file")
@@ -300,7 +345,8 @@ def main():
                      include_post_success=not args.exclude_post_success, primitive_discount=args.primitive_discount,
                      bootstrap_failures=args.bootstrap_failures,
                      tail_values=json.loads(args.tail_values.read_text()) if args.tail_values else None,
-                     path_map=path_map, tail_critic_sha256=args.tail_critic_sha256)
+                     path_map=path_map, tail_critic_sha256=args.tail_critic_sha256,
+                     plan_v4_reference=args.plan_v4_reference)
     if args.path_map:
         result["path_map_sha256"] = digest(args.path_map)
     with args.output.open("x") as target:
