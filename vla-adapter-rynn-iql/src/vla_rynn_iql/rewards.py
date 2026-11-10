@@ -77,6 +77,8 @@ def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
     if source == "final":
         result.update(fusion_mode=reward_config.get("fusion_mode", "additive"),
                       alpha=float(reward_config.get("alpha", 0.0)))
+        if reward_config.get("base_coefficient") is not None:
+            result["base_coefficient"] = float(reward_config["base_coefficient"])
         normalization = reward_config.get("final_normalization", "none")
         if normalization != "none":
             result["final_normalization"] = normalization

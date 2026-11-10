@@ -262,6 +262,10 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
             if type(raw[section][key]) is not bool:
                 raise TypeError(f"{section}.{key} must be boolean")
             schema[section] = {**schema[section], key: None}
+    if raw["reward"].get("base_coefficient") is None:
+        raw["reward"].pop("base_coefficient", None)
+    elif method.requires_rewards:
+        schema["reward"] = {**schema["reward"], "base_coefficient": None}
     if not method.requires_rewards:
         schema.update(reward=None, iql={})
     _validate_schema(raw, schema)
@@ -336,6 +340,12 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
             raise ValueError("Reward parameters must be finite")
         if reward["fusion_mode"] not in {"additive", "multiplicative"}:
             raise ValueError("reward.fusion_mode must be additive or multiplicative")
+        if "base_coefficient" in reward:
+            _number(reward, "base_coefficient", low=0)
+            if not math.isfinite(reward["base_coefficient"]):
+                raise ValueError("reward.base_coefficient must be finite")
+            if reward_source(reward) != "final" or reward["fusion_mode"] != "additive":
+                raise ValueError("reward.base_coefficient requires additive Final Reward")
         if reward["final_normalization"] not in {"none", "initial_chunk_v1"}:
             raise ValueError("Unsupported reward.final_normalization")
         if type(reward["accumulate_primitive_steps"]) is not bool:

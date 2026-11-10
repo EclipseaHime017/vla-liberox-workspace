@@ -184,6 +184,7 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
         "action_horizon": max(c["length"] for ep in episodes for c in ep["chunks"]),
         "source_dataset_id": dataset["id"], "source_dataset_sha256": dataset["dataset_sha256"],
         "episode_count": len(episodes), "success_count": sum(bool(ep["success"]) for ep in episodes)}
+    raw["reward"].pop("base_coefficient", None)
     raw["reward"].update(entries[0]["saved_reward_config"])
     raw["reward"]["final_normalization"] = entries[0]["saved_reward_config"].get("final_normalization", "none")
     raw["reward"].update(entries[0]["saved_annotation_config"])

@@ -66,6 +66,12 @@ def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
     kappa = float(recipe["shaping_weight"])
     alpha = float(recipe.get("alpha", 0))
     mode = recipe.get("fusion_mode", "additive")
+    base_coefficient = recipe.get("base_coefficient", 1 - alpha)
+    if (type(base_coefficient) not in (int, float) or not np.isfinite(base_coefficient)
+            or base_coefficient < 0):
+        raise ValueError("Invalid Final Reward base_coefficient")
+    if "base_coefficient" in recipe and mode != "additive":
+        raise ValueError("base_coefficient requires additive Final Reward")
     if mode not in {"additive", "multiplicative"}:
         raise ValueError("Unknown Final Reward fusion mode")
     if not all(np.isfinite(x) for x in (gamma, alpha, kappa)) or not 0 <= alpha <= 1:
@@ -96,7 +102,7 @@ def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
             f, original = 0., b
         s = stage_chunk_reward(scores, start, length, gamma, cumulative) if scores is not None else 0.
         if mode == "additive":
-            value = (1 - alpha) * b + alpha * s + kappa * f
+            value = base_coefficient * b + alpha * s + kappa * f
         else:
             value = -float(scores[end]) * original
         sparse.append(b)

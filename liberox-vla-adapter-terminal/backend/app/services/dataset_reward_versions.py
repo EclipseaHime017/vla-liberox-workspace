@@ -147,6 +147,8 @@ class DatasetRewardVersions:
         }
         configs["final"] = {**common, "stage_exponent": reward.get("stage_exponent", 2.0),
                             "alpha": reward.get("alpha", 0.0),
+                            "base_coefficient": reward.get("base_coefficient"),
+                            "final_normalization": "initial_chunk_v1",
                             "fusion_mode": reward.get("fusion_mode", "additive"),
                             "shaping_weight": reward["shaping_weight"]}
         if configs["final"]["fusion_mode"] == "multiplicative":
@@ -172,8 +174,8 @@ class DatasetRewardVersions:
         for key in ("accumulate_primitive_steps", "force_model", "overwrite_global"):
             if key in parameters and type(parameters[key]) is not bool:
                 raise ValueError(f"{key} must be boolean")
-        for key in ("gamma", "stage_exponent", "shaping_weight", "sampling_hz", "alpha"):
-            if key not in parameters:
+        for key in ("gamma", "stage_exponent", "shaping_weight", "sampling_hz", "alpha", "base_coefficient"):
+            if key not in parameters or (key == "base_coefficient" and parameters[key] is None):
                 continue
             value = parameters[key]
             if type(value) not in (int, float) or not math.isfinite(value):
@@ -182,6 +184,7 @@ class DatasetRewardVersions:
                     or (key == "alpha" and not 0 <= value <= 1)
                     or (key == "stage_exponent" and value < 1)
                     or (key == "shaping_weight" and value < 0)
+                    or (key == "base_coefficient" and value < 0)
                     or (key == "sampling_hz" and not 0 < value <= 20)):
                 raise ValueError(f"Invalid {key}")
         for key in ("batch_size", "robometer_batch_size", "max_frames"):
@@ -193,6 +196,10 @@ class DatasetRewardVersions:
             raise ValueError("This reward source does not run a model")
         if parameters.get("fusion_mode", "additive") not in {"additive", "multiplicative"}:
             raise ValueError("Unsupported fusion_mode")
+        if parameters.get("final_normalization", "none") not in {"none", "initial_chunk_v1"}:
+            raise ValueError("Unsupported final_normalization")
+        if parameters.get("base_coefficient") is not None and parameters.get("fusion_mode") != "additive":
+            raise ValueError("base_coefficient requires additive Final Reward")
         if macro_only_reward(parameters):
             parameters["accumulate_primitive_steps"] = False
         with self.lock:
@@ -226,11 +233,14 @@ class DatasetRewardVersions:
         work.mkdir(parents=True, exist_ok=False)
         raw = self._effective_config(dataset)
         raw["data"].pop("stage_annotations_manifest", None)
+        raw["reward"].pop("base_coefficient", None)
         raw["reward"].update(source=source if source != "robometer" else "sparse",
                              rynnvalue=source == "rynnvalue" or (
                                  source == "final" and parameters["shaping_weight"] > 0))
         if source == "final":
-            raw["reward"]["final_normalization"] = "initial_chunk_v1"
+            raw["reward"]["final_normalization"] = parameters.get("final_normalization", "initial_chunk_v1")
+            if parameters.get("base_coefficient") is not None:
+                raw["reward"]["base_coefficient"] = parameters["base_coefficient"]
         for key in ("gamma", "stage_exponent", "shaping_weight", "accumulate_primitive_steps", "max_frames",
                     "alpha", "fusion_mode"):
             if key in parameters:
