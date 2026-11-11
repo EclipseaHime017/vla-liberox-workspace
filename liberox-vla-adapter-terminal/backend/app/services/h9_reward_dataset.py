@@ -52,8 +52,7 @@ def register_h9_dataset(dataset_manifest: Path, source_version_id: str, config_p
     if (any(recipe.get(k) != v for k, v in required.items())
             or recipe.get("final_normalization", "none") != "none"
             or raw["data"].get("include_post_success", True)
-            or raw["data"].get("bootstrap_failed_end", False) is not True
-            or raw["iql"]["beta"] != .3):
+            or raw["data"].get("bootstrap_failed_end", False) is not True):
         raise ValueError("Configuration is not the frozen H9 arm/W5 semantics")
     if rewards.get("reward_config") != recipe or rewards.get("binding_kind"):
         raise ValueError("Materialized reward recipe must exactly match H9 config")

@@ -113,6 +113,21 @@ def test_isolated_cli_uses_existing_runtime(configured, tmp_path):
     assert json.loads(run.stdout.splitlines()[-1])["export_path"] == str(tmp_path / "export")
 
 
+def test_actor_beta_is_not_a_reward_recipe_constraint(configured, tmp_path):
+    args = inputs(configured, tmp_path, "T3-4")
+    raw = yaml.safe_load(args["config_path"].read_text())
+    manifest = Path(raw["paths"]["work_dir"]) / "rewards/reward_manifest.json"
+    before = manifest.read_bytes()
+    raw["iql"]["beta"] = .75
+    args["config_path"].write_text(yaml.safe_dump(raw))
+    args["config_sha256"] = sha256_file(args["config_path"])
+    result = register_h9_dataset(**args)
+    saved = yaml.safe_load(Path(result["version"]["config_path"]).read_text())
+    assert saved["iql"]["beta"] == .75
+    assert result["version"]["reward_config"] == json.loads(before)["reward_config"]
+    assert manifest.read_bytes() == before
+
+
 @pytest.mark.parametrize("fault", ["hash", "split", "recipe", "w5", "mixed"])
 def test_h9_rejects_before_publication(configured, tmp_path, fault):
     args = inputs(configured, tmp_path, "T3-4")
