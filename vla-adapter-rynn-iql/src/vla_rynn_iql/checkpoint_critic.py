@@ -58,6 +58,7 @@ def _statistics(rows):
 
 def export_critic(checkpoint: Path, prepared_manifest: Path, reward_manifest: Path,
                   replay_cache: Path, output: Path, *, expected_trainer_sha256: str,
+                  expected_beta: float | None = None,
                   device: str = "cpu", batch_size: int = 32) -> dict:
     """Inspect a trusted torch checkpoint; never call training/actor/optimizer APIs.
 
@@ -90,9 +91,11 @@ def export_critic(checkpoint: Path, prepared_manifest: Path, reward_manifest: Pa
     if metadata.get("algorithm") != "iql" or config.section("training")["method"] != "iql":
         raise ValueError("R5 requires IQL")
     if (step != 10000 or config.section("reward")["gamma"] != .99
+            or config.section("reward")["source"] != "rynnvalue"
+            or config.section("data").get("include_post_success", True)
             or not config.section("data").get("bootstrap_failed_end", False)
             or not config.section("reward").get("zero_success_potential", False)):
-        raise ValueError("R5 requires final T2-D: 10000 steps, gamma=.99, both W5 switches enabled")
+        raise ValueError("R5 requires final T2-D: 10000 steps, Rynn gamma=.99, no post-success, both W5 switches enabled")
     contract = model_contract(config.section("model"))
     parent = metadata.get("model_parent")
     validate_parent(parent, config.section("model"))
@@ -143,8 +146,12 @@ def export_critic(checkpoint: Path, prepared_manifest: Path, reward_manifest: Pa
         raise ValueError("Replay chunk length mismatch")
     beta = float(config.section("iql")["beta"])
     cap = float(config.section("iql")["max_advantage_weight"])
-    if beta != .3 or cap != 20:
-        raise ValueError("R5 T2-D requires its saved actual beta=0.3, cap=20")
+    if not math.isfinite(beta) or beta <= 0 or cap != 20:
+        raise ValueError("R5 T2-D requires a finite positive saved actual beta and cap=20")
+    if expected_beta is not None and (
+            isinstance(expected_beta, bool) or not math.isfinite(expected_beta)
+            or expected_beta <= 0 or beta != expected_beta):
+        raise ValueError(f"Saved actual beta {beta} differs from independently expected beta {expected_beta}")
     trainer = torch.load(files[2], map_location="cpu", weights_only=False, mmap=True)
     if (trainer.get("schema_version"), trainer.get("step"), trainer.get("algorithm")) != (2, step, "iql"):
         raise ValueError("trainer.pt metadata mismatch")
@@ -190,6 +197,8 @@ def export_critic(checkpoint: Path, prepared_manifest: Path, reward_manifest: Pa
               "checkpoint_metadata": metadata, "config_sha256": config.digest,
               "seed": config.section("training")["seed"], "step": step, "split": "train",
               "gamma": config.section("reward")["gamma"], "beta": beta, "max_weight": cap,
+              "expected_beta": expected_beta,
+              "beta_source": "checkpoint/effective_config.yaml:iql.beta",
               "source": "T2-D", "deduplicated": True, "checkpoint_step": step,
               "cache_identity": identity, "cache_fingerprint": cache["fingerprint"],
               "normalization_sha256": stable_hash({key: identity[key] for key in ("action_stats", "proprio_stats")}),

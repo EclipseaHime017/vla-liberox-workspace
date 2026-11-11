@@ -13,6 +13,8 @@ def main():
     for name in ("checkpoint", "prepared-manifest", "reward-manifest", "replay-cache", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--expected-trainer-sha256", required=True)
+    parser.add_argument("--expected-beta", type=float,
+                        help="Optional independent assertion; weights always use saved actual beta")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=32)
     result = export_critic(**vars(parser.parse_args()))

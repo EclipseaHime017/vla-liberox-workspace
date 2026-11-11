@@ -9,6 +9,7 @@ import yaml
 
 from vla_rynn_iql.checkpoint_critic import export_critic
 from vla_rynn_iql.base_models import model_contract
+from vla_rynn_iql.config import LoadedConfig
 from vla_rynn_iql.data import prepare_dataset, training_replay_policy
 from vla_rynn_iql.io import sha256_file
 from vla_rynn_iql.iql import QNetwork, ValueNetwork
@@ -24,7 +25,7 @@ def case(configured, tmp_path):
     config = configured
     config.raw["training"].update(method="iql", train_steps=10000)
     config.raw["iql"].update(beta=.3, max_advantage_weight=20., critic_image_size=16)
-    config.raw["data"].update(bootstrap_failed_end=True)
+    config.raw["data"].update(bootstrap_failed_end=True, include_post_success=False)
     config.raw["reward"].update(zero_success_potential=True, gamma=.99)
     manifest_path = prepare_dataset(config).manifest
     manifest = json.loads(manifest_path.read_text())
@@ -44,7 +45,7 @@ def case(configured, tmp_path):
         "dataset_sha256": manifest["dataset_sha256"], "reward_sha256": reward_manifest_digest(reward),
         "training_layout": {"chunking": manifest["chunking"], "actor_horizon": contract["io"]["replay_horizon"],
                             "transition_horizon": manifest["action_horizon"]},
-        "replay_policy": training_replay_policy(True), "bootstrap_failed_end": True}
+        "replay_policy": training_replay_policy(False), "bootstrap_failed_end": True}
     (checkpoint / "checkpoint.json").write_text(json.dumps(metadata))
     (checkpoint / "effective_config.yaml").write_text(yaml.safe_dump(config.raw))
     dims = (manifest["action_horizon"], manifest["action_dim"], manifest["proprio_dim"])
@@ -104,3 +105,40 @@ def test_fail_closed_before_output(case, failure):
     with pytest.raises((ValueError, KeyError)):
         run(case)
     assert not output.exists()
+
+
+def set_saved(case, *, beta=None, **data):
+    checkpoint = case[0]
+    path = checkpoint / "effective_config.yaml"
+    raw = yaml.safe_load(path.read_text())
+    if beta is not None:
+        raw["iql"]["beta"] = beta
+    raw["data"].update(data)
+    path.write_text(yaml.safe_dump(raw))
+    meta_path = checkpoint / "checkpoint.json"
+    meta = json.loads(meta_path.read_text())
+    meta["config_sha256"] = LoadedConfig(path, raw).digest
+    meta_path.write_text(json.dumps(meta))
+
+
+@pytest.mark.parametrize("beta", [.3, .75, 1.5, 3.])
+def test_actual_saved_beta_and_independent_expected_beta(case, beta):
+    set_saved(case, beta=beta)
+    result = export_critic(*case, expected_trainer_sha256=sha256_file(case[0] / "trainer.pt"),
+                           expected_beta=beta)
+    assert result["beta"] == result["expected_beta"] == beta
+    assert all(row["weight"] == float(torch.exp(torch.tensor(beta)).clamp(max=20)) for row in result["rows"])
+
+
+@pytest.mark.parametrize("expected", [.3, float("nan"), 0., True])
+def test_independent_beta_mismatch_is_not_an_override(case, expected):
+    set_saved(case, beta=.75)
+    with pytest.raises(ValueError, match="expected beta"):
+        export_critic(*case, expected_trainer_sha256=sha256_file(case[0] / "trainer.pt"), expected_beta=expected)
+    assert not case[-1].exists()
+
+
+def test_postsuccess_input_is_not_t2d(case):
+    set_saved(case, include_post_success=True)
+    with pytest.raises(ValueError, match="no post-success"):
+        run(case)
