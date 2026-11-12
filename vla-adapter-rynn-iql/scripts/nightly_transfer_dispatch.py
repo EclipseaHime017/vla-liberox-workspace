@@ -24,6 +24,7 @@ import urllib.request
 
 import yaml
 from nightly_transfer_source import canonical, sha, safe, token, file_sha, immutable, POLICY_FILES, TRAIN_FILES
+from nightly_transfer_windows import parse_windows, active_window
 
 SCHEDULE = '7a82d7067d2620e8c02d1f2afbaac7822b91db801de36cb2cb0c4ee9e28a8ba1'
 TERMINAL = ('EVALUATION_QUEUED', 'REJECTED', 'EVALUATION_AMBIGUOUS', 'BLOCKED_RETRY_BUDGET', 'BLOCKED_AUTHENTICATION')
@@ -122,9 +123,8 @@ class Scheduler:
         self.config = config
         self.root = safe(config['root'])
         self.root.mkdir(parents=True, exist_ok=True)
-        self.start, self.end = timestamp(config['window_start']), timestamp(config['window_end'])
-        if self.start >= self.end:
-            raise ValueError('Invalid discovery window')
+        self.windows = parse_windows(config)
+        self.start, self.end = self.windows[0][0], self.windows[-1][1]
         self.lock = threading.RLock()
         self.state_path = self.root / 'scheduler-state.json'
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {
@@ -144,8 +144,9 @@ class Scheduler:
             atomic(self.state_path, self.state)
 
     def scan_due(self, now):
-        return self.start <= now < self.end and (self.state['last_scan'] is None or now-self.state['last_scan'] >= 1800
-                or (now >= self.end-60 and self.state['last_scan'] < self.end-60))
+        window = active_window(self.windows,now)
+        return window is not None and (self.state['last_scan'] is None or now-self.state['last_scan'] >= 1800
+                or (now >= window[1]-60 and self.state['last_scan'] < window[1]-60))
 
     def discover(self, now, remote_json, *, smoke=False):
         if not smoke and not self.scan_due(now):
@@ -183,8 +184,8 @@ class Scheduler:
             return None
         self.expire_retries(now)
         candidates = [m for m in self.state['models'].values() if m['phase'] not in TERMINAL and m.get('retry_at', 0) <= now]
-        if now >= self.end:
-            candidates = [m for m in candidates if self.start <= m.get('transfer_started_at', -1) < self.end]
+        if active_window(self.windows,now) is None:
+            candidates = [m for m in candidates if active_window(self.windows,m.get('transfer_started_at',-1))]
         return min(candidates, key=lambda m: (m['priority'], m['discovered_at'], m['policy_id'])) if candidates else None
 
     def expire_retries(self, now):
@@ -200,7 +201,7 @@ class Scheduler:
         """Do not exit just because an in-window transfer's retry is 60s away."""
         with self.lock:
             self.expire_retries(now)
-            return any(self.start <= m.get('transfer_started_at', -1) < self.end
+            return any(active_window(self.windows,m.get('transfer_started_at',-1)) is not None
                 and m['phase'] not in TERMINAL
                 for m in self.state['models'].values())
 
@@ -211,6 +212,19 @@ class Scheduler:
                 'phase': m['phase'], 'reason': m.get('error') or ('WINDOW_CLOSED_NOT_STARTED' if 'transfer_started_at' not in m else 'INCOMPLETE')}
                 for m in self.state['models'].values() if m['phase'] != 'EVALUATION_QUEUED']
             self.state['status'] = 'NEEDS_FOLLOWUP' if self.state['unprocessed'] or self.state['source_errors'] else 'ALL_DISCOVERED_MODELS_QUEUED'
+            self.save()
+
+    def open_window(self,now):
+        window = active_window(self.windows,now)
+        if window is None or self.state.get('current_window_start') == window[0]: return
+        with self.lock:
+            if self.state.get('window_closed'):
+                self.state.setdefault('close_report_history',[]).append({
+                    'previous_window_start':self.state.get('current_window_start'),
+                    'status':self.state.get('status'), 'unprocessed':self.state.get('unprocessed',[]),
+                    'closed_windows':list(self.state.get('closed_windows',[]))})
+            self.state.update(current_window_start=window[0],current_window_end=window[1],
+                              window_closed=False,unprocessed=[],status='WINDOW_OPEN')
             self.save()
 
 
@@ -270,7 +284,7 @@ def process_model(scheduler, model, network_env):
         pieces = shlex.split(command)
         if pieces[0] == 'get' and 'transfer_started_at' not in model:
             now = time.time()
-            if not scheduler.start <= now < scheduler.end:
+            if active_window(scheduler.windows,now) is None:
                 raise RuntimeError('WINDOW_CLOSED: refusing a new model transfer')
             mark('DOWNLOADING', transfer_started_at=now)
         remote = [pieces[0], pid, *pieces[1:]]
@@ -433,11 +447,18 @@ def run(config, password_fd=None, *, smoke=False):
             now = time.time()
             if scheduler.scan_due(now):
                 scheduler.discover(now, remote_json)
-            if now >= scheduler.end and not scheduler.state.get('closing_scan_done'):
+            closed = scheduler.state.setdefault('closed_windows',[])
+            ended = [end for _,end in scheduler.windows if now >= end and end not in closed]
+            if ended:
                 # Metadata only: records final arrivals without starting them outside the window.
                 scheduler.discover(now, remote_json, smoke=True)
-                scheduler.state['closing_scan_done'] = True
+                closed.extend(ended)
                 scheduler.close_report()
+            scheduler.open_window(now)
+            scheduler.state['next_window_start'] = next((start for start,_ in scheduler.windows if start > now),None)
+            if now < scheduler.end and active is None:
+                scheduler.state['status'] = 'WINDOW_OPEN' if active_window(scheduler.windows,now) else 'WAITING_NEXT_WINDOW'
+            scheduler.save()
             if active is not None and active.done():
                 active.result()
                 active = None
@@ -453,13 +474,66 @@ def run(config, password_fd=None, *, smoke=False):
             time.sleep(5)
 
 
+def migrate_config(old_path, new_path, old_digest, new_digest):
+    """Locked audited schedule-only migration. Model trees and receipts are untouched."""
+    old_bytes, new_bytes = safe(old_path).read_bytes(),safe(new_path).read_bytes()
+    if sha(old_bytes) != old_digest or sha(new_bytes) != new_digest:
+        raise IdentityError('Reviewed old/new configuration byte SHA mismatch')
+    old, new = json.loads(old_bytes),json.loads(new_bytes)
+    previous, upcoming = parse_windows(old),parse_windows(new)
+    if 'windows' not in new: raise IdentityError('Migration requires explicit finite R22 nights')
+    schedule_keys = {'window_start','window_end','windows'}
+    if {k:v for k,v in old.items() if k not in schedule_keys} != {k:v for k,v in new.items() if k not in schedule_keys}:
+        raise IdentityError('Migration may only change schedule, not sources/allowlist/identity')
+    if any(not any(a <= start and end <= b for a,b in upcoming) for start,end in previous):
+        raise IdentityError('Migration cannot drop an old authorized window')
+    root = safe(old['root'])
+    with safe(root/'scheduler.lock').open('a+') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        state_path = safe(root/'scheduler-state.json')
+        before_bytes = state_path.read_bytes()
+        state = json.loads(before_bytes)
+        key = sha(canonical({'old':old_digest,'new':new_digest}))
+        record = root/'migrations'/key
+        if state['config_sha256'] == sha(canonical(new)):
+            proof = json.loads(safe(record/'intent.json').read_text())
+            if proof['new_config_sha256'] != new_digest: raise IdentityError('Migration identity mismatch')
+            if not (record/'APPLIED.json').exists():
+                immutable(record/'APPLIED.json',{'state_sha256':sha(before_bytes),'migration':key})
+            return {'migration':key,'already_applied':True}
+        if state['config_sha256'] != sha(canonical(old)):
+            raise IdentityError('Active state does not match reviewed old configuration')
+        # Independently check current pinned allowlist bytes, without constructing/saving Scheduler.
+        for source in new['sources'].values():
+            if file_sha(safe(source['allowlist'])) != source['allowlist_sha256']:
+                raise IdentityError('Pinned allowlist changed')
+        immutable(record/'before-state.json',state)
+        immutable(record/'intent.json',{'old_config_sha256':old_digest,'new_config_sha256':new_digest,
+            'original_state_byte_sha256':sha(before_bytes),'old_config':old,'new_config':new})
+        state['config_sha256'] = sha(canonical(new))
+        state.setdefault('migration_history',[]).append(key)
+        # All prior fields/model phases/POST intents are retained, including historical close reports.
+        state['status'] = 'SCHEDULE_MIGRATED_PENDING_RESTART'
+        atomic(state_path,state)
+        immutable(record/'APPLIED.json',{'state_sha256':file_sha(state_path),'migration':key})
+        return {'migration':key,'already_applied':False}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--password-fd', type=int)
     parser.add_argument('--metadata-smoke', action='store_true')
+    parser.add_argument('--migrate-from',type=Path)
+    parser.add_argument('--old-config-sha256')
+    parser.add_argument('--new-config-sha256')
     args = parser.parse_args()
-    print(json.dumps(run(json.loads(safe(args.config).read_text()), args.password_fd, smoke=args.metadata_smoke)))
+    if args.migrate_from:
+        if not args.old_config_sha256 or not args.new_config_sha256 or args.metadata_smoke or args.password_fd is not None:
+            parser.error('Migration requires both reviewed config SHA values and no runtime action')
+        print(json.dumps(migrate_config(args.migrate_from,args.config,args.old_config_sha256,args.new_config_sha256)))
+    else:
+        print(json.dumps(run(json.loads(safe(args.config).read_text()), args.password_fd, smoke=args.metadata_smoke)))
 
 
 if __name__ == '__main__':

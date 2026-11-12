@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 from unittest.mock import Mock
 
+sys.path.insert(0,str(Path(__file__).parents[1]/'scripts'))
 spec = importlib.util.spec_from_file_location('scan', Path(__file__).parents[1] / 'scripts/nightly_transfer_scan.py')
 S = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(S)
