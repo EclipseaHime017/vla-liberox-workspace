@@ -160,6 +160,16 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(src.read_bytes(),b'training record')
         self.assertFalse(list(self.root.glob('.r21-record-*')))
 
+    def test_duplicate_start_or_smoke_cannot_touch_state_before_lock(self):
+        state = self.scheduler.state_path
+        state.write_bytes(b'authoritative active writer bytes, not a constructor input')
+        before = state.read_bytes()
+        with (self.scheduler.root/'scheduler.lock').open('a+') as lock:
+            D.fcntl.flock(lock,D.fcntl.LOCK_EX|D.fcntl.LOCK_NB)
+            for smoke in (False,True):
+                with self.assertRaises(BlockingIOError): D.run(self.config,smoke=smoke)
+                self.assertEqual(state.read_bytes(),before)
+
 
 class EvaluationTests(unittest.TestCase):
     def setUp(self):

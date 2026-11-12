@@ -393,9 +393,12 @@ def copy_new(source, target, entry):
 
 
 def run(config, password_fd=None, *, smoke=False):
-    scheduler = Scheduler(config)
-    with safe(scheduler.root / 'scheduler.lock').open('a+') as lock, ExitStack() as stack:
+    root = safe(config['root'])
+    root.mkdir(parents=True, exist_ok=True)
+    # Lock before Scheduler reads/writes persistent state, including metadata smoke.
+    with safe(root / 'scheduler.lock').open('a+') as lock, ExitStack() as stack:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        scheduler = Scheduler(config)
         env = os.environ.copy()
         if 'nscc' in config['sources']:
             if password_fd is None or password_fd < 3:
