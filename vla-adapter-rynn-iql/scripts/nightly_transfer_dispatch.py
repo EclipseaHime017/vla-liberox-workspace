@@ -60,6 +60,14 @@ def module(path, digest, name):
     return result
 
 
+def allowlisted_jobs(raw):
+    if raw.get('kind') == 'r21_nscc_pbs_static_allowlist':
+        return [{**e, 'request_sha256': raw['request_canonical_sha256'],
+                 'max_steps': e['evaluation_max_steps'], 'run_directory': e['run']}
+                for e in raw['entries']]
+    return raw['jobs']
+
+
 def validate_manifest(manifest, reference, allowed, source_id):
     if sha(canonical(manifest)) != reference['manifest_sha256'] or manifest.get('source_id') != source_id:
         raise IdentityError('Frozen manifest SHA/source mismatch')
@@ -90,7 +98,18 @@ def validate_manifest(manifest, reference, allowed, source_id):
     if content != model['artifact_content_sha256']:
         raise IdentityError('Artifact content identity mismatch')
     terminal = manifest['terminal']
-    if (terminal['job']['id'] != model['job_id'] or terminal['job']['status'] != 'COMPLETED'
+    if source_id == 'nscc':
+        if (terminal.get('kind') != 'pbs' or terminal.get('pbs_job_id') != expected['pbs_job_id']
+                or terminal['pbs'].get('job_state') != 'F' or terminal['pbs'].get('Exit_status') != 0
+                or terminal.get('request_sha256') != expected['request_sha256']
+                or terminal.get('run') != expected['run_directory']
+                or terminal['summary'].get('status') != 'COMPLETED'
+                or terminal['summary'].get('step') != model['training_steps']):
+            raise IdentityError('PBS final evidence conflicts with frozen run')
+        config_entry = next(e for e in entries if e['relative'] == 'training_records/effective_config.yaml')
+        if config_entry['sha256'] != expected['effective_config_sha256']:
+            raise IdentityError('PBS effective configuration SHA mismatch')
+    elif (terminal['job']['id'] != model['job_id'] or terminal['job']['status'] != 'COMPLETED'
             or terminal['job']['request_sha256'] != model['request_sha256']
             or any(x.get('status') != 'COMPLETED' or x.get('step') != model['training_steps']
                    for x in (terminal['summary'], terminal['job']['result']))):
@@ -117,7 +136,7 @@ class Scheduler:
             raw = safe(source['allowlist']).read_bytes()
             if sha(raw) != source['allowlist_sha256']:
                 raise IdentityError('Allowlist SHA mismatch')
-            self.allowed[name] = {j['job_id']: j for j in json.loads(raw)['jobs']}
+            self.allowed[name] = {j['job_id']: j for j in allowlisted_jobs(json.loads(raw))}
         self.save()
 
     def save(self):
