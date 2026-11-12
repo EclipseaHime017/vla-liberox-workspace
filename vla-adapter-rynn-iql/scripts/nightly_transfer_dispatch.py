@@ -28,6 +28,7 @@ from nightly_transfer_windows import parse_windows, active_window
 
 SCHEDULE = '7a82d7067d2620e8c02d1f2afbaac7822b91db801de36cb2cb0c4ee9e28a8ba1'
 TERMINAL = ('EVALUATION_QUEUED', 'REJECTED', 'EVALUATION_AMBIGUOUS', 'BLOCKED_RETRY_BUDGET', 'BLOCKED_AUTHENTICATION')
+PUBLICATION_DIRECTORY_ERROR = 'Policy directory must match its safe policy_id'
 
 
 class IdentityError(ValueError):
@@ -353,7 +354,7 @@ def publish(config, model, root, manifest):
     decode_child(raw)
     dest = safe(Path(config['policy_registry']) / model['policy_id'])
     if not dest.exists():
-        export_policy(source / 'policy.yaml', dest, config['base_checkpoint'])
+        export_named_input(source,root,model['policy_id'],dest,config['base_checkpoint'],export_policy)
     deployed = yaml.safe_load(safe(dest / 'policy.yaml').read_text())
     validate_policy(dest / 'policy.yaml', deployed)
     compare_deployed_identity(raw, deployed)
@@ -367,6 +368,23 @@ def publish(config, model, root, manifest):
                 raise IdentityError('Existing training record differs')
     immutable(root / 'publication.json', {'policy_id': model['policy_id'], 'artifact_content_sha256': model['artifact_content_sha256'],
                                          'deployed_policy_sha256': file_sha(dest / 'policy.yaml')})
+
+
+def export_named_input(source,root,pid,dest,base_checkpoint,export_policy):
+    """Give the unchanged strict exporter a real policy_id-named input directory.
+
+    Only links to already verified immutable inputs, not a second actor copy.
+    The pinned exporter reads source and writes a separate final copy; never chmod
+    or write these shared inodes. Context cleanup removes only our temporary links.
+    """
+    with tempfile.TemporaryDirectory(prefix='.publication-input-',dir=safe(root)) as folder:
+        stage = Path(folder)/token(pid)
+        stage.mkdir()
+        for name in POLICY_FILES:
+            path = safe(source/name)
+            if not path.is_file(): raise IdentityError('Missing verified publication input')
+            os.link(path,stage/name,follow_symlinks=False)
+        return export_policy(stage/'policy.yaml',dest,base_checkpoint)
 
 
 def compare_deployed_identity(raw, deployed):
@@ -519,6 +537,63 @@ def migrate_config(old_path, new_path, old_digest, new_digest):
         return {'migration':key,'already_applied':False}
 
 
+def recover_publication(config_path, config_digest, policy_ids):
+    """Explicit narrow recovery of the R22 files/ directory-name defect only."""
+    raw = safe(config_path).read_bytes()
+    if sha(raw) != config_digest: raise IdentityError('Reviewed configuration byte SHA mismatch')
+    config = json.loads(raw)
+    root = safe(config['root'])
+    with safe(root/'scheduler.lock').open('a+') as lock, ExitStack() as workers:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        state_path = safe(root/'scheduler-state.json')
+        state = json.loads(state_path.read_text())
+        if state['config_sha256'] != sha(canonical(config)):
+            raise IdentityError('Recovery configuration does not match scheduler')
+        pending, outcomes = [], []
+        for pid in sorted(set(policy_ids)):
+            token(pid)
+            model = state['models'][pid]
+            folder = safe(root/'models'/pid)
+            worker = workers.enter_context(safe(folder/'worker.lock').open('a+'))
+            fcntl.flock(worker,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            audit = safe(root/'recoveries/publication-directory'/f'{pid}.json')
+            if model['phase'] != 'REJECTED':
+                if audit.exists() and json.loads(audit.read_text())['manifest_sha256'] == model['manifest_sha256']:
+                    outcomes.append({'policy_id':pid,'already_recovered':True})
+                    continue
+                raise IdentityError('Only exact rejected directory-name failure can be recovered')
+            if model.get('error') != PUBLICATION_DIRECTORY_ERROR:
+                raise IdentityError('Different rejection must not be requeued')
+            for name in ('publication.json','evaluation.json','evaluation-intent.json','evaluation-request.json'):
+                if safe(folder/name).exists(): raise IdentityError('Publication/evaluation already attempted; manual review required')
+            if safe(Path(config['policy_registry'])/pid).exists():
+                raise IdentityError('Destination already exists; not the directory-name-only failure')
+            source = config['sources'][model['source_id']]
+            allowbytes = safe(source['allowlist']).read_bytes()
+            if sha(allowbytes) != source['allowlist_sha256']: raise IdentityError('Allowlist SHA mismatch')
+            allowed = {j['job_id']:j for j in allowlisted_jobs(json.loads(allowbytes))}
+            manifest = json.loads(safe(folder/'manifest.json').read_text())
+            validate_manifest(manifest,model,allowed,model['source_id'])
+            proof = json.loads(safe(folder/'VERIFIED.json').read_text())
+            if proof != {'manifest_sha256':model['manifest_sha256'],'artifact_content_sha256':model['artifact_content_sha256']}:
+                raise IdentityError('VERIFIED identity mismatch')
+            for entry in manifest['files']:
+                path = safe(folder/'files'/entry['relative'])
+                if path.stat().st_size != entry['size'] or file_sha(path) != entry['sha256']:
+                    raise IdentityError('Recovery requires all nine original file SHA values')
+            if yaml.safe_load((folder/'files/policy.yaml').read_text()).get('policy_id') != pid:
+                raise IdentityError('Downloaded policy identity mismatch')
+            pending.append((model,audit,dict(model)))
+        # Validate every requested model before updating any model phase.
+        for model,audit,before in pending:
+            immutable(audit,{'policy_id':model['policy_id'],'manifest_sha256':model['manifest_sha256'],
+                'config_byte_sha256':config_digest,'before':before,'reason':'verified directory-name-only publication repair'})
+            model.update(phase='VERIFIED',error=None,retry_at=0)
+            outcomes.append({'policy_id':model['policy_id'],'already_recovered':False})
+        if pending: atomic(state_path,state)
+        return {'models':outcomes,'download_or_evaluation_started':False}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -527,8 +602,14 @@ def main():
     parser.add_argument('--migrate-from',type=Path)
     parser.add_argument('--old-config-sha256')
     parser.add_argument('--new-config-sha256')
+    parser.add_argument('--recover-publication',nargs='+',metavar='POLICY_ID')
+    parser.add_argument('--config-sha256')
     args = parser.parse_args()
-    if args.migrate_from:
+    if args.recover_publication:
+        if not args.config_sha256 or args.migrate_from or args.metadata_smoke or args.password_fd is not None:
+            parser.error('Publication recovery requires reviewed config SHA and no other operation')
+        print(json.dumps(recover_publication(args.config,args.config_sha256,args.recover_publication)))
+    elif args.migrate_from:
         if not args.old_config_sha256 or not args.new_config_sha256 or args.metadata_smoke or args.password_fd is not None:
             parser.error('Migration requires both reviewed config SHA values and no runtime action')
         print(json.dumps(migrate_config(args.migrate_from,args.config,args.old_config_sha256,args.new_config_sha256)))
