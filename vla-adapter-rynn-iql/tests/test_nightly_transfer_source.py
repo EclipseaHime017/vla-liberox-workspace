@@ -132,7 +132,9 @@ class SourceTests(unittest.TestCase):
     def test_done_exact_grant_after_window_and_expiry(self):
         auth = self.root / 'authorized_keys'
         auth.write_text('other\nscoped grant\n')
-        self.contract['revoke'] = {'authorized_keys': str(auth), 'line': 'scoped grant'}
+        grant = self.root / 'grant-line.txt'
+        grant.write_text('scoped grant\n')
+        self.contract['revoke'] = {'authorized_keys': str(auth), 'line_file': str(grant)}
         self.contract['discovery_end'] = time.time()+30
         with self.assertRaises(ValueError):
             self.call('done')

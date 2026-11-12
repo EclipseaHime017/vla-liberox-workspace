@@ -200,14 +200,18 @@ def serve(contract, args, output):
                 raise ValueError('Cannot revoke catalog capability before discovery window closes')
             authorization = contract['revoke']
             auth = safe(authorization['authorized_keys'])
+            # Stored separately: the forced-command line itself contains the contract SHA.
+            exact_line = safe(authorization['line_file']).read_text().rstrip('\n')
+            if not exact_line or '\n' in exact_line or '\r' in exact_line:
+                raise ValueError('Invalid scoped grant record')
             with auth.open('r+') as stream:
                 fcntl.flock(stream, fcntl.LOCK_EX)
                 lines = stream.readlines()
-                matching = [line for line in lines if line.rstrip('\n') == authorization['line']]
+                matching = [line for line in lines if line.rstrip('\n') == exact_line]
                 if len(matching) > 1:
                     raise ValueError('Duplicate scoped grant')
                 stream.seek(0)
-                stream.writelines(line for line in lines if line.rstrip('\n') != authorization['line'])
+                stream.writelines(line for line in lines if line.rstrip('\n') != exact_line)
                 stream.truncate()
                 stream.flush()
                 os.fsync(stream.fileno())
