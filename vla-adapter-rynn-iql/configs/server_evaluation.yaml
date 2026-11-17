@@ -1,0 +1,22 @@
+schema_version: 1
+liberox_root: ../../third_party/LIBERO-X
+vla_adapter_root: ../../third_party/VLA-Adapter
+output_root: ../outputs/evaluations
+render_backend: egl
+# Environment for --check-render; normal evaluation uses each policy's model environment.
+check_environment: pi05
+policies:
+  - ../../policy-registry/REPLACE_WITH_POLICY_ID/policy.yaml
+tasks:
+  - level: LEVEL1
+    task_name: EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove
+    max_steps: 500
+    init_state_indices: [0, 1, 2]
+trials: 30
+base_seed: 0
+seed_count: null
+schedule_seed: 0
+success_streak: 5
+consecutive_error_limit: 3
+# null uses the selected variant's default, capped by the child's supervised horizon.
+open_loop_steps: null

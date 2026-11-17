@@ -1,0 +1,13 @@
+# Install in each model environment used for evaluation, after its training setup.
+numpy==1.26.4
+mujoco==2.3.7
+robosuite==1.4.1
+numba==0.59.1
+bddl==3.6.0
+gym==0.26.2
+easydict
+cloudpickle
+matplotlib>=3.7,<4
+opencv-python==4.11.0.86
+imageio[ffmpeg]
+PyOpenGL==3.1.10

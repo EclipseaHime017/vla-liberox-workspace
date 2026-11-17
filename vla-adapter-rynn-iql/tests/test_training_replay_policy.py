@@ -83,3 +83,34 @@ def test_resume_checks_changed_training_sample_policy(
     with expected:
         _restore_checkpoint(tmp_path, components, None, None, None,
                             torch.device("cpu"), configured, manifest, rewards)
+
+
+# Server-branch coverage merged into main.
+from vla_rynn_iql.base_models import model_contract  # noqa: E402
+
+@pytest.mark.parametrize("changed", ["actor_horizon", "transition_horizon", "chunking", "missing", "contract"])
+def test_resume_rejects_changed_training_geometry(configured, tmp_path, monkeypatch, changed):
+    manifest = {"dataset_sha256": "dataset", "action_horizon": 8, "episodes": []}
+    layout = {"chunking": None, "actor_horizon": 8, "transition_horizon": 8}
+    contract = model_contract(configured.section("model"))
+    metadata = {
+        "dataset_sha256": "dataset", "reward_sha256": reward_manifest_digest({}),
+        "base_checkpoint": configured.section("model")["base_checkpoint"], "stats_key": "test",
+        "training_layout": layout, "model_contract": contract,
+    }
+    if changed == "missing":
+        metadata.pop("training_layout")
+    elif changed == "contract":
+        contract["io"]["replay_horizon"] = 5
+    else:
+        layout[changed] = "old" if changed == "chunking" else 5
+    (tmp_path / "checkpoint.json").write_text(json.dumps(metadata))
+    components = SimpleNamespace(stats_key="test")
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("incompatible checkpoint must be rejected before loading weights")
+
+    monkeypatch.setattr(torch, "load", unexpected_load)
+    with pytest.raises(ValueError, match="input contract|training_layout"):
+        _restore_checkpoint(tmp_path, components, None, None, None,
+                            torch.device("cpu"), configured, manifest, {})

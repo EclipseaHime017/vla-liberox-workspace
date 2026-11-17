@@ -37,6 +37,9 @@ class ActionDataset(Dataset):
         self.items = [(episode, index, None) for episode, index in
                       iter_unique_replay_chunks(self.manifest["episodes"], split=split,
                                                include_post_success=self.include_post_success)]
+        self.prompt_groups: dict[str, list[int]] = {}
+        for index, (episode, chunk_index, _) in enumerate(self.items):
+            self.prompt_groups.setdefault(episode["prompt"], []).append(index)
         if split == "train" and not self.items:
             raise RuntimeError("Training replay is empty")
         # Only chunk boundaries are ever read: the start frame for the actor

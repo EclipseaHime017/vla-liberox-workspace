@@ -7,3 +7,5 @@ imageio>=2.34,<3
 imageio-ffmpeg>=0.5,<1
 tensorboard>=2.15,<3
 wandb>=0.19,<1
+msgpack>=1,<2
+msgpack-numpy>=0.4.8,<0.5

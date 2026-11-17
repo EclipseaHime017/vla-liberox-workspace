@@ -37,6 +37,55 @@ def merge_config(base: dict, changes: dict) -> dict:
     return result
 
 
+def strict_keys(value: Any, expected: set[str], context: str) -> dict:
+    if not isinstance(value, dict):
+        raise TypeError(f"{context} must be a mapping")
+    missing, unknown = sorted(expected - value.keys()), sorted(value.keys() - expected)
+    if missing or unknown:
+        raise ValueError(f"Invalid {context} keys; missing={missing}, unknown={unknown}")
+    return value
+
+
+def resolve_path(value: str, base: Path, context: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"{context} must be a non-empty path")
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else base / path).resolve()
+
+
+def validate_overrides(value: Any) -> dict:
+    from .config import TRAIN_SCHEMA
+    from .methods import COMMON_TRAINING_KEYS
+    from .models import MODELS
+    if not isinstance(value, dict):
+        raise TypeError("overrides must be a mapping")
+    sections = (TRAIN_SCHEMA.keys() - {"schema_version"}) | {"vla"}
+    result = {key: {} for key in sections}
+    result.update(copy.deepcopy(value))
+    strict_keys(result, sections, "overrides")
+    model_fields = {"family", "base_id", "base_checkpoint", "stats_key", "contract"}
+    for model in MODELS.values():
+        model_fields.update(model.defaults)
+    for section, fields in result.items():
+        if not isinstance(fields, dict):
+            raise TypeError(f"overrides.{section} must be a mapping")
+        allowed = (COMMON_TRAINING_KEYS | {"method", "actor_lr_warmup_steps"} if section == "training"
+                   else model_fields if section == "model"
+                   else {"base_checkpoint", "stats_key", "use_pro_version", "freeze_backbone"} if section == "vla"
+                   else TRAIN_SCHEMA[section].keys() | (COMMON_TRAINING_KEYS if section == "iql" else set()))
+        allowed = set(allowed) | {"data": {"bootstrap_failed_end"},
+                                  "reward": {"zero_success_potential"}}.get(section, set())
+        if section == "logging":
+            allowed = set(allowed) | {"diagnostics"}
+        if fields.keys() - allowed:
+            raise ValueError(f"Unknown overrides.{section} keys: {sorted(fields.keys() - allowed)}")
+    managed = {"paths": {"work_dir"}, "data": {"task_ids", "selection_manifest"}}
+    for section, names in managed.items():
+        if result[section].keys() & names:
+            raise ValueError(f"Pipeline-managed overrides.{section} keys: {sorted(result[section].keys() & names)}")
+    return result
+
+
 def resolve_source_paths(raw: dict, path: Path) -> dict:
     result = copy.deepcopy(raw)
 

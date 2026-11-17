@@ -47,7 +47,7 @@ def _episode(root: Path, run_id: str, *, kind: str = "original", resume: int | N
     )
     (run_dir / "run.json").write_text(json.dumps({
         "id": run_id, "kind": kind, "task_id": "LEVEL1::task", "task_name": "task",
-        "task": "do the task", "status": "COMPLETED", "error": None,
+        "policy_id": "base", "task": "do the task", "status": "COMPLETED", "error": None,
         "root_session_id": "root", "parent_session_id": "root" if kind == "branch" else None,
         "resume_step": resume, "control_mode": "manual" if action_source == "human" else "policy",
         "success": success,
@@ -82,6 +82,6 @@ def configured(tmp_path: Path):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_digest_cache(tmp_path_factory, monkeypatch):
+def isolated_model_digest_cache(tmp_path_factory, monkeypatch):
     """Model digests computed by tests must never reach models/.cache/digests."""
     monkeypatch.setenv("VLA_DIGEST_CACHE_ROOT", str(tmp_path_factory.mktemp("digests")))

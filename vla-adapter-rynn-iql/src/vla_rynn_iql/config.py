@@ -213,20 +213,21 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raise ValueError(f"Unknown training keys: {sorted(unknown)}")
     training.setdefault("method", "iql")
     method = training_method(raw)
-    iql = raw.setdefault("iql", {})
-    if not isinstance(iql, dict):
+    legacy_iql = raw.setdefault("iql", {})
+    if not isinstance(legacy_iql, dict):
         raise TypeError("iql must be a mapping")
-    unknown = set(iql) - set(TRAIN_SCHEMA["iql"])
+    unknown = set(legacy_iql) - set(TRAIN_SCHEMA["iql"]) - COMMON_TRAINING_KEYS
     if unknown:
         raise ValueError(f"Unknown config.iql keys: {sorted(unknown)}")
     common_defaults = (read_source(PROJECT_ROOT / "configs" / "runtime.yaml")["training"]
-                       if COMMON_TRAINING_KEYS - training.keys() else {})
+                       if COMMON_TRAINING_KEYS - training.keys() - legacy_iql.keys() else {})
     for key in COMMON_TRAINING_KEYS:
         if key not in training:
-            training[key] = common_defaults[key]
+            training[key] = legacy_iql[key] if key in legacy_iql else common_defaults[key]
+        legacy_iql.pop(key, None)
     if training.get("actor_lr_warmup_steps") is None:
         # Compatibility only: old IQL configs tied actor LR warmup to critic warmup.
-        training["actor_lr_warmup_steps"] = (iql.get("critic_warmup_steps", 1000)
+        training["actor_lr_warmup_steps"] = (legacy_iql.get("critic_warmup_steps", 1000)
                                             if method.name == "iql" else 1000)
     _number(training, "actor_lr_warmup_steps", low=0, integer=True)
     raw.setdefault("bc", {})
@@ -235,6 +236,7 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raw["reward"] = {}
     raw.setdefault("reward", {})
     raw["model"] = model_config(raw)
+    raw.pop("vla", None)
     raw["schema_version"] = 2
     # Canonicalize old boolean configs. Explicit contradictory choices fail fast.
     if method.requires_rewards and isinstance(raw.get("reward"), dict):
@@ -266,6 +268,14 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         raw["reward"].pop("base_coefficient", None)
     elif method.requires_rewards:
         schema["reward"] = {**schema["reward"], "base_coefficient": None}
+    if "diagnostics" in raw.get("logging", {}):
+        diagnostics = raw["logging"]["diagnostics"]
+        if not isinstance(diagnostics, dict):
+            raise TypeError("logging.diagnostics must be a mapping")
+        diagnostics.setdefault("enabled", False)
+        diagnostics.setdefault("interval_steps", 100)
+        schema["logging"] = {**TRAIN_SCHEMA["logging"], "diagnostics": {
+            "enabled": None, "interval_steps": None}}
     if not method.requires_rewards:
         schema.update(reward=None, iql={})
     _validate_schema(raw, schema)
@@ -410,6 +420,10 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     )
     _number(logging_cfg, "flush_seconds", low=1, high=3600)
     _number(logging_cfg, "console_interval_steps", low=1, integer=True)
+    if "diagnostics" in logging_cfg:
+        if type(logging_cfg["diagnostics"]["enabled"]) is not bool:
+            raise TypeError("logging.diagnostics.enabled must be boolean")
+        _number(logging_cfg["diagnostics"], "interval_steps", low=1, integer=True)
     return LoadedConfig(path, raw)
 
 

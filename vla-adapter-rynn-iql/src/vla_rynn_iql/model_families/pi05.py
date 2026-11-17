@@ -46,7 +46,8 @@ def signature(settings):
 
 def resolve_revision(settings, hash_file=None, *, parent=None):
     from ..pi05_assets import checkpoint_identity, identity_digest
-    kwargs = {} if hash_file is None else {"hash_file": hash_file}
+    from ..model_storage import cached_sha256
+    kwargs = {"hash_file": hash_file or cached_sha256}
     identity = checkpoint_identity(Path(settings["base_checkpoint"]), base_id=settings["base_id"],
                                    parent=parent, contract=settings.get("contract"), **kwargs)
     if f"assets/{settings['stats_key']}/norm_stats.json" not in identity["files"]:

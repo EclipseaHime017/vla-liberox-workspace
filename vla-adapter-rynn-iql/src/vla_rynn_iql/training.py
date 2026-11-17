@@ -24,8 +24,8 @@ import yaml
 from torch.utils.data import default_collate
 
 from .config import LoadedConfig, reward_source
-from .data import load_manifest, training_replay_policy
-from .io import atomic_json, stable_hash
+from .data import load_manifest, training_replay_policy, validate_training_manifest
+from .io import atomic_json, sha256_file, stable_hash
 from .algorithms import TrainingAlgorithm, build_algorithm
 from .methods import actor_lr_warmup, training_method
 from .models import model_backend, model_config, model_signature
@@ -40,6 +40,7 @@ from .monitoring import (
 )
 from .replay import ActionDataset, ReplayDataset
 from .rewards import load_reward_index, reward_manifest_digest
+from .training_diagnostics import due as diagnostics_due, weight_statistics, validation_metrics, validation_dataset
 
 
 LOG = logging.getLogger(__name__)
@@ -168,6 +169,14 @@ def _initialize_wandb(
 
 
 def _sample_batch(dataset: ActionDataset, batch_size: int, generator: torch.Generator):
+    groups = getattr(dataset, "prompt_groups", {})
+    if batch_size > 1 and len(groups) > 1:
+        anchor = int(torch.randint(len(dataset), (1,), generator=generator))
+        episode, chunk_index, _ = dataset.items[anchor]
+        prompt = episode["prompt"]
+        group = groups[prompt]
+        indices = [group[index] for index in torch.randint(len(group), (batch_size,), generator=generator).tolist()]
+        return default_collate([dataset[index] for index in indices])
     indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
     return default_collate([dataset[index] for index in indices])
 
@@ -231,23 +240,27 @@ def _save_checkpoint(
     config: LoadedConfig,
     manifest: dict[str, Any],
     reward_index: dict[str, Any] | None,
+    *, rng: dict[str, Any] | None = None,
 ) -> Path:
     target = directory / f"step_{step:08d}"
     target.mkdir(parents=True, exist_ok=True)
     model_backend(config.raw).save_actor(components, model_config(config.raw), target)
+    if rng is None:
+        rng = {"torch_rng": torch.get_rng_state(),
+               "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+               "numpy_rng": np.random.get_state(), "python_rng": random.getstate()}
     torch.save({
         "schema_version": 2, "step": step, "algorithm": training_method(config.raw).name,
         "algorithm_state": algorithm.checkpoint(),
         "actor_optimizer": actor_optimizer.state_dict(),
-        "torch_rng": torch.get_rng_state(),
-        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-        "numpy_rng": np.random.get_state(), "python_rng": random.getstate(),
+        **rng,
         "data_rng": data_generator.get_state(),
     }, target / "trainer.pt")
     checkpoint_metadata = {
         "schema_version": 2, "step": step, "config_sha256": config.digest,
         "algorithm": training_method(config.raw).name,
         "model_config": model_signature(config.raw),
+        "model_contract": model_contract(config.section("model")),
         "model_identity": getattr(components, "identity", None),
         "model_parent": getattr(components, "parent", None),
         "training_layout": {"chunking": manifest.get("chunking"),
@@ -351,22 +364,27 @@ def _restore_checkpoint(
     config: LoadedConfig,
     manifest: dict[str, Any],
     reward_index: dict[str, Any] | None,
+    *, restore_random: bool = True, checkpoint_device: Any = None,
 ) -> int:
     checkpoint = checkpoint.expanduser().resolve()
     metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
     method = training_method(config.raw).name
-    previous_parent = metadata.get("model_parent")
-    if previous_parent is not None and parent_identity(previous_parent) != parent_identity(getattr(components, "parent", None)):
-        raise ValueError("Resume checkpoint uses a different parent model")
-    if previous_parent is None:
-        previous_contract = legacy_contract(metadata.get("model_config", {}))
-        if canonical_contract(previous_contract) != canonical_contract(model_contract(config.section("model"))):
-            raise ValueError("Resume checkpoint uses a different model input contract")
     if metadata.get("algorithm", "iql") != method:
         raise ValueError("Resume checkpoint uses a different training method")
     previous_model = model_signature({"model": metadata.get("model_config", {})})
     if previous_model != model_signature(config.raw):
         raise ValueError("Resume checkpoint uses a different model training configuration; start a new run")
+    if metadata.get("model_identity") != getattr(components, "identity", None):
+        raise ValueError("Resume checkpoint uses different model weights or normalization")
+    previous_parent = metadata.get("model_parent")
+    if previous_parent is not None and parent_identity(previous_parent) != parent_identity(getattr(components, "parent", None)):
+        raise ValueError("Resume checkpoint uses a different parent model")
+    previous_contract = metadata.get("model_contract")
+    if previous_contract is None:
+        previous_contract = (previous_parent["contract"] if previous_parent is not None
+                             else legacy_contract(metadata.get("model_config", {})))
+    if canonical_contract(previous_contract) != canonical_contract(model_contract(config.section("model"))):
+        raise ValueError("Resume checkpoint uses a different model input contract")
     has_success_tail = any(
         episode.get("split") == "train" and episode.get("terminal_step") is not None
         and int(episode["recorded_action_count"]) > int(episode["terminal_step"]) + 1
@@ -398,15 +416,16 @@ def _restore_checkpoint(
         raise ValueError(f"Resume checkpoint is incompatible: {mismatches}")
     model_backend(config.raw).restore_actor(components, model_config(config.raw), checkpoint)
     trainer = torch.load(
-        checkpoint / "trainer.pt", map_location=device, weights_only=False
+        checkpoint / "trainer.pt", map_location=checkpoint_device or device, weights_only=False
     )
     agent.restore(trainer["algorithm_state"] if "algorithm_state" in trainer else trainer["iql"])
     actor_optimizer.load_state_dict(trainer["actor_optimizer"])
-    torch.set_rng_state(trainer["torch_rng"].cpu())
-    if torch.cuda.is_available() and trainer.get("cuda_rng") is not None:
-        torch.cuda.set_rng_state_all([state.cpu() for state in trainer["cuda_rng"]])
-    np.random.set_state(trainer["numpy_rng"])
-    random.setstate(trainer["python_rng"])
+    if restore_random:
+        torch.set_rng_state(trainer["torch_rng"].cpu())
+        if torch.cuda.is_available() and trainer.get("cuda_rng") is not None:
+            torch.cuda.set_rng_state_all([state.cpu() for state in trainer["cuda_rng"]])
+        np.random.set_state(trainer["numpy_rng"])
+        random.setstate(trainer["python_rng"])
     data_generator.set_state(trainer["data_rng"].cpu())
     return int(trainer["step"])
 
@@ -428,12 +447,7 @@ def train(config: LoadedConfig) -> Path:
         torch.cuda.set_device(device)
     LOG.info("Loading prepared replay for %s", method.name.upper())
     manifest = load_manifest(config)
-    from .execution import CHUNKING_RULE
-    if manifest.get("chunking") != CHUNKING_RULE:
-        raise ValueError("Prepared replay uses legacy chunking; rerun Prepare and regenerate compatible rewards before training")
-    for key in ("action_dim", "proprio_dim"):
-        if key in manifest and manifest[key] != config.section("data")[key]:
-            raise ValueError(f"Prepared replay {key} does not match the selected model configuration")
+    validate_training_manifest(manifest, config)
     reward_index = load_reward_index(config) if method.requires_rewards else None
     reward_hash = reward_manifest_digest(reward_index) if reward_index is not None else None
     reward_mode = ("cumulative_primitive_steps" if config.section("reward")["accumulate_primitive_steps"]
@@ -448,6 +462,9 @@ def train(config: LoadedConfig) -> Path:
     dataset = (ReplayDataset(config, components.action_stats, components.proprio_stats, "train",
                              reward_index=reward_index) if method.requires_transitions else
                ActionDataset(config, components.action_stats, components.proprio_stats, "train"))
+    validation = (validation_dataset(config, components)
+                  if logging_cfg.get("diagnostics", {}).get("enabled", False) else None)
+    diagnostic_episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
     agent = build_algorithm(config, device, transition_horizon=manifest["action_horizon"])
@@ -632,6 +649,10 @@ def train(config: LoadedConfig) -> Path:
             metric["cuda_peak_memory_gib"] = float(
                 metric["cuda_peak_memory_bytes"]
             ) / (1024.0 ** 3)
+            if diagnostics_due(logging_cfg, step + 1):
+                if context is not None:
+                    metric.update(weight_statistics(context, batch, diagnostic_episodes))
+                metric.update(validation_metrics(backend, components, validation, device, micro_batch_size))
             should_report = progress.update(metric)
             metrics_file.write(json.dumps(metric, sort_keys=True) + "\n")
             metrics_file.flush()

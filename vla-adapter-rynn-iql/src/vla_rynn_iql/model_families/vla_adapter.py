@@ -76,7 +76,8 @@ def signature(settings):
 
 def resolve_revision(settings, hash_file=None, *, parent=None):
     from ..checkpoint_assets import resolve_revision as resolve
-    kwargs = {} if hash_file is None else {"hash_file": hash_file}
+    from ..model_storage import cached_sha256
+    kwargs = {"hash_file": hash_file or cached_sha256}
     return resolve(settings["base_checkpoint"], parent["revision"] if parent else settings.get("base_revision"), **kwargs)
 
 

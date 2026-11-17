@@ -25,5 +25,5 @@ test = ["pytest>=8,<9"]
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "hpc/tests"]
 pythonpath = ["src"]

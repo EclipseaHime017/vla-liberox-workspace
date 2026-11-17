@@ -157,3 +157,12 @@ def test_post_success_option_defaults_true_and_requires_boolean(tmp_path):
     for invalid in (None, "false", 0, 1):
         with pytest.raises(TypeError, match="include_post_success"):
             load_train_config(path, overrides={"data": {"include_post_success": invalid}})
+
+
+# Server-branch coverage merged into main.
+IQL_PRESET = PROJECT_ROOT / "configs/training/iql.yaml"
+
+def test_default_entrypoint_uses_composed_iql_profile():
+    from vla_rynn_iql.config import DEFAULT_TRAIN_CONFIG
+    assert DEFAULT_TRAIN_CONFIG == IQL_PRESET
+    assert load_train_config().raw == load_train_config(IQL_PRESET).raw

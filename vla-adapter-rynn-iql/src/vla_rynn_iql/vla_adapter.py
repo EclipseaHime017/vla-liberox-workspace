@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -16,6 +19,7 @@ from .models import model_config
 from .base_models import model_contract
 from .model_artifacts import parent_snapshot, decode_child, legacy_contract
 from .checkpoint_assets import resolve_revision, checkpoint_view
+from .model_storage import cached_sha256
 
 
 ACTION_DIM = 7
@@ -100,16 +104,17 @@ def restrict_tensorflow_to_cpu() -> None:
     """Upstream VLA-Adapter uses TensorFlow only for image preprocessing.
 
     Hide GPUs from it before its first op; otherwise TensorFlow reserves most of
-    the GPU memory the PyTorch model needs.
+    the GPU memory the PyTorch model needs (on every rank).
     """
     import tensorflow as tf
     try:
         tf.config.set_visible_devices([], "GPU")
-    except RuntimeError:
-        pass  # already initialized by this process; the earlier setting stands
+    except RuntimeError as exc:
+        if tf.config.get_visible_devices("GPU"):
+            raise RuntimeError("TensorFlow GPU is already initialized; restart the training worker") from exc
 
 
-def policy_image_pipeline(cfg: Any):
+def policy_image_pipeline(cfg):
     """The official LIBERO client image preprocessing, applied to oriented frames.
 
     Inference runs ``prepare_observation`` (JPEG round trip and lanczos3 resize
@@ -118,8 +123,7 @@ def policy_image_pipeline(cfg: Any):
     crops). Post-training uses the same upstream functions so the processor
     sees identical pixels on both sides.
     """
-    def transform(images) -> list[Image.Image]:
-        # Resolved on first use: loading a model for inference never needs it.
+    def transform(images):
         from experiments.robot.openvla_utils import center_crop_image, resize_image_for_policy
         from experiments.robot.robot_utils import get_image_resize_size
         restrict_tensorflow_to_cpu()
@@ -132,13 +136,48 @@ def policy_image_pipeline(cfg: Any):
     return transform
 
 
+@contextmanager
+def _rank_component_loader(utils, device):
+    """Keep upstream DDP-key handling while avoiding checkpoint CUDA tags.
+
+    Object-Pro component checkpoints contain cuda:0 storages. Each rank must
+    deserialize on CPU before copying into its own device-resident modules.
+    The hook is local to model construction in this isolated worker process.
+    """
+    import torch
+    original = utils.load_component_state_dict
+
+    def load_cpu(path):
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        return {key.removeprefix("module."): value for key, value in state.items()}
+
+    utils.DEVICE = device
+    utils.load_component_state_dict = load_cpu
+    try:
+        yield
+    finally:
+        utils.load_component_state_dict = original
+
+
+def _initialize_components(cfg, device):
+    from experiments.robot import openvla_utils
+    with _rank_component_loader(openvla_utils, device):
+        model = openvla_utils.get_vla(cfg)
+        model.set_version(cfg.save_version)
+        projector = openvla_utils.get_proprio_projector(cfg, model.llm_dim, proprio_dim=8)
+        head = openvla_utils.get_action_head(cfg, model.llm_dim)
+        processor = openvla_utils.get_processor(cfg)
+    return model, head, projector, None, processor
+
+
 def load_components(
     config: LoadedConfig, overlay: Path | None = None, *, training: bool = True
 ) -> VLAComponents:
     from .model_adaptation import configure_components
     _add_vla_path(config)
     restrict_tensorflow_to_cpu()
-    from experiments.robot.libero.run_libero_eval import GenerateConfig, initialize_model
+    import torch
+    device = torch.device(config.section("training")["device"])
 
     vla_cfg = model_config(config.raw)
     policy = load_overlay(overlay) if overlay is not None else None
@@ -150,18 +189,19 @@ def load_components(
     elif policy is not None:
         vla_cfg["contract"] = policy.model_config["contract"]
     contract = model_contract(vla_cfg)
-    revision = resolve_revision(vla_cfg["base_checkpoint"], vla_cfg.get("base_revision"))
+    revision = resolve_revision(vla_cfg["base_checkpoint"], vla_cfg.get("base_revision"), cached_sha256)
     holder = checkpoint_view(vla_cfg["base_checkpoint"], revision)
-    cfg = GenerateConfig(
+    cfg = SimpleNamespace(
         pretrained_checkpoint=holder.name,
         task_suite_name=vla_cfg["stats_key"],
         use_l1_regression=True, use_minivlm=True, num_images_in_input=len(contract["io"]["cameras"]),
         use_proprio=True, use_film=False, use_pro_version=True,
         load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=contract["io"]["native_action_horizon"],
-        seed=int(config.section("training")["seed"]), phase="Inference", center_crop=True,
+        seed=int(config.section("training")["seed"]), phase="Inference", save_version="vla-adapter",
+        model_family="openvla", center_crop=True,
     )
     try:
-        model, action_head, proprio_projector, _, processor = initialize_model(cfg)
+        model, action_head, proprio_projector, _, processor = _initialize_components(cfg, device)
     except BaseException:
         holder.cleanup()
         raise
@@ -184,7 +224,36 @@ def load_components(
         checkpoint_holder=holder, policy_images=policy_image_pipeline(cfg),
     )
     configure_components(components, vla_cfg, training=training)
+    for name in ("model", "action_head", "proprio_projector"):
+        module = getattr(components, name).to(device)
+        if any(parameter.device != device for parameter in module.parameters()):
+            raise RuntimeError(f"{name} did not load on the requested device {device}")
     return components
+
+
+def evaluation_policy(config, manifest, parent):
+    """Use the official inference pipeline and the child's frozen image contract."""
+    from .base_models import model_observation
+    from .image_transforms import image_orientation, vla_adapter_observation
+    from .upstream_environment import verify_vla_adapter_environment
+
+    verify_vla_adapter_environment(Path(config.section("paths")["vla_adapter_root"]))
+    components = load_components(config, overlay=manifest, training=False)
+    from experiments.robot.libero.run_libero_eval import prepare_observation, process_action
+    from experiments.robot.robot_utils import get_action, get_image_resize_size
+    cfg = components.cfg
+    resize = get_image_resize_size(cfg)
+    orientation = image_orientation(model_observation(model_config(config.raw)))
+
+    def predict(observation, prompt):
+        prepared, _ = prepare_observation(vla_adapter_observation(observation, orientation), resize)
+        return get_action(cfg, components.model, prepared, prompt,
+                          processor=components.processor, action_head=components.action_head,
+                          proprio_projector=components.proprio_projector,
+                          noisy_action_projector=None, use_film=cfg.use_film,
+                          use_minivlm=cfg.use_minivlm)
+
+    return predict, lambda action: process_action(action.copy(), cfg.model_family)
 
 
 def qwen_prompt(task: str) -> str:

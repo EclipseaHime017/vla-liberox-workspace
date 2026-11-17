@@ -104,3 +104,17 @@ def test_w1_reads_generated_independent_base_reward(configured):
     assert report["handoff_summary"]["count"] == 1
     assert report["normalization_scales"]["mean"] == 1.
     assert report["reward_manifest_sha256"] == sha256_file(rewards)
+
+
+# Server-branch coverage merged into main.
+
+def test_server_does_not_offer_semantic_coefficient_override(tmp_path):
+    import yaml
+    from vla_rynn_iql.server_config import load_server_config
+    root = Path(__file__).resolve().parents[1]
+    raw = yaml.safe_load((root / "configs/server_pipeline.yaml").read_text())
+    raw["overrides"]["reward"]["base_coefficient"] = 1.
+    path = tmp_path / "server.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="base_coefficient|reward overrides"):
+        load_server_config(path)

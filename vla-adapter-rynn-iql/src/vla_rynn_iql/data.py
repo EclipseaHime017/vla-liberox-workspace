@@ -605,6 +605,7 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
         )
     steps, steps_source = execution_steps(run, metadata, config_path=run_json.parent / "config.yaml")
     segments = _execution_segments(run, metadata, recorded_action_count, steps, trajectory_path=trajectory)
+    handoff_steps = metadata.get("handoff_steps", run.get("handoff_steps", []))
     return {
         "run_id": str(run["id"]),
         "root_run_id": str(run.get("root_session_id") or run["id"]),
@@ -635,9 +636,10 @@ def _load_run(run_json: Path, config: LoadedConfig, *,
         "recorded_action_source_segments": action_source_segments(
             sources, recorded_action_count,
         ),
-        **({"trajectory_segments": segments,
-            "handoff_steps": metadata.get("handoff_steps", run.get("handoff_steps", []))}
-           if segments is not None else {}),
+        # Handoffs bound actor windows even without instruction segments; omit the
+        # empty field so manifests of plain recordings keep their identity.
+        **({"trajectory_segments": segments, "handoff_steps": handoff_steps} if segments is not None
+           else {"handoff_steps": handoff_steps} if handoff_steps else {}),
         "trajectory_path": str(trajectory.resolve()),
         "trajectory_sha256": sha256_file(trajectory),
         "observations_path": str(observations.resolve()),
@@ -858,7 +860,8 @@ def load_manifest(config: LoadedConfig) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"Prepared dataset manifest not found: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+    # Schema 4 stays readable for inspection; training rejects it via validate_training_manifest.
+    if payload.get("schema_version") not in (4, MANIFEST_SCHEMA_VERSION):
         raise ValueError(
             "Unsupported dataset manifest schema; rerun prepare_dataset.py before annotation"
         )
@@ -866,6 +869,14 @@ def load_manifest(config: LoadedConfig) -> dict[str, Any]:
         validate_task_prompt(episode, episode.get("prompt"), context=f"Prepared run {episode['run_id']}")
     transition_layout_summary(payload["episodes"])
     return payload
+
+
+def validate_training_manifest(manifest: dict[str, Any], config: LoadedConfig) -> None:
+    if manifest.get("chunking") != CHUNKING_RULE:
+        raise ValueError("Prepared replay uses legacy chunking; rerun Prepare and regenerate compatible rewards before training")
+    for key in ("action_dim", "proprio_dim"):
+        if key in manifest and manifest[key] != config.section("data")[key]:
+            raise ValueError(f"Prepared replay {key} does not match the selected model configuration")
 
 
 def iter_episode_arrays(manifest: dict[str, Any]) -> Iterator[tuple[dict[str, Any], dict[str, np.ndarray], dict[str, np.ndarray]]]:

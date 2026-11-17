@@ -158,14 +158,13 @@ def test_terminal_preserves_nested_lora_defaults_and_explicit_legacy_override(co
 @pytest.mark.parametrize("mode", ["frozen", "full", "lora"])
 @pytest.mark.parametrize("supervision", [4, 8])
 def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeypatch, mode, supervision):
-    import sys
-    import types
     from vla_rynn_iql.training import _publish_overlay, _save_checkpoint
     from vla_rynn_iql.algorithms import BehaviorCloning
     from vla_rynn_iql import vla_adapter
     from test_replay import _stats
 
     config = copy.deepcopy(configured)
+    config.raw["training"]["device"] = "cpu"
     config.raw["training"]["method"] = "bc"
     config.raw["model"]["backbone"] = mode
     from vla_rynn_iql.base_models import model_contract
@@ -192,14 +191,12 @@ def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeyp
     assert overlay.parent == c.parent
     vla_adapter.validate_overlay(overlay, config.section("model")["base_checkpoint"], c.stats_key)
     assert (overlay.backbone is not None) == (mode != "frozen")
-    module = types.ModuleType("experiments.robot.libero.run_libero_eval")
-    module.GenerateConfig = SimpleNamespace
     def initialize(_):
         fresh = copy.deepcopy(initial)
         return fresh.model, fresh.action_head, fresh.proprio_projector, None, None
-    module.initialize_model = initialize
-    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(vla_adapter, "_initialize_components", lambda cfg, device: initialize(cfg))
     monkeypatch.setattr(vla_adapter, "_add_vla_path", lambda _: None)
+    monkeypatch.setattr(vla_adapter, "restrict_tensorflow_to_cpu", lambda: None)
     monkeypatch.setattr(vla_adapter, "resolve_revision", lambda *_: "a" * 40)
     monkeypatch.setattr(vla_adapter, "checkpoint_view", lambda *_: SimpleNamespace(name=str(tmp_path), cleanup=lambda: None))
     loaded = vla_adapter.load_components(config, overlay_path, training=False)

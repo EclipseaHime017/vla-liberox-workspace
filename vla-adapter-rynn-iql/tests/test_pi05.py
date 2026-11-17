@@ -11,7 +11,7 @@ import pytest
 import torch
 import yaml
 
-from vla_rynn_iql import pi05, vla_adapter
+from vla_rynn_iql import base_models, pi05, vla_adapter
 from vla_rynn_iql.algorithms import BehaviorCloning, ImplicitQLearning
 from vla_rynn_iql.config import PROJECT_ROOT, load_train_config
 from vla_rynn_iql.data import prepare_dataset
@@ -177,7 +177,7 @@ def test_liberox_conversion_pins_source_and_copies_its_own_stats(tmp_path, monke
     assert identity["source_revision"] == base.revision
     assert identity["conversion_precision"] == "bfloat16"
     assert (output / base.norm_file).read_text() == norm.read_text()
-    assert not (output / pi05_assets.base_model("pi05-libero-base").norm_file).exists()
+    assert not (output / base_models.base_model("pi05-libero-base").norm_file).exists()
     with pytest.raises(SystemExit, match="Refusing to overwrite"):
         script.main()
     assert len(calls) == 1

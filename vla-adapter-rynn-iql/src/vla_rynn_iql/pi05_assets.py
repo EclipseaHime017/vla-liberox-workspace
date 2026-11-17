@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 from .io import sha256_file, stable_hash
-from .base_models import BASE_MODELS, base_model, family_adapter
 from .model_storage import local_model_directory
 
 OPENPI_COMMIT = "215abfb217dbac7d5f1273282331b9b1866c0479"
@@ -14,6 +13,7 @@ IDENTITY_FILE = "pi05_identity.json"
 
 def checkpoint_identity(directory: Path, hash_file=sha256_file, *, base_id: str | None = None,
                         parent: dict | None = None, contract: dict | None = None) -> dict:
+    from .base_models import BASE_MODELS, base_model, family_adapter
     directory = local_model_directory(directory).resolve()
     metadata = json.loads((directory / IDENTITY_FILE).read_text())
     base = (base_model(base_id) if base_id is not None else
@@ -46,3 +46,12 @@ def checkpoint_identity(directory: Path, hash_file=sha256_file, *, base_id: str 
 
 def identity_digest(identity: dict) -> str:
     return stable_hash(identity)
+
+
+def __getattr__(name):
+    # Registry helpers remain available here without making the stdlib-only
+    # installer import YAML or NumPy at module load.
+    if name in {"BASE_MODELS", "base_model", "family_adapter"}:
+        from . import base_models
+        return getattr(base_models, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

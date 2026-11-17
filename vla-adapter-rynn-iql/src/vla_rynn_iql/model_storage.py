@@ -3,6 +3,7 @@ import os
 import json
 import re
 import tempfile
+import fcntl
 from pathlib import Path
 
 from .io import atomic_json, sha256_file, stable_hash
@@ -22,35 +23,51 @@ def digest_cache_root() -> Path:
 
 def _signature(path: Path) -> dict:
     stat = path.stat()
-    return {"path": str(path), "inode": stat.st_ino, "size": stat.st_size,
+    return {"path": str(path), "device": stat.st_dev, "inode": stat.st_ino, "size": stat.st_size,
             "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns}
 
 
 def cached_sha256(path: Path, cache_root: Path | None = None) -> str:
-    """Content SHA-256 of a large model file, reused while its inode metadata is unchanged.
-
-    Any write or metadata change updates ctime, which an unprivileged process
-    cannot set back, so an unchanged (inode, size, mtime, ctime) tuple means the
-    previously hashed bytes. Unknown or changed files are always hashed in full.
-    """
+    """Reuse content digests by file identity; serialize cold misses across ranks."""
     resolved = Path(path).resolve()
-    signature = _signature(resolved)
     entry = (cache_root or digest_cache_root()) / f"{stable_hash(str(resolved))[:32]}.json"
-    try:
-        cached = json.loads(entry.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        cached = None
-    # Any unreadable, malformed or stale entry is ignored and recomputed.
-    if (isinstance(cached, dict) and all(cached.get(key) == value for key, value in signature.items())
-            and isinstance(cached.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", cached["sha256"])):
-        return cached["sha256"]
-    digest = sha256_file(resolved)
-    if _signature(resolved) == signature:
+
+    def cached(signature):
         try:
-            atomic_json(entry, {**signature, "sha256": digest})
+            value = json.loads(entry.read_text())
+        except (OSError, ValueError):
+            return None
+        if (isinstance(value, dict) and all(value.get(key) == item for key, item in signature.items())
+                and isinstance(value.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])):
+            return value["sha256"]
+
+    def compute():
+        signature = _signature(resolved)
+        digest = cached(signature)
+        if digest is None:
+            digest = sha256_file(resolved)
+            if _signature(resolved) != signature:
+                raise ValueError(f"Model file changed while hashing: {resolved}")
+            try:
+                atomic_json(entry, {**signature, "sha256": digest})
+            except OSError:
+                pass
+        return digest
+
+    digest = cached(_signature(resolved))
+    if digest is not None:
+        return digest
+    try:
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        lock = entry.with_suffix(".lock").open("a")
+    except OSError:
+        return compute()
+    with lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
         except OSError:
-            pass
-    return digest
+            return compute()
+        return compute()
 
 
 def local_model_directory(value: str | Path) -> Path:

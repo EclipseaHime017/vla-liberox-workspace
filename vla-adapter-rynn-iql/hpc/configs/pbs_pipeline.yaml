@@ -1,0 +1,34 @@
+# One single-node allocation, two independent experiments with disjoint GPUs.
+schema_version: 1
+job_name: liberox-dual
+project: personal-project-id  # replace with your PBS project
+queue: normal@pbs101  # use your site's public routing queue
+walltime: "24:00:00"
+gpus: 4
+launcher_environment: pi05
+output_root: ../../outputs/pbs
+experiments:
+  - name: rynnvalue
+    config: ../../configs/server_pipeline.yaml
+    runs_root: ../../../dataset-root/imports/task-export
+    model: pi05-liberox-base
+    method: iql
+    reward_source: rynnvalue
+    gpu_ids: [0, 1]
+    overrides:
+      training:
+        micro_batch_size: 64
+        gradient_accumulation_steps: 1
+        train_steps: 10000
+  - name: final
+    config: ../../configs/server_pipeline.yaml
+    runs_root: ../../../dataset-root/imports/task-export
+    model: pi05-liberox-base
+    method: iql
+    reward_source: final
+    gpu_ids: [2, 3]
+    overrides:
+      training:
+        micro_batch_size: 64
+        gradient_accumulation_steps: 1
+        train_steps: 10000

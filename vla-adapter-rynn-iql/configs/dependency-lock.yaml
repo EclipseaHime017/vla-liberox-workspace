@@ -1,4 +1,15 @@
 schema_version: 1
+evaluation:
+  libero_x_repository: https://github.com/meituan/LIBERO-X.git
+  libero_x_commit: f528726421c7211d8eb05fe48e9e5e2535ccc813
+  packages:
+    mujoco: 2.3.7
+    robosuite: 1.4.1
+    numba: 0.59.1
+    numpy: 1.26.4
+    bddl: 3.6.0
+    gym: 0.26.2
+    PyOpenGL: 3.1.10
 rynnvalue:
   repository: https://github.com/alibaba-damo-academy/RynnValue.git
   git_commit: 10e0d333f5f3811d0d130587e50f1faf48da49e5
