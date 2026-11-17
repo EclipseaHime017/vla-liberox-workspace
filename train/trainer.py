@@ -123,7 +123,7 @@ def _initialize_wandb(
     except ImportError as exc:
         raise RuntimeError(
             "W&B logging is enabled but wandb is not installed; "
-            "install requirements-train.txt"
+            "install envs/layers/vla.txt"
         ) from exc
     try:
         run = wandb.init(
@@ -562,7 +562,7 @@ def train(config: LoadedConfig) -> Path:
             except ImportError as exc:
                 raise RuntimeError(
                     "TensorBoard logging is enabled but tensorboard is not installed; "
-                    "install requirements-train.txt"
+                    "install envs/layers/vla.txt"
                 ) from exc
             writer = stack.enter_context(
                 SummaryWriter(

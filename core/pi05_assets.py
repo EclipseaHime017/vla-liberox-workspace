@@ -7,6 +7,9 @@ from pathlib import Path
 from core.io import sha256_file, stable_hash
 from core.model_storage import local_model_directory
 
+# The pi05 installer imports these before PyYAML exists in its fresh environment, so they
+# stay literals; tests/core/test_environment_roles.py keeps them equal to third_party/lock.yaml.
+OPENPI_REPOSITORY = "https://github.com/Physical-Intelligence/openpi.git"
 OPENPI_COMMIT = "215abfb217dbac7d5f1273282331b9b1866c0479"
 IDENTITY_FILE = "pi05_identity.json"
 

@@ -4,8 +4,7 @@
 /third_party/*
 !/third_party/.gitkeep
 !/third_party/README.md
-!/third_party/lock*.yaml
-!/third_party/factr.lock.json
+!/third_party/lock.yaml
 !/third_party/patches/
 /dataset-root/
 /dataset-exports/

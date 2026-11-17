@@ -1,19 +1,19 @@
 """Pinned-source verification and subprocess environment; no device access."""
-from core.paths import ROOT
 import hashlib
-import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 
+from core.paths import ROOT
+from core.upstream import upstream_lock
+
 WORKSPACE = ROOT
-LOCK = WORKSPACE / "third_party/factr.lock.json"
 
 
 def verify_upstream(root):
     root = Path(root).resolve()
-    lock = json.loads(LOCK.read_text())
+    lock = upstream_lock("factr")
     result = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                             capture_output=True, text=True, check=True)
     if result.stdout.strip() != lock["commit"]:

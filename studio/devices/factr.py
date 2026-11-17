@@ -215,7 +215,7 @@ class FactrStartupProbe:
             try:
                 self.sdk = importlib.import_module("dynamixel_sdk")
             except ImportError as exc:
-                raise RuntimeError("Missing dynamixel-sdk; install requirements-factr.txt") from exc
+                raise RuntimeError("Missing dynamixel-sdk; install envs/layers/factr.txt") from exc
         self.port = self.sdk.PortHandler(device.path)
         self.packet = self.sdk.PacketHandler(2.0)
         try:

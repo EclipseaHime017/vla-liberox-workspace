@@ -1,4 +1,4 @@
-# Keep this matrix synchronized with configs/dependency-lock.yaml.
+# Keep this matrix synchronized with robometer.runtime in third_party/lock.yaml.
 # torch/torchvision/torchao should be installed from the PyTorch cu128 index.
 torch==2.8.0
 torchvision==0.23.0

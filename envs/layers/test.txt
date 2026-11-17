@@ -1,2 +1,2 @@
--r requirements-ui.txt
+-r studio.txt
 pytest==9.1.1

@@ -1,7 +1,6 @@
-"""Read-only checks for the pinned VLA source and preprocessing dependencies."""
+"""Pinned upstreams (third_party/lock.yaml) and read-only checks of their local checkouts."""
 from __future__ import annotations
 
-from core.paths import THIRD_PARTY
 import hashlib
 import importlib.metadata
 import os
@@ -10,14 +9,25 @@ import subprocess
 
 import yaml
 
+from core.paths import THIRD_PARTY
 
-LOCK_PATH = THIRD_PARTY / "lock-train.yaml"
+LOCK_PATH = THIRD_PARTY / "lock.yaml"
 TF_DISTRIBUTIONS = ("tensorflow", "tensorflow-cpu", "tensorflow-intel", "tensorflow-macos")
 SOURCE_PATHS = (".", ":(glob,exclude)**/*.pyc",
                 ":(glob,exclude)**/*.pyo", ":(glob,exclude)**/*.egg-info/**")
 DIFF_ARGS = ("diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames",
              "--unified=3", "--diff-algorithm=myers", "--no-indent-heuristic", "--no-color",
              "--inter-hunk-context=0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--", *SOURCE_PATHS)
+
+
+def upstream_lock(name: str, *, lock_path: Path = LOCK_PATH) -> dict:
+    """One upstream's pin: repository, commit, checkout and optional patch, weights, packages."""
+    return yaml.safe_load(lock_path.read_text(encoding="utf-8"))[name]
+
+
+def checkout_path(name: str) -> Path:
+    """Default local checkout of an upstream, third_party/<checkout>/."""
+    return THIRD_PARTY / upstream_lock(name)["checkout"]
 
 
 def verify_tensorflow_version(expected: str) -> dict[str, str]:
@@ -46,11 +56,11 @@ def _git(checkout: Path, *args: str) -> bytes:
 
 
 def verify_vla_adapter_environment(checkout: Path, *, lock_path: Path = LOCK_PATH) -> None:
-    lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))["vla_adapter"]
-    verify_tensorflow_version(lock["tensorflow"])
+    lock = upstream_lock("vla_adapter", lock_path=lock_path)
+    verify_tensorflow_version(lock["packages"]["tensorflow"])
     commit = _git(checkout, "rev-parse", "HEAD").decode().strip()
-    if commit != lock["git_commit"]:
-        raise RuntimeError(f"VLA-Adapter commit mismatch: expected {lock['git_commit']}, found {commit}")
+    if commit != lock["commit"]:
+        raise RuntimeError(f"VLA-Adapter commit mismatch: expected {lock['commit']}, found {commit}")
     patch = (lock_path.parent / lock["patch"]["path"]).resolve()
     content = patch.read_bytes()
     if hashlib.sha256(content).hexdigest() != lock["patch"]["sha256"]:

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Install/check pinned official sources and isolated runtime; never access motors."""
 import argparse
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -41,10 +40,11 @@ def main():
     config = load_factr_config()
     if args.install_usb_rule:
         return install_usb_rule(config)  # No runtime setup/check, calibration or torque.
-    from studio.devices.factr_official import LOCK, verify_upstream, runtime_environment
+    from core.upstream import upstream_lock
+    from studio.devices.factr_official import verify_upstream, runtime_environment
     settings = config.runtime
     root, python = Path(settings["upstream_root"]), Path(settings["runtime_python"])
-    lock = json.loads(LOCK.read_text())
+    lock = upstream_lock("factr")
     if not args.check:
         if not root.exists():
             root.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +55,9 @@ def main():
             if python.name != "python" or python.parent.name != "bin":
                 raise ValueError("runtime_python must point to <venv>/bin/python")
             subprocess.run(["/usr/bin/python3", "-m", "venv", "--system-site-packages", str(python.parent.parent)], check=True)
-        subprocess.run([str(python), "-m", "pip", "install", "dynamixel-sdk==3.7.31", "pyserial==3.5"], check=True)
+        # PyYAML reads third_party/lock.yaml; ROS 2 systems already provide it.
+        subprocess.run([str(python), "-m", "pip", "install", "dynamixel-sdk==3.7.31", "pyserial==3.5",
+                        "PyYAML>=6,<7"], check=True)
     verify_upstream(root)
     result = subprocess.run([str(python), "-m", "studio.devices.factr_worker", "--check"], cwd=ROOT,
                             env=runtime_environment(root))

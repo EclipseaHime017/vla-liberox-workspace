@@ -8,10 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
 
-
-ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
+from core.upstream import checkout_path, upstream_lock  # noqa: E402
 
 
 def main() -> int:
@@ -19,13 +18,11 @@ def main() -> int:
         description="Verify the pinned local RynnValue checkout and model revision"
     )
     parser.add_argument(
-        "--checkout", type=Path, default=ROOT.parent / "third_party" / "RynnValue",
-        help="Official RynnValue source checkout (default: workspace/third_party/RynnValue)",
+        "--checkout", type=Path, default=checkout_path("rynnvalue"),
+        help="Official RynnValue source checkout (default: third_party/RynnValue)",
     )
     args = parser.parse_args()
-    lock = yaml.safe_load(
-        (ROOT / "third_party" / "lock-train.yaml").read_text(encoding="utf-8")
-    )["rynnvalue"]
+    lock = upstream_lock("rynnvalue")
     checkout = args.checkout.expanduser().resolve()
     package_init = checkout / "rynn_value" / "__init__.py"
     if not package_init.is_file():
@@ -34,9 +31,9 @@ def main() -> int:
         ["git", "-C", str(checkout), "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
-    if commit != lock["git_commit"]:
+    if commit != lock["commit"]:
         raise RuntimeError(
-            f"RynnValue checkout mismatch: expected {lock['git_commit']}, got {commit}"
+            f"RynnValue checkout mismatch: expected {lock['commit']}, got {commit}"
         )
     dirty = subprocess.run(
         ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=all"],
@@ -54,7 +51,7 @@ def main() -> int:
         )
     print(f"RynnValue checkout verified: {commit}")
     print(f"RynnValue import path: {rynn_value.__file__}")
-    print(f"Pinned model revision: {lock['hf_revision']}")
+    print(f"Pinned model revision: {lock['weights_revision']}")
     return 0
 
 

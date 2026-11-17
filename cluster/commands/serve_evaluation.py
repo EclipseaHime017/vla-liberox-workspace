@@ -7,12 +7,13 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
+from core.paths import THIRD_PARTY  # noqa: E402
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
-    parser.add_argument("--vla-root", type=Path, default=Path("third_party/VLA-Adapter"))
+    parser.add_argument("--vla-root", type=Path, default=THIRD_PARTY / "VLA-Adapter")
     parser.add_argument("--gpu", type=int, required=True, help="Physical GPU index; use only allocated GPUs")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--token-file", type=Path, required=True)

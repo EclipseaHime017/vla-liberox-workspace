@@ -1,2 +1,2 @@
-# Optional SpaceMouse input dependency. Install requirements-sim.txt first.
+# Optional SpaceMouse input dependency (teleop role), installed after sim.txt.
 pyspacemouse==2.0.0

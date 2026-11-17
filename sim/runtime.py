@@ -1,7 +1,6 @@
 """Headless LIBERO-X rollout, independent of the platform and training loops."""
 from __future__ import annotations
 
-from core.paths import THIRD_PARTY
 from collections import deque
 import importlib
 import importlib.metadata
@@ -27,6 +26,7 @@ from core.registry import family_adapter, model_contract
 from sim.metrics import ConsecutiveSuccess, aggregate_trials, _apply_close_error
 from core.io import atomic_json, sha256_file
 from core.artifacts import decode_child, validate_policy
+from core.upstream import upstream_lock
 
 
 def proprio_from_observation(obs):
@@ -45,14 +45,14 @@ def proprio_from_observation(obs):
 def initialize_simulation(request, directory):
     """Configure paths before imports; never create ~/.libero or require a display."""
     root = Path(request["liberox_root"])
-    lock = yaml.safe_load((THIRD_PARTY / "lock-train.yaml").read_text())["evaluation"]
+    lock = upstream_lock("libero_x")
     versions = {name: importlib.metadata.version(name) for name in lock["packages"]}
     for name, expected in lock["packages"].items():
         if versions[name] != expected:
             raise RuntimeError(f"Evaluation requires {name}=={expected}; found {versions[name]}")
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-    if revision != lock["libero_x_commit"]:
-        raise ValueError(f"LIBERO-X revision mismatch: expected {lock['libero_x_commit']}, found {revision}")
+    if revision != lock["commit"]:
+        raise ValueError(f"LIBERO-X revision mismatch: expected {lock['commit']}, found {revision}")
     subprocess.run(["git", "-C", str(root), "diff", "--quiet", "HEAD", "--", "libero"], check=True)
     os.environ["MUJOCO_GL"] = request["render_backend"]
     os.environ["PYOPENGL_PLATFORM"] = request["render_backend"]

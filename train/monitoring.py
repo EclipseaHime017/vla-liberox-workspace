@@ -222,7 +222,7 @@ def convert_run_metrics(run_dir: Path, log_dir: Path | None = None) -> tuple[Pat
         from torch.utils.tensorboard import SummaryWriter
     except ImportError as exc:
         raise RuntimeError(
-            "tensorboard is not installed; install requirements-train.txt"
+            "tensorboard is not installed; install envs/layers/vla.txt"
         ) from exc
     writer = SummaryWriter(log_dir=str(target))
     try:

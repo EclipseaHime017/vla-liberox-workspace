@@ -12,8 +12,9 @@ import sys
 import tomllib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
-from core.paths import ROOT as PROJECT  # noqa: E402
-from core.pi05_assets import OPENPI_COMMIT
+from core.paths import ROOT as PROJECT, THIRD_PARTY  # noqa: E402
+# Standard library only: this runs in a fresh environment before PyYAML is installed.
+from core.pi05_assets import OPENPI_COMMIT, OPENPI_REPOSITORY  # noqa: E402
 
 
 def preserved_packages(names, lock):
@@ -34,7 +35,7 @@ def preserved_packages(names, lock):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--openpi-root", type=Path, default=PROJECT.parent / "third_party" / "OpenPI")
+    parser.add_argument("--openpi-root", type=Path, default=THIRD_PARTY / "OpenPI")
     parser.add_argument("--preserve-package", action="append", default=[], metavar="NAME",
                         help="Keep a preinstalled platform build at the exact upstream-locked version")
     args = parser.parse_args()
@@ -43,7 +44,7 @@ def main():
     root = args.openpi_root.expanduser().resolve()
     if not root.exists():
         root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "clone", "https://github.com/Physical-Intelligence/openpi.git", str(root)], check=True)
+        subprocess.run(["git", "clone", OPENPI_REPOSITORY, str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "checkout", "--detach", OPENPI_COMMIT], check=True)
     commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     if commit != OPENPI_COMMIT or subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True).strip():
@@ -90,7 +91,7 @@ def main():
                     "tensorboard==2.20.0", f"protobuf=={protobuf}"], check=True)
     subprocess.run([sys.executable, "-m", "pip", "check"], check=True)
     preserved_packages(args.preserve_package, lock)
-    print("π₀.₅ environment ready. Next run python -m train.commands.prepare_pi05 to download and convert official weights.")
+    print("π₀.₅ environment ready. Next run python -m train prepare-pi05 to download and convert official weights.")
 
 
 if __name__ == "__main__":

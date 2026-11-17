@@ -3,6 +3,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 import os
 
+from core.paths import ROOT, THIRD_PARTY
+
 @dataclass(frozen=True)
 class FactrRuntimeOptions:
     upstream_root: str
@@ -14,9 +16,9 @@ def parse_runtime_options(raw, config_dir: Path) -> FactrRuntimeOptions:
         raise TypeError("runtime must be a mapping")
     values = dict(raw or {})
     defaults = {
-        "upstream_root": "../third_party/FACTR_Teleop",
-        "runtime_python": "../third_party/factr-runtime/bin/python",
-        "calibration_file": "../runs/factr_calibration/calibration.json",
+        "upstream_root": str(THIRD_PARTY / "FACTR_Teleop"),
+        "runtime_python": str(THIRD_PARTY / "factr-runtime/bin/python"),
+        "calibration_file": str(ROOT / "runs/factr_calibration/calibration.json"),
     }
     if set(values) - set(defaults):
         raise ValueError(f"Unknown runtime keys: {sorted(set(values)-set(defaults))}. "

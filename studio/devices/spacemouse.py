@@ -468,7 +468,7 @@ class SpaceMouseInput:
             module = importlib.import_module("pyspacemouse")
         except ModuleNotFoundError as exc:
             raise RuntimeError(
-                "pyspacemouse is not installed. Install requirements-spacemouse.txt "
+                "pyspacemouse is not installed. Install envs/layers/spacemouse.txt "
                 "and the system package libhidapi-dev."
             ) from exc
         try:

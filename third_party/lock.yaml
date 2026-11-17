@@ -1,0 +1,72 @@
+# Every upstream this repository builds on, as siblings: pinned source, local patch,
+# weights and the package versions checked at runtime. Checkouts live in
+# third_party/<checkout>/ and are not committed; `python envs/setup.py --role ...`
+# clones only the upstreams a role needs. Readers: core/upstream.py (upstream_lock).
+schema_version: 2
+
+libero_x:              # simulator: scenes, BDDL tasks, initial states
+  repository: https://github.com/meituan/LIBERO-X.git
+  commit: f528726421c7211d8eb05fe48e9e5e2535ccc813
+  checkout: LIBERO-X
+  packages:            # verified by sim/runtime.py before a headless rollout
+    mujoco: 2.3.7
+    robosuite: 1.4.1
+    numba: 0.59.1
+    numpy: 1.26.4
+    bddl: 3.6.0
+    gym: 0.26.2
+    PyOpenGL: 3.1.10
+
+vla_adapter:           # policy family (vla-liberox environment)
+  repository: https://github.com/OpenHelix-Team/VLA-Adapter.git
+  commit: 23fa0c9c159e2aa04341cdd3e924f44061311060
+  checkout: VLA-Adapter
+  patch:               # local OpenVLA class registration and Hub cache lookup
+    path: patches/vla_adapter_hf_local_autoclass.patch
+    sha256: b6a5f8e21da1c15d2a5bea0cfd4ccca11440f3e5177622e942ac3f9ab4751500
+  weights: VLA-Adapter/LIBERO-Object-Pro
+  packages:
+    transformers: 4.40.1
+    tensorflow: 2.15.0
+
+openpi:                # π₀.₅ family (pi05 environment, built from the upstream uv.lock)
+  repository: https://github.com/Physical-Intelligence/openpi.git
+  commit: 215abfb217dbac7d5f1273282331b9b1866c0479
+  checkout: OpenPI
+
+rynnvalue:             # reward model (rynnvalue-reward environment); loaded from source, not installed
+  repository: https://github.com/alibaba-damo-academy/RynnValue.git
+  commit: 10e0d333f5f3811d0d130587e50f1faf48da49e5
+  checkout: RynnValue
+  weights: Alibaba-DAMO-Academy/RynnValue-4B
+  weights_revision: 3f73b5d2b5e53b21f248c8791004dde6a8cf2b92
+
+robometer:             # reward model (robometer-reward environment)
+  repository: https://github.com/robometer/robometer.git
+  commit: 352d160389daa964788de1ec933d1925f3a6de4f
+  checkout: Robometer
+  weights: aliangdw/Robometer-4B-LIBERO
+  weights_revision: bb7dce7e6bde3bd236c0fbe0be46fdf19b57b873
+  runtime:             # install exactly this matrix; envs/robometer-constraints.txt repeats it for pip
+    python: "3.10"
+    torch: 2.8.0
+    torchvision: 0.23.0
+    torchao: 0.13.0
+    xformers: 0.0.32.post2
+    transformers: 4.57.1
+    trl: 0.20.0
+    cuda_wheel_index: https://download.pytorch.org/whl/cu128
+
+factr:                 # teleoperation device; runs in its own system-Python runtime (third_party/factr-runtime)
+  repository: https://github.com/JasonJZLiu/FACTR_Teleop.git
+  commit: 7a07ab3629af03a91c0198df7c44a0082dca77ab
+  checkout: FACTR_Teleop
+  files:               # official sources the platform imports; sha256 must match
+    src/factr_teleop/factr_teleop/__init__.py: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    src/factr_teleop/factr_teleop/factr_teleop.py: 0c86585c03b51a76a3c965b32f0f55cc8244d96454758e326acc7766df496945
+    src/factr_teleop/factr_teleop/dynamixel/__init__.py: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    src/factr_teleop/factr_teleop/dynamixel/driver.py: 4e78607c873b211bc0a4941a32c264e269860e19f43ca1c2e044463242be8a4d
+    src/factr_teleop/factr_teleop/configs/grav_comp_demo.yaml: 61330cd2e0df160293b793d4b76e600dedab584e29dc692cf973e5e752169328
+    src/factr_teleop/factr_teleop/urdf/factr_teleop_franka.urdf: 47c938a9457cbc5dea90dc58e3a3f7d7ade474912fbafa9762ff6fd740a45209
+    src/python_utils/python_utils/__init__.py: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    src/python_utils/python_utils/utils.py: 83b1690f47c75573db8933e8c1fb2521705353ae3b3782adc7af3f16c8ff1e48

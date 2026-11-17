@@ -30,7 +30,7 @@ def discover_factr_device(config, *, ports=None):
         try:
             from serial.tools.list_ports import comports
         except ImportError as exc:
-            raise RuntimeError("缺少 pyserial，无法枚举 FACTR 串口；请安装 requirements-ui.txt") from exc
+            raise RuntimeError("缺少 pyserial，无法枚举 FACTR 串口；请安装 envs/layers/studio.txt") from exc
         ports = comports()  # OS metadata only; no Serial()/PortHandler() calls.
     matches = {}
     for port in ports:

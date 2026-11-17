@@ -58,9 +58,9 @@ def checkout(tmp_path, monkeypatch):
     source.write_text("registered local loader\n")
     patch = tmp_path / "loader.patch"
     patch.write_bytes(git(root, *DIFF_ARGS))
-    lock = tmp_path / "dependency-lock.yaml"
+    lock = tmp_path / "lock.yaml"
     lock.write_text(yaml.safe_dump({"vla_adapter": {
-        "tensorflow": "2.15.0", "git_commit": commit,
+        "packages": {"tensorflow": "2.15.0"}, "commit": commit,
         "patch": {"path": patch.name, "sha256": hashlib.sha256(patch.read_bytes()).hexdigest()},
     }}))
     return root, lock, patch
@@ -98,7 +98,7 @@ def test_unrecorded_checkout_changes_are_rejected(checkout, changed, message):
         patch.write_bytes(patch.read_bytes() + b"\n")
     elif changed == "commit":
         raw = yaml.safe_load(lock.read_text())
-        raw["vla_adapter"]["git_commit"] = "0" * 40
+        raw["vla_adapter"]["commit"] = "0" * 40
         lock.write_text(yaml.safe_dump(raw))
     elif changed == "staged":
         (root / "existing.py").write_text("staged preprocessing\n")

@@ -1,0 +1,171 @@
+# What each device role installs: conda environments, third_party upstreams and weights.
+#   python envs/setup.py --list
+#   python envs/setup.py --role train --family pi05 --dry-run
+# Roles combine (--role studio --role teleop); a unit shared by several roles runs once,
+# in the order units are declared below. Upstream pins come from third_party/lock.yaml;
+# "{lock[...]}" in a step is filled from it.
+#
+# Step kinds: clone <upstream> (third_party/<checkout> at the pinned commit; an existing
+# checkout must already match), patch <upstream> (apply the locked patch once),
+# pip [...] (python -m pip install), run [...] (python ... from the repository root),
+# conda [...] (conda install), npm [...] (npm --prefix web), hf <upstream> (download pinned
+# weights to the Hugging Face cache), verify packages (the six packages import from this
+# checkout), note / manual (printed only; manual steps need sudo or a person).
+schema_version: 1
+
+environments:
+  vla-liberox: {python: "3.10.16"}      # platform, simulator, VLA-Adapter
+  pi05: {python: "3.11"}                # π₀.₅, built from the OpenPI uv.lock
+  rynnvalue-reward: {python: "3.10"}
+  robometer-reward: {python: "3.10"}
+
+units:
+  vla-adapter:                          # the vla-liberox base: VLA-Adapter and its dependency set
+    environment: vla-liberox
+    steps:
+      - clone: vla_adapter
+      - patch: vla_adapter
+      - pip: [-e, third_party/VLA-Adapter]
+  libero-x:
+    environment: vla-liberox
+    steps:
+      - clone: libero_x
+      - pip: [packaging, ninja]
+      - pip: [--no-deps, -e, third_party/LIBERO-X]     # never its requirements.txt
+      - pip: [-e, third_party/LIBERO-X/packages/openpi-client]
+  sim:
+    environment: vla-liberox
+    steps: [{pip: [-r, envs/layers/sim.txt]}]
+  studio:
+    environment: vla-liberox
+    steps: [{pip: [-r, envs/layers/studio.txt]}]
+  test:
+    environment: vla-liberox
+    steps: [{pip: [-r, envs/layers/test.txt]}]
+  vla:
+    environment: vla-liberox
+    steps: [{pip: [-r, envs/layers/vla.txt]}]
+  eval-vla-liberox:                     # headless LIBERO-X rollouts in the training environment
+    environment: vla-liberox
+    steps:
+      - clone: libero_x
+      - pip: [-r, envs/layers/eval.txt]
+  workspace:
+    environment: vla-liberox
+    steps:
+      - pip: [--no-deps, -e, .]
+      - verify: packages
+  torch-cu128:                          # last: earlier installs may pull another Torch build
+    environment: vla-liberox
+    steps:
+      - pip: [--upgrade, torch==2.7.0, torchvision==0.22.0, torchaudio==2.7.0,
+              --index-url, https://download.pytorch.org/whl/cu128]
+      - pip: [numpy==1.26.4, setuptools==69.5.1]
+  web:
+    environment: vla-liberox
+    steps:
+      - conda: [-c, conda-forge, "nodejs>=22.12,<23"]
+      - npm: [ci]
+      - npm: [run, build]
+  vla-adapter-weights:
+    environment: vla-liberox
+    steps:
+      - note: "{lock[vla_adapter][weights]} downloads into models/ on first load"
+  spacemouse:
+    environment: vla-liberox
+    steps:
+      - pip: [-r, envs/layers/spacemouse.txt]
+      - manual: >-
+          sudo cp envs/udev/70-3dconnexion-spacemouse-wireless.rules /etc/udev/rules.d/
+          && sudo udevadm control --reload-rules && sudo udevadm trigger   (then replug the device)
+  factr:
+    environment: vla-liberox
+    steps:
+      - pip: [-r, envs/layers/factr.txt]
+      - manual: "install ROS 2 Jazzy and Pinocchio for the system Python (not into vla-liberox)"
+      - clone: factr
+      - run: [-m, studio, setup-factr]                 # builds third_party/factr-runtime, checks sources
+  pi05:
+    environment: pi05
+    steps:
+      - clone: openpi
+      - pip: [uv]
+      - run: [-m, train, setup-pi05]                   # installs from the OpenPI uv.lock
+      - verify: packages
+  eval-pi05:
+    environment: pi05
+    steps:
+      - clone: libero_x
+      - pip: [-r, envs/layers/eval.txt]
+  pi05-weights:                         # ~12 GiB download, ~7 GiB converted
+    environment: pi05
+    steps:
+      - run: [-m, train, prepare-pi05]
+  rynnvalue:
+    environment: rynnvalue-reward
+    steps:
+      - clone: rynnvalue                               # loaded from source, not pip-installed
+      - pip: [torch==2.8.0, torchvision==0.23.0, --index-url, https://download.pytorch.org/whl/cu128]
+      - pip: [-r, envs/rynnvalue.txt]
+      - pip: [--no-deps, -e, .]
+      - verify: packages
+      - run: [-m, rewards, rynnvalue-verify]
+  rynnvalue-weights:
+    environment: rynnvalue-reward
+    steps: [{hf: rynnvalue}]
+  robometer:
+    environment: robometer-reward
+    steps:
+      - clone: robometer
+      - pip: ["torch=={lock[robometer][runtime][torch]}", "torchvision=={lock[robometer][runtime][torchvision]}",
+              "torchao=={lock[robometer][runtime][torchao]}", --index-url, "{lock[robometer][runtime][cuda_wheel_index]}"]
+      - pip: ["xformers=={lock[robometer][runtime][xformers]}", --index-url, "{lock[robometer][runtime][cuda_wheel_index]}"]
+      - pip: [-c, envs/robometer-constraints.txt, -e, "third_party/Robometer[robometer]"]
+      - pip: [-r, envs/robometer.txt]
+      - pip: [--no-deps, -e, .]
+      - verify: packages
+      - run: [-m, rewards, robometer-verify]
+  robometer-weights:
+    environment: robometer-reward
+    steps: [{hf: robometer}]
+
+# Units of a policy family, chosen with --family (default vla_adapter).
+families:
+  vla_adapter:
+    train: [vla-adapter, vla, workspace, torch-cu128]
+    weights: [vla-adapter-weights]
+    eval: [eval-vla-liberox]
+  pi05:
+    train: [pi05]
+    weights: [pi05-weights]
+    eval: [eval-pi05]
+
+roles:
+  dev:
+    summary: 开发机：平台开发与测试（含前端），不下载权重
+    units: [vla-adapter, libero-x, sim, studio, test, vla, workspace, torch-cu128, web]
+  studio:
+    summary: 平台机：仿真、采集、接管、网页；--family pi05 另装 π₀.₅ 环境
+    units: [vla-adapter, libero-x, sim, studio, vla, workspace, torch-cu128, web, vla-adapter-weights]
+    family: [train, weights]
+  teleop:
+    summary: 接管设备（附加到 studio）：SpaceMouse 与 FACTR
+    units: [spacemouse, factr]
+  reward-rynnvalue:
+    summary: RynnValue 轨迹评价
+    units: [rynnvalue, rynnvalue-weights]
+  reward-robometer:
+    summary: Robometer 进度与成功概率评价
+    units: [robometer, robometer-weights]
+  train:
+    summary: 训练服务器：只装所选家族的训练环境、上游和基模
+    family: [train, weights]
+  hpc:
+    summary: PBS 集群节点：同 train
+    family: [train, weights]
+  eval:
+    summary: 无头闭环评测（附加到 train / infer）：LIBERO-X 与仿真依赖
+    family: [train, eval]
+  infer:
+    summary: 远程推理服务：只装所选家族的环境与待服务策略的基模
+    family: [train, weights]

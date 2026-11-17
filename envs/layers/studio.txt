@@ -1,4 +1,4 @@
-# Install after requirements-sim.txt in the vla-liberox environment.
+# Platform backend (vla-liberox environment), installed after sim.txt.
 fastapi==0.141.1
 uvicorn[standard]==0.52.1
 websockets==16.1.1

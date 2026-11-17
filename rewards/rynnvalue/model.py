@@ -10,12 +10,11 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 import numpy as np
-import yaml
 from PIL import Image
 
 from core.config import LoadedConfig
 from core.io import sha256_file
-from core.paths import THIRD_PARTY
+from core.upstream import upstream_lock
 
 
 def validate_rynnvalue_config_contract(config: Any, processor: Any) -> dict[str, Any]:
@@ -174,13 +173,12 @@ class RynnValueAnnotator:
                 f"RynnValue source checkout is invalid; missing {package_init}. "
                 "Clone the pinned official repository instead of pip-installing it."
             )
-        lock_path = THIRD_PARTY / "lock-train.yaml"
-        lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))["rynnvalue"]
+        lock = upstream_lock("rynnvalue")
         revision = reward["revision"]
-        if revision != lock["hf_revision"]:
+        if revision != lock["weights_revision"]:
             raise RuntimeError(
                 "RynnValue model request is not the pinned revision: "
-                f"requested={revision}, expected={lock['hf_revision']}"
+                f"requested={revision}, expected={lock['weights_revision']}"
             )
         try:
             git_commit = subprocess.run(
@@ -193,10 +191,10 @@ class RynnValueAnnotator:
             ).stdout.strip()
         except (OSError, subprocess.CalledProcessError) as exc:
             raise RuntimeError(f"Cannot verify RynnValue source checkout: {checkout}") from exc
-        if git_commit != lock["git_commit"]:
+        if git_commit != lock["commit"]:
             raise RuntimeError(
                 "Official RynnValue checkout is not the pinned audited revision: "
-                f"expected {lock['git_commit']}, got {git_commit}"
+                f"expected {lock['commit']}, got {git_commit}"
             )
         if dirty:
             raise RuntimeError(
@@ -216,7 +214,7 @@ class RynnValueAnnotator:
         except ImportError as exc:
             raise RuntimeError(
                 "RynnValue dependencies are unavailable. Use the rynnvalue-reward environment "
-                "and install requirements-reward.txt."
+                "(python envs/setup.py --role reward-rynnvalue)."
             ) from exc
         loaded_checkout = Path(rynn_value.__file__).resolve().parents[1]
         if loaded_checkout != checkout:
@@ -253,10 +251,10 @@ class RynnValueAnnotator:
             path for path in snapshot.iterdir()
             if path.is_file() and path.suffix in {".json", ".py", ".safetensors"}
         )
-        if resolved_revision != lock["hf_revision"]:
+        if resolved_revision != lock["weights_revision"]:
             raise RuntimeError(
                 "RynnValue model snapshot is not the pinned revision: "
-                f"resolved={resolved_revision}, expected={lock['hf_revision']}"
+                f"resolved={resolved_revision}, expected={lock['weights_revision']}"
             )
         self.metadata = {
             "provider": "rynnvalue",
