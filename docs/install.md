@@ -97,6 +97,14 @@ python envs/setup.py --role train --role eval --family pi05
 
 ## 5. 检查安装
 
+只读的整体检查（仓库、环境、上游检出，不修改任何东西）：
+
+```bash
+python skills/deploy/scripts/preflight.py --role <角色> [--family <家族>]
+```
+
+各组件的专项检查：
+
 ```bash
 conda run -n rynnvalue-reward python -m rewards rynnvalue-verify   # RynnValue 检出与环境
 conda run -n robometer-reward python -m rewards robometer-verify   # Robometer 版本矩阵与 CUDA
@@ -112,7 +120,7 @@ conda run -n vla-liberox npm --prefix web test
 
 VLA-Adapter 的源码、补丁和 TensorFlow 版本由 `tests/core/test_upstream_environment.py` 核对：除字节码和 egg-info 外，检出不得包含补丁以外的修改。
 
-## 6. 从 0.8 目录升级已安装的设备
+## 6. 从 0.8.0 升级已安装的设备
 
 `third_party/`、`models/`、`dataset-root/`、`policy-registry/` 的位置不变，数据无需迁移。旧的训练包和 Robometer 接入包不再存在，需要在每个用到它们的环境中换成本仓库：
 

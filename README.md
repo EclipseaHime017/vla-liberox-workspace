@@ -1,6 +1,6 @@
 # LIBERO-X Simulation, Takeover and Post-Training Platform
 
-Version **0.9.0** · [Changelog (Chinese)](CHANGELOG.md) · [中文说明](README_CN.md)
+Version **0.8.5** · [Changelog (Chinese)](CHANGELOG.md) · [中文说明](README_CN.md)
 
 Run VLA policies in LIBERO-X simulation, take over by hand and record trajectories, score them with reward models and human keyframes, then post-train the policy with BC or IQL and test it in closed loop. Everything runs from a local web platform; training can also run on multi-GPU servers or PBS clusters.
 
@@ -55,6 +55,8 @@ python -m cluster evaluate            # headless closed-loop evaluation
 ## Documentation
 
 Detailed guides are in Chinese under [`docs/`](docs/): install, architecture, studio, training, methods, models, tasks, rewards, evaluation, cluster, data.
+
+AI agents working in this repository start with [docs/agent.md](docs/agent.md); deployment and environment checks follow the [deploy skill](skills/deploy/SKILL.md) (`python skills/deploy/scripts/preflight.py --role <role>` is read-only).
 
 ## Tests
 

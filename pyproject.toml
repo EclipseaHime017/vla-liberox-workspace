@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vla-liberox"
-version = "0.9.0"
+version = "0.8.5"
 description = "LIBERO-X VLA post-training: simulation studio, training methods, rewards and cluster runs"
 requires-python = ">=3.10,<3.12"
 # Only light dependencies shared by every environment. Heavy, version-conflicting

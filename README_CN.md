@@ -1,6 +1,6 @@
 # LIBERO-X 仿真、接管与后训练平台
 
-版本 **0.9.0** · [更新记录](CHANGELOG.md) · [English](README.md)
+版本 **0.8.5** · [更新记录](CHANGELOG.md) · [English](README.md)
 
 在 LIBERO-X 仿真中运行 VLA 策略，人工接管并录制轨迹，用模型评价和人工关键帧给轨迹打奖励，再用 BC／IQL 后训练策略并做闭环测试。平台在网页中完成全部操作；训练也可以在服务器、多卡或 PBS 集群上进行。
 
@@ -24,7 +24,7 @@ cluster/   服务器：多卡训练、队列、PBS、闭环评测、远程推理
 studio/    平台后端（FastAPI）
 web/       平台前端（React + Vite）
 configs/   全部配置          envs/  按设备用途的环境          third_party/  上游锁与补丁
-tests/     按包分组的测试    docs/  文档
+tests/     按包分组的测试    docs/  文档                      skills/  agent 技能（deploy）
 ```
 
 - **后端**：`studio/`；**前端**：`web/`；**训练**：`train/`，配合 `rewards/`、`sim/`、`cluster/`。
@@ -52,7 +52,7 @@ python envs/setup.py --role studio                # 执行
 | `train`、`hpc` | 训练服务器、PBS 节点：只装所选家族 |
 | `eval`、`infer` | 无头闭环评测、远程推理服务 |
 
-系统依赖、人工步骤（udev、ROS、Hugging Face 授权）和从 0.8 升级见 [安装](docs/install.md)。
+系统依赖、人工步骤（udev、ROS、Hugging Face 授权）和从 0.8.0 升级见 [安装](docs/install.md)。
 
 ## 快速开始
 
@@ -98,6 +98,7 @@ python -m cluster evaluate            # 无头闭环评测，configs/cluster/eva
 | [服务器与集群](docs/cluster.md) | 多卡训练、队列、PBS、NSCC 说明 |
 | [数据与存储](docs/data.md) | 目录布局、整理旧目录、导出 |
 | [third_party](third_party/README.md) | 上游锁与检出 |
+| [Agent 指南](docs/agent.md) | 给 AI agent：代码地图、验证命令、改动落点、必须保持的约定；部署与环境核对用 [skills/deploy](skills/deploy/SKILL.md) |
 
 ## 测试
 

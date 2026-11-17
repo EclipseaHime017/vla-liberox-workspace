@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -55,3 +57,25 @@ def test_no_script_shadows_a_package():
     shadows = [str(path.relative_to(ROOT)) for path in ROOT.rglob("*.py")
                if path.stem in names and not {"node_modules", "third_party", "logs"} & set(path.parts)]
     assert shadows == []
+
+
+def test_every_version_string_matches_the_version_file():
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    lock = json.loads((ROOT / "web/package-lock.json").read_text(encoding="utf-8"))
+
+    def search(path, pattern):
+        match = re.search(pattern, (ROOT / path).read_text(encoding="utf-8"), re.M)
+        return match.group(1) if match else None
+
+    found = {
+        "pyproject.toml": search("pyproject.toml", r'^version = "([^"]+)"'),
+        "studio/main.py": search("studio/main.py", r'version="([^"]+)"'),
+        "web/package.json": json.loads((ROOT / "web/package.json").read_text(encoding="utf-8"))["version"],
+        "web/package-lock.json": lock["version"],
+        "web/package-lock.json packages['']": lock["packages"][""]["version"],
+        "Sidebar.tsx": search("web/src/components/layout/Sidebar.tsx", r"本机工作区 · v([0-9.]+)"),
+        "README.md": search("README.md", r"Version \*\*([0-9.]+)\*\*"),
+        "README_CN.md": search("README_CN.md", r"版本 \*\*([0-9.]+)\*\*"),
+        "CHANGELOG.md": search("CHANGELOG.md", r"^## ([0-9.]+)$"),
+    }
+    assert {name: value for name, value in found.items() if value != version} == {}

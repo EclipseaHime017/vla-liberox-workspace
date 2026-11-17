@@ -17,10 +17,11 @@ vla-liberox-workspace/
 ├─ envs/       按设备用途的环境定义（roles.yaml、layers/、setup.py）
 ├─ third_party/  上游锁 lock.yaml 与补丁；上游检出不提交
 ├─ tests/      core/ sim/ rewards/ train/ cluster/ studio/（前端测试在 web/ 内）
+├─ skills/     agent 技能：deploy（部署流程与只读的 preflight 检查）；.claude/skills/ 链接到这里
 └─ docs/
 ```
 
-运行数据不提交，目录名与 0.8 相同：`dataset-root/`（平台数据库与录制数据）、`models/`（基础权重）、`policy-registry/`（导出的策略）、`evaluator/`、`outputs/`、`logs/`。本地实验脚本放在 `experiments/`，同样不提交。
+运行数据不提交，目录名与 0.8.0 相同：`dataset-root/`（平台数据库与录制数据）、`models/`（基础权重）、`policy-registry/`（导出的策略）、`evaluator/`、`outputs/`、`logs/`。本地实验脚本放在 `experiments/`，同样不提交。
 
 ## 2. 依赖方向
 

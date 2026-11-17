@@ -1,6 +1,6 @@
 # 更新记录
 
-## 0.9.0
+## 0.8.5
 
 本版不改变仿真、训练算法和网页的使用方式，重点是把仓库整理为按职责划分的顶层包，并为新增训练方法和按设备安装做准备。
 
@@ -32,15 +32,18 @@
 ### 文档
 
 - 重写 README（英文精简版）与 README_CN，`docs/` 改为 install、architecture、studio、training、methods、models、tasks、rewards、evaluation、cluster、data。
+- 新增 `docs/agent.md`：给 AI agent 的代码地图、验证命令、常见改动的落点和必须保持的约定。
+- 新增技能 `skills/deploy`：部署、升级和环境核对的流程，以及只读检查 `python skills/deploy/scripts/preflight.py --role <角色>`；Claude Code 通过 `.claude/skills/deploy` 发现它。
+- 版本号统一由测试核对：`VERSION`、`pyproject.toml`、后端、前端和文档标题必须一致。
 
 ### 升级说明
 
 - **数据不需要迁移**：`dataset-root/`、`models/`、`policy-registry/`、`evaluator/`、`third_party/` 的位置不变；已导出的策略、RynnValue 原始输出和数据集清单照常使用。
 - **派生奖励会重新物化**：奖励缓存按实现文件的名称和内容建立指纹，文件移动后首次使用会在 CPU 上重新计算，不需要重跑模型评价。
-- **替换旧的可编辑安装**：在 vla-liberox、pi05 中卸载 `vla-rynn-iql`，在 robometer-reward 中卸载 `vla-adapter-robometer`，再执行 `pip install --no-deps -e .`，见 [docs/install.md](docs/install.md#6-从-08-目录升级已安装的设备)。
+- **替换旧的可编辑安装**：在 vla-liberox、pi05 中卸载 `vla-rynn-iql`，在 robometer-reward 中卸载 `vla-adapter-robometer`，再执行 `pip install --no-deps -e .`，见 [docs/install.md](docs/install.md#6-从-080-升级已安装的设备)。
 - **自定义 YAML 和脚本**：按下表更新路径与命令。
 
-| 0.8 | 0.9 |
+| 0.8.0 | 0.8.5 |
 | --- | --- |
 | `liberox-vla-adapter-terminal/backend/app/` | `studio/`（`core/config.py` → `studio/config.py`） |
 | `liberox-vla-adapter-terminal/frontend/` | `web/` |
@@ -67,7 +70,7 @@
 
 ### 验证
 
-- 后端与训练 1849 项通过、49 项跳过；前端 205 项通过，类型检查通过。
+- 后端与训练 1855 项通过、49 项跳过；前端 205 项通过，类型检查通过。
 - 新旧平台的接口逐项对照：路由一致，响应仅构建信息中的前端目录和 W&B 项目名不同。
 - 按角色安装只做了 `--dry-run` 核对；本版未在评测 PC 和服务器上部署。
 
