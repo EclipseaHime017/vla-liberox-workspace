@@ -115,7 +115,7 @@ def create_app(
 
     app = FastAPI(
         title="LIBERO-X Local Data Studio",
-        version="0.8.0",
+        version="0.9.0",
         lifespan=lifespan,
     )
     app.state.storage_maintenance = maintenance

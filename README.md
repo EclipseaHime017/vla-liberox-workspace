@@ -1,314 +1,64 @@
-# LIBERO-X Local Data Studio
+# LIBERO-X Simulation, Takeover and Post-Training Platform
 
-Current release: **v0.8.0**
+Version **0.9.0** · [Changelog (Chinese)](CHANGELOG.md) · [中文说明](README_CN.md)
 
-Release highlights: isolated model-variant contracts, mainline continuation,
-execution-aligned post-training, and 21 task scenes across LEVEL1–4.
-See the [categorized update summary](README_CN.md#4-v080-更新汇总).
+Run VLA policies in LIBERO-X simulation, take over by hand and record trajectories, score them with reward models and human keyframes, then post-train the policy with BC or IQL and test it in closed loop. Everything runs from a local web platform; training can also run on multi-GPU servers or PBS clusters.
 
-Local-first simulation, VLA evaluation, trajectory rewind, SpaceMouse / FACTR takeover,
-offline post-training, and reproducible batch policy testing for five
-Franka/LIBERO-X task families, all with LEVEL1–4 variants, including two
-longer-horizon composite task families.
+| | Supported |
+| --- | --- |
+| Policies | VLA-Adapter (LIBERO-Object-Pro, LIBERO-X), π₀.₅ (LIBERO, LIBERO-X) |
+| Methods | BC, IQL; the method interface leaves room for sampling methods such as IDQL |
+| Rewards | sparse, RynnValue (PBRS shaping), Stage (human keyframes), Final Reward fusion; Robometer progress/success scoring |
+| Scenes | 21 LIBERO-X scenes (5 tasks × LEVEL1–4); custom scenes via YAML |
+| Takeover | SpaceMouse, FACTR force-feedback leader arm |
 
-- Backend: FastAPI application service with a background simulation worker.
-- Frontend: React + TypeScript, served by FastAPI after a Vite production build.
-- Storage: portable run directories plus a SQLite catalog that also retains user labels.
-- Compatibility: the existing evaluation, intervention, and SpaceMouse CLI scripts remain available.
-- Configuration: fixed runtime settings live in [`configs/`](configs/); application code lives in [`liberox-vla-adapter-terminal/`](liberox-vla-adapter-terminal/).
-- Operator preview: a transient 2x2 stream shows agent, wrist, −45°, and +45° cameras; VLA input and recorded artifacts remain the original two cameras.
-- FACTR Franka: GUI and CLI share official calibration and gravity compensation, with one reference capture and explicit ON/OFF. Joint following includes slow leader alignment; GUI records measured end-effector action labels, trajectories and dual-camera video through the standard manual-data pipeline. Physical acceptance is still required.
-- Three cascading selectors resolve task purpose → difficulty → exact prompt, covering 21 scenes; the same hierarchy filters sessions, datasets, training datasets and test history. The composite families cover placing an object in a drawer and closing it, or turning off the stove and sorting two bowls into the drainer. Prompts follow official variants, including cream cheese as the LEVEL4 drawer target. Families are registered in `configs/tasks/registry.yaml`, without changing stored scene IDs. LEVEL5 language variants are not offered for now. Prompts/init arrays are cached and simulators remain on-demand; missing optional assets are disabled.
-- Run drafts can choose a simulation seed and ablate either VLA camera by replacing only that fixed model-input slot with a black frame; raw preview and recording data remain intact, and these ablation runs are excluded from ordinary training. Simulation, dataset selection/split, training and test-schedule seeds have distinct roles. A simulation seed can change fixture placement but does not select another benchmark init state or inherit the training RNG.
-- Offline post-training: [`vla-adapter-rynn-iql/`](vla-adapter-rynn-iql/) supports BC/IQL with model-specific adaptation and objectives; it preserves recorded data and publishes hash-checked overlays to `policy-registry/`.
-- π₀.₅-LIBERO: official OpenPI runs in an isolated `pi05` environment, with BF16 checkpoint conversion, action-expert or full-model tuning, and strict base/normalization identity checks. See [installation and configuration](README_CN.md#23-π₀₅). VLA-Adapter remains available; missing or changed models never silently select another policy.
-- Integrated workflow: freeze a dataset and expand its per-row configuration for Final Reward, RynnValue, Robometer or All. Final Reward combines Stage and sparse baselines with RynnValue shaping, using saved inputs without loading a model. All serially reruns both models and publishes results only after the complete job succeeds. Training uses a fixed snapshot; gamma and cumulative reward remain adjustable per run, while p, α, κ and fusion mode are configured on the dataset. Robometer remains diagnostic only. See [the UI workflow](README_CN.md#34-评价与打包数据集).
-- Model registry: a dedicated sidebar page inspects base/overlay metadata and safely renames, copies, or removes local training overlays. Base policies have no local training record; a trained policy links only to the job that produced it, with its effective YAML available directly.
-- Unified work queue: inference simulations, dataset processing, annotation, training and testing share FIFO scheduling and a cross-process resource lease. Manual takeover is never queued and requires free resources. Detached jobs persist across backend restarts; interrupted in-process tasks must be registered again. Each training job pins its configuration, model and rewards; UI checkpoint resume is hidden while CLI resume remains available.
-- Branch separation: `main` owns PC collection, GUI, single-GPU training and portable dataset/evaluation exports. The `server` branch alone owns the full-screen terminal, multi-GPU DDP + ZeRO-1 training, mmap cache and distributed checkpoints. Shared data contracts and training algorithms flow from `main` to `server`; server-specific execution does not merge back into `main`. See [transfer and branch instructions](docs/RUN_COMMANDS.md).
-- Human stage labels: mark positive/negative keyframes without cutting recordings. Saving labels updates the Stage preview only; generate Final Reward separately in dataset configuration. Latest labels and model outputs are frozen for each result, preserving active and historical training. Legacy labels remain readable without resaving. Details retain the three Original Final Reward components and show the new fused Final Reward separately. See [Chinese usage](README_CN.md#34-评价与打包数据集).
-- Batch testing: preview a deterministic init-state/seed schedule, then register independent policy tests in a persistent FIFO queue. Tests share the training dispatcher and GPU lock; canceling a waiting test or stopping the current test leaves subsequent tasks intact.
+## Layout
 
-## Repository layout
+The six top-level directories are Python packages, run as `python -m <package> <command>`:
 
-```text
-vla-liberox-workspace/
-├── liberox-vla-adapter-terminal/  # simulation, intervention, Web UI and recording
-├── vla-adapter-rynn-iql/          # standalone reward annotation and offline RL
-├── configs/                       # terminal/UI runtime configuration
-├── dataset-root/                  # recorded source data (Git-ignored)
-├── dataset-exports/               # self-contained dataset runs exports (Git-ignored)
-├── policy-registry/               # immutable policy overlays (Git-ignored)
-├── docs/                          # user guides and platform interfaces
-├── logs/                          # local development notes (Git-ignored)
-├── third_party/                   # upstream source checkouts (Git-ignored)
-└── README_CN.md                   # complete Chinese setup and operating guide
-```
+| Directory | Contents |
+| --- | --- |
+| `core/` | Shared config, storage layout, model registry, method catalog, upstream lock |
+| `sim/` | LIBERO-X simulation and evaluation rollouts |
+| `rewards/` | PBRS, Stage, fusion, reward versions; RynnValue and Robometer integrations |
+| `train/` | Model families, methods (BC, IQL, critics), replay, training loop, export |
+| `cluster/` | Multi-GPU training, queue, PBS, closed-loop and remote evaluation |
+| `studio/` | Platform backend (FastAPI) |
+| `web/` | Platform frontend (React + Vite) |
 
-The collection terminal and offline trainer are separate systems. The trainer
-never rewrites recorded actions, states, observations, or media. UI-launched
-RynnValue evaluation adds only hash-checked `rynnvalue_evaluation.json/npz`
-sidecars beside an episode so later dataset packages can reuse the result. The
-deployment integration boundary remains a hash-checked `policy.yaml` overlay
-published to `policy-registry/`.
+Dependencies point one way: `core ← sim, rewards ← train ← cluster, studio`. Configuration lives in `configs/`, per-device environments in `envs/`, and upstream pins and patches in `third_party/`.
 
-The Web UI orchestrates them without importing RynnValue into the simulation
-process. Preparation and simulation use `vla-liberox`; π₀.₅ model execution/training
-uses `pi05`, while VLA-Adapter training uses `vla-liberox`. RynnValue and Robometer
-use their own reward environments. Work is serialized by a shared queue and
-cross-process resource lease. TensorBoard is read-only and remains outside
-that lease. Dataset manifests reference and hash source artifacts instead of
-copying trajectories or videos.
+## Install
 
-For server transfer, click **导出数据集** on a frozen dataset card. A background job
-copies its complete member recordings to `dataset-exports/<export-id>/runs/`,
-binding each saved reward/evaluation beside the copied trajectory. Dataset-specific
-results take precedence over global results, including legacy global evaluations
-stored only in dataset directories. Source files and model outputs remain unchanged;
-no evaluator runs. Copy the exported `runs/` tree to the server and select it as
-`runs_root`; no UI database or frozen-bundle import is required. Both dated and flat
-source layouts work. The old task ZIP and `transfer_dataset.py` bundle tool are removed.
-
-Start from `vla-liberox-workspace/` after activating `vla-liberox`:
+Each machine installs only what its role needs:
 
 ```bash
-python liberox-vla-adapter-terminal/scripts/run_ui.py
+git clone https://github.com/EclipseaHime017/vla-liberox-workspace.git
+cd vla-liberox-workspace
+python envs/setup.py --list                                   # roles
+python envs/setup.py --role train --family pi05 --dry-run     # print the plan
+python envs/setup.py --role train --family pi05               # install
 ```
 
-On a new checkout, run `npm ci` once in `liberox-vla-adapter-terminal/frontend/`. The launcher fingerprints the frontend sources, prints the exact build command before running it, and automatically rebuilds the Git-ignored `frontend/dist` after later pulls. Run `npm run build` there for a manual source-only rebuild, or `npm ci && npm run build` after `package-lock.json` changes. Neither `npm run build` nor `npm test` installs or upgrades dependencies.
+Roles: `dev`, `studio`, `teleop`, `reward-rynnvalue`, `reward-robometer`, `train`, `hpc`, `eval`, `infer`. System packages and manual steps are listed in [docs/install.md](docs/install.md) (Chinese).
 
-Open <http://127.0.0.1:8000>. See [README_CN.md](README_CN.md) for setup, operation and data management. Project guides live in [docs/](docs/); local development notes live in Git-ignored `logs/`. See [third-party layout and migration](docs/DEPENDENCIES.md).
-
-## FACTR calibration and manual gravity compensation
-
-GUI and CLI share the pinned official FACTR classes, driver and control parameters.
-The unmodified checkout/runtime live under `third_party/`; commit/file hashes are
-verified against `configs/factr_official.lock.json`. No custom gravity model remains.
+## Quick start
 
 ```bash
 conda activate vla-liberox
-python liberox-vla-adapter-terminal/scripts/setup_factr.py
-python liberox-vla-adapter-terminal/scripts/setup_factr.py --check
-python liberox-vla-adapter-terminal/scripts/test_factr.py
+python -m studio                      # platform at http://127.0.0.1:8000
+python -m train pipeline --dry-run    # single-GPU terminal pipeline (configs/pipeline.yaml)
+python -m cluster train               # multi-GPU server training (configs/cluster/pipeline.yaml)
+python -m cluster evaluate            # headless closed-loop evaluation
 ```
 
-Setup/check do not open hardware. System ROS 2/Pinocchio dependencies must be
-installed first; SDK packages go into an isolated system-Python runtime, not the
-VLA Python environment. GUI and CLI discover the USB serial port using these
-top-level selectors in [configs/factr_test_config.yaml](configs/factr_test_config.yaml):
+## Documentation
 
-```yaml
-vendor_id: 0x0403
-product_id: 0x6014
-serial_number: null
-```
+Detailed guides are in Chinese under [`docs/`](docs/): install, architecture, studio, training, methods, models, tasks, rewards, evaluation, cluster, data.
 
-Discovery is read-only: it enumerates USB port metadata without opening a port,
-starting the official worker, arming the controller or enabling torque. Exactly
-one device must match; if several share these IDs, set `serial_number` to the
-intended device's USB serial number. No match or an ambiguous match is reported
-in the selected FACTR settings. The port is resolved again when the worker starts,
-so no fixed `/dev/ttyUSB*` or `/dev/serial/by-id/...` path is configured.
-Remove the old `device_path` setting; the former `standalone` section is now `runtime`.
-
-USB connection detection is independent of the official runtime's availability;
-a connected device can still report missing runtime dependencies. The isolated
-FACTR environment above remains required for calibration and control. Install the
-updated `requirements-ui.txt` in the VLA environment for `pyserial==3.5` enumeration.
-GUI reconnection requires calibration again and never restores compensation
-automatically. CLI can reuse a matching saved calibration only with a USB serial
-number. Old path-based calibration fingerprints require one new calibration.
-
-The existing GUI **Calibrate** button checks the selected port's USB latency
-first. At 1 ms, calibration proceeds without elevated privileges. Otherwise,
-the local UI requests a system polkit authorization dialog: enter the password
-there, never in the webpage. Authorization installs the persistent VID/PID udev
-rule and applies 1 ms to the currently matched device, then continues calibration
-without enabling torque or requiring a replug. Cancellation, denial or timeout
-does not start calibration. There is no separate repair button.
-
-This authorization flow requires a local desktop session with `pkexec` and a
-polkit authentication agent; it is not available through SSH/headless operation
-or a remote browser. The terminal fallback remains available on each PC:
+## Tests
 
 ```bash
-python liberox-vla-adapter-terminal/scripts/setup_factr.py --install-usb-rule
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n vla-liberox python -m pytest -q tests
+conda run -n vla-liberox npm --prefix web test
 ```
-
-This does not install the runtime, open the port or control motors. It reads the
-YAML USB selectors: with `serial_number: null`, the rule applies to **all devices
-with that VID/PID**, including other FTDI adapters; set a serial number explicitly
-only when you want to restrict it. The rule handles `add|bind` events and does
-not depend on `/dev/ttyUSB*` numbering. The terminal command does not apply the
-setting to a currently connected device: stop controller programs, support the
-physical arm and reconnect USB. The GUI authorization flow instead applies the
-setting immediately to the uniquely matched device.
-Repeat the command after changing USB selectors. A manual `echo 1 | sudo tee ...`
-is only a temporary workaround and can be lost on reconnect.
-
-In GUI, select FACTR, place the complete arm in the official Figure 1 reference
-configuration and release the trigger, click Calibrate once, then Enable gravity
-compensation. Calibration calls the official offset method and captures trigger
-zero using the official 0.8 rad travel. No individual-motor or separate endpoint
-calibration, and no arbitrary-pose physical-zero assumption.
-
-The only supported calibration reference is official **Figure 1**:
-`[0, -0.7854, 0, -2.356, 0, 1.57, 0]` rad. The YAML
-`reference_joint_positions` must match this fixed reference; a folded or arbitrary
-pose is not a substitute. Calibration does not modify motor Homing Offset,
-controller gains or upstream source files.
-
-Compensation is explicitly enabled, never enabled by calibration or takeover.
-It persists through movement, normal simulation completion, countdown and rewind.
-Manual OFF, simulation faults or backend shutdown disable output before expensive
-postprocessing. Closing the browser alone does not stop the backend. Support the
-arm before OFF; an unverified shutdown is shown as unknown, not falsely confirmed.
-
-CLI: `c` calibrates, `s` tests, `g` enables without an ENABLE prompt,
-`d` disables immediately, `i` shows status; `q`/Ctrl+C disable output then exit
-the entire test program. No second confirmation is requested.
-Normal test completion returns to the menu with support retained; Ctrl+C/faults
-stop output immediately. Tests create no trajectories/videos/run directories;
-only successful calibration persists.
-
-Official gravity/friction/null-space/limit-barrier control uses a 500 Hz target
-and gain 0.85. USB latency 1 ms, 4 Mbps and correct current-mode configuration
-are required. No custom speed cutoff or support time limit; encoder integrity,
-hardware current limits, watchdog and shutdown handling remain. Trigger torque
-stays OFF. Port permissions, motor modes and EEPROM are not changed; USB latency
-is changed only after the explicit system authorization above or terminal setup.
-
-FACTR mirrors calibrated seven-joint targets through a Panda joint-position
-controller (physics still runs; no qpos teleport). Before takeover, the simulation
-stays fixed while the physical leader slowly aligns to it, holds through the
-countdown, then follows 1:1. Keep the physical workspace clear. Alignment uses
-the official PD gains in a nonblocking adapter with gravity support; it is not
-the unmodified blocking upstream alignment routine. Its documented >=200 Hz
-requirement is checked over a rolling 50-cycle window only for alignment, not
-as a human motion-speed cutoff or an every-cycle 5 ms deadline. A single late
-tick skips alignment PD/reference advance and retains normal compensation;
-sustained low rate still stops the run. This is an application timing check,
-not an assertion implemented by upstream FACTR. Hardware watchdogs remain.
-FACTR and SpaceMouse use the same recorded manual-session and training workflow.
-FACTR still follows joint targets; each 20 Hz step's measured end-effector world
-translation and relative rotation are inverse-scaled into seven-dimensional OSC
-labels, with the gripper command appended. These describe achieved motion, not
-an exactly equivalent executed OSC command. No separate joint demonstration log
-is written. Unclipped labels remain in raw_action; bounded labels in env_action,
-with clipping statistics in controller diagnostics. Parent prefixes, state-based
-dual-camera reconstruction and dataset export use the shared recording pipeline.
-Normal completion retains compensation; errors disable it and save partial data.
-SpaceMouse remains an installed `pyspacemouse` dependency, not a vendored checkout.
-Do not run GUI, CLI or upstream demos against the same serial port concurrently.
-See [the Chinese guide](README_CN.md#26-人工控制器可选)
-and [official source](https://github.com/JasonJZLiu/FACTR_Teleop).
-
-## Batch policy testing
-
-The Test page runs a selected task and policy repeatedly without publishing
-rollout media or trajectories. “Random environments” are the finite
-`init_state_index` values belonging to that exact BDDL task, not other scenes;
-environment seeds form the second randomization axis. The backend freezes a
-reproducible, balanced schedule before launch, then runs every normal episode to
-`max_steps`. A success is latched after the system-configured number of consecutive
-`done=true` control steps (five by default), while the remainder of the episode
-still executes. Results include per-init-state success rates; the Wilson interval
-assumes independent episodes and can be narrow when only a few states are tested.
-
-The default mode removes real-time wall-clock waits while keeping the MuJoCo
-control-frequency semantics unchanged; real-time pacing remains optional.
-Each test stores one lightweight `evaluation.json` under the project
-`evaluations/` tree. Detached-job diagnostics (`job.json`, `job.log`, and the
-validated effective YAML) remain in `jobs/`; no video, observation, action,
-trajectory, image, or plot is written by batch testing.
-
-## RynnValue + IQL offline post-training
-
-The standalone pipeline keeps `VLA-Adapter/LIBERO-Object-Pro` as the deployed
-Franka policy, freezes its vision/language backbone, and updates only the
-continuous action head and proprio projector:
-
-```text
-dataset-root
-        │
-        ├── validate trajectories; bind reusable RynnValue sidecars per episode
-        ▼
-frozen RynnValue-4B ── absolute/relative heads + exact Analysis output
-        │               (immutable, reward-agnostic annotation cache)
-        ▼
-deterministic reward materialization ── sparse + Shape + Final Reward
-        │                              (gamma/kappa/reduction keyed cache)
-        ▼
-Pixel-IQL critics/value + advantage-weighted VLA behavior cloning
-        │
-        ▼
-policy-registry/<policy_id>/policy.yaml
-        ├── standalone LIBERO-X evaluation
-        └── selectable policy overlay in the existing Web UI
-```
-
-RynnValue follows the pinned official inference implementation and is used only
-as an offline trajectory evaluator. Annotation schema v6 retains decoded absolute
-and relative temporal distances, both distributional-head logits, absolute-head
-entropy, and the exact generated Analysis text/token IDs, but no training
-reward. No overlapping-window average is applied, and PBRS is never labeled as
-a native model output. A separate deterministic cache derives sparse, Shape,
-and Final Reward. Existing compatible schema-v4/v5 sidecars are migrated by
-reusing their model heads, even when their old reward settings differ; no new
-RynnValue forward is performed. The
-PyTorch trainer implements IQL with double-Q
-critics, expectile value regression and advantage-weighted behavior cloning; it
-does not perform online exploration or modify the upstream VLA-Adapter source.
-
-Reuse `vla-liberox` for dataset preparation, simulation and VLA-Adapter training.
-RynnValue uses `rynnvalue-reward`, Robometer uses `robometer-reward`, and π₀.₅ uses
-`pi05`; do not merge their dependency stacks. The following commands use VLA-Adapter. After
-following the installation steps in the [standalone trainer guide](README_CN.md#2-环境配置),
-run from the workspace root:
-
-```bash
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/prepare_dataset.py \
-  --config vla-adapter-rynn-iql/configs/training/iql.yaml
-conda run -n rynnvalue-reward python vla-adapter-rynn-iql/scripts/annotate_rewards.py \
-  --config vla-adapter-rynn-iql/configs/training/iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/materialize_rewards.py \
-  --config vla-adapter-rynn-iql/configs/training/iql.yaml
-conda run -n vla-liberox python vla-adapter-rynn-iql/scripts/train_iql.py \
-  --config vla-adapter-rynn-iql/configs/training/iql.yaml
-```
-
-The default profile pins the RynnValue source commit and 4B model snapshot,
-uses 8×7 action chunks and 8-D proprio at 20 Hz, and is designed for staged use
-on a 16 GB GPU. A dataset containing only failures is accepted for integration
-testing with an explicit warning, but is not evidence that offline training will
-improve task success.
-
-Use the platform's Test page to evaluate trained models. IQL training writes
-TensorBoard events beside the raw `metrics.jsonl` log. Run
-`tensorboard --logdir vla-adapter-rynn-iql/outputs/training` to compare runs.
-
-## Robometer trajectory evaluation
-
-The independent [Robometer evaluator](README_CN.md#25-robometer) adds the
-official `Robometer-4B-LIBERO` single-trajectory progress and success
-probability outputs to existing episodes. In the data page, RynnValue and
-Robometer may be selected independently or run sequentially in one GPU job.
-Their files, cache validation and overwrite behavior remain independent;
-Robometer does not alter IQL rewards or frozen training manifests. Episode
-details show both original Robometer curves and an explicitly UI-derived,
-time-aligned comparison with normalized RynnValue remaining time.
-
-Robometer uses the separate `robometer-reward` Conda environment. Its pinned
-model/source revisions, CUDA device, BF16 mode, 3 Hz evaluation rate, four-frame
-prefix protocol and batch-size tuning are documented in the
-[evaluator configuration guide](README_CN.md#25-robometer).
-
-### References
-
-- [RynnValue paper — temporal distance and potential-based reward shaping](https://arxiv.org/abs/2608.09853)
-- [RynnValue official implementation](https://github.com/alibaba-damo-academy/RynnValue)
-- [Implicit Q-Learning paper](https://arxiv.org/abs/2110.06169)
-- [VLA-Adapter official implementation](https://github.com/OpenHelix-Team/VLA-Adapter)
-- [LIBERO-X official implementation](https://github.com/meituan/LIBERO-X)
-- [Robometer paper](https://arxiv.org/abs/2603.02115)
-- [Robometer official implementation](https://github.com/robometer/robometer)

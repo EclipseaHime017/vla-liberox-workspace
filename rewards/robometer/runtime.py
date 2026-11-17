@@ -4,15 +4,11 @@ from __future__ import annotations
 
 from importlib import metadata
 
+from core.upstream import upstream_lock
 
-EXPECTED = {
-    "torch": "2.8.0",
-    "torchvision": "0.23.0",
-    "torchao": "0.13.0",
-    "xformers": "0.0.32.post2",
-    "transformers": "4.57.1",
-    "trl": "0.20.0",
-}
+# The pinned matrix lives in third_party/lock.yaml (robometer.runtime).
+EXPECTED = {name: str(upstream_lock("robometer")["runtime"][name])
+            for name in ("torch", "torchvision", "torchao", "xformers", "transformers", "trl")}
 
 
 def public_version(value: str) -> str:
@@ -36,7 +32,7 @@ def validate_runtime_versions() -> dict[str, str]:
         details = "; ".join(problems)
         raise RuntimeError(
             "Incompatible Robometer runtime: " + details + ". Rebuild the "
-            "robometer-reward environment using README_CN.md (Robometer setup); "
+            "robometer-reward environment (python envs/setup.py --role reward-robometer); "
             "downgrading torchao alone is not supported."
         )
     return found

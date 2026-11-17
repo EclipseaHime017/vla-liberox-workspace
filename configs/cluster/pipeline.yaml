@@ -1,4 +1,4 @@
-# Server-branch-only multi-GPU entrypoint; main keeps its single-GPU UI runner.
+# Single-node multi-GPU training (python -m cluster train); the platform keeps its single-GPU runner.
 schema_version: 4
 training_config: ../methods/iql.yaml
 runs_root: ../../dataset-root/projects/libero_x_vla/runs
