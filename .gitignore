@@ -1,23 +1,31 @@
-# Platform source, configuration and user documentation are versioned.
-# Upstream checkouts and generated experiment data stay local.
+# Source, configuration, environment recipes and documentation are versioned.
+# Upstream checkouts, weights and generated data stay local; envs/setup.py
+# fetches only what a device role needs (see docs/install.md).
 /third_party/*
 !/third_party/.gitkeep
+!/third_party/README.md
+!/third_party/lock*.yaml
+!/third_party/factr.lock.json
+!/third_party/patches/
 /dataset-root/
+/dataset-exports/
 /training-datasets/
 /runs/
+/outputs/
 /policy-registry/*
 !/policy-registry/.gitkeep
-/vla-adapter-rynn-iql/outputs/
-/vla-adapter-robometer/outputs/
 /models/*
 !/models/.gitkeep
 /evaluator/*
 !/evaluator/.gitkeep
 /tmp/
 /annotation-cache/
+# Site-specific scheduler settings (queues, projects, accounts).
+/configs/cluster/local/
 
-# Local development notes are not distributed with the source repository.
+# Local development notes and one-off experiment tooling stay on each machine.
 /logs/
+/experiments/
 
 # Python
 **/__pycache__/
@@ -41,11 +49,11 @@ wandb/
 
 # Frontend
 **/node_modules/
-# Vite output stays machine-local; run_ui.py rebuilds it when sources change.
-**/frontend/dist/
-**/frontend/*.tsbuildinfo
-**/frontend/vite.config.js
-**/frontend/vite.config.d.ts
+# Vite output stays machine-local; `python -m studio` rebuilds it when sources change.
+/web/dist/
+/web/*.tsbuildinfo
+/web/vite.config.js
+/web/vite.config.d.ts
 
 # Local configuration and caches
 .env
@@ -58,7 +66,6 @@ wandb/
 .cache/
 
 # Generated trajectories, videos, and portable dataset exports
-/dataset-exports/
 *.npy
 *.npz
 *.mp4

@@ -1,0 +1,202 @@
+"""Opt-in real LIBERO / OSC smoke test with deterministic synthetic HID input.
+
+RUN_MUJOCO_SMOKE=1 MUJOCO_GL=egl PYTHONPATH=.:scripts pytest -s tests/test_spacemouse_simulation.py
+No physical SpaceMouse or VLA checkpoint is required; no motor device is opened.
+"""
+from __future__ import annotations
+
+import dataclasses
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from studio.devices.spacemouse import SpaceMouseInput, SpaceMouseTransform, load_spacemouse_config
+from studio.devices.spacemouse_motion import SpaceMouseActionMapper
+from sim.control import run_control_loop
+from sim.recording import TrajectoryRecorder, load_trajectory, save_trajectory_bundle
+
+
+@pytest.mark.skipif(os.environ.get("RUN_MUJOCO_SMOKE") != "1", reason="opt-in MuJoCo smoke test")
+@pytest.mark.parametrize("frame", ["world", "tool"])
+def test_exclusive_commands_step_real_osc_and_save_complete_partial_trajectory(tmp_path, monkeypatch, frame):
+    import sim.env as direct
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(root / "third_party" / "LIBERO-X"))
+    runtime = direct.load_runtime()
+    bddl, init_path = direct.resolve_task(root / "third_party" / "LIBERO-X", "LEVEL1",
+        "EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove")
+    state = direct.load_initial_states(runtime, init_path)[0]
+    env = direct.make_env(runtime, bddl, 64, 25, 20, 0, "vla_views", 128, 64, True)
+    clock = [10.]
+    mouse = SpaceMouseInput(dataclasses.replace(load_spacemouse_config(),
+        translation_gain=.1, rotation_gain=.1, smoothing_alpha=.5), clock=lambda: clock[0])
+    mouse._connected = True
+    mouse.reset_for_arm(gripper=1., control_frame=frame)
+    mapper = SpaceMouseActionMapper(env)
+    executed = []
+    snapshots = []
+    recorder = TrajectoryRecorder(control_hz=20., capture_images=False)
+    try:
+        initial = direct.restore_state(env, state)
+        mapper.prepare_takeover([], control_hz=20.)
+        recorder.record_initial(env, initial)
+
+        def query(step):
+            clock[0] += .05
+            if step < 20:
+                axes = ((0, .8, 0, .1, 0, 0) if step < 8 else
+                        (.1, 0, 0, 0, 0, .8) if step < 16 else (0,) * 6)
+                mouse._accept_event(step + 1, axes, (0, 0))
+            elif step == 20:
+                clock[0] += .3  # Stale: hold gripper but no motion.
+            else:
+                mouse._connected = False
+            snapshot = mouse.latest_snapshot()
+            snapshots.append(snapshot)
+            if not snapshot.connected:
+                return None
+            action = mapper.convert(snapshot.action, snapshot.control_frame)
+            executed.append(action.copy())
+            return action
+
+        result = run_control_loop(env=env, recorder=recorder, initial_observation=initial,
+            target_action_count=24, rate_limiter=direct.RealTimeControlLimiter(20., False),
+            action_source="human", manual_query=query, stop_on_success=False)
+        assert result.stopped_reason == "controller_stop"
+        assert recorder.action_count == 21 and recorder.state_count == 22
+        actions = np.stack(recorder.env_actions)
+        assert np.array_equal(actions, executed)
+        local = np.asarray([s.action for s in snapshots[:-1]], dtype=np.float32)
+        assert np.array_equal(actions, local) if frame == "world" else not np.allclose(actions, local)
+        assert np.all(actions[:8, 3:6] == 0) and np.any(actions[:8, :3])
+        assert np.all(actions[8:16, :3] == 0) and np.any(actions[8:16, 3:6])
+        assert np.all(actions[16:, :6] == 0) and np.all(actions[:, 6] == 1)
+        assert np.all(np.isfinite(recorder.sim_states))
+        assert np.linalg.norm(recorder.eef_positions[8] - recorder.eef_positions[0]) > 1e-4
+        assert np.linalg.norm(recorder.eef_quaternions[16] - recorder.eef_quaternions[8]) > 1e-4
+        # Reconstruct cameras after control, just as the GUI records observations.
+        direct.postprocess_recorded_trajectory(runtime, env, recorder,
+            combined_path=None, main_view_path=None, save_observations=True,
+            fps=20, video_camera="vla_views", video_width=128, video_height=64,
+            main_view_width=64, main_view_height=64)
+        paths = save_trajectory_bundle(recorder, tmp_path / "trajectory",
+            {"manual_source": "spacemouse", "motion_mode": "exclusive", "manual_control_frame": frame}, create_plot=False)
+        trajectory, metadata = load_trajectory(Path(paths["trajectory"]))
+        assert metadata["control_hz"] == 20
+        assert metadata["manual_control_frame"] == frame
+        assert metadata["action_count"] == 21 and metadata["state_count"] == 22
+        assert np.array_equal(trajectory["env_action"], actions)
+        assert set(trajectory["action_source"]) == {"human"}
+        with np.load(paths["trajectory_observations"]) as images:
+            assert images["agentview_image"].shape == images["wrist_image"].shape == (22, 64, 64, 3)
+        assert not any(name.startswith("prismatic") for name in sys.modules)
+    finally:
+        env.close()
+
+
+@pytest.mark.skipif(os.environ.get("RUN_MUJOCO_SMOKE") != "1", reason="opt-in MuJoCo smoke test")
+def test_raw_tool_inputs_move_real_panda_forward_right_up_without_axis_swap(monkeypatch):
+    import sim.env as direct
+    from scipy.spatial.transform import Rotation
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(root / "third_party" / "LIBERO-X"))
+    runtime = direct.load_runtime()
+    bddl, init_path = direct.resolve_task(root / "third_party" / "LIBERO-X", "LEVEL1",
+        "EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove")
+    env = direct.make_env(runtime, bddl, 32, 100, 20, 0, "vla_views", 64, 32, True)
+    try:
+        direct.restore_state(env, direct.load_initial_states(runtime, init_path)[0])
+        state = np.asarray(env.get_sim_state()).copy()
+        robot = env.env.robots[0]
+        robot.sim.forward()
+        transform = SpaceMouseTransform(dataclasses.replace(load_spacemouse_config(),
+            deadzone=0, smoothing_alpha=1, translation_gain=.15, rotation_gain=.15))
+        # In the initial downward pose, forward/right/up must be +world X/-Y/+Z.
+        # Test actual HID axes, independently of the mapper's matrix definition.
+        for axis, (raw_axis, expected_sign) in enumerate(((1, 1), (0, -1), (2, 1),
+                                                        (3, 1), (4, 1), (5, -1))):
+            poses = []
+            for sign in (1, -1):
+                direct.restore_state(env, state)
+                mapper = SpaceMouseActionMapper(env)
+                mapper.prepare_takeover([], control_hz=20.)
+                transform.reset_filter()
+                raw = np.zeros(6)
+                raw[raw_axis] = sign
+                _, command = transform.apply(raw)
+                action = np.r_[command, -1.]
+                for _ in range(4):
+                    env.step(mapper.convert(action, "tool"))
+                robot.sim.forward()
+                poses.append((robot.sim.data.get_site_xpos(mapper.eef_name).copy(),
+                              robot.sim.data.get_site_xmat(mapper.eef_name).copy()))
+            # Compare opposite inputs from the same state to cancel neutral drift.
+            if axis < 3:
+                change = poses[0][0] - poses[1][0]
+            else:
+                change = Rotation.from_matrix(poses[0][1] @ poses[1][1].T).as_rotvec()
+            assert change[axis % 3] * expected_sign > 1e-3, (axis, change)
+            assert np.argmax(np.abs(change)) == axis % 3, (axis, change)
+    finally:
+        env.close()
+
+
+@pytest.mark.skipif(os.environ.get("RUN_MUJOCO_SMOKE") != "1", reason="opt-in MuJoCo smoke test")
+def test_restored_takeover_does_not_reopen_gripper_or_reuse_initial_osc_goal(monkeypatch):
+    import sim.env as direct
+
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(root / "third_party" / "LIBERO-X"))
+    runtime = direct.load_runtime()
+    bddl, init_path = direct.resolve_task(root / "third_party" / "LIBERO-X", "LEVEL1",
+        "EXTENSION_KITCHEN_SCENE11_place_the_black_bowl_on_the_flat_stove")
+    env = direct.make_env(runtime, bddl, 32, 100, 20, 0, "vla_views", 64, 32, True)
+    try:
+        direct.restore_state(env, direct.load_initial_states(runtime, init_path)[0])
+        actions = [np.array([0., 0., 0., 0., 0., .3, 1.])] * 12
+        actions += [np.array([0., 0., 0., 0., 0., 0., 1.])] * 10
+        for action in actions:
+            env.step(action)
+        robot = env.env.robots[0]
+        saved = np.asarray(env.get_sim_state()).copy()
+        target = robot.gripper.current_action.copy()
+        robot.sim.forward()
+        orientation = robot.sim.data.get_site_xmat(robot.controller.eef_name).copy()
+        fingers = robot._ref_gripper_joint_pos_indexes
+        original_gap = np.ptp(robot.sim.data.qpos[fingers])
+
+        measurements = []
+        for repaired in (False, True):
+            env.reset()
+            direct.restore_state(env, saved)
+            robot = env.env.robots[0]
+            if repaired:
+                mapper = SpaceMouseActionMapper(env)
+                assert mapper.prepare_takeover(actions, control_hz=20.) == 1.
+                np.testing.assert_array_equal(env.get_sim_state(), saved)
+                np.testing.assert_allclose(robot.gripper.current_action, target, atol=1e-12)
+                np.testing.assert_allclose(robot.controller.goal_ori, orientation, atol=1e-12)
+                np.testing.assert_allclose(robot.controller.goal_pos, robot.controller.ee_pos)
+                np.testing.assert_array_equal(robot.controller.initial_joint, robot.controller.joint_pos)
+            else:
+                assert np.linalg.norm(robot.controller.goal_ori - orientation) > .1
+                np.testing.assert_array_equal(robot.gripper.current_action, [0.])
+            env.step(actions[-1])  # Neutral SpaceMouse motion, keep closing.
+            robot.sim.forward()
+            measurements.append((np.ptp(robot.sim.data.qpos[fingers]),
+                np.linalg.norm(robot.sim.data.get_site_xmat(robot.controller.eef_name) - orientation)))
+
+        old_gap, old_rotation = measurements[0]
+        new_gap, new_rotation = measurements[1]
+        print(f"takeover finger gap: {original_gap:.6f} -> old {old_gap:.6f}, fixed {new_gap:.6f}; "
+              f"rotation matrix change: old {old_rotation:.6f}, fixed {new_rotation:.6f}")
+        assert old_gap > original_gap + .005
+        assert new_gap < original_gap + .001
+        assert new_rotation < old_rotation * .5
+    finally:
+        env.close()

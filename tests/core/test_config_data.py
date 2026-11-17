@@ -1,0 +1,593 @@
+from __future__ import annotations
+
+from pathlib import Path
+import json
+import zipfile
+
+import numpy as np
+import yaml
+
+import pytest
+
+from core.config import load_train_config
+from core.data import REPLAY_POLICY, load_manifest, prepare_dataset, replay_chunks
+from core.io import sha256_file, stable_hash
+
+
+def test_duplicate_yaml_key_is_rejected(tmp_path: Path):
+    path = tmp_path / "bad.yaml"
+    path.write_text("schema_version: 1\nschema_version: 1\n", encoding="utf-8")
+    with pytest.raises(Exception, match="duplicate key"):
+        load_train_config(path)
+
+
+def test_unknown_config_key_is_rejected(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["iql"]["mystery"] = 1
+    path = tmp_path / "unknown.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unknown config.iql keys"):
+        load_train_config(path)
+
+
+def test_rynnvalue_checkout_path_is_resolved(configured):
+    expected = configured.path.parent / "RynnValue"
+    assert Path(configured.section("paths")["rynnvalue_root"]) == expected.resolve()
+
+
+def test_reward_dtype_must_match_pinned_bfloat16_checkpoint(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"]["dtype"] = "float32"
+    path = tmp_path / "float32-reward.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="reward.dtype=bfloat16"):
+        load_train_config(path)
+
+
+def test_reward_accumulation_mode_must_be_boolean(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"]["accumulate_primitive_steps"] = "false"
+    path = tmp_path / "invalid-reward-mode.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(TypeError, match="accumulate_primitive_steps"):
+        load_train_config(path)
+
+
+@pytest.mark.parametrize("mode, expected", [("additive", True), ("multiplicative", False)])
+def test_final_cumulative_config_and_recipe_agree(configured, tmp_path, mode, expected):
+    from rewards.manifest import reward_derivation_config
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"].update(source="final", fusion_mode=mode, alpha=.5, accumulate_primitive_steps=True)
+    path = tmp_path / "fusion.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    reward = load_train_config(path).section("reward")
+    assert reward["accumulate_primitive_steps"] is expected
+    assert reward_derivation_config(reward)["accumulate_primitive_steps"] is expected
+
+
+@pytest.mark.parametrize("normalization", [None, "none", "initial_chunk_v1"])
+def test_final_normalization_preserves_legacy_recipe_identity(configured, tmp_path, normalization):
+    from rewards.manifest import reward_derivation_config
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"].update(source="final")
+    raw["reward"].pop("final_normalization")
+    if normalization is not None:
+        raw["reward"]["final_normalization"] = normalization
+    path = tmp_path / "normalization.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    reward = load_train_config(path).section("reward")
+    assert reward["final_normalization"] == (normalization or "none")
+    recipe = reward_derivation_config(reward)
+    if normalization == "initial_chunk_v1":
+        assert recipe["final_normalization"] == normalization
+    else:
+        assert "final_normalization" not in recipe
+
+
+def test_default_final_normalization_and_invalid_rule(configured, tmp_path):
+    assert configured.section("reward")["final_normalization"] == "initial_chunk_v1"
+    raw = yaml.safe_load(configured.path.read_text())
+    raw["reward"]["final_normalization"] = "clip"
+    path = tmp_path / "invalid-normalization.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="reward.final_normalization"):
+        load_train_config(path)
+
+
+def test_rynnvalue_reward_switch_must_be_boolean(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"]["rynnvalue"] = "false"
+    path = tmp_path / "invalid-rynnvalue-switch.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(TypeError, match="reward.rynnvalue"):
+        load_train_config(path)
+
+
+def test_legacy_config_without_rynnvalue_switch_keeps_shaping_enabled(
+    configured, tmp_path: Path,
+):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"].pop("rynnvalue", None)
+    raw["reward"].pop("source", None)
+    path = tmp_path / "legacy-without-rynnvalue-switch.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert load_train_config(path).section("reward")["rynnvalue"] is True
+
+
+def test_success_confirmation_threshold_is_validated(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["data"]["success_consecutive_steps"] = 0
+    path = tmp_path / "invalid-success-threshold.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="success_consecutive_steps"):
+        load_train_config(path)
+
+
+def test_tensorboard_logging_configuration_is_strict(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["logging"]["tensorboard"] = "yes"
+    path = tmp_path / "invalid-logging.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(TypeError, match="logging.tensorboard"):
+        load_train_config(path)
+
+
+def test_positive_micro_batch_is_not_artificially_limited_to_one(configured, tmp_path: Path):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["training"]["micro_batch_size"] = 8
+    path = tmp_path / "batched.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert load_train_config(path).section("training")["micro_batch_size"] == 8
+
+
+def test_default_iql_stability_profile(configured):
+    iql = configured.section("iql")
+    assert iql["critic_optimizer"] == "adamw"
+    assert iql["critic_weight_decay"] == 0.01
+    assert iql["value_optimizer"] == "adamw"
+    assert iql["value_weight_decay"] == 0.01
+    assert iql["beta"] == 3.0
+    assert iql["max_advantage_weight"] == 20.0
+    assert iql["critic_warmup_steps"] == 1000
+
+
+@pytest.mark.parametrize("field", ["critic_optimizer", "value_optimizer"])
+def test_iql_optimizer_name_is_validated(configured, tmp_path: Path, field: str):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["iql"][field] = "sgd"
+    path = tmp_path / f"invalid-{field}.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=field):
+        load_train_config(path)
+
+
+@pytest.mark.parametrize("field", ["critic_weight_decay", "value_weight_decay"])
+def test_iql_weight_decay_is_nonnegative(configured, tmp_path: Path, field: str):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["iql"][field] = -1
+    path = tmp_path / f"invalid-{field}.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=field):
+        load_train_config(path)
+
+
+@pytest.mark.parametrize("field", ["critic_max_grad_norm", "value_max_grad_norm"])
+def test_iql_gradient_clip_is_positive(configured, tmp_path: Path, field: str):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["iql"][field] = 0
+    path = tmp_path / f"invalid-{field}.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=field):
+        load_train_config(path)
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("enabled", "yes", "wandb.enabled"),
+        ("mode", "automatic", "wandb.mode"),
+        ("project", "", "wandb.project"),
+        ("tags", ["duplicate", "duplicate"], "wandb.tags"),
+        ("log_interval_steps", 0, "log_interval_steps"),
+    ],
+)
+def test_wandb_logging_configuration_is_strict(
+    configured, tmp_path: Path, field: str, value, error: str,
+):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["logging"]["wandb"][field] = value
+    path = tmp_path / f"invalid-wandb-{field}.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises((TypeError, ValueError), match=error):
+        load_train_config(path)
+
+
+@pytest.mark.parametrize("value", [0, 1.5, "10"])
+def test_console_progress_interval_is_a_positive_integer(
+    configured, tmp_path: Path, value
+):
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["logging"]["console_interval_steps"] = value
+    path = tmp_path / "invalid-console-progress.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises((TypeError, ValueError), match="console_interval_steps"):
+        load_train_config(path)
+
+
+def test_branch_keeps_full_trajectory_and_marks_interrupted_policy_prefix(configured):
+    prepare_dataset(configured)
+    manifest = load_manifest(configured)
+    episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
+    assert [chunk["start"] for chunk in episodes["root"]["chunks"]] == [0, 8, 16]
+    assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [0, 5, 13, 18]
+    assert episodes["branch"]["chunks"][0] == {
+        "start": 0, "length": 5, "end": 5, "action_source": "policy",
+        "transition_type": "policy_interrupted", "interrupted": True,
+        "copied_prefix": True,
+    }
+    assert episodes["branch"]["chunks"][1]["action_source"] == "human"
+    assert episodes["branch"]["reward_boundaries"] == [0, 5, 13, 18, 22]
+    assert episodes["root"]["split"] == episodes["branch"]["split"]
+
+
+def test_branch_reward_boundaries_include_natural_rollout_before_takeover(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    run = json.loads(run_json.read_text(encoding="utf-8"))
+    run["resume_step"] = 13
+    run_json.write_text(json.dumps(run), encoding="utf-8")
+    trajectory = run_json.parent / "episodes" / "episode_000" / "trajectory.npz"
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    sources = np.asarray(["policy"] * len(arrays["env_action"]), dtype="<U32")
+    sources[13:] = "human"
+    arrays["action_source"] = sources
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert [
+        (chunk["start"], chunk["end"], chunk["transition_type"])
+        for chunk in branch["chunks"]
+    ] == [
+        (0, 8, "policy_prefix"),
+        (8, 13, "policy_interrupted"),
+        (13, 18, "human"),
+        (18, 22, "human"),
+    ]
+    assert branch["reward_boundaries"] == [0, 8, 13, 18, 22]
+
+
+def test_500_step_branch_evaluation_still_spans_full_25_seconds(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    run = json.loads(run_json.read_text(encoding="utf-8"))
+    run.update({"resume_step": 210, "success": False})
+    run_json.write_text(json.dumps(run), encoding="utf-8")
+    episode = run_json.parent / "episodes" / "episode_000"
+    actions = np.zeros((500, 7), dtype=np.float32)
+    actions[:, -1] = -1.0
+    raw_actions = actions.copy()
+    raw_actions[:, -1] = 1.0
+    sources = np.asarray(["policy"] * 210 + ["human"] * 290, dtype="<U32")
+    np.savez_compressed(
+        episode / "trajectory.npz",
+        time_seconds=np.arange(501, dtype=np.float64) / 20.0,
+        eef_position=np.zeros((501, 3), np.float32),
+        eef_axis_angle=np.zeros((501, 3), np.float32),
+        gripper_qpos=np.zeros((501, 2), np.float32),
+        env_action=actions,
+        raw_action=raw_actions,
+        reward=np.zeros(500, np.float32),
+        done=np.zeros(500, dtype=bool),
+        action_source=sources,
+    )
+    np.savez_compressed(
+        episode / "trajectory_observations.npz",
+        agentview_image=np.zeros((501, 16, 16, 3), np.uint8),
+        wrist_image=np.zeros((501, 16, 16, 3), np.uint8),
+    )
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert branch["reward_boundaries"][0] == 0
+    assert branch["reward_boundaries"][-1] == 500
+    assert branch["reward_boundaries"][-1] / 20.0 == 25.0
+    assert any(
+        chunk["start"] == 208 and chunk["end"] == 210
+        and chunk["transition_type"] == "policy_interrupted"
+        for chunk in branch["chunks"]
+    )
+
+
+def test_latched_done_tail_is_trained_without_changing_source(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    original_bytes = {path: path.read_bytes() for path in source.rglob("*") if path.is_file()}
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+
+    assert branch["recorded_action_count"] == 22
+    assert branch["terminal_step"] == 17
+    assert branch["success_streak_start"] == 13
+    assert branch["action_count"] == 22
+    assert branch["trailing_action_count"] == 4
+    assert branch["post_terminal_false_count"] == 0
+    assert branch["chunks"][-2] == {
+        "start": 13, "length": 5, "end": 18, "action_source": "human",
+        "transition_type": "human", "interrupted": False,
+        "copied_prefix": False,
+    }
+    assert branch["reward_boundaries"][0] == 0
+    assert branch["reward_boundaries"][-1] == 22
+    assert branch["chunks"][-1] == {
+        "start": 18, "length": 4, "end": 22, "action_source": "human",
+        "transition_type": "human", "interrupted": False,
+        "copied_prefix": False,
+    }
+    assert branch["evaluation_chunks"][:-1] == branch["chunks"][:-1]
+    assert branch["evaluation_chunks"][-1] == {
+        "start": 18, "length": 4, "end": 22, "action_source": "human",
+        "transition_type": "post_terminal_evaluation", "interrupted": False,
+        "copied_prefix": False,
+    }
+    assert all(path.read_bytes() == content for path, content in original_bytes.items())
+    manifest = load_manifest(configured)
+    assert manifest["replay_policy"] == REPLAY_POLICY
+    assert manifest["trajectory_chunk_count"] == manifest["chunk_count"] == 7
+    assert sum(ep["action_count"] for ep in manifest["episodes"]) == 39
+    assert sum(chunk["length"] for ep in manifest["episodes"] for chunk in replay_chunks(ep)) == 39
+
+
+def test_action_source_change_is_a_hard_chunk_boundary(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    sources = arrays["action_source"].astype("<U32")
+    sources[5:10] = "human"
+    sources[10:] = "policy_requery"
+    arrays["action_source"] = sources
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert [
+        (chunk["start"], chunk["end"], chunk["action_source"])
+        for chunk in branch["chunks"]
+    ] == [
+        (0, 5, "policy"),
+        (5, 10, "human"),
+        (10, 18, "policy_requery"),
+        (18, 22, "policy_requery"),
+    ]
+
+
+def test_post_success_source_change_starts_a_new_training_chunk(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["action_source"] = arrays["action_source"].astype("<U32")
+    arrays["action_source"][20:] = "policy_requery"
+    arrays["done"][19:] = False
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(ep for ep in load_manifest(configured)["episodes"] if ep["run_id"] == "branch")
+    assert branch["success"] is True
+    assert branch["terminal_step"] == 17
+    assert branch["post_terminal_false_count"] == 3
+    assert [(c["start"], c["end"], c["transition_type"]) for c in branch["chunks"][-2:]] == [
+        (18, 20, "human"), (20, 22, "policy_requery"),
+    ]
+    assert branch["action_source_segments"][-1] == {
+        "start": 20, "end": 22, "action_source": "policy_requery",
+    }
+
+
+def test_branch_can_resume_after_success_confirmation(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    run = json.loads(run_json.read_text(encoding="utf-8"))
+    run["resume_step"] = 20
+    run_json.write_text(json.dumps(run), encoding="utf-8")
+    trajectory = run_json.parent / "episodes" / "episode_000" / "trajectory.npz"
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["action_source"][:20] = "policy"
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(ep for ep in load_manifest(configured)["episodes"] if ep["run_id"] == "branch")
+    assert branch["terminal_step"] == 17
+    assert branch["resume_step"] == 20
+    assert branch["action_count"] == 22
+    assert branch["chunks"][-1]["start"] == 20
+    assert branch["chunks"][-1]["end"] == 22
+    assert branch["chunks"][-1]["action_source"] == "human"
+    assert branch["chunks"][-2]["copied_prefix"] is True
+
+
+def test_sibling_branches_keep_stable_interrupted_prefix_for_annotation(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    branch_run = next(source.rglob("branch/run.json")).parent
+    sibling_run = branch_run.parent / "branch-sibling"
+    import shutil
+    shutil.copytree(branch_run, sibling_run)
+    run = json.loads((sibling_run / "run.json").read_text(encoding="utf-8"))
+    run["id"] = "branch-sibling"
+    (sibling_run / "run.json").write_text(json.dumps(run), encoding="utf-8")
+
+    prepare_dataset(configured)
+    branches = [
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["kind"] == "branch"
+    ]
+    interrupted = [
+        chunk for episode in branches for chunk in episode["chunks"]
+        if chunk["interrupted"]
+    ]
+    assert len(interrupted) == 2
+    assert {(chunk["start"], chunk["end"]) for chunk in interrupted} == {(0, 5)}
+
+
+def test_transient_success_requires_a_new_complete_streak(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["done"] = arrays["done"].copy()
+    arrays["done"][15] = False
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert branch["terminal_step"] == 20
+    assert branch["success_streak_start"] == 16
+    assert branch["action_count"] == 22
+    assert branch["trailing_action_count"] == 1
+    assert branch["post_terminal_false_count"] == 0
+
+
+def test_unconfirmed_success_pulses_are_treated_as_failure(configured):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    trajectory = next(source.rglob("branch/episodes/episode_000/trajectory.npz"))
+    with np.load(trajectory, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    arrays["done"] = np.zeros_like(arrays["done"], dtype=bool)
+    arrays["done"][[13, 15, 17, 19, 21]] = True
+    np.savez_compressed(trajectory, **arrays)
+
+    prepare_dataset(configured)
+    branch = next(
+        episode for episode in load_manifest(configured)["episodes"]
+        if episode["run_id"] == "branch"
+    )
+    assert branch["recorded_success"] is True
+    assert branch["success"] is False
+    assert branch["raw_done_true_count"] == 5
+    assert branch["terminal_step"] is None
+    assert branch["action_count"] == 22
+
+
+def test_ui_export_zip_is_imported_without_modifying_source(configured, tmp_path: Path):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    archive = tmp_path / "dataset.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for path in source.rglob("*"):
+            if path.is_file():
+                bundle.write(path, path.relative_to(source))
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["paths"]["dataset_sources"] = [str(archive)]
+    raw["paths"]["work_dir"] = str(tmp_path / "zip-work")
+    path = tmp_path / "zip-config.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    imported = load_train_config(path)
+    prepare_dataset(imported)
+    assert load_manifest(imported)["episode_count"] == 2
+
+
+def test_ui_selection_manifest_prepares_exact_members_and_split(configured, tmp_path: Path):
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    run_json = next(source.rglob("branch/run.json"))
+    episode = run_json.parent / "episodes" / "episode_000"
+    members = [{
+            "run_id": "branch", "split": "validation", "resume_step": 5,
+            "end_step": 22,
+            "artifacts": {
+                name: {"path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size}
+                for name, path in {
+                    "manifest": run_json,
+                    "trajectory": episode / "trajectory.npz",
+                    "observations": episode / "trajectory_observations.npz",
+                }.items()
+            },
+        }]
+    immutable = {
+        "task_id": "LEVEL1::task", "selection": {"mode": "manual"},
+        "validation_fraction": 0.2, "split_seed": 7,
+        "success_consecutive_steps": 5, "members": members,
+    }
+    selection = {
+        "schema_version": 1, "id": "ds_exact", "project_id": "libero_x_vla",
+        **immutable, "dataset_sha256": stable_hash(immutable),
+    }
+    selection_path = tmp_path / "dataset.json"
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["data"]["selection_manifest"] = str(selection_path)
+    raw["data"]["task_ids"] = ["LEVEL1::task"]
+    raw["paths"]["work_dir"] = str(tmp_path / "exact-work")
+    config_path = tmp_path / "exact.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    selected = load_train_config(config_path)
+    prepare_dataset(selected)
+    manifest = load_manifest(selected)
+    assert manifest["source_dataset_id"] == "ds_exact"
+    assert [episode["run_id"] for episode in manifest["episodes"]] == ["branch"]
+    assert manifest["episodes"][0]["split"] == "validation"
+    assert manifest["episodes"][0]["chunks"][0]["start"] == 0
+    assert manifest["episodes"][0]["chunks"][0]["end"] == 5
+    assert manifest["episodes"][0]["chunks"][0]["transition_type"] == "policy_interrupted"
+
+
+def test_npz_shapes_come_from_headers_without_decoding(tmp_path):
+    import numpy as np
+    from core.data import npz_array_shapes
+
+    path = tmp_path / "observations.npz"
+    np.savez_compressed(path, agentview_image=np.zeros((5, 4, 6, 3), np.uint8),
+                        wrist_image=np.zeros((5, 4, 6, 3), np.uint8))
+    assert npz_array_shapes(path) == {"agentview_image": (5, 4, 6, 3), "wrist_image": (5, 4, 6, 3)}
+
+
+def test_prepare_rejects_float_images_with_valid_shapes(configured):
+    from pathlib import Path
+    import numpy as np
+    import pytest
+    from core.data import prepare_dataset
+
+    source = Path(configured.section("paths")["dataset_sources"][0])
+    observations = next(source.rglob("trajectory_observations.npz"))
+    with np.load(observations) as archive:
+        arrays = {key: archive[key].astype(np.float32) for key in archive.files}
+    np.savez_compressed(observations, **arrays)
+    with pytest.raises(ValueError, match="uint8"):
+        prepare_dataset(configured)
+
+
+@pytest.mark.parametrize("marker", ["manifest", "trajectory"])
+def test_policy_camera_ablation_runs_never_become_training_episodes(configured, marker):
+    import json
+    from core.data import load_manifest, prepare_dataset
+    run_dir = (Path(configured.section("paths")["dataset_sources"][0])
+               / "projects/libero_x_vla/runs/task/2026-01-01/branch")
+    if marker == "manifest":
+        manifest = json.loads((run_dir / "run.json").read_text())
+        (run_dir / "run.json").write_text(json.dumps({**manifest, "disabled_policy_cameras": ["wrist"]}))
+    else:  # older manifests keep the setting only in the trajectory metadata
+        trajectory = run_dir / "episodes/episode_000/trajectory.npz"
+        with np.load(trajectory) as source:
+            arrays = {key: source[key] for key in source.files}
+        np.savez_compressed(trajectory, **arrays,
+                            metadata_json=np.asarray(json.dumps({"disabled_policy_cameras": ["wrist"]})))
+    prepare_dataset(configured)
+    assert [episode["run_id"] for episode in load_manifest(configured)["episodes"]] == ["root"]

@@ -1,0 +1,2486 @@
+"""Simulation session state machine and background workers."""
+
+from __future__ import annotations
+
+import json
+import logging
+import queue
+import shutil
+import threading
+import time
+import uuid
+from contextlib import nullcontext
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+
+from studio.storage.paths import storage_path
+from types import SimpleNamespace
+from typing import Any
+
+import cv2
+import numpy as np
+
+import sim.env as direct
+from sim.control import confirmed_success_step, run_control_loop, success_confirm_steps
+from sim.recording import TrajectoryRecorder, load_trajectory
+
+from studio.config import UIConfig
+from studio.devices.spacemouse import SpaceMouseInput, SpaceMouseSnapshot, load_spacemouse_config
+from studio.devices.spacemouse_motion import SpaceMouseActionMapper, validate_control_frame
+from studio.devices.factr import load_factr_config
+from studio.services.factr_controller_service import FactrControllerService
+from studio.domain.run import (
+    ACTIVE_STATES,
+    TERMINAL_STATES,
+    SimulationDraft,
+    SimulationSession,
+    summarize_runs,
+    utc_now,
+)
+from sim.success import LiberoEvaluator
+from studio.policies.router import PolicyProvider
+from studio.policies.registry import configured_models
+from studio.policies.catalog import PolicyCatalog
+from studio.exceptions import ConflictError
+from studio.services.work_resources import ResourceLease
+from studio.recording.episode_recorder import EpisodeRecorderFactory
+from studio.services.controller_service import SpaceMouseControllerService
+from studio.services.task_catalog import ConfiguredTaskCatalog
+from studio.services.task_registry import RegistryTaskCatalog, TaskSnapshot, freeze_task
+from studio.services.run_continuation import continuation_public, promote_run, prefix_segments
+from core.execution import validate_task_prompt
+from sim.simulator import LiberoXSimulator
+from studio.storage.files import (
+    recorded_policy_family,
+    atomic_write_bytes,
+    atomic_write_csv,
+    atomic_write_json,
+    atomic_write_yaml,
+    safe_artifacts,
+    scan_trajectories,
+)
+from studio.storage.repositories import RunRepository
+
+
+LOGGER = logging.getLogger("liberox.backend.worker")
+SESSION_MANIFEST_SCHEMA_VERSION = 2
+SESSION_SUMMARY_SCHEMA_VERSION = 2
+
+
+def _confirmed_success(result: dict[str, Any], manifest: dict[str, Any],
+                       trajectory: str | None) -> dict[str, Any]:
+    """Confirmed-success fields under the current system-wide streak length.
+
+    A stored result is reused only if it was evaluated with the current
+    setting; older records, and records from before a setting change, are
+    re-derived from the trajectory's ``done`` array.
+    """
+    required = success_confirm_steps()
+    for source in (result, manifest):
+        if "success_confirmed_step" in source and source.get("success_confirm_steps") == required:
+            step = source["success_confirmed_step"]
+            step = int(step) if isinstance(step, int) and not isinstance(step, bool) else None
+            return {"success_confirmed": step is not None, "success_confirmed_step": step,
+                    "success_confirm_steps": required}
+    step = None
+    if trajectory is not None:
+        try:
+            with np.load(trajectory, allow_pickle=False) as arrays:
+                step = confirmed_success_step(arrays["done"], required) if "done" in arrays.files else None
+        except (OSError, ValueError, KeyError, EOFError):
+            step = None
+    return {"success_confirmed": step is not None, "success_confirmed_step": step,
+            "success_confirm_steps": required}
+
+
+class PreviewService:
+    """One task-aware read-only MuJoCo renderer shared by drafts and sessions."""
+
+    def __init__(self, manager: "SimulationManager"):
+        self.manager = manager
+        self.states: queue.Queue[
+            tuple[SimulationSession | SimulationDraft, np.ndarray, str, int | None]
+        ] = queue.Queue(maxsize=1)
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="ui-preview")
+        self.thread.start()
+
+    def submit(
+        self,
+        target: SimulationSession | SimulationDraft,
+        state: Any,
+        revision: int | None = None,
+    ) -> None:
+        item = (target, np.asarray(state).copy(), target.task_id, revision)
+        try:
+            self.states.put_nowait(item)
+        except queue.Full:
+            try:
+                self.states.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.states.put_nowait(item)
+            except queue.Full:
+                pass
+
+    def close(self) -> None:
+        self.stop_event.set()
+        self.thread.join(timeout=30.0)
+        if self.thread.is_alive():
+            LOGGER.warning("Preview service did not stop within 30 seconds")
+
+    def _run(self) -> None:
+        config = self.manager.eval_config
+        env = None
+        env_context: str | None = None
+        env_seed: int | None = None
+        period = 1.0 / self.manager.ui_config.preview_fps
+        try:
+            last_render = 0.0
+            while not self.stop_event.is_set():
+                try:
+                    target, state, task_id, revision = self.states.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                delay = period - (time.monotonic() - last_render)
+                if delay > 0 and self.stop_event.wait(delay):
+                    break
+                while True:
+                    try:
+                        target, state, task_id, revision = self.states.get_nowait()
+                    except queue.Empty:
+                        break
+                resource = None
+                self.manager._frame_lock.acquire()
+                try:
+                    work_queue = getattr(self.manager, "work_queue", None)
+                    if work_queue is not None:
+                        if isinstance(target, SimulationSession):
+                            if not target.resource_owned:
+                                continue
+                        else:
+                            resource = ResourceLease(work_queue.gpu_lock_path)
+                    task_catalog = self.manager._task_catalog_for(target) if hasattr(self.manager, "_task_catalog_for") else self.manager.catalog
+                    bddl, _ = task_catalog.paths(task_id)
+                    # LEVEL5 prompt variants share the same LEVEL4 scene. The
+                    # seed places fixtures in the model (not in the saved state),
+                    # so a new seed needs a cheap soft reset, not a rebuild.
+                    target_context = str(bddl)
+                    if env is None or env_context != target_context:
+                        if env is not None:
+                            self.manager.simulator.close(env)
+                            env = None
+                        env = self.manager.simulator.create(
+                            bddl,
+                            config,
+                            max_steps=10000,
+                            seed=target.seed,
+                        )
+                        env_context, env_seed = target_context, int(target.seed)
+                    elif env_seed != int(target.seed):
+                        env_seed = None
+                        self.manager.simulator.reseed(env, int(target.seed))
+                        env_seed = int(target.seed)
+                    self.manager.simulator.restore(env, state)
+                    frame = self.manager.simulator.render_operator_preview(
+                        env,
+                        self.manager.ui_config.preview_width,
+                        self.manager.ui_config.preview_height,
+                    )
+                    ok, encoded = cv2.imencode(
+                        ".jpg",
+                        cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                        [cv2.IMWRITE_JPEG_QUALITY, self.manager.ui_config.jpeg_quality],
+                    )
+                    if not ok:
+                        raise RuntimeError("Preview JPEG encoding failed")
+                    with self.manager.lock:
+                        if isinstance(target, SimulationDraft):
+                            if (
+                                self.manager.draft is target
+                                and target.preview_revision == revision
+                            ):
+                                target.latest_jpeg = encoded.tobytes()
+                                target.preview_status = "READY"
+                                target.error = None
+                        else:
+                            target.latest_jpeg = encoded.tobytes()
+                            target.latest_frame_version += 1
+                            target.preview_ready = True
+                            target.preview_error = None
+                            target.preview_event.set()
+                except ConflictError:
+                    if isinstance(target, SimulationDraft) and self.manager.draft is target:
+                        self.stop_event.wait(0.2)
+                        # A retry must never evict a newer session's first frame.
+                        try:
+                            self.states.put_nowait((target, state, task_id, revision))
+                        except queue.Full:
+                            pass
+                except Exception as exc:
+                    LOGGER.exception("Preview frame failed for %s", target.id)
+                    message = f"{type(exc).__name__}: {exc}"
+                    with self.manager.lock:
+                        if isinstance(target, SimulationDraft):
+                            if (
+                                self.manager.draft is target
+                                and target.preview_revision == revision
+                            ):
+                                target.preview_status = "ERROR"
+                                target.error = message
+                        else:
+                            target.preview_error = message
+                            target.preview_event.set()
+                    if env is not None:
+                        self.manager.simulator.close(env)
+                        env = None
+                        env_context = None
+                finally:
+                    if resource is not None:
+                        resource.close()
+                    self.manager._frame_lock.release()
+                last_render = time.monotonic()
+        except Exception as exc:
+            LOGGER.exception("Preview service failed")
+        finally:
+            if env is not None:
+                self.manager.simulator.close(env)
+
+
+class SimulationManager:
+    def __init__(self, ui_config: UIConfig, eval_config: direct.EvalConfig):
+        self.ui_config = ui_config
+        self.eval_config = replace(eval_config, headless=True, env_only=False)
+        direct.apply_runtime_environment(self.eval_config)
+        _, liberox_root = direct.add_repo_paths(
+            self.eval_config.vla_root,
+            self.eval_config.liberox_root,
+        )
+        self.runtime = direct.load_runtime()
+        self.simulator = LiberoXSimulator(self.runtime)
+        self.recorder_factory = EpisodeRecorderFactory()
+        self.evaluator = LiberoEvaluator()
+        self.catalog = RegistryTaskCatalog(self.runtime, self.ui_config.task_registry) if getattr(self.ui_config, "task_registry", None) else ConfiguredTaskCatalog(
+            self.runtime,
+            liberox_root,
+            self.eval_config,
+            self.ui_config.additional_tasks,
+            self.ui_config.task_families,
+        )
+        self.policy_catalog = PolicyCatalog(
+            self.ui_config.policy_registry,
+            base_models=configured_models(self.ui_config.workspace_root),
+        )
+        self.provider = PolicyProvider(
+            self.runtime, self.eval_config, self.policy_catalog
+        )
+        try:
+            self.spacemouse_config = load_spacemouse_config()
+            self.spacemouse_config_error: str | None = None
+        except Exception as exc:
+            self.spacemouse_config = None
+            self.spacemouse_config_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning("SpaceMouse configuration unavailable: %s", self.spacemouse_config_error)
+        self.lock = threading.RLock()
+        self.controller = (
+            None
+            if self.spacemouse_config is None
+            else SpaceMouseControllerService(self.spacemouse_config)
+        )
+        self.factr_controller = None
+        self.factr_config_error = None
+        try:
+            self.factr_controller = FactrControllerService(load_factr_config())
+        except Exception as exc:
+            self.factr_config_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning("FACTR configuration unavailable: %s", self.factr_config_error)
+        self.sessions: dict[str, SimulationSession] = {}
+        self.legacy_sessions: dict[str, dict[str, Any]] = {}
+        self.draft: SimulationDraft | None = None
+        self.active_session_id: str | None = None
+        self.gpu_guard = None
+        self._trajectory_cache: dict[str, tuple[dict[str, np.ndarray], dict[str, Any]]] = {}
+        self._frame_env = None
+        self._frame_task_id: str | None = None
+        self._frame_lock = threading.Lock()
+        self.ui_config.output_root.mkdir(parents=True, exist_ok=True)
+        self.repository = RunRepository(
+            self.ui_config.catalog_path, self.ui_config.project_id
+        )
+        self.preview = PreviewService(self)
+        self.refresh_history()
+
+    def refresh_history(self) -> None:
+        roots = tuple(dict.fromkeys((*self.ui_config.scan_roots, self.ui_config.output_root)))
+        indexed = scan_trajectories(roots)
+        indexed_ids = {item["id"] for item in indexed}
+        # UI setup failures may intentionally have only a manifest/summary and
+        # no trajectory. Keep those records visible and deletable after restart.
+        manifest_paths = list(self.ui_config.output_root.rglob("run.json"))
+        manifest_paths.extend(self.ui_config.output_root.glob("*/session.json"))
+        for manifest in manifest_paths:
+            directory = manifest.parent
+            if directory.is_symlink() or manifest.is_symlink():
+                continue
+            if not manifest.is_file():
+                continue
+            try:
+                manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            session_id = manifest_data.get("id")
+            if not isinstance(session_id, str) or not session_id or session_id in indexed_ids:
+                continue
+            summary_data: dict[str, Any] = {}
+            summary_path = directory / "summary.json"
+            if summary_path.is_file() and not summary_path.is_symlink():
+                try:
+                    loaded_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded_summary, dict):
+                        summary_data = loaded_summary
+                except Exception:
+                    pass
+            item = self._public_from_persisted(directory, manifest_data, summary_data)
+            indexed.append(item)
+            indexed_ids.add(session_id)
+        by_id = {item["id"]: item for item in indexed}
+        for item in indexed:
+            current, visited = item, set()
+            while not item.get("policy_family") and current.get("parent_session_id") not in visited:
+                parent_id = current.get("parent_session_id")
+                visited.add(parent_id)
+                current = by_id.get(parent_id)
+                if current is None or current.get("policy_id") != item.get("policy_id"):
+                    break
+                item["policy_family"] = current.get("policy_family")
+        with self.lock:
+            self.legacy_sessions = {
+                item["id"]: item
+                for item in indexed
+                if item["id"] not in self.sessions
+            }
+            for item in self.legacy_sessions.values():
+                directory = Path(item["output_dir"])
+                manifest = directory / "run.json"
+                if not manifest.is_file():
+                    manifest = directory / "session.json"
+                managed = False
+                try:
+                    directory.resolve().relative_to(self.ui_config.output_root.resolve())
+                    managed = (
+                        not directory.is_symlink()
+                        and manifest.is_file()
+                        and json.loads(manifest.read_text(encoding="utf-8")).get("id") == item["id"]
+                    )
+                except (Exception, ValueError):
+                    managed = False
+                item["managed"] = managed
+                item["legacy"] = not managed
+                if managed and item.get("status") in ACTIVE_STATES:
+                    interrupted = {"status": "ERROR", "error": "Backend interrupted before completion",
+                                   "stopped_reason": "backend_interrupted", "completed_at": utc_now()}
+                    persisted = json.loads(manifest.read_text(encoding="utf-8"))
+                    persisted.update(interrupted)
+                    atomic_write_json(manifest, persisted)
+                    item.update(interrupted)
+                    self.repository.upsert(item, directory)
+                task_id = item.get("task_id")
+                if task_id is not None:
+                    try:
+                        self._task_catalog_for(item).entry(str(task_id))
+                    except (ValueError, OSError):
+                        task_id = None
+                if task_id is None:
+                    task_id = self.catalog.resolve_id(
+                        item.get("level"), item.get("task_name")
+                    )
+                item["task_id"] = task_id
+                item["branchable"] = bool(
+                    item["kind"] == "original"
+                    and task_id is not None
+                    and item.get("trajectory")
+                )
+
+    def bootstrap(self) -> dict[str, Any]:
+        return {
+            "config": {
+                "max_steps": self.eval_config.max_steps,
+                "open_loop_steps": self.eval_config.open_loop_steps,
+                "seed": self.eval_config.seed,
+                "disabled_policy_cameras": list(
+                    self.eval_config.disabled_policy_cameras
+                ),
+                "control_hz": self.eval_config.control_hz,
+                "video_fps": self.eval_config.video_fps,
+                "success_consecutive_steps": success_confirm_steps(),
+                "preview": {
+                    "width": self.ui_config.preview_width,
+                    "height": self.ui_config.preview_height,
+                    "fps": self.ui_config.preview_fps,
+                    "layout": "2x2",
+                    "stream_width": self.ui_config.preview_width * 2,
+                    "stream_height": self.ui_config.preview_height * 2,
+                    "cameras": [
+                        {"id": "agentview", "label": "主视角", "policy_input": True},
+                        {"id": "robot0_eye_in_hand", "label": "腕部视角", "policy_input": True},
+                        {"id": "oblique_minus_45", "label": "−45° 斜视角", "policy_input": False},
+                        {"id": "oblique_plus_45", "label": "+45° 斜视角", "policy_input": False},
+                    ],
+                    "recorded_cameras": ["agentview", "robot0_eye_in_hand"],
+                },
+                "manual": {
+                    "translation_gain": self.ui_config.manual_translation_gain,
+                    "rotation_gain": self.ui_config.manual_rotation_gain,
+                    "control_frame": getattr(self.spacemouse_config, "control_frame", "world"),
+                },
+                "spacemouse": {
+                    "configured": self.spacemouse_config is not None,
+                    "dependency_version": SpaceMouseInput.dependency_version(),
+                    "config_error": self.spacemouse_config_error,
+                    "device_name": None
+                    if self.spacemouse_config is None
+                    else self.spacemouse_config.device_name,
+                    "vendor_id": None
+                    if self.spacemouse_config is None
+                    else self.spacemouse_config.expected_vendor_id,
+                    "product_id": None
+                    if self.spacemouse_config is None
+                    else self.spacemouse_config.expected_product_id,
+                    "stale_timeout_ms": None
+                    if self.spacemouse_config is None
+                    else self.spacemouse_config.stale_timeout_ms,
+                    "state": None if self.controller is None else self.controller.status()["state"],
+                },
+            },
+            "model": self.provider.metadata(),
+            "policy_catalog": self.policy_catalog.list_policies(),
+            "task": self.catalog.metadata(self.catalog.default_task_id),
+            "task_catalog": self.catalog.list_tasks(),
+            "capabilities": {
+                "model_switching": True,
+                "task_switching": True,
+                "pause": False,
+                "step": False,
+                "branch_depth": 1,
+                "manual_control": True,
+                "manual_sources": ["spacemouse", "factr"],
+            },
+        }
+
+    def _controller_service(self, controller_id: str = "spacemouse"):
+        if controller_id == "spacemouse":
+            return getattr(self, "controller", None)
+        if controller_id == "factr":
+            return getattr(self, "factr_controller", None)
+        raise ValueError(f"Unknown controller: {controller_id}")
+
+    def controller_catalog(self) -> dict[str, Any]:
+        return {"controllers": [self.controller_status(name) for name in ("spacemouse", "factr")]}
+
+    def controller_status(self, controller_id: str = "spacemouse") -> dict[str, Any]:
+        controller = self._controller_service(controller_id)
+        if controller is None:
+            return {
+                "controller_id": controller_id,
+                "state": "ERROR",
+                "connected": False,
+                "calibrated": False,
+                "calibration_progress": 0.0,
+                "message": f"{controller_id} 配置不可用",
+                "error": getattr(self, f"{controller_id}_config_error", None),
+                "armed_session_id": None,
+                "latency_ms": None,
+                "latency_level": None,
+                "stale": True,
+            }
+        return {"controller_id": controller_id, **controller.status()}
+
+    def calibrate_controller(self, controller_id: str = "spacemouse", phase: str = "reference", *,
+                             allow_usb_authorization: bool = False) -> dict[str, Any]:
+        with self.lock:
+            if self.active_session_id is not None:
+                raise RuntimeError("Cannot calibrate while a simulation is active")
+            controller = self._controller_service(controller_id)
+            if controller is None:
+                raise RuntimeError(f"{controller_id} unavailable: {self.controller_status(controller_id)['error']}")
+            for other in ("spacemouse", "factr"):
+                if other != controller_id and self.controller_status(other)["state"] in {"CALIBRATING", "ARMED"}:
+                    raise RuntimeError("Another controller is calibrating or armed")
+            if phase != "reference":
+                raise ValueError("Only single-capture reference calibration is supported")
+            if controller_id == "factr" and allow_usb_authorization:
+                return controller.start_calibration(allow_usb_authorization=True)
+            return controller.start_calibration()
+
+    def set_controller_gravity(self, controller_id: str, enabled: bool):
+        if controller_id != "factr":
+            raise ValueError("Only FACTR supports gravity compensation")
+        with self.lock:
+            controller = self._controller_service("factr")
+            if controller is None:
+                raise RuntimeError("FACTR is unavailable")
+            if enabled and self.controller_status("spacemouse")["state"] == "CALIBRATING":
+                raise RuntimeError("Another controller is calibrating")
+        return controller.set_gravity(enabled)
+
+    def _disable_factr_on_error(self, reason: str):
+        controller = getattr(self, "factr_controller", None)
+        if controller is not None:
+            controller.emergency_stop(reason)
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        # Directory scans run outside the manager lock, which the control loop
+        # takes on every step; only the in-memory snapshot is built under it.
+        with self.lock:
+            records = list(self.sessions.values())
+            legacy = list(self.legacy_sessions.values())
+        artifacts = {record.id: safe_artifacts(record.output_dir) for record in records}
+        with self.lock:
+            items = [record.public(artifacts[record.id]) for record in records]
+        items.extend(legacy)
+        return sorted(
+            [continuation_public(item) for item in items],
+            key=lambda item: (item.get("created_at") or "", item["id"]),
+            reverse=True,
+        )
+
+    def dataset_summary(self) -> dict[str, Any]:
+        # Counted from the run views, not the SQLite index: its success column
+        # holds the instantaneous flag, while lists and datasets use confirmed success.
+        with self.lock:
+            runs = [record.public() for record in self.sessions.values()]
+            runs.extend(item for item in self.legacy_sessions.values() if not item.get("legacy"))
+        summary = summarize_runs(runs, self.ui_config.project_id)
+        summary["dataset_root"] = str(self.ui_config.dataset_root)
+        summary["catalog"] = str(self.ui_config.catalog_path)
+        summary["legacy_indexed"] = sum(
+            1 for item in self.legacy_sessions.values() if item.get("legacy")
+        )
+        return summary
+
+    def get_public(self, session_id: str) -> dict[str, Any]:
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if record is None:
+                if session_id in self.legacy_sessions:
+                    return continuation_public(dict(self.legacy_sessions[session_id]))
+                raise KeyError(session_id)
+        artifacts = safe_artifacts(record.output_dir)
+        with self.lock:
+            return continuation_public(record.public(artifacts))
+
+    def promote(self, session_id: str) -> dict[str, Any]:
+        with self.lock:
+            run = self.get_public(session_id)
+            if run.get("can_promote"):
+                load_trajectory(Path(run["trajectory"]))
+            return promote_run(run)
+
+    def _task_catalog_for(self, target):
+        output = target.get("output_dir") if isinstance(target, dict) else getattr(target, "output_dir", None)
+        declared = target.get("task_snapshot") if isinstance(target, dict) else getattr(target, "task_snapshot", None)
+        snapshot = Path(output) / "task_snapshot" / "task.json" if output else None
+        if snapshot is None or not snapshot.is_file():
+            if declared:
+                raise FileNotFoundError(f"Saved task snapshot is unavailable: {snapshot or declared}")
+            return self.catalog
+        files = [snapshot, snapshot.parent / "task.bddl", snapshot.parent / "initial_states.init"]
+        key = (str(snapshot), tuple((file.stat().st_size, file.stat().st_mtime_ns) for file in files))
+        cache = getattr(self, "_task_snapshot_cache", {})
+        if key not in cache:
+            if len(cache) >= 8:
+                cache.clear()
+            cache[key] = TaskSnapshot.load(self.runtime, snapshot)
+            self._task_snapshot_cache = cache
+        return cache[key]
+
+    def _new_record(
+        self,
+        *,
+        kind: str,
+        max_steps: int,
+        open_loop_steps: int | None,
+        seed: int | None = None,
+        init_state_index: int = 0,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
+        policy_id: str = "base",
+        task_id: str | None = None,
+        expected_policy_content_sha256: str | None = None,
+        parent: dict[str, Any] | None = None,
+        resume_step: int | None = None,
+        control_mode: str = "policy",
+        manual_translation_gain: float | None = None,
+        manual_rotation_gain: float | None = None,
+        controller_id: str | None = None,
+        control_frame: str | None = None,
+    ) -> SimulationSession:
+        eval_config = getattr(self, "eval_config", None)
+        default_seed = int(getattr(eval_config, "seed", 0))
+        default_disabled_cameras = tuple(
+            getattr(eval_config, "disabled_policy_cameras", ())
+        )
+        if parent is not None:
+            task_id = parent.get("task_id")
+            if not task_id:
+                raise ValueError("Source trajectory task is not available in the UI catalog")
+            policy_id = str(parent.get("policy_id") or "base")
+            seed = int(parent.get("seed", default_seed))
+            init_state_index = int(parent.get("init_state_index", 0))
+            disabled_policy_cameras = parent.get(
+                "disabled_policy_cameras", default_disabled_cameras
+            )
+        seed = default_seed if seed is None else int(seed)
+        disabled_policy_cameras = tuple(
+            default_disabled_cameras
+            if disabled_policy_cameras is None
+            else disabled_policy_cameras
+        )
+        task_id = task_id or self.catalog.default_task_id
+        task_catalog = self.catalog if parent is None else self._task_catalog_for(parent)
+        task_catalog.initial_state(task_id, init_state_index)
+        task = task_catalog.metadata(task_id)
+        if parent is not None and control_mode == "manual":
+            policy = SimpleNamespace(
+                policy_id=policy_id, label=parent.get("policy_label"), family=parent.get("policy_family"),
+                base_checkpoint=parent.get("policy_base_checkpoint"), manifest=parent.get("policy_overlay"),
+                compatibility_sha256=parent.get("policy_compatibility_sha256"),
+                content_sha256=parent.get("policy_content_sha256"),
+            )
+        else:
+            policy = self._policy_entry(policy_id)
+            open_loop_steps = policy.resolve_open_loop_steps(open_loop_steps)
+            if expected_policy_content_sha256 is not None:
+                self._check_policy_identity(policy, expected_policy_content_sha256)
+            if parent is not None:
+                self._check_policy_identity(policy, parent.get("policy_content_sha256"))
+        self._validate_session_values(
+            max_steps, open_loop_steps, seed, disabled_policy_cameras
+        )
+        session_id = uuid.uuid4().hex[:12]
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d_%H%M%S")
+        task_group = str(task["task_name"]).lower()
+        output_dir = (
+            self.ui_config.output_root
+            / task_group
+            / f"{stamp}__{session_id}"
+        )
+        episode_dir = output_dir / "episodes" / "episode_000"
+        episode_dir.mkdir(parents=True, exist_ok=False)
+        task_snapshot = None
+        if isinstance(task_catalog, (RegistryTaskCatalog, TaskSnapshot)):
+            try:
+                frozen = freeze_task(task_catalog, task_id, output_dir / "task_snapshot")
+                task_snapshot = str(frozen.manifest_path)
+            except Exception:
+                shutil.rmtree(output_dir, ignore_errors=True)
+                raise
+        record = SimulationSession(
+            id=session_id,
+            kind=kind,
+            output_dir=output_dir,
+            max_steps=max_steps,
+            open_loop_steps=open_loop_steps,
+            seed=seed,
+            init_state_index=init_state_index,
+            disabled_policy_cameras=disabled_policy_cameras,
+            policy_id=policy.policy_id,
+            policy_label=policy.label,
+            policy_family=getattr(policy, "family", None),
+            policy_base_checkpoint=policy.base_checkpoint,
+            policy_overlay=None if policy.manifest is None else str(policy.manifest),
+            policy_compatibility_sha256=policy.compatibility_sha256,
+            policy_content_sha256=getattr(policy, "content_sha256", None),
+            task_id=task_id,
+            task_level=task["level"],
+            task_name=task["task_name"],
+            task_prompt=task["prompt"],
+            task_snapshot=task_snapshot,
+            parent_session_id=None if parent is None else parent["id"],
+            root_session_id=session_id if parent is None else (parent.get("root_session_id") or parent["id"]),
+            source_trajectory=None if parent is None else parent["trajectory"],
+            resume_step=resume_step,
+            control_mode=control_mode,
+            managed=True,
+            manual_source=(controller_id or "spacemouse") if control_mode == "manual" else None,
+            manual_translation_gain=manual_translation_gain,
+            manual_rotation_gain=manual_rotation_gain,
+            manual_control_frame=(control_frame or "world") if control_mode == "manual" and controller_id != "factr" else None,
+            manual_requested_control_frame=(control_frame or "world") if control_mode == "manual" and controller_id != "factr" else None,
+            spacemouse_deadman_ms=(
+                self.spacemouse_config.stale_timeout_ms
+                if control_mode == "manual" and controller_id != "factr" and self.spacemouse_config is not None
+                else None
+            ),
+            controller_deadman_ms=(getattr(
+                getattr(self._controller_service(controller_id or "spacemouse"), "config", None),
+                "stale_timeout_ms", 250) if control_mode == "manual" else None),
+            status="LOADING",
+            branchable=parent is None,
+            current_step=0 if resume_step is None else resume_step,
+            state_count=0 if resume_step is None else resume_step + 1,
+            action_count=0 if resume_step is None else resume_step,
+        )
+        self._persist_effective_config(record, policy)
+        return record
+
+    def _claim(self, record: SimulationSession) -> None:
+        gpu_guard = getattr(self, "gpu_guard", None)
+        if gpu_guard is not None and not record.resource_owned:
+            gpu_guard()
+        with self.lock:
+            if any(self.controller_status(name)["state"] == "CALIBRATING" for name in ("spacemouse", "factr")):
+                raise RuntimeError("Cannot start a simulation during controller calibration")
+            if self.draft is not None and not record.resource_owned:
+                raise RuntimeError("Cancel or start the current draft before creating a session")
+            if self.active_session_id is not None:
+                active = self.sessions.get(self.active_session_id)
+                if active is not None and active.status in ACTIVE_STATES:
+                    raise RuntimeError(f"Session {active.id} is still active")
+            self.sessions[record.id] = record
+            self.active_session_id = record.id
+            self._persist_manifest(record)
+
+    @staticmethod
+    def _validate_session_values(
+        max_steps: int,
+        open_loop_steps: int,
+        seed: int = 0,
+        disabled_policy_cameras: tuple[str, ...] | list[str] = (),
+    ) -> None:
+        if not 1 <= max_steps <= 10000:
+            raise ValueError("max_steps must be in [1, 10000]")
+        if type(open_loop_steps) is not int or open_loop_steps < 1:
+            raise ValueError("open_loop_steps must be a positive integer")
+        if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2147483647:
+            raise ValueError("seed must be an integer in [0, 2147483647]")
+        cameras = tuple(disabled_policy_cameras)
+        if len(cameras) != len(set(cameras)):
+            raise ValueError("disabled_policy_cameras must not contain duplicates")
+        unknown = sorted(set(cameras) - set(direct.VLA_OBSERVATION_CAMERAS))
+        if unknown:
+            raise ValueError(f"Unknown policy cameras: {unknown}")
+        if len(cameras) >= len(direct.VLA_OBSERVATION_CAMERAS):
+            raise ValueError("At least one VLA policy camera must remain enabled")
+
+    def _policy_entry(self, policy_id: str):
+        catalog = getattr(self, "policy_catalog", None)
+        if catalog is not None:
+            try:
+                return catalog.select(policy_id)
+            except ValueError as exc:
+                raise ConflictError("所选策略模型已删除或不可用；仍可回放及人工接管，请重新选择模型后推理。",
+                                    code="POLICY_UNAVAILABLE", context={"severity": "warning"}) from exc
+        if policy_id != "base":
+            raise ValueError(f"Unknown policy_id: {policy_id}")
+        checkpoint = str(getattr(getattr(self, "eval_config", None), "checkpoint", "unknown"))
+        from studio.policies.catalog import PolicyEntry
+        return PolicyEntry(
+            policy_id="base", label="VLA-Adapter · Object-Pro（基础模型）",
+            base_checkpoint=checkpoint, manifest=None,
+            compatibility_sha256=None, family="vla_adapter",
+            stats_key=getattr(getattr(self, "eval_config", None), "stats_key", "libero_object"),
+            action_head=None, proprio_projector=None, training_step=None,
+        )
+
+    @staticmethod
+    def _check_policy_identity(policy, expected: str | None) -> None:
+        if expected is None:
+            raise ConflictError("旧记录未保存可验证的模型身份；可人工接管，但不能确认原模型并重新推理。",
+                                code="POLICY_IDENTITY_UNVERIFIED", context={"severity": "warning"})
+        if getattr(policy, "content_sha256", None) != expected:
+            raise ConflictError("原策略模型权重已改变；可人工接管，请重新选择模型创建仿真。",
+                                code="POLICY_CHANGED", context={"severity": "warning"})
+
+    def _start_record(self, record: SimulationSession) -> dict[str, Any]:
+        coordinator = getattr(self, "work_queue", None)
+        if coordinator is not None:
+            def execute():
+                record.resource_owned = True
+                try:
+                    if self.active_session_id != record.id:
+                        self._claim(record)
+                    record.status = "LOADING"
+                    if record.parent_session_id:
+                        parent = self.get_public(record.parent_session_id)
+                        self._copy_branch_source(record, parent)
+                        self._install_resume_preview(record, parent)
+                    self._run_session(record)
+                    if record.error:
+                        raise RuntimeError(record.error)
+                except Exception as exc:
+                    record.error = str(exc)
+                    record.status = "ERROR"
+                    record.completed_at = utc_now()
+                    self._persist_manifest(record)
+                    raise
+                finally:
+                    with self._frame_lock:
+                        record.resource_owned = False
+                    with self.lock:
+                        if self.active_session_id == record.id:
+                            self.active_session_id = None
+            if record.control_mode == "manual":
+                lease = coordinator.immediate_lease()
+                record.resource_owned = True
+                try:
+                    self._claim(record)
+                except Exception:
+                    record.resource_owned = False
+                    lease.close()
+                    raise
+                def manual():
+                    try:
+                        execute()
+                    finally:
+                        lease.close()
+                        coordinator._wake_training_queue()
+                record.thread = threading.Thread(target=manual, daemon=True, name=f"manual-{record.id}")
+                try:
+                    record.thread.start()
+                except Exception:
+                    record.resource_owned = False
+                    lease.close()
+                    with self.lock:
+                        self.active_session_id = None
+                    record.status = "ERROR"
+                    record.error = "Cannot start manual control worker"
+                    self._persist_manifest(record)
+                    raise
+            else:
+                def cancel_record():
+                    record.stop_event.set()
+                    if record.status == "QUEUED":
+                        record.status = "ERROR"
+                        record.error = "Queued simulation canceled"
+                        record.completed_at = utc_now()
+                        self._persist_manifest(record)
+                with coordinator.lock, self.lock:
+                    record.status = "QUEUED"
+                    self.sessions[record.id] = record
+                    job, _ = coordinator.submit_local("simulation", execute,
+                        parameters={"session_id": record.id, "parent_run_id": record.parent_session_id,
+                                    "policy_id": record.policy_id, "policy_content_sha256": record.policy_content_sha256},
+                        cancel=cancel_record)
+                    record.work_job_id = job["id"]
+                    self._persist_manifest(record)
+            return record.public(safe_artifacts(record.output_dir))
+        self._claim(record)
+        record.thread = threading.Thread(
+            target=self._run_session,
+            args=(record,),
+            daemon=True,
+            name=f"simulation-{record.id}",
+        )
+        record.thread.start()
+        return record.public(safe_artifacts(record.output_dir))
+
+    def create_original(
+        self,
+        max_steps: int,
+        open_loop_steps: int | None = None,
+        task_id: str | None = None,
+        policy_id: str = "base",
+        initial_jpeg: bytes | None = None,
+        expected_policy_content_sha256: str | None = None,
+        seed: int | None = None,
+        init_state_index: int = 0,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        record = self._new_record(
+            kind="original",
+            max_steps=max_steps,
+            open_loop_steps=open_loop_steps,
+            task_id=task_id,
+            policy_id=policy_id,
+            expected_policy_content_sha256=expected_policy_content_sha256,
+            seed=seed,
+            init_state_index=init_state_index,
+            disabled_policy_cameras=disabled_policy_cameras,
+        )
+        if initial_jpeg is not None:
+            record.latest_jpeg = initial_jpeg
+            record.latest_frame_version = 1
+        try:
+            return self._start_record(record)
+        except Exception:
+            shutil.rmtree(record.output_dir, ignore_errors=True)
+            raise
+
+    def _draft_public(self, draft: SimulationDraft) -> dict[str, Any]:
+        return draft.public(self.catalog.metadata(draft.task_id))
+
+    def get_draft(self) -> dict[str, Any] | None:
+        with self.lock:
+            return None if self.draft is None else self._draft_public(self.draft)
+
+    def _prepare_draft(self, draft: SimulationDraft, revision: int) -> None:
+        try:
+            state = self.catalog.initial_state(draft.task_id, draft.init_state_index)
+            with self.lock:
+                if self.draft is not draft or draft.preview_revision != revision:
+                    return
+                draft.preview_status = "RENDERING"
+                draft.error = None
+            self.preview.submit(draft, state, revision)
+        except Exception as exc:
+            LOGGER.exception("Draft preview preparation failed")
+            with self.lock:
+                if self.draft is draft and draft.preview_revision == revision:
+                    draft.preview_status = "ERROR"
+                    draft.error = f"{type(exc).__name__}: {exc}"
+
+    def _launch_draft_preview(self, draft: SimulationDraft) -> None:
+        threading.Thread(
+            target=self._prepare_draft,
+            args=(draft, draft.preview_revision),
+            daemon=True,
+            name=f"draft-preview-{draft.id}",
+        ).start()
+
+    def create_draft(
+        self,
+        task_id: str,
+        max_steps: int,
+        open_loop_steps: int | None = None,
+        policy_id: str = "base",
+        seed: int | None = None,
+        init_state_index: int = 0,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        gpu_guard = getattr(self, "gpu_guard", None)
+        if gpu_guard is not None and getattr(self, "work_queue", None) is None:
+            gpu_guard()
+        seed = self.eval_config.seed if seed is None else seed
+        disabled_policy_cameras = tuple(
+            self.eval_config.disabled_policy_cameras
+            if disabled_policy_cameras is None
+            else disabled_policy_cameras
+        )
+        policy = self._policy_entry(policy_id)
+        open_loop_steps = policy.resolve_open_loop_steps(open_loop_steps)
+        self._validate_session_values(
+            max_steps, open_loop_steps, seed, disabled_policy_cameras
+        )
+        self.catalog.initial_state(task_id, init_state_index)
+        with self.lock:
+            if self.active_session_id is not None:
+                raise RuntimeError("Cannot create a draft while a simulation is active")
+            draft = SimulationDraft(
+                id=uuid.uuid4().hex[:12],
+                task_id=task_id,
+                max_steps=max_steps,
+                open_loop_steps=open_loop_steps,
+                seed=seed,
+                init_state_index=init_state_index,
+                disabled_policy_cameras=disabled_policy_cameras,
+                policy_id=policy.policy_id,
+                policy_label=policy.label,
+                policy_content_sha256=getattr(policy, "content_sha256", None),
+            )
+            self.draft = draft
+            public = self._draft_public(draft)
+        self._launch_draft_preview(draft)
+        return public
+
+    def update_draft(
+        self,
+        *,
+        task_id: str | None = None,
+        max_steps: int | None = None,
+        open_loop_steps: int | None = None,
+        policy_id: str | None = None,
+        seed: int | None = None,
+        init_state_index: int | None = None,
+        disabled_policy_cameras: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            if self.active_session_id is not None:
+                raise RuntimeError("Cannot modify a draft while a simulation is active")
+            if self.draft is None:
+                raise KeyError("draft")
+            draft = self.draft
+            next_task_id = task_id if task_id is not None else draft.task_id
+            next_max_steps = max_steps if max_steps is not None else draft.max_steps
+            next_open_loop = (
+                open_loop_steps if open_loop_steps is not None else draft.open_loop_steps
+            )
+            next_policy_id = policy_id if policy_id is not None else draft.policy_id
+            policy = self._policy_entry(next_policy_id)
+            next_open_loop = policy.resolve_open_loop_steps(
+                open_loop_steps if next_policy_id != draft.policy_id else next_open_loop
+            )
+            next_seed = seed if seed is not None else draft.seed
+            next_init_state_index = (
+                init_state_index
+                if init_state_index is not None
+                else draft.init_state_index
+            )
+            if next_task_id != draft.task_id and init_state_index is None:
+                next_init_state_index = 0
+            next_disabled_cameras = tuple(
+                disabled_policy_cameras
+                if disabled_policy_cameras is not None
+                else draft.disabled_policy_cameras
+            )
+            self._validate_session_values(
+                next_max_steps, next_open_loop, next_seed, next_disabled_cameras
+            )
+            self.catalog.initial_state(next_task_id, next_init_state_index)
+            preview_changed = (
+                next_task_id != draft.task_id
+                or next_seed != draft.seed
+                or next_init_state_index != draft.init_state_index
+            )
+            draft.task_id = next_task_id
+            draft.max_steps = next_max_steps
+            draft.open_loop_steps = next_open_loop
+            draft.seed = next_seed
+            draft.init_state_index = next_init_state_index
+            draft.disabled_policy_cameras = next_disabled_cameras
+            policy_changed = draft.policy_id != policy.policy_id
+            draft.policy_id = policy.policy_id
+            draft.policy_label = policy.label
+            if policy_changed:
+                draft.policy_content_sha256 = getattr(policy, "content_sha256", None)
+            if preview_changed:
+                draft.preview_revision += 1
+                draft.preview_status = "PREPARING"
+                draft.error = None
+            public = self._draft_public(draft)
+        if preview_changed:
+            self._launch_draft_preview(draft)
+        return public
+
+    def draft_preview(self) -> bytes:
+        with self.lock:
+            if self.draft is None:
+                raise KeyError("draft")
+            if self.draft.latest_jpeg is None:
+                raise FileNotFoundError("Draft preview is not ready")
+            return self.draft.latest_jpeg
+
+    def discard_draft(self) -> bool:
+        with self.lock:
+            existed = self.draft is not None
+            self.draft = None
+            return existed
+
+    def start_draft(self) -> dict[str, Any]:
+        with self.lock:
+            if self.active_session_id is not None:
+                raise RuntimeError("Cannot start a draft while a simulation is active")
+            if any(self.controller_status(name)["state"] == "CALIBRATING" for name in ("spacemouse", "factr")):
+                raise RuntimeError("Cannot start a draft during controller calibration")
+            if self.draft is None:
+                raise KeyError("draft")
+            draft = self.draft
+            if getattr(self, "policy_catalog", None) is not None:
+                self._check_policy_identity(self._policy_entry(draft.policy_id), draft.policy_content_sha256)
+            if (draft.preview_status != "READY" or draft.latest_jpeg is None) and getattr(self, "work_queue", None) is None:
+                raise RuntimeError("Draft preview must be ready before starting")
+            self.draft = None
+        try:
+            return self.create_original(
+                draft.max_steps,
+                draft.open_loop_steps,
+                task_id=draft.task_id,
+                policy_id=draft.policy_id,
+                expected_policy_content_sha256=draft.policy_content_sha256,
+                initial_jpeg=draft.latest_jpeg,
+                seed=draft.seed,
+                init_state_index=draft.init_state_index,
+                disabled_policy_cameras=draft.disabled_policy_cameras,
+            )
+        except Exception:
+            with self.lock:
+                if self.draft is None:
+                    self.draft = draft
+            raise
+
+    def create_branch(
+        self,
+        parent_id: str,
+        resume_step: int,
+        control_mode: str,
+        open_loop_steps: int,
+        translation_gain: float | None = None,
+        rotation_gain: float | None = None,
+        controller_id: str | None = None,
+        control_frame: str | None = None,
+        max_steps: int | None = None,
+    ) -> dict[str, Any]:
+        if control_frame is not None:
+            validate_control_frame(control_frame)
+            if control_mode != "manual" or controller_id == "factr":
+                raise ValueError("control_frame is only valid for SpaceMouse manual branches")
+        parent = self.get_public(parent_id)
+        if not parent.get("branchable"):
+            raise ValueError("Promote this completed branch to a mainline before continuing")
+        if parent["status"] not in TERMINAL_STATES:
+            raise ValueError("The source session must finish before branching")
+        if parent.get("trajectory"):
+            _, source_metadata = load_trajectory(Path(parent["trajectory"]))
+            validate_task_prompt(parent, parent.get("task"), context=f"Run {parent_id}")
+            validate_task_prompt(source_metadata, parent.get("task"), context=f"Trajectory {parent_id}")
+            parent = dict(parent)
+            fallback_seed = parent.get("seed")
+            if fallback_seed is None:
+                fallback_seed = self.eval_config.seed
+            parent["seed"] = int(source_metadata.get("seed", fallback_seed))
+            parent["disabled_policy_cameras"] = list(
+                source_metadata.get(
+                    "disabled_policy_cameras",
+                    parent.get("disabled_policy_cameras", ()),
+                )
+            )
+        if control_mode not in {"policy", "manual"}:
+            raise ValueError("control_mode must be 'policy' or 'manual'")
+        if control_mode == "policy":
+            if controller_id is not None:
+                raise ValueError("controller_id must be omitted for policy branches")
+            if translation_gain is not None or rotation_gain is not None:
+                raise ValueError("manual gains must be omitted for policy branches")
+        else:
+            controller_id = controller_id or "spacemouse"
+            if controller_id == "spacemouse":
+                control_frame = control_frame or getattr(self.spacemouse_config, "control_frame", "world")
+            controller = self._controller_service(controller_id)
+            defaults = getattr(controller, "config", None) if controller_id == "factr" else None
+            translation_gain = (
+                getattr(defaults, "translation_gain", self.ui_config.manual_translation_gain)
+                if translation_gain is None
+                else float(translation_gain)
+            )
+            rotation_gain = (
+                getattr(defaults, "rotation_gain", self.ui_config.manual_rotation_gain)
+                if rotation_gain is None
+                else float(rotation_gain)
+            )
+            if not 0.05 <= translation_gain <= 1.0:
+                raise ValueError("translation_gain must be in [0.05, 1.0]")
+            if not 0.05 <= rotation_gain <= 1.0:
+                raise ValueError("rotation_gain must be in [0.05, 1.0]")
+            if controller is None:
+                raise RuntimeError(f"{controller_id} is unavailable")
+            controller_state = controller.status()["state"]
+            if controller_state != "READY":
+                raise RuntimeError(
+                    f"{controller_id} must be connected and calibrated before takeover "
+                    f"(current state: {controller_state})"
+                )
+            if controller_id == "factr" and not controller.status().get("gravity_enabled"):
+                raise RuntimeError("FACTR: enable gravity compensation before alignment/takeover")
+        if type(open_loop_steps) is not int or open_loop_steps < 1:
+            raise ValueError("open_loop_steps must be a positive integer")
+        action_count = int(parent["action_count"])
+        if not 0 <= resume_step <= action_count:
+            raise ValueError(f"resume_step must be in [0, {action_count}]")
+        target_steps = int(parent["max_steps"]) if max_steps is None else max_steps
+        if target_steps <= resume_step:
+            raise ValueError(
+                "The source target step count must be greater than resume_step: "
+                f"target_steps={target_steps}, resume_step={resume_step}"
+            )
+        record = self._new_record(
+            kind="branch",
+            max_steps=target_steps,
+            open_loop_steps=open_loop_steps,
+            parent=parent,
+            resume_step=resume_step,
+            control_mode=control_mode,
+            manual_translation_gain=translation_gain,
+            manual_rotation_gain=rotation_gain,
+            controller_id=controller_id,
+            control_frame=control_frame,
+        )
+        try:
+            if getattr(self, "work_queue", None) is not None:
+                return self._start_record(record)
+            self._copy_branch_source(record, parent)
+            self._install_resume_preview(record, parent)
+            self._claim(record)
+        except Exception:
+            shutil.rmtree(record.output_dir, ignore_errors=True)
+            raise
+        record.thread = threading.Thread(
+            target=self._run_session,
+            args=(record,),
+            daemon=True,
+            name=f"simulation-{record.id}",
+        )
+        record.thread.start()
+        return record.public(safe_artifacts(record.output_dir))
+
+    def stop(self, session_id: str) -> dict[str, Any]:
+        with self.lock:
+            queued = self.sessions.get(session_id)
+            work_id = queued.work_job_id if queued is not None and queued.status == "QUEUED" else None
+        if work_id:
+            self.work_queue.stop(work_id)
+            return self.get_public(session_id)
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if record is None:
+                raise KeyError(session_id)
+            if record.status in TERMINAL_STATES:
+                return record.public(safe_artifacts(record.output_dir))
+            record.stop_event.set()
+            record.status = "STOPPING"
+            self._persist_manifest(record)
+            return record.public(safe_artifacts(record.output_dir))
+
+    def manual_connect(self, session_id: str) -> None:
+        record = self._manual_record(session_id)
+        record.manual_connected = True
+
+    def manual_settings(
+        self,
+        session_id: str,
+        translation_gain: float,
+        rotation_gain: float,
+        *, control_frame: str | None = None,
+    ) -> None:
+        record = self._manual_record(session_id)
+        if control_frame is not None:
+            validate_control_frame(control_frame)
+            if record.manual_source == "factr":
+                raise ValueError("control_frame is only valid for SpaceMouse")
+        translation_gain = float(translation_gain)
+        rotation_gain = float(rotation_gain)
+        if not 0.05 <= translation_gain <= 1.0:
+            raise ValueError("translation_gain must be in [0.05, 1.0]")
+        if not 0.05 <= rotation_gain <= 1.0:
+            raise ValueError("rotation_gain must be in [0.05, 1.0]")
+        with self.lock:
+            record.manual_translation_gain = translation_gain
+            record.manual_rotation_gain = rotation_gain
+            if control_frame is not None:
+                record.manual_requested_control_frame = control_frame
+            controller = self._controller_service(record.manual_source or "spacemouse")
+            if controller is not None:
+                controller.set_gains(record.id, translation_gain, rotation_gain)
+                if control_frame is not None:
+                    controller.request_control_frame(record.id, control_frame)
+
+    def _arm_spacemouse(self, record: SimulationSession, gripper: float) -> None:
+        # Serialize the READY -> ARMED handoff with settings, so a selection
+        # made during countdown cannot be lost between reading and arming.
+        with self.lock:
+            self.controller.arm(record.id, record.manual_translation_gain, record.manual_rotation_gain,
+                                gripper=gripper,
+                                control_frame=record.manual_requested_control_frame or "world")
+            record.manual_control_frame = record.manual_requested_control_frame or "world"
+            record.spacemouse_status = "armed"
+            record.spacemouse_connected = True
+            record.spacemouse_stale = False
+
+    def manual_disconnect(self, session_id: str) -> None:
+        record = self._manual_record(session_id)
+        record.manual_connected = False
+        if record.status in ACTIVE_STATES:
+            record.stop_event.set()
+
+    def _manual_record(self, session_id: str) -> SimulationSession:
+        with self.lock:
+            record = self.sessions.get(session_id)
+            if record is None or record.control_mode != "manual":
+                raise ValueError("Session is not a manual branch")
+            return record
+
+    def _copy_branch_source(self, record: SimulationSession, parent: dict[str, Any]) -> None:
+        source = Path(parent["trajectory"]).resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"Source trajectory not found: {source}")
+        destination = record.episode_dir / "source_trajectory.npz"
+        temporary = record.episode_dir / ".source_trajectory.npz.tmp"
+        shutil.copyfile(source, temporary)
+        temporary.replace(destination)
+        record.source_trajectory = str(destination.resolve())
+
+    def _install_resume_preview(
+        self, record: SimulationSession, parent: dict[str, Any]
+    ) -> None:
+        assert record.resume_step is not None
+        artifacts = parent.get("artifacts", {})
+        video_value = next(
+            (
+                value
+                for name, value in artifacts.items()
+                if name == "agentview.mp4" or name.endswith("/agentview.mp4")
+            ),
+            None,
+        )
+        if video_value is None:
+            return
+        capture = cv2.VideoCapture(str(video_value))
+        try:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, record.resume_step)
+            ok, frame = capture.read()
+        finally:
+            capture.release()
+        if not ok:
+            return
+        ok, encoded = cv2.imencode(
+            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.ui_config.jpeg_quality]
+        )
+        if ok:
+            content = encoded.tobytes()
+            atomic_write_bytes(record.episode_dir / "resume_preview.jpg", content)
+            record.latest_jpeg = content
+            record.latest_frame_version += 1
+
+    def _persist_effective_config(self, record: SimulationSession, policy=None) -> None:
+        """Write the immutable run inputs once, before the worker starts."""
+        eval_config = getattr(self, "eval_config", None)
+        if record.control_mode != "policy":
+            policy = None
+        elif policy is None:
+            policy = self._policy_entry(record.policy_id)
+        atomic_write_yaml(
+            record.output_dir / "config.yaml",
+            {
+                "schema_version": 1,
+                "project_id": getattr(self.ui_config, "project_id", "libero_x_vla"),
+                "task": {
+                    "task_id": record.task_id,
+                    "level": record.task_level,
+                    "task_name": record.task_name,
+                    "prompt": record.task_prompt,
+                    "snapshot": record.task_snapshot,
+                    "init_state_index": record.init_state_index,
+                },
+                "policy": {
+                    "provider": record.policy_family,
+                    "policy_id": record.policy_id,
+                    "label": record.policy_label,
+                    "base_checkpoint": record.policy_base_checkpoint,
+                    "overlay": record.policy_overlay,
+                    "compatibility_sha256": record.policy_compatibility_sha256,
+                    "content_sha256": record.policy_content_sha256,
+                    "stats_key": policy.stats_key if policy is not None else None,
+                },
+                "simulation": {
+                    "max_steps": record.max_steps,
+                    "open_loop_steps": record.open_loop_steps,
+                    "control_hz": getattr(eval_config, "control_hz", 20),
+                    "seed": record.seed,
+                    "disabled_policy_cameras": list(
+                        record.disabled_policy_cameras
+                    ),
+                    "control_mode": record.control_mode,
+                    "resume_step": record.resume_step,
+                },
+                "controller": {
+                    "id": record.manual_source,
+                    "translation_gain": record.manual_translation_gain,
+                    "rotation_gain": record.manual_rotation_gain,
+                    "control_frame": record.manual_control_frame,
+                },
+            },
+        )
+
+    def _persist_manifest(self, record: SimulationSession) -> None:
+        trajectory = None
+        if record.trajectory is not None:
+            try:
+                trajectory = Path(record.trajectory).resolve().relative_to(
+                    record.output_dir.resolve()
+                ).as_posix()
+            except ValueError:
+                trajectory = str(Path(record.trajectory).resolve())
+        manifest = {
+                "schema_version": SESSION_MANIFEST_SCHEMA_VERSION,
+                "managed_by": "liberox_data_studio",
+                "project_id": getattr(getattr(self, "ui_config", None), "project_id", "libero_x_vla"),
+                "id": record.id,
+                "kind": record.kind,
+                "task_id": record.task_id,
+                "level": record.task_level,
+                "task_name": record.task_name,
+                "task": record.task_prompt,
+                "task_snapshot": record.task_snapshot,
+                "trajectory_segments": record.trajectory_segments,
+                "handoff_steps": record.handoff_steps,
+                "status": record.status,
+                "created_at": record.created_at,
+                "completed_at": record.completed_at,
+                "parent_session_id": record.parent_session_id,
+                "root_session_id": record.root_session_id,
+                "resume_step": record.resume_step,
+                "control_mode": record.control_mode,
+                "manual_source": record.manual_source,
+                "manual_control_frame": record.manual_control_frame,
+                "manual_requested_control_frame": record.manual_requested_control_frame,
+                "policy_id": record.policy_id,
+                "policy_label": record.policy_label,
+                "policy_family": record.policy_family,
+                "policy_base_checkpoint": record.policy_base_checkpoint,
+                "policy_overlay": record.policy_overlay,
+                "policy_compatibility_sha256": record.policy_compatibility_sha256,
+                "policy_content_sha256": record.policy_content_sha256,
+                "current_step": record.current_step,
+                "max_steps": record.max_steps,
+                "open_loop_steps": record.open_loop_steps,
+                "seed": record.seed,
+                "init_state_index": record.init_state_index,
+                "disabled_policy_cameras": list(record.disabled_policy_cameras),
+                "state_count": record.state_count,
+                "action_count": record.action_count,
+                "training_chunk_count": record.training_chunk_count,
+                "training_chunk_count_rule": "recorded_execution_v1",
+                "policy_queries": record.policy_queries,
+                "trajectory": trajectory,
+                "success": record.success,
+                "success_confirmed": record.success_confirmed_step is not None,
+                "success_confirmed_step": record.success_confirmed_step,
+                "success_confirm_steps": record.success_confirm_steps,
+                "error": record.error,
+            }
+        atomic_write_json(record.output_dir / "run.json", manifest)
+        repository = getattr(self, "repository", None)
+        if repository is not None:
+            repository.upsert(manifest, record.output_dir)
+
+    @staticmethod
+    def _public_from_persisted(
+        directory: Path,
+        manifest: dict[str, Any],
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Rebuild the API view without duplicating it in ``session.json``."""
+        result = (
+            summary["result"]
+            if isinstance(summary.get("result"), dict)
+            else summary
+        )
+        context = (
+            summary["context"]
+            if isinstance(summary.get("context"), dict)
+            else summary
+        )
+        timing = (
+            summary["timing"]
+            if isinstance(summary.get("timing"), dict)
+            else summary
+        )
+        branch = (
+            summary["branch"]
+            if isinstance(summary.get("branch"), dict)
+            else summary
+        )
+        controller = (
+            summary.get("controller")
+            if isinstance(summary.get("controller"), dict)
+            else {}
+        )
+        trajectory_name = manifest.get("trajectory")
+        trajectory = None
+        if isinstance(trajectory_name, str) and trajectory_name:
+            candidate = storage_path(directory / trajectory_name).resolve()
+            try:
+                candidate.relative_to(directory.resolve())
+            except ValueError:
+                candidate = Path("/__invalid_trajectory__")
+            if candidate.is_file():
+                trajectory = str(candidate)
+        action_count = int(result.get("steps", manifest.get("action_count", 0)) or 0)
+        state_count = int(manifest.get("state_count", action_count + (1 if action_count else 0)) or 0)
+        manual_source = (controller.get("type", manifest.get("manual_source") or "spacemouse")
+                         if controller else manifest.get("manual_source"))
+        control_frame = None
+        if manual_source == "spacemouse":
+            control_frame = controller.get("control_frame") or manifest.get("manual_control_frame") or "world"
+        return {
+            "id": manifest["id"],
+            "kind": manifest.get("kind", "original"),
+            "task_id": context.get("task_id", manifest.get("task_id")),
+            "parent_session_id": branch.get(
+                "parent_session_id", manifest.get("parent_session_id")
+            ),
+            "root_session_id": manifest.get("root_session_id"),
+            "source_trajectory": None,
+            "resume_step": branch.get("resume_step", manifest.get("resume_step")),
+            "control_mode": summary.get(
+                "control_mode", manifest.get("control_mode", "policy")
+            ),
+            "policy_id": manifest.get("policy_id") or "",
+            "policy_label": manifest.get("policy_label"),
+            "policy_family": recorded_policy_family(directory, manifest),
+            "policy_base_checkpoint": manifest.get(
+                "policy_base_checkpoint", manifest.get("checkpoint")
+            ),
+            "policy_overlay": manifest.get("policy_overlay"),
+            "policy_content_sha256": manifest.get("policy_content_sha256"),
+            "policy_compatibility_sha256": manifest.get(
+                "policy_compatibility_sha256"
+            ),
+            "manual_source": manual_source,
+            "manual_translation_gain": controller.get(
+                "translation_gain", manifest.get("manual_translation_gain")
+            ),
+            "manual_rotation_gain": controller.get(
+                "rotation_gain", manifest.get("manual_rotation_gain")
+            ),
+            "manual_control_frame": control_frame,
+            "manual_requested_control_frame": manifest.get("manual_requested_control_frame") or control_frame,
+            "training_chunk_count": manifest.get("training_chunk_count"),
+            "training_chunk_count_rule": manifest.get("training_chunk_count_rule"),
+            "task_snapshot": manifest.get("task_snapshot"),
+            "spacemouse_status": None,
+            "spacemouse_connected": None,
+            "spacemouse_stale": None,
+            "spacemouse_latency_ms": None,
+            "spacemouse_deadman_ms": None,
+            "status": manifest.get("status", summary.get("status", "ERROR")),
+            "created_at": manifest.get("created_at", summary.get("created_at")),
+            "completed_at": manifest.get("completed_at", summary.get("completed_at")),
+            "task": context.get("task", manifest.get("task")),
+            "task_name": context.get("task_name", manifest.get("task_name")),
+            "level": context.get("level", manifest.get("level")),
+            "checkpoint": context.get("checkpoint", manifest.get("checkpoint")),
+            "max_steps": int(result.get("target_steps", manifest.get("max_steps", action_count)) or 0),
+            "open_loop_steps": summary.get(
+                "open_loop_steps", manifest.get("open_loop_steps")
+            ),
+            "seed": int(manifest.get("seed", context.get("seed", 0)) or 0),
+            "init_state_index": int(
+                manifest.get("init_state_index", context.get("init_state_index", 0)) or 0
+            ),
+            "disabled_policy_cameras": list(
+                manifest.get("disabled_policy_cameras", []) or []
+            ),
+            "current_step": int(manifest.get("current_step", action_count) or 0),
+            "state_count": state_count,
+            "action_count": action_count,
+            "policy_queries": int(result.get("policy_queries", manifest.get("policy_queries", 0)) or 0),
+            "success": bool(result.get("success", False)),
+            **_confirmed_success(result, manifest, trajectory),
+            "error": manifest.get("error") or result.get("error"),
+            "stopped_reason": result.get("stopped_reason") or manifest.get("stopped_reason"),
+            "measured_control_hz": timing.get(
+                "measured_control_hz", manifest.get("measured_control_hz")
+            ),
+            "simulated_duration_seconds": float(
+                timing.get(
+                    "simulated_duration_seconds",
+                    manifest.get("simulated_duration_seconds", 0.0),
+                )
+                or 0.0
+            ),
+            "output_dir": str(directory.resolve()),
+            "trajectory": trajectory,
+            "artifacts": safe_artifacts(directory),
+            "branchable": False,
+            "legacy": False,
+            "managed": True,
+            "preparation_phase": "completed" if not result.get("error") else "failed",
+            "preparation_message": result.get("error"),
+            "countdown_remaining": None,
+            "preview_ready": False,
+            "preparation_timing": {
+                "total_seconds": timing.get("preparation_seconds"),
+                "model_load_seconds": timing.get("model_load_seconds"),
+                "model_cache_hit": float(bool(timing.get("model_cache_hit", False))),
+            },
+        }
+
+    def _set_status(self, record: SimulationSession, status: str) -> None:
+        if status == "ERROR":
+            self._disable_factr_on_error(record.error or "Simulation failed")
+        with self.lock:
+            record.status = status
+            self._persist_manifest(record)
+
+    def _set_spacemouse_status(
+        self,
+        record: SimulationSession,
+        status: str,
+        *,
+        connected: bool | None = None,
+        stale: bool | None = None,
+        latency_ms: float | None = None,
+    ) -> None:
+        with self.lock:
+            record.spacemouse_status = status
+            record.spacemouse_connected = connected
+            record.spacemouse_stale = stale
+            record.spacemouse_latency_ms = latency_ms
+
+    def _spacemouse_action(self, record: SimulationSession, step: int,
+                          mapper: SpaceMouseActionMapper | None = None) -> np.ndarray:
+        if self.controller is None:
+            raise RuntimeError("SpaceMouse controller service is unavailable")
+        snapshot: SpaceMouseSnapshot = self.controller.snapshot(record.id)
+        if mapper is None and snapshot.control_frame != "world":
+            raise RuntimeError("Tool control requires the control environment's OSC mapper")
+        action = (np.asarray(snapshot.action, dtype=np.float32) if mapper is None
+                  else mapper.convert(snapshot.action, snapshot.control_frame))
+        latency_ms = (
+            None
+            if snapshot.sample_age_seconds is None
+            else snapshot.sample_age_seconds * 1000.0
+        )
+        if snapshot.error is not None:
+            status = "error"
+        elif not snapshot.connected:
+            status = "disconnected"
+        elif snapshot.stale:
+            status = "stale"
+        else:
+            status = "ready"
+        with self.lock:
+            record.manual_control_frame = snapshot.control_frame
+            record.spacemouse_status = status
+            record.spacemouse_connected = snapshot.connected
+            record.spacemouse_stale = snapshot.stale
+            record.spacemouse_latency_ms = latency_ms
+            record.controller_status = status
+            record.controller_connected = snapshot.connected
+            record.controller_stale = snapshot.stale
+            record.controller_latency_ms = latency_ms
+            row: dict[str, Any] = {
+                "step": step,
+                "sequence": snapshot.sequence,
+                "captured_monotonic": snapshot.captured_monotonic,
+                "device_timestamp": snapshot.device_timestamp,
+                "sample_age_ms": "" if latency_ms is None else latency_ms,
+                "connected": snapshot.connected,
+                "stale": snapshot.stale,
+                "button_left": snapshot.buttons[0] if len(snapshot.buttons) > 0 else 0,
+                "button_right": snapshot.buttons[1] if len(snapshot.buttons) > 1 else 0,
+                "translation_gain": record.manual_translation_gain,
+                "rotation_gain": record.manual_rotation_gain,
+                "motion_intent": snapshot.motion_intent,
+                "translation_strength": snapshot.translation_strength,
+                "rotation_strength": snapshot.rotation_strength,
+                "control_frame": snapshot.control_frame,
+                "pending_control_frame": snapshot.pending_control_frame or "",
+                "frame_mapping_limited": False if mapper is None else mapper.limited,
+                "error": snapshot.error or "",
+            }
+            for prefix, values in (
+                ("raw", snapshot.raw_axes),
+                ("corrected", snapshot.corrected_axes),
+                ("command", snapshot.command_axes),
+            ):
+                for axis, value in zip(("x", "y", "z", "rx", "ry", "rz"), values):
+                    row[f"{prefix}_{axis}"] = value
+            row["gripper_action"] = snapshot.action[6]
+            for axis, value in zip(("x", "y", "z", "rx", "ry", "rz"), action[:6]):
+                row[f"env_command_{axis}"] = float(value)
+            record.spacemouse_samples.append(row)
+        if snapshot.error is not None:
+            raise RuntimeError(f"SpaceMouse reader failed: {snapshot.error}")
+        return action
+
+
+    @staticmethod
+    def _serializable_spacemouse_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+        diagnostics = dict(diagnostics or {})
+        event_times = np.asarray(diagnostics.pop("event_times", []), dtype=np.float64)
+        intervals_ms = np.diff(event_times) * 1000.0
+        if len(intervals_ms):
+            diagnostics["hid_interval_ms"] = {
+                "p50": float(np.percentile(intervals_ms, 50)),
+                "p95": float(np.percentile(intervals_ms, 95)),
+                "p99": float(np.percentile(intervals_ms, 99)),
+                "max": float(np.max(intervals_ms)),
+            }
+        else:
+            diagnostics["hid_interval_ms"] = None
+        return diagnostics
+
+    def _persist_spacemouse_samples(self, record: SimulationSession) -> dict[str, Any]:
+        """Save detailed samples as CSV and return a compact summary block."""
+        rows = record.spacemouse_samples
+        if rows:
+            atomic_write_csv(
+                record.episode_dir / "spacemouse_samples.csv",
+                list(rows[0]),
+                rows,
+            )
+        ages = np.asarray(
+            [row["sample_age_ms"] for row in rows if row["sample_age_ms"] != ""],
+            dtype=np.float64,
+        )
+        latency = None
+        if len(ages):
+            latency = {
+                "p50_ms": float(np.percentile(ages, 50)),
+                "p95_ms": float(np.percentile(ages, 95)),
+                "max_ms": float(np.max(ages)),
+            }
+        assert self.spacemouse_config is not None
+        calibration = record.spacemouse_calibration or {}
+        calibration_result = calibration.get("result", {})
+        diagnostics = record.spacemouse_diagnostics or {}
+        hid_intervals = diagnostics.get("hid_interval_ms")
+        if isinstance(hid_intervals, dict):
+            hid_intervals = {
+                "p95_ms": hid_intervals.get("p95"),
+                "max_ms": hid_intervals.get("max"),
+            }
+        return {
+            "type": "spacemouse",
+            "device": self.spacemouse_config.device_name,
+            "motion_mode": self.spacemouse_config.motion_mode,
+            "intent_switch_ratio": self.spacemouse_config.intent_switch_ratio,
+            "control_frame": record.manual_control_frame,
+            "translation_gain": record.manual_translation_gain,
+            "rotation_gain": record.manual_rotation_gain,
+            "sample_count": len(rows),
+            "sample_age_ms": latency,
+            "calibration": {
+                "id": calibration.get("id"),
+                "bias": calibration_result.get("bias"),
+                "movement_resets": calibration_result.get("movement_resets"),
+            },
+            "hid_interval_ms": hid_intervals,
+            "reader_error": diagnostics.get("reader_error"),
+        }
+
+    def _run_session(self, record: SimulationSession) -> None:
+        recorder: TrajectoryRecorder | None = None
+        follower = None
+        spacemouse_mapper = None
+        env = None
+        source_trajectory: dict[str, np.ndarray] | None = None
+        restore_error: float | None = None
+        timing: dict[str, float | None] = {}
+        controller_summary: dict[str, Any] | None = None
+        controller = self._controller_service(record.manual_source or "spacemouse") if record.control_mode == "manual" else None
+        prep_started = time.monotonic()
+        seed = record.seed
+
+        def phase(name: str, message: str) -> None:
+            with self.lock:
+                record.preparation_phase = name
+                record.preparation_message = message
+                record.preparation_timing[f"{name}_at_seconds"] = (
+                    time.monotonic() - prep_started
+                )
+                self._persist_manifest(record)
+
+        try:
+            task_catalog = self._task_catalog_for(record)
+            task = task_catalog.entry(record.task_id)
+            bddl, _ = task_catalog.paths(record.task_id)
+            phase("loading_source", "读取轨迹与初始状态")
+            if record.control_mode == "policy":
+                phase("loading_model", "加载策略模型")
+                model_was_loaded = self.provider.loaded
+                model_load_started = time.monotonic()
+                try:
+                    self.provider.load(record.open_loop_steps, record.policy_id,
+                                       expected_content_sha256=record.policy_content_sha256)
+                finally:
+                    with self.lock:
+                        record.preparation_timing["model_load_seconds"] = (
+                            time.monotonic() - model_load_started
+                        )
+                        record.preparation_timing["model_cache_hit"] = float(
+                            model_was_loaded
+                        )
+                        self._persist_manifest(record)
+                set_seed = getattr(self.runtime, "set_seed_everywhere", None)
+                if callable(set_seed):
+                    set_seed(seed)
+                if hasattr(self.provider, "seed"):
+                    self.provider.seed(seed)
+            if record.kind == "original":
+                initial_state = task_catalog.initial_state(
+                    record.task_id, record.init_state_index
+                )
+                recorder = self.recorder_factory.original(float(self.eval_config.control_hz))
+            else:
+                assert record.source_trajectory is not None and record.resume_step is not None
+                source_trajectory, source_metadata = load_trajectory(
+                    Path(record.source_trajectory)
+                )
+                source_metadata = {"session_id": record.parent_session_id or Path(record.source_trajectory).stem,
+                                   "task": record.task_prompt or task.prompt, **source_metadata}
+                source_seed = int(source_metadata.get("seed", seed))
+                if source_seed != seed:
+                    raise ValueError(
+                        "Branch seed does not match its copied source trajectory: "
+                        f"session={seed}, source={source_seed}"
+                    )
+                initial_state = source_trajectory["sim_state"][record.resume_step]
+                recorder = self.recorder_factory.branch(
+                    source_trajectory,
+                    record.resume_step,
+                    float(source_metadata.get("control_hz", self.eval_config.control_hz)),
+                )
+                record.prefix_segments = prefix_segments(source_metadata,
+                    len(source_trajectory["env_action"]), record.resume_step)
+                old_handoffs = source_metadata.get("handoff_steps", [source_metadata.get("source_resume_step") or 0])
+                record.handoff_steps = sorted({int(step) for step in old_handoffs
+                    if 0 <= int(step) <= record.resume_step} | {record.resume_step})
+
+            recorder.policy_action_codec = (self.provider.metadata().get("recording_action_codec", "vla_adapter_v1")
+                                            if record.control_mode == "policy" else "vla_adapter_v1")
+            session_config = replace(
+                self.eval_config,
+                max_steps=record.max_steps,
+                open_loop_steps=record.open_loop_steps,
+                trials=1,
+                headless=True,
+                seed=seed,
+                disabled_policy_cameras=record.disabled_policy_cameras,
+            )
+            phase("warming_controller", "预热 MuJoCo 控制器")
+            self.simulator.prewarm(bddl, initial_state, session_config)
+            phase("creating_environment", "创建控制环境")
+            env = self.simulator.create(
+                bddl,
+                session_config,
+                max_steps=record.max_steps,
+                seed=seed,
+            )
+            phase("restoring_state", "恢复所选帧状态")
+            observation = self.simulator.restore(env, initial_state)
+            observation = self.simulator.observations(env, observation)
+            if record.kind == "branch" and hasattr(self.simulator, "restore_control_state"):
+                self.simulator.restore_control_state(
+                    env, recorder.env_actions, recorder.control_hz,
+                    reanchor_nullspace=record.control_mode == "manual")
+            if record.kind == "original":
+                recorder.record_initial(env, observation)
+            else:
+                restored = np.asarray(env.get_sim_state())
+                expected = np.asarray(initial_state)
+                restore_error = float(np.max(np.abs(restored - expected)))
+                if restore_error > 1e-9:
+                    raise RuntimeError(
+                        "MuJoCo state restoration mismatch: "
+                        f"max_abs_error={restore_error}"
+                    )
+
+            record.current_step = recorder.action_count
+            record.state_count = recorder.state_count
+            record.action_count = recorder.action_count
+            if record.manual_source == "factr":
+                from studio.devices.factr_joint_control import JointFollower
+                follower = JointFollower(env)
+            elif record.manual_source == "spacemouse":
+                spacemouse_mapper = SpaceMouseActionMapper(env)
+            phase("preparing_preview", "准备实时四视角")
+            record.preview_event.clear()
+            record.preview_error = None
+            self.preview.submit(record, env.get_sim_state())
+            if not record.preview_event.wait(20.0):
+                raise TimeoutError("Preview service did not produce the first frame within 20 seconds")
+            if record.preview_error:
+                raise RuntimeError(f"Preview service failed: {record.preview_error}")
+            record.preparation_timing["ready_seconds"] = time.monotonic() - prep_started
+
+            if record.control_mode == "manual":
+                if controller is None:
+                    raise RuntimeError("Selected controller service is unavailable")
+                assert record.manual_translation_gain is not None
+                assert record.manual_rotation_gain is not None
+                record.controller_calibration = controller.calibration_snapshot()
+                if follower is not None:
+                    from studio.workers.factr_control_worker import prepare_factr
+                    if not prepare_factr(self, record, follower, controller):
+                        record.stopped_reason = "alignment_cancelled"
+                        return
+                else:
+                    record.spacemouse_calibration = record.controller_calibration
+                self._set_status(record, "READY")
+                for remaining in (3, 2, 1):
+                    with self.lock:
+                        record.countdown_remaining = remaining
+                        record.preparation_phase = "countdown"
+                        record.preparation_message = f"{remaining} 秒后开始 {record.manual_source} 接管"
+                        self._persist_manifest(record)
+                    if record.stop_event.wait(1.0):
+                        break
+                    if record.preview_error:
+                        raise RuntimeError(record.preview_error)
+                    if follower is not None and not controller.status().get("gravity_enabled"):
+                        record.stopped_reason = "alignment_cancelled"
+                        return
+                record.countdown_remaining = None
+                if not record.stop_event.is_set():
+                    arm_args = (record.id, record.manual_translation_gain, record.manual_rotation_gain)
+                    gripper = recorder.env_actions[-1][6] if recorder.env_actions else -1.
+                    if follower is not None:
+                        controller.finish_alignment(record.id)
+                        sample = controller.arm(*arm_args, gripper=1. if gripper > 0 else -1.)
+                        follower.check_aligned(sample.joint_positions)
+                    else:
+                        gripper = spacemouse_mapper.prepare_takeover(
+                            recorder.env_actions, control_hz=recorder.control_hz,
+                        )
+                        self._arm_spacemouse(record, gripper=gripper)
+                    record.controller_status = "armed"
+                    record.controller_connected = True
+                    record.controller_stale = False
+            with self.lock:
+                record.preparation_phase = "complete"
+                record.preparation_message = None
+                record.preparation_timing["total_seconds"] = time.monotonic() - prep_started
+            self._set_status(record, "STOPPING" if record.stop_event.is_set() else "RUNNING")
+
+            limiter = direct.RealTimeControlLimiter(
+                float(getattr(env.env, "control_freq", session_config.control_hz)),
+                True,
+            )
+
+            def query_policy(current_observation: dict[str, Any], _step: int):
+                current_observation = self.simulator.observations(env, current_observation)
+                return current_observation, self.provider.predict(
+                    current_observation,
+                    record.task_prompt or task.prompt,
+                    record.disabled_policy_cameras,
+                )
+
+            def on_transition(_observation: dict[str, Any], step: int, success: bool) -> None:
+                with self.lock:
+                    record.current_step = step
+                    record.action_count = recorder.action_count
+                    record.state_count = recorder.state_count
+                    record.success = self.evaluator.success(success)
+                    dones, required = recorder.dones, record.success_confirm_steps
+                    if (record.success_confirmed_step is None and len(dones) >= required
+                            and all(dones[-required:])):
+                        record.success_confirmed_step = len(dones) - 1
+                    record.policy_queries = len(recorder.inference_query_steps)
+                self.preview.submit(record, env.get_sim_state())
+
+            # Fixed for the session; a branch prefix may already contain the streak.
+            record.success_confirm_steps = success_confirm_steps()
+            record.success_confirmed_step = confirmed_success_step(
+                recorder.dones, record.success_confirm_steps)
+            common = dict(
+                env=env,
+                recorder=recorder,
+                initial_observation=observation,
+                target_action_count=record.max_steps,
+                rate_limiter=limiter,
+                open_loop_steps=record.open_loop_steps,
+                stop_requested=record.stop_event.is_set,
+                on_transition=on_transition,
+                stop_on_success=False,
+                horizon_reason="max_steps",
+            )
+            if follower is not None:
+                from studio.workers.factr_control_worker import run_factr_loop
+                result = run_factr_loop(record=record, controller=controller, follower=follower,
+                    recorder=recorder, initial_observation=observation, rate_limiter=limiter,
+                    on_transition=on_transition)
+            elif record.control_mode == "manual":
+                result = run_control_loop(
+                    **common,
+                    action_source="human",
+                    manual_query=lambda step: self._spacemouse_action(record, step, spacemouse_mapper),
+                )
+            else:
+                result = run_control_loop(
+                    **common,
+                    action_source="policy_requery" if record.kind == "branch" else "policy",
+                    policy_query=query_policy,
+                    policy_action_transform=self.provider.process_action,
+                )
+
+            record.success = result.success
+            record.success_confirmed_step = confirmed_success_step(
+                recorder.dones, record.success_confirm_steps)
+            record.policy_queries = len(recorder.inference_query_steps)
+            record.stopped_reason = result.stopped_reason
+            record.current_step = recorder.action_count
+            record.action_count = recorder.action_count
+            record.state_count = recorder.state_count
+            timing = direct.summarize_control_timing(
+                result.control_step_times, recorder.control_hz
+            )
+            record.measured_control_hz = timing["measured_control_hz"]
+            record.simulated_duration_seconds = float(
+                timing["simulated_duration_seconds"] or 0.0
+            )
+            record.preparation_phase = "postprocessing"
+            record.preparation_message = "保存轨迹与结果"
+            self._set_status(record, "POSTPROCESSING")
+        except Exception as exc:
+            record.error = f"{type(exc).__name__}: {exc}"
+            record.stopped_reason = "error"
+            record.preparation_message = "准备或运行失败"
+            LOGGER.exception("Session %s failed", record.id)
+        finally:
+            import sys
+            if record.error or sys.exc_info()[0] is not None:
+                self._disable_factr_on_error(record.error or "Simulation interrupted")
+            if controller is not None:
+                try:
+                    if record.manual_source == "factr":
+                        controller.finish_alignment(record.id)
+                    else:
+                        record.spacemouse_diagnostics = self._serializable_spacemouse_diagnostics(controller.diagnostics())
+                        if record.spacemouse_status != "error":
+                            record.spacemouse_status = "stopped"
+                    controller.disarm(record.id)
+                except Exception as exc:
+                    record.error = record.error or f"Controller cleanup: {exc}"
+                    self._disable_factr_on_error(record.error)
+                if record.controller_status != "error":
+                    record.controller_status = "stopped"
+            if follower is not None:
+                record.controller_diagnostics = follower.encoder.diagnostics()
+                controller_summary = {"type": "factr", "action_conversion": record.controller_diagnostics}
+                if record.controller_diagnostics["clipped_steps"]:
+                    LOGGER.warning("Session %s: %d/%d measured end-effector actions exceeded OSC bounds; "
+                                   "unclipped values retained in raw_action", record.id,
+                                   record.controller_diagnostics["clipped_steps"],
+                                   record.controller_diagnostics["sample_count"])
+            if recorder is not None:
+                record.action_count = record.current_step = recorder.action_count
+                record.state_count = recorder.state_count
+                record.policy_queries = len(recorder.inference_query_steps)
+
+            suffix_start = record.resume_step or 0
+            has_new_actions = bool(
+                recorder is not None
+                and recorder.action_count > (suffix_start if record.kind == "branch" else 0)
+            )
+            if env is not None and recorder is not None and has_new_actions:
+                combined_pending = record.episode_dir / ".vla_views.pending.mp4"
+                main_pending = record.episode_dir / ".agentview.pending.mp4"
+                try:
+                    direct.postprocess_recorded_trajectory(
+                        runtime=self.runtime,
+                        env=env,
+                        recorder=recorder,
+                        save_observations=True,
+                        combined_path=combined_pending,
+                        main_view_path=main_pending,
+                        fps=self.eval_config.video_fps,
+                        video_camera=self.eval_config.video_camera,
+                        video_width=self.eval_config.video_width,
+                        video_height=self.eval_config.video_height,
+                        main_view_width=self.eval_config.main_view_video_width,
+                        main_view_height=self.eval_config.main_view_video_height,
+                    )
+                    combined_pending.replace(record.episode_dir / "vla_views.mp4")
+                    main_pending.replace(record.episode_dir / "agentview.mp4")
+                except Exception as exc:
+                    combined_pending.unlink(missing_ok=True)
+                    main_pending.unlink(missing_ok=True)
+                    record.error = record.error or (
+                        f"{type(exc).__name__}: post-processing failed: {exc}"
+                    )
+                    record.stopped_reason = "error"
+                    LOGGER.exception("Session %s video post-processing failed", record.id)
+                    self._disable_factr_on_error(record.error)
+            if env is not None:
+                try:
+                    self.simulator.close(env)
+                except Exception as exc:
+                    record.error = record.error or f"Environment cleanup: {exc}"
+                    record.stopped_reason = "error"
+                    self._disable_factr_on_error(record.error)
+
+            if recorder is not None and recorder.state_count:
+                try:
+                    metadata = self._metadata(record, timing, restore_error)
+                    staging = record.episode_dir / f".trajectory-staging-{uuid.uuid4().hex}"
+                    staging.mkdir()
+                    paths = self.recorder_factory.save(
+                        recorder,
+                        staging / "trajectory",
+                        metadata,
+                        save_observations=has_new_actions,
+                        create_plot=record.kind == "original" and has_new_actions,
+                        intervention_step=record.resume_step,
+                        save_metadata_json=False,
+                    )
+                    if (
+                        has_new_actions
+                        and source_trajectory is not None
+                        and record.resume_step is not None
+                    ):
+                        paths.update(self.recorder_factory.compare(
+                            source_trajectory,
+                            recorder.arrays(),
+                            record.resume_step,
+                            recorder.control_hz,
+                            staging / "trajectory_action_comparison",
+                            branch_label="re-inference"
+                            if record.control_mode == "policy"
+                            else "human takeover",
+                        ))
+                    published: dict[str, str] = {}
+                    for key, value in paths.items():
+                        source_path = Path(value)
+                        destination = record.episode_dir / source_path.name
+                        source_path.replace(destination)
+                        published[key] = str(destination)
+                    staging.rmdir()
+                    record.trajectory = published["trajectory"]
+                except Exception as exc:
+                    record.error = record.error or (
+                        f"{type(exc).__name__}: persistence failed: {exc}"
+                    )
+                    record.stopped_reason = "error"
+                    LOGGER.exception("Session %s trajectory persistence failed", record.id)
+
+            if record.manual_source == "spacemouse":
+                try:
+                    controller_summary = self._persist_spacemouse_samples(record)
+                except Exception as exc:
+                    record.error = record.error or (
+                        f"{type(exc).__name__}: SpaceMouse persistence failed: {exc}"
+                    )
+                    record.stopped_reason = "error"
+
+
+            if record.error:
+                self._disable_factr_on_error(record.error)
+            record.completed_at = utc_now()
+            record.status = "ERROR" if record.error else "COMPLETED"
+            record.preparation_phase = "failed" if record.error else "completed"
+            record.preparation_message = record.error if record.error else None
+            record.countdown_remaining = None
+            record.branchable = bool(
+                record.kind == "original" and recorder is not None and recorder.action_count > 0
+            )
+            summary = self._summary(record, timing, restore_error, controller_summary)
+            try:
+                atomic_write_json(record.output_dir / "summary.json", summary)
+            except Exception as exc:
+                record.error = record.error or (
+                    f"{type(exc).__name__}: final summary failed: {exc}"
+                )
+                record.status = "ERROR"
+                LOGGER.exception("Session %s final summary persistence failed", record.id)
+            try:
+                self._persist_manifest(record)
+            except Exception as exc:
+                record.error = record.error or (
+                    f"{type(exc).__name__}: final manifest failed: {exc}"
+                )
+                record.status = "ERROR"
+                LOGGER.exception("Session %s final manifest persistence failed", record.id)
+            finally:
+                with self.lock:
+                    if self.active_session_id == record.id:
+                        self.active_session_id = None
+
+    def _metadata(
+        self,
+        record: SimulationSession,
+        timing: dict[str, float | None],
+        restore_error: float | None,
+    ) -> dict[str, Any]:
+        bddl, _ = self._task_catalog_for(record).paths(record.task_id)
+        provider_metadata = self.provider.metadata() if record.control_mode == "policy" else {}
+        return {
+            "session_id": record.id,
+            "parent_session_id": record.parent_session_id,
+            "root_session_id": record.root_session_id,
+            "source_trajectory": record.source_trajectory,
+            "source_resume_step": record.resume_step,
+            "target_total_steps": record.max_steps,
+            "control_mode": record.control_mode,
+            "manual_source": record.manual_source,
+            "controller_id": record.manual_source,
+            "controller_calibration": record.controller_calibration,
+            "controller_diagnostics": record.controller_diagnostics,
+            "controller_deadman_ms": record.controller_deadman_ms,
+            "manual_translation_gain": record.manual_translation_gain,
+            "manual_rotation_gain": record.manual_rotation_gain,
+            "manual_control_frame": record.manual_control_frame,
+            "manual_requested_control_frame": record.manual_requested_control_frame,
+            "spacemouse_deadman_ms": record.spacemouse_deadman_ms,
+            "spacemouse_latency_ms": record.spacemouse_latency_ms,
+            "spacemouse_status": record.spacemouse_status,
+            "spacemouse_calibration": record.spacemouse_calibration,
+            "preparation_timing": dict(record.preparation_timing),
+            "created_at": record.created_at,
+            "completed_at": record.completed_at,
+            "task_id": record.task_id,
+            "task": record.task_prompt,
+            "task_name": record.task_name,
+            "level": record.task_level,
+            "bddl": str(bddl),
+            "task_snapshot": record.task_snapshot,
+            "trajectory_segments": record.trajectory_segments,
+            "training_chunk_count": record.training_chunk_count,
+            "training_chunk_count_rule": "recorded_execution_v1",
+            "handoff_steps": record.handoff_steps,
+            "checkpoint": record.policy_base_checkpoint
+            if record.control_mode == "policy"
+            else None,
+            "policy_id": record.policy_id,
+            "policy_label": record.policy_label,
+            "policy_family": record.policy_family,
+            "policy_base_checkpoint": record.policy_base_checkpoint,
+            "policy_overlay": record.policy_overlay,
+            "policy_compatibility_sha256": record.policy_compatibility_sha256,
+            "policy_content_sha256": record.policy_content_sha256,
+            "policy_device": provider_metadata["model_device"]
+            if record.control_mode == "policy"
+            else None,
+            "seed": record.seed,
+            "init_state_index": record.init_state_index,
+            "disabled_policy_cameras": list(record.disabled_policy_cameras),
+            "open_loop_steps": record.open_loop_steps,
+            "control_hz": self.eval_config.control_hz,
+            "realtime_control": True,
+            "policy_queries": record.policy_queries,
+            "success": record.success,
+            "success_confirmed": record.success_confirmed_step is not None,
+            "success_confirmed_step": record.success_confirmed_step,
+            "success_confirm_steps": record.success_confirm_steps,
+            "stopped_reason": record.stopped_reason,
+            "error": record.error,
+            "restore_max_abs_error": restore_error,
+            **timing,
+        }
+
+    def _summary(
+        self,
+        record: SimulationSession,
+        timing: dict[str, float | None],
+        restore_error: float | None,
+        controller: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Build the small human-facing outcome summary.
+
+        Replay/configuration details live in ``trajectory.npz``'s embedded
+        metadata.  This file intentionally carries only identity, context,
+        outcome, and the performance values normally inspected by a user.
+        """
+        summary: dict[str, Any] = {
+            "schema_version": SESSION_SUMMARY_SCHEMA_VERSION,
+            "run_id": record.id,
+            "kind": record.kind,
+            "status": record.status,
+            "control_mode": record.control_mode,
+            "policy": {
+                "policy_id": record.policy_id,
+                "label": record.policy_label,
+                "base_checkpoint": record.policy_base_checkpoint,
+                "overlay": record.policy_overlay,
+                "compatibility_sha256": record.policy_compatibility_sha256,
+            },
+            "task": record.task_prompt,
+            "result": {
+                "success": record.success,
+                "success_confirmed": record.success_confirmed_step is not None,
+                "success_confirmed_step": record.success_confirmed_step,
+                "success_confirm_steps": record.success_confirm_steps,
+                "steps": record.action_count,
+                "target_steps": record.max_steps,
+                "policy_queries": record.policy_queries,
+                "stopped_reason": record.stopped_reason,
+                "error": record.error,
+            },
+            "timing": {
+                "simulated_duration_seconds": timing.get(
+                    "simulated_duration_seconds", record.simulated_duration_seconds
+                ),
+                "measured_control_hz": timing.get(
+                    "measured_control_hz", record.measured_control_hz
+                ),
+                "mean_control_interval_ms": self._seconds_to_ms(
+                    timing.get("control_interval_mean_seconds")
+                ),
+                "max_control_interval_ms": self._seconds_to_ms(
+                    timing.get("control_interval_max_seconds")
+                ),
+                "preparation_seconds": record.preparation_timing.get("total_seconds"),
+                "model_load_seconds": record.preparation_timing.get("model_load_seconds"),
+                "model_cache_hit": bool(
+                    record.preparation_timing.get("model_cache_hit", 0.0)
+                ),
+            },
+        }
+        if record.kind == "branch":
+            summary["branch"] = {
+                "parent_session_id": record.parent_session_id,
+                "root_session_id": record.root_session_id,
+                "resume_step": record.resume_step,
+                "restore_max_abs_error": restore_error,
+            }
+        if controller is not None:
+            summary["controller"] = controller
+        return summary
+
+    @staticmethod
+    def _seconds_to_ms(value: float | None) -> float | None:
+        return None if value is None else float(value) * 1000.0
+
+    def _trajectory_for(self, session_id: str):
+        public = self.get_public(session_id)
+        path_value = public.get("trajectory")
+        if not path_value:
+            raise ValueError("Session has no saved trajectory")
+        path = str(Path(path_value).resolve())
+        with self.lock:
+            cached = self._trajectory_cache.get(path)
+        if cached is None:
+            cached = load_trajectory(Path(path))
+            with self.lock:
+                if len(self._trajectory_cache) >= 4:
+                    self._trajectory_cache.pop(next(iter(self._trajectory_cache)))
+                self._trajectory_cache[path] = cached
+        return cached
+
+    def frame_state(self, session_id: str, step: int) -> dict[str, Any]:
+        trajectory, metadata = self._trajectory_for(session_id)
+        state_count = len(trajectory["sim_state"])
+        if not 0 <= step < state_count:
+            raise IndexError(step)
+        action_count = len(trajectory["raw_action"])
+        action_index = min(step, max(0, action_count - 1))
+        has_action = action_count > 0 and step < action_count
+        return {
+            "step": step,
+            "time_seconds": float(trajectory["time_seconds"][step]),
+            "eef_position_m": trajectory["eef_position"][step].tolist(),
+            "eef_axis_angle_rad": trajectory["eef_axis_angle"][step].tolist(),
+            "gripper_qpos": trajectory["gripper_qpos"][step].tolist(),
+            "raw_action": trajectory["raw_action"][action_index].tolist() if has_action else None,
+            "env_action": trajectory["env_action"][action_index].tolist() if has_action else None,
+            "success": bool(trajectory["done"][:step].any()) if step else False,
+            "control_hz": float(metadata.get("control_hz", self.eval_config.control_hz)),
+        }
+
+    def render_frame(self, session_id: str, step: int) -> bytes:
+        trajectory, metadata = self._trajectory_for(session_id)
+        task_id = metadata.get("task_id") or self.catalog.resolve_id(
+            metadata.get("level"), metadata.get("task_name")
+        )
+        if not task_id:
+            raise ValueError("Trajectory task is not available in the UI catalog")
+        if not 0 <= step < len(trajectory["sim_state"]):
+            raise IndexError(step)
+        task_catalog = self._task_catalog_for(self.get_public(session_id))
+        bddl, _ = task_catalog.paths(task_id)
+        scene_key = (str(bddl), int(metadata.get("seed", self.eval_config.seed)))
+        coordinator = getattr(self, "work_queue", None)
+        with self._frame_lock, (ResourceLease(coordinator.gpu_lock_path) if coordinator is not None else nullcontext()):
+            if self._frame_env is None or self._frame_task_id != task_id or getattr(self, "_frame_scene_key", None) != scene_key:
+                if self._frame_env is not None:
+                    self.simulator.close(self._frame_env)
+                    self._frame_env = None
+                self._frame_env = self.simulator.create(
+                    bddl,
+                    self.eval_config,
+                    max_steps=max(1, len(trajectory["sim_state"])),
+                    seed=int(metadata.get("seed", self.eval_config.seed)),
+                )
+                self._frame_task_id = task_id
+                self._frame_scene_key = scene_key
+            self.simulator.restore(self._frame_env, trajectory["sim_state"][step])
+            frame = self.simulator.render(
+                self._frame_env,
+                direct.MAIN_VIEW_CAMERA,
+                self.ui_config.preview_width,
+                self.ui_config.preview_height,
+            )
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                [cv2.IMWRITE_JPEG_QUALITY, self.ui_config.jpeg_quality],
+            )
+            if not ok:
+                raise RuntimeError("JPEG encoding failed")
+            return encoded.tobytes()
+
+    def artifact_path(self, session_id: str, name: str) -> Path:
+        if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+            raise ValueError("Invalid artifact name")
+        public = self.get_public(session_id)
+        path_value = public.get("artifacts", {}).get(name)
+        if not path_value:
+            raise FileNotFoundError(name)
+        path = Path(path_value).resolve()
+        output_dir = Path(public["output_dir"]).resolve()
+        try:
+            path.relative_to(output_dir)
+        except ValueError:
+            raise FileNotFoundError(name) from None
+        if not path.is_file():
+            raise FileNotFoundError(name)
+        return path
+
+    def delete_session(self, session_id: str, confirm_session_id: str) -> None:
+        coordinator = getattr(self, "work_queue", None)
+        with coordinator.lock if coordinator is not None else nullcontext():
+            if coordinator is not None:
+                for identifier in coordinator.repository.queue_ids(pending_only=True):
+                    _, job = coordinator._load_job(identifier)
+                    parameters = job.get("parameters", {})
+                    if session_id in parameters.get("run_ids", []) or parameters.get("parent_run_id") == session_id:
+                        raise ConflictError("轨迹被待完成的工作任务引用，不能删除。", code="RUN_QUEUED")
+            return self._delete_session(session_id, confirm_session_id)
+
+    def _delete_session(self, session_id: str, confirm_session_id: str) -> None:
+        if confirm_session_id != session_id:
+            raise ValueError("confirm_session_id must exactly match the session id")
+        with self.lock:
+            if self.active_session_id is not None:
+                raise RuntimeError("Cannot delete while a simulation is active")
+            if any(self.controller_status(name)["state"] in {"CALIBRATING", "ARMED"} for name in ("spacemouse", "factr")):
+                raise RuntimeError("Cannot delete while the controller is calibrating or armed")
+            public = self.get_public(session_id)
+            if not public.get("managed"):
+                raise ValueError("Only UI-owned sessions can be deleted")
+            if public.get("status") not in TERMINAL_STATES:
+                raise RuntimeError("Only completed sessions can be deleted")
+            directory = Path(public["output_dir"])
+            if directory.is_symlink():
+                raise ValueError("Refusing to delete a symbolic-link session directory")
+            resolved = directory.resolve()
+            try:
+                resolved.relative_to(self.ui_config.output_root.resolve())
+            except ValueError:
+                raise ValueError("Session directory is outside the UI output root")
+            manifest_path = resolved / "run.json"
+            if not manifest_path.is_file() or manifest_path.is_symlink():
+                raise ValueError("Managed session marker is missing or unsafe")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("id") != session_id:
+                raise ValueError("Session marker id does not match the requested id")
+            shutil.rmtree(resolved)
+            repository = getattr(self, "repository", None)
+            if repository is not None:
+                repository.delete(session_id)
+            self.sessions.pop(session_id, None)
+            self.legacy_sessions.pop(session_id, None)
+            for cache_key in list(self._trajectory_cache):
+                try:
+                    Path(cache_key).resolve().relative_to(resolved)
+                except ValueError:
+                    continue
+                self._trajectory_cache.pop(cache_key, None)
+
+    def close(self) -> None:
+        # Remove physical output before waiting on a possibly blocked CUDA call.
+        if getattr(self, "factr_controller", None) is not None:
+            self.factr_controller.close()
+        with self.lock:
+            active_id = self.active_session_id
+            if active_id and active_id in self.sessions:
+                self.sessions[active_id].stop_event.set()
+                thread = self.sessions[active_id].thread
+            else:
+                thread = None
+        if thread is not None:
+            # A synchronous CUDA call cannot be interrupted safely. Shutdown
+            # waits for the worker to reach its next control boundary.
+            thread.join()
+        self.preview.close()
+        if self.controller is not None:
+            self.controller.close()
+        with self._frame_lock:
+            if self._frame_env is not None:
+                self.simulator.close(self._frame_env)
+                self._frame_env = None
+                self._frame_task_id = None
+        self.provider.unload()

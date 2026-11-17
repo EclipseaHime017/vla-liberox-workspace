@@ -1,0 +1,722 @@
+from __future__ import annotations
+
+from core.paths import ROOT
+import json
+import fcntl
+import importlib.metadata
+import logging
+import math
+import os
+import random
+import threading
+import subprocess
+import time
+import uuid
+from contextlib import ExitStack
+from datetime import datetime, timezone
+from pathlib import Path
+
+from core.storage_paths import with_dataset_lease
+from typing import Any
+
+import numpy as np
+import torch
+import yaml
+from torch.utils.data import default_collate
+
+from core.config import LoadedConfig, reward_source
+from core.data import load_manifest, training_replay_policy, validate_training_manifest
+from core.io import atomic_json, sha256_file, stable_hash
+from train.methods.algorithms import TrainingAlgorithm, build_algorithm
+from core.methods import actor_lr_warmup, training_method
+from core.model_config import model_backend, model_config, model_signature
+from core.registry import model_contract, family_adapter
+from core.image_transforms import canonical_contract
+from core.artifacts import legacy_contract, parent_identity
+from train.monitoring import ACTION_NAMES, TrainingProgressReporter, log_tensorboard_metric, log_wandb_metric
+from train.replay import ActionDataset, ReplayDataset
+from rewards.manifest import load_reward_index, reward_manifest_digest
+from train.diagnostics import (
+    due as diagnostics_due,
+    weight_statistics,
+    validation_metrics,
+    validation_dataset,
+)
+
+
+LOG = logging.getLogger(__name__)
+_STOP_REQUESTED = threading.Event()
+
+
+class TrainingCancelled(RuntimeError):
+    pass
+
+
+def request_training_stop() -> None:
+    """Ask the optimizer loop to checkpoint at its next safe step boundary."""
+    _STOP_REQUESTED.set()
+
+
+def _action_diagnostics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> dict[str, float]:
+    """Return unweighted per-axis errors so gripper learning is observable."""
+    valid = mask.float().unsqueeze(-1)
+    denominator = valid.sum().clamp_min(1.0)
+    error = (prediction.float() - target.float()).abs()
+    per_axis = (error * valid).sum(dim=(0, 1)) / denominator
+    valid_steps = mask.bool()
+    predicted_gripper = prediction.float()[..., -1][valid_steps]
+    target_gripper = target.float()[..., -1][valid_steps]
+    diagnostics = torch.cat(
+        (
+            per_axis,
+            torch.stack(
+                (
+                    predicted_gripper.mean(),
+                    target_gripper.mean(),
+                    (target_gripper < 0.5).float().mean(),
+                )
+            ),
+        )
+    ).detach().cpu().tolist()
+    result = {
+        f"actor_l1_{name}": float(diagnostics[index])
+        for index, name in enumerate(ACTION_NAMES)
+    }
+    result.update(
+        actor_gripper_prediction_mean=float(diagnostics[7]),
+        actor_gripper_target_mean=float(diagnostics[8]),
+        actor_gripper_target_close_fraction=float(diagnostics[9]),
+    )
+    return result
+
+
+def _module_parameter_norm(module: torch.nn.Module) -> float:
+    """Calculate a module-wide L2 norm without flattening or copying its parameters."""
+    norms = [parameter.detach().norm(2).float() for parameter in module.parameters()]
+    if not norms:
+        return 0.0
+    return float(torch.stack(norms).norm(2))
+
+
+def _device(name: str) -> torch.device:
+    device = torch.device(name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"CUDA device {name} was requested but CUDA is unavailable")
+    return device
+
+
+def _initialize_wandb(
+    config: LoadedConfig,
+    run_dir: Path,
+    run_id: str,
+) -> Any:
+    """Create a W&B run lazily so disabled logging has no SDK dependency."""
+    wandb_cfg = config.section("logging")["wandb"]
+    if not wandb_cfg["enabled"]:
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "W&B logging is enabled but wandb is not installed; "
+            "install requirements-train.txt"
+        ) from exc
+    try:
+        run = wandb.init(
+            project=wandb_cfg["project"],
+            entity=wandb_cfg["entity"],
+            id=run_id,
+            name=wandb_cfg["run_name"] or run_id,
+            group=wandb_cfg["group"],
+            tags=wandb_cfg["tags"],
+            job_type="train",
+            config=config.raw,
+            dir=str(run_dir),
+            mode=wandb_cfg["mode"],
+            force=wandb_cfg["mode"] == "online",
+            resume="never",
+            save_code=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Cannot initialize W&B. For online mode run `wandb login`; "
+            "for an offline server set logging.wandb.mode=offline. "
+            f"Original error: {exc}"
+        ) from exc
+    if run is None:
+        raise RuntimeError("wandb.init returned no run")
+    run.define_metric("train/step")
+    run.define_metric("*", step_metric="train/step")
+    atomic_json(run_dir / "wandb.json", {
+        "schema_version": 1,
+        "run_id": str(run.id),
+        "mode": wandb_cfg["mode"],
+        "project": str(run.project or wandb_cfg["project"]),
+        "entity": run.entity,
+        "url": run.url or None,
+        "local_dir": str(run.dir),
+    })
+    LOG.info(
+        "W&B monitoring enabled: mode=%s, run=%s%s",
+        wandb_cfg["mode"],
+        run.id,
+        f", url={run.url}" if run.url else "",
+    )
+    return run
+
+
+def _sample_batch(dataset: ActionDataset, batch_size: int, generator: torch.Generator):
+    groups = getattr(dataset, "prompt_groups", {})
+    if batch_size > 1 and len(groups) > 1:
+        anchor = int(torch.randint(len(dataset), (1,), generator=generator))
+        episode, chunk_index, _ = dataset.items[anchor]
+        prompt = episode["prompt"]
+        group = groups[prompt]
+        indices = [group[index] for index in torch.randint(len(group), (batch_size,), generator=generator).tolist()]
+        return default_collate([dataset[index] for index in indices])
+    indices = torch.randint(len(dataset), (batch_size,), generator=generator).tolist()
+    return default_collate([dataset[index] for index in indices])
+
+
+def _validate_single_task_micro_batch(
+    manifest: dict[str, Any], micro_batch_size: int,
+) -> None:
+    """Reject ambiguous prompt padding while retaining legacy batch-one training."""
+    if micro_batch_size == 1:
+        return
+    train_episodes = [
+        episode for episode in manifest["episodes"]
+        if episode["split"] == "train" and episode.get("chunks")
+    ]
+    task_ids = {str(episode["task_id"]) for episode in train_episodes}
+    prompts = {str(episode["prompt"]) for episode in train_episodes}
+    if len(task_ids) != 1 or len(prompts) != 1:
+        raise ValueError(
+            "training.micro_batch_size>1 requires a single-task prepared training split; "
+            f"found task_ids={sorted(task_ids)} and {len(prompts)} prompts"
+        )
+
+
+def _code_version() -> dict[str, Any]:
+    project = workspace = ROOT
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except Exception:
+        commit = "unknown"
+    versions = {}
+    for package in ("vla-liberox", "torch", "transformers", "numpy"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = "not-installed"
+    return {
+        "workspace_git_commit": commit,
+        "project": str(project),
+        "package_versions": versions,
+    }
+
+
+def _actor_lr(step: int, total: int, peak: float, final: float, warmup: int) -> float:
+    if warmup and step < warmup:
+        return peak * (step + 1) / warmup
+    progress = (step - warmup) / max(1, total - warmup - 1)
+    return final + 0.5 * (peak - final) * (1.0 + math.cos(math.pi * min(1.0, progress)))
+
+
+def _save_checkpoint(
+    directory: Path,
+    step: int,
+    components: Any,
+    algorithm: TrainingAlgorithm,
+    actor_optimizer: torch.optim.Optimizer,
+    data_generator: torch.Generator,
+    config: LoadedConfig,
+    manifest: dict[str, Any],
+    reward_index: dict[str, Any] | None,
+    *, rng: dict[str, Any] | None = None,
+) -> Path:
+    target = directory / f"step_{step:08d}"
+    target.mkdir(parents=True, exist_ok=True)
+    model_backend(config.raw).save_actor(components, model_config(config.raw), target)
+    if rng is None:
+        rng = {"torch_rng": torch.get_rng_state(),
+               "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+               "numpy_rng": np.random.get_state(), "python_rng": random.getstate()}
+    torch.save({
+        "schema_version": 2, "step": step, "algorithm": training_method(config.raw).name,
+        "algorithm_state": algorithm.checkpoint(),
+        "actor_optimizer": actor_optimizer.state_dict(),
+        **rng,
+        "data_rng": data_generator.get_state(),
+    }, target / "trainer.pt")
+    checkpoint_metadata = {
+        "schema_version": 2, "step": step, "config_sha256": config.digest,
+        "algorithm": training_method(config.raw).name,
+        "model_config": model_signature(config.raw),
+        "model_contract": model_contract(config.section("model")),
+        "model_identity": getattr(components, "identity", None),
+        "model_parent": getattr(components, "parent", None),
+        "training_layout": {"chunking": manifest.get("chunking"),
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
+        "dataset_sha256": manifest["dataset_sha256"],
+        "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
+        "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
+        "replay_policy": training_replay_policy(config.section("data").get("include_post_success", True)),
+        "bootstrap_failed_end": config.section("data").get("bootstrap_failed_end", False),
+        "base_checkpoint": config.section("model")["base_checkpoint"],
+        "stats_key": components.stats_key,
+        "code_version": _code_version(),
+    }
+    atomic_json(target / "checkpoint.json", checkpoint_metadata)
+    (target / "effective_config.yaml").write_text(
+        yaml.safe_dump(config.raw, sort_keys=False), encoding="utf-8"
+    )
+    return target
+
+
+def _publish_overlay(
+    checkpoint: Path,
+    registry: Path,
+    step: int,
+    config: LoadedConfig,
+    components: Any,
+    manifest: dict[str, Any],
+    reward_index: dict[str, Any] | None,
+) -> Path:
+    method = training_method(config.raw).name
+    prefix = "rynn-iql" if method == "iql" else method
+    model_prefix = family_adapter(model_config(config.raw)["family"]).EXPORT_PREFIX
+    if model_prefix:
+        prefix = f"{model_prefix}-{prefix}"
+    policy_id = f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    target = registry / policy_id
+    target.mkdir(parents=True, exist_ok=False)
+    latest = registry / "latest"
+    export_record = checkpoint.parent.parent / "export.json"
+    export_owner = {
+        "policy_id": policy_id, "registry": str(registry.resolve()),
+        "previous_latest": None,
+    }
+    try:
+        atomic_json(export_record, export_owner)
+    except BaseException:
+        target.rmdir()
+        raise
+    settings = model_config(config.raw)
+    parent = getattr(components, "parent", None)
+    if parent is not None:
+        settings.update(base_revision=parent["revision"], stats_key=parent["stats_key"],
+                        contract=parent["contract"])
+    native_artifacts = model_backend(config.raw).export_actor(components, settings, target, checkpoint=checkpoint)
+    io = model_contract(settings)["io"]
+    compatibility = {
+        "base_checkpoint": config.section("model")["base_checkpoint"],
+        "stats_key": components.stats_key,
+        "action_horizon": io["replay_horizon"],
+        "action_dim": io["action_dim"],
+        "proprio_dim": io["proprio_dim"],
+    }
+    reward_label = {None: "", "rynnvalue": "RynnValue", "sparse": "Sparse", "stage": "Stage-based", "final": "Final Reward"}[
+        reward_source(config.section("reward")) if training_method(config.raw).requires_rewards else None
+    ]
+    payload = {
+        "algorithm": method,
+        "model_config": settings,
+        "policy_id": policy_id,
+        "label": f"{reward_label} IQL · step {step}" if method == "iql" else f"BC · step {step}",
+        **compatibility,
+        "dataset_sha256": manifest["dataset_sha256"],
+        "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
+        "training_step": step,
+        **native_artifacts,
+        "compatibility_sha256": stable_hash(compatibility),
+    }
+    if parent is not None:
+        payload.update(schema_version=5, family=settings["family"], parent=parent)
+    temporary = target / ".policy.yaml.tmp"
+    temporary.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    os.replace(temporary, target / "policy.yaml")
+    with (registry / ".registry.lock").open("a+") as registry_lock:
+        fcntl.flock(registry_lock.fileno(), fcntl.LOCK_EX)
+        export_owner["previous_latest"] = os.readlink(latest) if latest.is_symlink() else None
+        atomic_json(export_record, export_owner)
+        temporary_link = registry / f".latest-{uuid.uuid4().hex}"
+        temporary_link.symlink_to(target.name, target_is_directory=True)
+        os.replace(temporary_link, latest)
+    return target / "policy.yaml"
+
+
+def _restore_checkpoint(
+    checkpoint: Path,
+    components: Any,
+    agent: TrainingAlgorithm,
+    actor_optimizer: torch.optim.Optimizer,
+    data_generator: torch.Generator,
+    device: torch.device,
+    config: LoadedConfig,
+    manifest: dict[str, Any],
+    reward_index: dict[str, Any] | None,
+    *, restore_random: bool = True, checkpoint_device: Any = None,
+) -> int:
+    checkpoint = checkpoint.expanduser().resolve()
+    metadata = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
+    method = training_method(config.raw).name
+    if metadata.get("algorithm", "iql") != method:
+        raise ValueError("Resume checkpoint uses a different training method")
+    previous_model = model_signature({"model": metadata.get("model_config", {})})
+    if previous_model != model_signature(config.raw):
+        raise ValueError("Resume checkpoint uses a different model training configuration; start a new run")
+    if metadata.get("model_identity") != getattr(components, "identity", None):
+        raise ValueError("Resume checkpoint uses different model weights or normalization")
+    previous_parent = metadata.get("model_parent")
+    if previous_parent is not None and parent_identity(previous_parent) != parent_identity(getattr(components, "parent", None)):
+        raise ValueError("Resume checkpoint uses a different parent model")
+    previous_contract = metadata.get("model_contract")
+    if previous_contract is None:
+        previous_contract = (previous_parent["contract"] if previous_parent is not None
+                             else legacy_contract(metadata.get("model_config", {})))
+    if canonical_contract(previous_contract) != canonical_contract(model_contract(config.section("model"))):
+        raise ValueError("Resume checkpoint uses a different model input contract")
+    has_success_tail = any(
+        episode.get("split") == "train" and episode.get("terminal_step") is not None
+        and int(episode["recorded_action_count"]) > int(episode["terminal_step"]) + 1
+        for episode in manifest["episodes"]
+    )
+    replay_policy = training_replay_policy(config.section("data").get("include_post_success", True))
+    if metadata.get("bootstrap_failed_end", False) != config.section("data").get("bootstrap_failed_end", False):
+        raise ValueError("Resume checkpoint uses a different failed-end bootstrap policy")
+    if has_success_tail and metadata.get("replay_policy") != replay_policy:
+        raise ValueError(
+            "Resume checkpoint used a different replay policy for post-success actions. "
+            "Start a new run without resume_checkpoint; "
+            "existing complete reward evaluations can still be reused."
+        )
+    expected = {
+        "training_layout": {"chunking": manifest.get("chunking"),
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
+        "dataset_sha256": manifest["dataset_sha256"],
+        "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
+        "base_checkpoint": config.section("model")["base_checkpoint"],
+        "stats_key": components.stats_key,
+    }
+    mismatches = {
+        key: (metadata.get(key), value)
+        for key, value in expected.items() if metadata.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(f"Resume checkpoint is incompatible: {mismatches}")
+    model_backend(config.raw).restore_actor(components, model_config(config.raw), checkpoint)
+    trainer = torch.load(
+        checkpoint / "trainer.pt", map_location=checkpoint_device or device, weights_only=False
+    )
+    agent.restore(trainer["algorithm_state"] if "algorithm_state" in trainer else trainer["iql"])
+    actor_optimizer.load_state_dict(trainer["actor_optimizer"])
+    if restore_random:
+        torch.set_rng_state(trainer["torch_rng"].cpu())
+        if torch.cuda.is_available() and trainer.get("cuda_rng") is not None:
+            torch.cuda.set_rng_state_all([state.cpu() for state in trainer["cuda_rng"]])
+        np.random.set_state(trainer["numpy_rng"])
+        random.setstate(trainer["python_rng"])
+    data_generator.set_state(trainer["data_rng"].cpu())
+    return int(trainer["step"])
+
+
+@with_dataset_lease
+def train(config: LoadedConfig) -> Path:
+    _STOP_REQUESTED.clear()
+    training_cfg = config.section("training")
+    method = training_method(config.raw)
+    logging_cfg = config.section("logging")
+    seed = int(training_cfg["seed"])
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    device = _device(training_cfg["device"])
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    LOG.info("Loading prepared replay for %s", method.name.upper())
+    manifest = load_manifest(config)
+    validate_training_manifest(manifest, config)
+    reward_index = load_reward_index(config) if method.requires_rewards else None
+    reward_hash = reward_manifest_digest(reward_index) if reward_index is not None else None
+    reward_mode = ("cumulative_primitive_steps" if config.section("reward")["accumulate_primitive_steps"]
+                   else "macro_action") if method.requires_rewards else "not_applicable"
+    micro_batch_size = int(training_cfg["micro_batch_size"])
+    _validate_single_task_micro_batch(manifest, micro_batch_size)
+    backend = model_backend(config.raw)
+    LOG.info("Loading policy model: %s", model_signature(config.raw))
+    component_load_started = time.monotonic()
+    components = backend.load_components(config)
+    LOG.info("Policy components loaded in %.2f s", time.monotonic() - component_load_started)
+    dataset = (ReplayDataset(config, components.action_stats, components.proprio_stats, "train",
+                             reward_index=reward_index) if method.requires_transitions else
+               ActionDataset(config, components.action_stats, components.proprio_stats, "train"))
+    validation = (validation_dataset(config, components)
+                  if logging_cfg.get("diagnostics", {}).get("enabled", False) else None)
+    diagnostic_episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
+    data_generator = torch.Generator(device="cpu")
+    data_generator.manual_seed(seed + 1)
+    agent = build_algorithm(config, device, transition_horizon=manifest["action_horizon"])
+    actor_parameters = backend.trainable_parameters(components)
+    counts = backend.parameter_counts(components)
+    print(f"MODEL ready | config={model_signature(config.raw)} | parameters={counts}", flush=True)
+    # Paper Table 9 / official pi-rl policy optimizer.  In particular, do not
+    # inherit AdamW's default 0.01 weight decay.
+    actor_optimizer = torch.optim.AdamW(
+        actor_parameters,
+        lr=float(training_cfg["policy_peak_lr"]),
+        betas=(0.9, 0.95),
+        eps=1e-8,
+        weight_decay=1e-10,
+    )
+    accumulation = int(training_cfg["gradient_accumulation_steps"])
+    total_steps = int(training_cfg["train_steps"])
+    warmup = int(config.section("iql")["critic_warmup_steps"]) if method.name == "iql" else 0
+    lr_warmup = actor_lr_warmup(config.raw)
+    start_step = 0
+    if training_cfg["resume_checkpoint"] is not None:
+        start_step = _restore_checkpoint(
+            Path(training_cfg["resume_checkpoint"]), components, agent, actor_optimizer,
+            data_generator,
+            device, config, manifest, reward_index,
+        )
+        if start_step >= total_steps:
+            raise ValueError(
+                f"Resume step {start_step} must be smaller than train_steps={total_steps}"
+            )
+        LOG.info("Resumed training at optimization step %d", start_step)
+    run_id = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d_%H%M%S')}__{uuid.uuid4().hex[:8]}"
+    run_dir = Path(config.section("paths")["output_dir"]) / run_id
+    checkpoint_root = run_dir / "checkpoints"
+    checkpoint_root.mkdir(parents=True, exist_ok=False)
+    if reward_index is not None:
+        atomic_json(run_dir / "reward_manifest.json", reward_index)
+    if reward_index is not None and reward_index.get("stage_annotations_path"):
+        atomic_json(run_dir / "stage_annotations.json", json.loads(
+            Path(reward_index["stage_annotations_path"]).read_text(encoding="utf-8")
+        ))
+    (run_dir / "effective_config.yaml").write_text(
+        yaml.safe_dump(config.raw, sort_keys=False), encoding="utf-8"
+    )
+    atomic_json(run_dir / "provenance.json", {
+        "schema_version": 1,
+        "algorithm": method.name,
+        "model_config": model_config(config.raw),
+        "model_parameters": counts,
+        "model_identity": getattr(components, "identity", None),
+        "model_parent": getattr(components, "parent", None),
+        "code_version": _code_version(),
+        "training_layout": {"chunking": manifest["chunking"],
+                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
+                            "transition_horizon": manifest["action_horizon"]},
+        "config_sha256": config.digest,
+        "dataset_sha256": manifest["dataset_sha256"],
+        "reward_sha256": reward_hash,
+        "reward_version_id": config.section("reward").get("version_id") if method.requires_rewards else None,
+        "replay_policy": training_replay_policy(config.section("data").get("include_post_success", True)),
+        "base_checkpoint": config.section("model")["base_checkpoint"],
+    })
+    actor_optimizer.zero_grad(set_to_none=True)
+    start_time = time.monotonic()
+    latest_checkpoint: Path | None = None
+    metrics_path = run_dir / "metrics.jsonl"
+    progress = TrainingProgressReporter(
+        total_steps=total_steps,
+        start_step=start_step,
+        interval_steps=int(logging_cfg["console_interval_steps"]),
+        warmup_steps=warmup,
+        samples_per_step=micro_batch_size,
+    )
+    LOG.info(
+        "Training started: run=%s, replay_chunks=%d, steps=%d->%d, warmup=%d, "
+        "micro_batch=%d, actor_effective_batch=%d, checkpoint_interval=%d, "
+        "reward_mode=%s, device=%s",
+        run_id,
+        len(dataset),
+        start_step,
+        total_steps,
+        warmup,
+        micro_batch_size,
+        micro_batch_size * accumulation,
+        int(training_cfg["checkpoint_interval"]),
+        reward_mode,
+        device,
+    )
+    with ExitStack() as stack:
+        metrics_file = stack.enter_context(metrics_path.open("w", encoding="utf-8"))
+        writer = None
+        if logging_cfg["tensorboard"]:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+            except ImportError as exc:
+                raise RuntimeError(
+                    "TensorBoard logging is enabled but tensorboard is not installed; "
+                    "install requirements-train.txt"
+                ) from exc
+            writer = stack.enter_context(
+                SummaryWriter(
+                    log_dir=str(run_dir / "tensorboard"),
+                    flush_secs=float(logging_cfg["flush_seconds"]),
+                )
+            )
+            writer.add_text(
+                "run/effective_config",
+                "```yaml\n" + yaml.safe_dump(config.raw, sort_keys=False) + "```",
+                start_step,
+            )
+        wandb_run = _initialize_wandb(config, run_dir, run_id)
+        if wandb_run is not None:
+            stack.callback(wandb_run.finish)
+        wandb_interval = int(logging_cfg["wandb"]["log_interval_steps"])
+        current_actor_lr = float(actor_optimizer.param_groups[0]["lr"])
+        # W&B and model dependencies may reconfigure the root logger after the
+        # VLA is imported.  Progress is a terminal contract, so emit it through
+        # an explicitly flushed stream instead of relying on LOG.info.
+        print(
+            "TRAIN ready | "
+            f"method={method.name} | run={run_id} | steps={start_step}->{total_steps} | "
+            f"micro_batch={micro_batch_size} | "
+            f"actor_batch={micro_batch_size * accumulation} | "
+            "reward_mode="
+            f"{reward_mode} "
+            f"| device={device}",
+            flush=True,
+        )
+        for step in range(start_step, total_steps):
+            batch = _sample_batch(
+                dataset, micro_batch_size, data_generator
+            )
+            critic_batch = {
+                key: value.to(device, non_blocking=True)
+                for key, value in batch.items() if isinstance(value, torch.Tensor)
+                and key in {"pixels", "next_pixels", "proprio", "next_proprio", "actions",
+                               "action_mask", "reward", "bootstrap_mask", "chunk_length"}
+            }
+            context, algorithm_metrics = agent.update(critic_batch, step)
+            losses, prediction = backend.actor_losses(components, batch, device)
+            actor_loss = agent.weight_actor_losses(losses, context)
+            action_metrics = _action_diagnostics(
+                prediction,
+                batch.get("actor_actions", batch["actions"]).to(device),
+                batch.get("actor_action_mask", batch["action_mask"]).to(device),
+            ) if prediction is not None else {"actor_flow_mse": float(losses.detach().mean())}
+            (actor_loss / accumulation).backward()
+            actor_loss_value = float(actor_loss.detach())
+            actor_grad_norm = None
+            action_head_parameter_norm = None
+            proprio_projector_parameter_norm = None
+            if (step + 1) % accumulation == 0 or step == total_steps - 1:
+                actor_grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(actor_parameters, 1.0)
+                )
+                current_actor_lr = _actor_lr(
+                    step, total_steps, float(training_cfg["policy_peak_lr"]),
+                    float(training_cfg["policy_final_lr"]), lr_warmup,
+                )
+                for group in actor_optimizer.param_groups:
+                    group["lr"] = current_actor_lr
+                actor_optimizer.step()
+                actor_optimizer.zero_grad(set_to_none=True)
+                if hasattr(components, "action_head"):
+                    action_head_parameter_norm = _module_parameter_norm(components.action_head)
+                if hasattr(components, "proprio_projector"):
+                    proprio_projector_parameter_norm = _module_parameter_norm(components.proprio_projector)
+            metric = {
+                "step": step + 1, "algorithm": method.name,
+                **algorithm_metrics,
+                "actor_loss": actor_loss_value,
+                "actor_learning_rate": current_actor_lr,
+                "actor_grad_norm": actor_grad_norm,
+                "action_head_parameter_norm": action_head_parameter_norm,
+                "proprio_projector_parameter_norm": proprio_projector_parameter_norm,
+                "elapsed_seconds": time.monotonic() - start_time,
+                "micro_batch_size": micro_batch_size,
+                "actor_effective_batch_size": micro_batch_size * accumulation,
+                "cuda_peak_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
+                **action_metrics,
+            }
+            metric["cuda_peak_memory_gib"] = float(
+                metric["cuda_peak_memory_bytes"]
+            ) / (1024.0 ** 3)
+            if diagnostics_due(logging_cfg, step + 1):
+                if context is not None:
+                    metric.update(weight_statistics(context, batch, diagnostic_episodes))
+                metric.update(validation_metrics(backend, components, validation, device, micro_batch_size))
+            should_report = progress.update(metric)
+            metrics_file.write(json.dumps(metric, sort_keys=True) + "\n")
+            metrics_file.flush()
+            log_tensorboard_metric(writer, metric)
+            completed_this_run = int(metric["step"]) - start_step
+            if (
+                wandb_run is not None
+                and (
+                    completed_this_run == 1
+                    or int(metric["step"]) == total_steps
+                    or completed_this_run % wandb_interval == 0
+                )
+            ):
+                log_wandb_metric(wandb_run, metric)
+            if should_report:
+                print(progress.format(metric), flush=True)
+            if (step + 1) % int(training_cfg["checkpoint_interval"]) == 0 or step + 1 == total_steps:
+                latest_checkpoint = _save_checkpoint(
+                    checkpoint_root, step + 1, components, agent, actor_optimizer,
+                    data_generator,
+                    config, manifest, reward_index,
+                )
+                LOG.info("Saved checkpoint %s", latest_checkpoint)
+            if _STOP_REQUESTED.is_set() and ((step + 1) % accumulation == 0 or step == total_steps - 1):
+                if latest_checkpoint is None or (step + 1) % int(training_cfg["checkpoint_interval"]) != 0:
+                    latest_checkpoint = _save_checkpoint(
+                        checkpoint_root, step + 1, components, agent, actor_optimizer,
+                        data_generator, config, manifest, reward_index,
+                    )
+                atomic_json(run_dir / "summary.json", {
+                    "schema_version": 1, "status": "canceled", "steps": step + 1,
+                    "elapsed_seconds": time.monotonic() - start_time,
+                    "dataset_sha256": manifest["dataset_sha256"],
+                    "reward_sha256": reward_hash, "algorithm": method.name,
+                    "cancel_checkpoint": str(latest_checkpoint),
+                    "resumed_from_step": start_step,
+                    "micro_batch_size": micro_batch_size,
+                    "transitions_processed": (step + 1 - start_step) * micro_batch_size,
+                })
+                LOG.warning(
+                    "Training stop requested; saved cancellation checkpoint %s",
+                    latest_checkpoint,
+                )
+                if wandb_run is not None:
+                    wandb_run.summary["status"] = "canceled"
+                    wandb_run.summary["last_step"] = step + 1
+                raise TrainingCancelled("Training canceled after safe checkpoint")
+        if wandb_run is not None:
+            wandb_run.summary["status"] = "optimization_completed"
+            wandb_run.summary["last_step"] = total_steps
+    assert latest_checkpoint is not None
+    registry = Path(config.section("paths")["policy_registry"])
+    registry.mkdir(parents=True, exist_ok=True)
+    policy = _publish_overlay(
+        latest_checkpoint, registry, total_steps, config, components, manifest, reward_index
+    )
+    atomic_json(run_dir / "summary.json", {
+        "schema_version": 1, "status": "completed", "steps": total_steps,
+        "elapsed_seconds": time.monotonic() - start_time,
+        "dataset_sha256": manifest["dataset_sha256"],
+        "reward_sha256": reward_hash, "algorithm": method.name, "policy_overlay": str(policy),
+        "resumed_from_step": start_step,
+        "micro_batch_size": micro_batch_size,
+        "transitions_processed": (total_steps - start_step) * micro_batch_size,
+        "peak_cuda_memory_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0,
+    })
+    return policy

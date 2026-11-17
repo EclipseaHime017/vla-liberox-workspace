@@ -1,0 +1,84 @@
+"""FastAPI dependencies and exception translation."""
+
+import logging
+
+from fastapi import HTTPException, Request
+
+from studio.services.run_service import RunService
+from studio.services.dataset_export_service import DatasetExportService
+from studio.services.offline_job_service import OfflineJobService
+from studio.services.training_dataset_service import TrainingDatasetService
+from studio.services.trajectory_evaluation_service import TrajectoryEvaluationService
+from studio.services.robometer_evaluation_service import RobometerEvaluationService
+from studio.services.stage_annotation_service import StageAnnotationService
+
+
+def service(request: Request) -> RunService:
+    current = getattr(request.app.state, "run_service", None)
+    if current is None:
+        current = RunService(request.app.state.manager)
+        request.app.state.run_service = current
+    return current
+
+
+def dataset_export_service(request: Request) -> DatasetExportService:
+    current = getattr(request.app.state, "dataset_export_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Dataset export service is unavailable")
+    return current
+
+
+def training_dataset_service(request: Request) -> TrainingDatasetService:
+    current = getattr(request.app.state, "training_dataset_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Offline dataset service is unavailable")
+    return current
+
+
+def offline_job_service(request: Request) -> OfflineJobService:
+    current = getattr(request.app.state, "offline_job_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Offline job service is unavailable")
+    return current
+
+
+def trajectory_evaluation_service(request: Request) -> TrajectoryEvaluationService:
+    current = getattr(request.app.state, "trajectory_evaluation_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Trajectory evaluation service is unavailable")
+    return current
+
+
+def robometer_evaluation_service(request: Request) -> RobometerEvaluationService:
+    current = getattr(request.app.state, "robometer_evaluation_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Robometer evaluation service is unavailable")
+    return current
+
+
+def stage_annotation_service(request: Request) -> StageAnnotationService:
+    current = getattr(request.app.state, "stage_annotation_service", None)
+    if current is None:
+        raise HTTPException(status_code=503, detail="Stage annotation service is unavailable")
+    return current
+
+
+def http_error(exc: Exception, *, key_error_context: str | None = None) -> HTTPException:
+    from studio.exceptions import ConflictError
+
+    if isinstance(exc, ConflictError):
+        return HTTPException(status_code=409, detail=exc.detail())
+    if isinstance(exc, KeyError):
+        if key_error_context:
+            logging.getLogger(__name__).error("%s: %s", key_error_context, exc, exc_info=True)
+            return HTTPException(status_code=500, detail=(
+                f"{key_error_context}: missing field or reference {exc}. Check the server log."
+            ))
+        return HTTPException(status_code=404, detail="Run not found")
+    if isinstance(exc, (ValueError, IndexError)):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, FileNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    return HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")

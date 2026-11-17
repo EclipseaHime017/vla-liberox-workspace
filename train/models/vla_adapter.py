@@ -1,0 +1,547 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
+
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+import yaml
+from PIL import Image
+
+from core.config import LoadedConfig, UniqueKeyLoader
+from core.io import sha256_file, stable_hash
+from core.model_config import model_config
+from core.registry import model_contract
+from core.artifacts import parent_snapshot, decode_child, legacy_contract
+from core.checkpoint_assets import resolve_revision, checkpoint_view
+from core.model_storage import cached_sha256
+
+
+ACTION_DIM = 7
+
+
+def resolve_stats_key(norm_stats: dict[str, Any], requested: str) -> str:
+    if requested in norm_stats:
+        return requested
+    candidate = f"{requested}_no_noops"
+    if candidate in norm_stats:
+        return candidate
+    available = ", ".join(sorted(norm_stats))
+    raise KeyError(f"Normalization key {requested!r} is unavailable; choices: {available}")
+
+
+def normalize_with_stats(values: np.ndarray, stats: dict[str, Any]) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    low = np.asarray(stats["q01"], dtype=np.float32)
+    high = np.asarray(stats["q99"], dtype=np.float32)
+    mask = np.asarray(stats.get("mask", np.ones_like(low, dtype=bool)), dtype=bool)
+    normalized = np.where(mask, 2.0 * (values - low) / (high - low + 1e-8) - 1.0, values)
+    return np.clip(normalized, -1.0, 1.0).astype(np.float32)
+
+
+def denormalize_with_stats(values: np.ndarray, stats: dict[str, Any]) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    low = np.asarray(stats["q01"], dtype=np.float32)
+    high = np.asarray(stats["q99"], dtype=np.float32)
+    mask = np.asarray(stats.get("mask", np.ones_like(low, dtype=bool)), dtype=bool)
+    return np.where(mask, 0.5 * (values + 1.0) * (high - low + 1e-8) + low, values).astype(np.float32)
+
+
+def env_to_dataset_actions(env_actions: np.ndarray, action_stats: dict[str, Any]) -> np.ndarray:
+    """Invert LIBERO execution conversion, then apply VLA training normalization."""
+    actions = np.asarray(env_actions, dtype=np.float32).copy()
+    if actions.shape[-1] != ACTION_DIM:
+        raise ValueError(f"Expected action dimension {ACTION_DIM}, got {actions.shape}")
+    # Execution maps model gripper 0=close, 1=open to +1=close, -1=open.
+    actions[..., -1] = (1.0 - actions[..., -1]) * 0.5
+    return normalize_with_stats(actions, action_stats)
+
+
+def dataset_to_env_actions(normalized: np.ndarray, action_stats: dict[str, Any]) -> np.ndarray:
+    actions = denormalize_with_stats(normalized, action_stats)
+    actions[..., -1] = np.where(actions[..., -1] >= 0.5, -1.0, 1.0)
+    return actions.astype(np.float32)
+
+
+def proprio_from_trajectory(trajectory: dict[str, np.ndarray]) -> np.ndarray:
+    return np.concatenate((
+        np.asarray(trajectory["eef_position"], dtype=np.float32),
+        np.asarray(trajectory["eef_axis_angle"], dtype=np.float32),
+        np.asarray(trajectory["gripper_qpos"], dtype=np.float32),
+    ), axis=-1)
+
+
+@dataclass
+class VLAComponents:
+    cfg: Any
+    model: Any
+    action_head: Any
+    proprio_projector: Any
+    processor: Any
+    stats_key: str
+    action_stats: dict[str, Any]
+    proprio_stats: dict[str, Any]
+    parent: dict | None = None
+    checkpoint_holder: Any = None
+    # Oriented HxWx3 frames -> processor-ready PIL images (see policy_image_pipeline).
+    policy_images: Any = None
+
+
+def _add_vla_path(config: LoadedConfig) -> None:
+    root = Path(config.section("paths")["vla_adapter_root"])
+    if not (root / "prismatic").is_dir():
+        raise FileNotFoundError(f"Invalid VLA-Adapter root: {root}")
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+
+def restrict_tensorflow_to_cpu() -> None:
+    """Upstream VLA-Adapter uses TensorFlow only for image preprocessing.
+
+    Hide GPUs from it before its first op; otherwise TensorFlow reserves most of
+    the GPU memory the PyTorch model needs (on every rank).
+    """
+    import tensorflow as tf
+    try:
+        tf.config.set_visible_devices([], "GPU")
+    except RuntimeError as exc:
+        if tf.config.get_visible_devices("GPU"):
+            raise RuntimeError("TensorFlow GPU is already initialized; restart the training worker") from exc
+
+
+def policy_image_pipeline(cfg):
+    """The official LIBERO client image preprocessing, applied to oriented frames.
+
+    Inference runs ``prepare_observation`` (JPEG round trip and lanczos3 resize
+    to the model size) and then ``prepare_images_for_vla`` (90%-area center
+    crop, required by upstream because the base model was trained with random
+    crops). Post-training uses the same upstream functions so the processor
+    sees identical pixels on both sides.
+    """
+    def transform(images):
+        from experiments.robot.openvla_utils import center_crop_image, resize_image_for_policy
+        from experiments.robot.robot_utils import get_image_resize_size
+        restrict_tensorflow_to_cpu()
+        size = get_image_resize_size(cfg)
+        result = []
+        for value in images:
+            image = Image.fromarray(resize_image_for_policy(np.ascontiguousarray(value), size)).convert("RGB")
+            result.append(center_crop_image(image) if cfg.center_crop else image)
+        return result
+    return transform
+
+
+@contextmanager
+def _rank_component_loader(utils, device):
+    """Keep upstream DDP-key handling while avoiding checkpoint CUDA tags.
+
+    Object-Pro component checkpoints contain cuda:0 storages. Each rank must
+    deserialize on CPU before copying into its own device-resident modules.
+    The hook is local to model construction in this isolated worker process.
+    """
+    import torch
+    original = utils.load_component_state_dict
+
+    def load_cpu(path):
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        return {key.removeprefix("module."): value for key, value in state.items()}
+
+    utils.DEVICE = device
+    utils.load_component_state_dict = load_cpu
+    try:
+        yield
+    finally:
+        utils.load_component_state_dict = original
+
+
+def _initialize_components(cfg, device):
+    from experiments.robot import openvla_utils
+    with _rank_component_loader(openvla_utils, device):
+        model = openvla_utils.get_vla(cfg)
+        model.set_version(cfg.save_version)
+        projector = openvla_utils.get_proprio_projector(cfg, model.llm_dim, proprio_dim=8)
+        head = openvla_utils.get_action_head(cfg, model.llm_dim)
+        processor = openvla_utils.get_processor(cfg)
+    return model, head, projector, None, processor
+
+
+def load_components(
+    config: LoadedConfig, overlay: Path | None = None, *, training: bool = True
+) -> VLAComponents:
+    from train.models.adaptation import configure_components
+    _add_vla_path(config)
+    restrict_tensorflow_to_cpu()
+    import torch
+    device = torch.device(config.section("training")["device"])
+
+    vla_cfg = model_config(config.raw)
+    policy = load_overlay(overlay) if overlay is not None else None
+    if policy is not None and policy.parent is not None:
+        if (vla_cfg["base_checkpoint"] != policy.base_checkpoint or
+                policy.stats_key not in {vla_cfg["stats_key"], f"{vla_cfg['stats_key']}_no_noops"}):
+            raise ValueError("Requested model differs from the overlay parent")
+        vla_cfg = dict(policy.model_config)
+    elif policy is not None:
+        vla_cfg["contract"] = policy.model_config["contract"]
+    contract = model_contract(vla_cfg)
+    revision = resolve_revision(vla_cfg["base_checkpoint"], vla_cfg.get("base_revision"), cached_sha256)
+    holder = checkpoint_view(vla_cfg["base_checkpoint"], revision)
+    cfg = SimpleNamespace(
+        pretrained_checkpoint=holder.name,
+        task_suite_name=vla_cfg["stats_key"],
+        use_l1_regression=True, use_minivlm=True, num_images_in_input=len(contract["io"]["cameras"]),
+        use_proprio=True, use_film=False, use_pro_version=True,
+        load_in_8bit=False, load_in_4bit=False, num_open_loop_steps=contract["io"]["native_action_horizon"],
+        seed=int(config.section("training")["seed"]), phase="Inference", save_version="vla-adapter",
+        model_family="openvla", center_crop=True,
+    )
+    try:
+        model, action_head, proprio_projector, _, processor = _initialize_components(cfg, device)
+    except BaseException:
+        holder.cleanup()
+        raise
+    stats_key = resolve_stats_key(model.norm_stats, vla_cfg["stats_key"])
+    cfg.unnorm_key = stats_key
+    if policy is not None:
+        validate_overlay(policy, vla_cfg["base_checkpoint"], stats_key)
+        import torch
+        if policy.backbone is not None:
+            model.load_state_dict(torch.load(policy.backbone, map_location="cpu", weights_only=True), strict=True)
+        action_head.load_state_dict(torch.load(policy.action_head, map_location="cpu", weights_only=True))
+        proprio_projector.load_state_dict(torch.load(policy.proprio_projector, map_location="cpu", weights_only=True))
+    components = VLAComponents(
+        cfg=cfg, model=model, action_head=action_head,
+        proprio_projector=proprio_projector, processor=processor,
+        stats_key=stats_key, action_stats=model.norm_stats[stats_key]["action"],
+        proprio_stats=model.norm_stats[stats_key]["proprio"],
+        parent=policy.parent if policy is not None and policy.parent is not None else parent_snapshot(
+            {**vla_cfg, "stats_key": stats_key}, revision, contract=contract),
+        checkpoint_holder=holder, policy_images=policy_image_pipeline(cfg),
+    )
+    configure_components(components, vla_cfg, training=training)
+    for name in ("model", "action_head", "proprio_projector"):
+        module = getattr(components, name).to(device)
+        if any(parameter.device != device for parameter in module.parameters()):
+            raise RuntimeError(f"{name} did not load on the requested device {device}")
+    return components
+
+
+def evaluation_policy(config, manifest, parent):
+    """Use the official inference pipeline and the child's frozen image contract."""
+    from core.registry import model_observation
+    from core.image_transforms import image_orientation, vla_adapter_observation
+    from core.upstream import verify_vla_adapter_environment
+
+    verify_vla_adapter_environment(Path(config.section("paths")["vla_adapter_root"]))
+    components = load_components(config, overlay=manifest, training=False)
+    from experiments.robot.libero.run_libero_eval import prepare_observation, process_action
+    from experiments.robot.robot_utils import get_action, get_image_resize_size
+    cfg = components.cfg
+    resize = get_image_resize_size(cfg)
+    orientation = image_orientation(model_observation(model_config(config.raw)))
+
+    def predict(observation, prompt):
+        prepared, _ = prepare_observation(vla_adapter_observation(observation, orientation), resize)
+        return get_action(cfg, components.model, prepared, prompt,
+                          processor=components.processor, action_head=components.action_head,
+                          proprio_projector=components.proprio_projector,
+                          noisy_action_projector=None, use_film=cfg.use_film,
+                          use_minivlm=cfg.use_minivlm)
+
+    return predict, lambda action: process_action(action.copy(), cfg.model_family)
+
+
+def qwen_prompt(task: str) -> str:
+    return (
+        "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+        "<|im_end|>\n<|im_start|>user\nWhat action should the robot take to "
+        f"{task.lower()}?<|im_end|>\n<|im_start|>assistant\n"
+    )
+
+
+def processor_inputs(
+    components: VLAComponents,
+    prompt: str | list[str] | tuple[str, ...],
+    agent: np.ndarray,
+    wrist: np.ndarray,
+):
+    """Build a one-task batch containing synchronized agent and wrist views."""
+    prompts = [prompt] if isinstance(prompt, str) else list(prompt)
+    agents = np.asarray(agent)
+    wrists = np.asarray(wrist)
+    if agents.ndim == 3:
+        agents = agents[None, ...]
+    if wrists.ndim == 3:
+        wrists = wrists[None, ...]
+    if agents.ndim != 4 or wrists.ndim != 4:
+        raise ValueError("VLA images must have shape HxWxC or BxHxWxC")
+    if len(prompts) != len(agents) or len(prompts) != len(wrists):
+        raise ValueError(
+            "VLA prompt/agent/wrist batch sizes differ: "
+            f"{len(prompts)}/{len(agents)}/{len(wrists)}"
+        )
+    if not prompts or any(not isinstance(value, str) or not value.strip() for value in prompts):
+        raise ValueError("Every VLA batch prompt must be a non-empty string")
+    # The current terminal pipeline deliberately trains one task per run. Keeping
+    # every token sequence identical preserves the exact single-sample action-query
+    # positions while allowing the upstream Prismatic processor to batch images.
+    texts = [qwen_prompt(value) for value in prompts]
+    if len(set(texts)) != 1:
+        raise ValueError(
+            "VLA micro-batches must contain one task prompt; use micro_batch_size=1 "
+            "for a legacy multi-task manifest"
+        )
+    primary = components.processor(
+        texts,
+        components.policy_images(agents),
+        padding=True,
+        return_tensors="pt",
+    ).to(
+        components.model.device, dtype=components.model.dtype
+    )
+    secondary = components.processor(
+        texts,
+        components.policy_images(wrists),
+        padding=True,
+        return_tensors="pt",
+    ).to(
+        components.model.device, dtype=components.model.dtype
+    )
+    torch = __import__("torch")
+    if not torch.equal(primary["input_ids"], secondary["input_ids"]):
+        raise RuntimeError("Agent and wrist token batches differ")
+    if not torch.equal(primary["attention_mask"], secondary["attention_mask"]):
+        raise RuntimeError("Agent and wrist attention masks differ")
+    primary["pixel_values"] = torch.cat(
+        [primary["pixel_values"], secondary["pixel_values"]], dim=1
+    )
+    return primary
+
+
+def extract_action_hidden_states(components: VLAComponents, inputs: Any):
+    """Differentiable Pro conditioning; frozen backbones retain the no-grad path."""
+    import torch
+    from prismatic.vla.constants import IGNORE_INDEX, NUM_TOKENS, STOP_INDEX
+
+    model = components.model
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
+    pixel_values = inputs["pixel_values"]
+    gradients = torch.is_grad_enabled() and any(p.requires_grad for p in model.parameters())
+    with torch.set_grad_enabled(gradients), torch.autocast("cuda", dtype=torch.bfloat16, enabled=input_ids.is_cuda):
+        labels = input_ids.clone()
+        labels[:] = IGNORE_INDEX
+        prompt_tokens = input_ids.shape[-1] - 1
+        input_ids, attention_mask = model._prepare_input_for_action_prediction(input_ids, attention_mask)
+        labels = model._prepare_labels_for_action_prediction(labels, input_ids)
+        input_embeddings = model.get_input_embeddings()(input_ids)
+        action_mask = model._process_action_masks(labels)
+        language_embeddings = input_embeddings[~action_mask].reshape(
+            input_embeddings.shape[0], -1, input_embeddings.shape[2]
+        )
+        patches = model._process_vision_features(pixel_values, language_embeddings, False)
+        queries = model.action_queries.weight.view(1, -1, model.action_queries.weight.shape[-1]).repeat(
+            input_embeddings.shape[0], 1, 1
+        )
+        input_embeddings = model._replace_input_embeddings(input_embeddings, action_mask, queries)
+        embeddings, multimodal_mask = model._build_multimodal_attention(
+            input_embeddings, patches, attention_mask
+        )
+        output = model.language_model(
+            input_ids=None, attention_mask=multimodal_mask, inputs_embeds=embeddings,
+            labels=None, use_cache=False, output_attentions=False,
+            output_hidden_states=True, return_dict=True,
+        )
+        patch_count = model.vision_backbone.get_num_patches() * model.vision_backbone.get_num_images_in_input()
+        layers = []
+        for hidden in output.hidden_states:
+            action_hidden = hidden[:, patch_count + prompt_tokens:patch_count + prompt_tokens + NUM_TOKENS]
+            action_hidden = action_hidden.reshape(hidden.shape[0], 1, NUM_TOKENS, -1)
+            task_hidden = hidden[:, :patch_count].reshape(hidden.shape[0], 1, patch_count, -1)
+            layers.append(torch.cat((task_hidden, action_hidden), dim=2))
+        return torch.cat(layers, dim=1)
+
+
+def predict_batch(components: VLAComponents, batch: dict, device: Any):
+    import torch
+    inputs = processor_inputs(components, list(batch["prompt"]),
+                              batch["agent_image"].cpu().numpy(), batch["wrist_image"].cpu().numpy())
+    hidden = extract_action_hidden_states(components, inputs)
+    return predict_normalized(components, hidden, batch["proprio"].to(device=device, dtype=torch.bfloat16))
+
+
+def predict_normalized(components: VLAComponents, hidden: Any, proprio: Any):
+    return components.action_head.predict_action(
+        hidden, proprio=proprio, proprio_projector=components.proprio_projector,
+        phase="Inference",
+    )
+
+
+@dataclass(frozen=True)
+class PolicyOverlay:
+    path: Path
+    policy_id: str
+    label: str
+    base_checkpoint: str
+    stats_key: str
+    action_head: Path
+    proprio_projector: Path
+    action_horizon: int
+    action_dim: int
+    proprio_dim: int
+    dataset_sha256: str
+    reward_sha256: str | None
+    training_step: int
+    component_sha256: dict[str, str]
+    compatibility_sha256: str
+    backbone: Path | None = None
+    model_config: dict[str, Any] | None = None
+    parent: dict | None = None
+
+
+def load_overlay(path: Path) -> PolicyOverlay:
+    path = path.expanduser().resolve()
+    raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+    raw, parent = decode_child(raw)
+    required = {"schema_version", "policy_id", "label", "base_checkpoint", "stats_key",
+                "action_head", "proprio_projector", "action_horizon", "action_dim",
+                "proprio_dim", "dataset_sha256", "reward_sha256", "training_step",
+                "component_sha256", "compatibility_sha256"}
+    if isinstance(raw, dict) and raw.get("schema_version") in (2, 3):
+        required.add("algorithm")
+    if isinstance(raw, dict) and raw.get("schema_version") == 3:
+        required.update(("backbone", "model_config"))
+        settings = model_config({"model": raw.get("model_config")})
+        if (settings["backbone"] == "frozen") != (raw.get("backbone") is None):
+            raise ValueError("Overlay backbone artifact does not match its model configuration")
+        if settings["backbone"] != "frozen" and (not isinstance(raw["backbone"], str) or not raw["backbone"].strip()):
+            raise ValueError("Adapted overlay backbone must be a non-empty path")
+    if not isinstance(raw, dict) or set(raw) != required or raw["schema_version"] not in (1, 2, 3):
+        raise ValueError(f"Invalid policy overlay manifest: {path}")
+    if raw.get("algorithm", "iql") not in ("iql", "bc"):
+        raise ValueError("Unknown policy overlay algorithm")
+    if raw.get("algorithm") == "bc" and raw["reward_sha256"] is not None:
+        raise ValueError("BC overlays must not reference rewards")
+    for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
+        if not isinstance(raw[key], str) or not raw[key].strip():
+            raise ValueError(f"Invalid policy overlay field {key}: {path}")
+    if path.parent.name != raw["policy_id"] or Path(raw["policy_id"]).name != raw["policy_id"]:
+        raise ValueError(f"Policy directory must match its safe policy_id: {path}")
+    for key in ("action_horizon", "action_dim", "proprio_dim", "training_step"):
+        if type(raw[key]) is not int or raw[key] < 1:
+            raise ValueError(f"Invalid policy overlay integer {key}: {path}")
+    hashes = raw["component_sha256"]
+    names = {"action_head", "proprio_projector"} | ({"backbone"} if raw.get("backbone") else set())
+    if not isinstance(hashes, dict) or set(hashes) != names:
+        raise ValueError(f"Invalid policy overlay component hashes: {path}")
+    def component(name: str) -> Path:
+        value = Path(raw[name]).expanduser()
+        result = (value if value.is_absolute() else path.parent / value).resolve()
+        if not result.is_file() or path.parent not in result.parents:
+            raise ValueError(f"Overlay component {name} is missing or outside its policy directory")
+        return result
+    settings = model_config({"model": {**(raw.get("model_config") or {}),
+        "base_checkpoint": raw["base_checkpoint"], "stats_key": raw["stats_key"]}})
+    settings["contract"] = legacy_contract(settings)
+    return PolicyOverlay(
+        path, str(raw["policy_id"]), str(raw["label"]), str(raw["base_checkpoint"]),
+        str(raw["stats_key"]), component("action_head"), component("proprio_projector"),
+        int(raw["action_horizon"]), int(raw["action_dim"]), int(raw["proprio_dim"]),
+        str(raw["dataset_sha256"]), raw["reward_sha256"], int(raw["training_step"]),
+        dict(hashes), str(raw["compatibility_sha256"]),
+        component("backbone") if raw.get("backbone") else None, settings, parent,
+    )
+
+
+def validate_overlay(policy: PolicyOverlay, base_checkpoint: str, stats_key: str) -> None:
+    io = model_contract(policy.model_config or {})["io"]
+    expected = (base_checkpoint, stats_key, io["replay_horizon"], io["action_dim"], io["proprio_dim"])
+    actual = (policy.base_checkpoint, policy.stats_key, policy.action_horizon, policy.action_dim, policy.proprio_dim)
+    if actual != expected:
+        raise ValueError(f"Policy overlay is incompatible: expected {expected}, got {actual}")
+    compatibility = {
+        "base_checkpoint": policy.base_checkpoint,
+        "stats_key": policy.stats_key,
+        "action_horizon": policy.action_horizon,
+        "action_dim": policy.action_dim,
+        "proprio_dim": policy.proprio_dim,
+    }
+    if policy.compatibility_sha256 != stable_hash(compatibility):
+        raise ValueError("Policy overlay compatibility hash does not match its manifest")
+    for name, path in (
+        ("action_head", policy.action_head),
+        ("proprio_projector", policy.proprio_projector),
+        ("backbone", policy.backbone),
+    ):
+        if path is None:
+            continue
+        expected_hash = policy.component_sha256.get(name)
+        if not expected_hash or sha256_file(path) != expected_hash:
+            raise ValueError(f"Policy overlay component hash mismatch: {name}")
+
+
+def overlay_public(path: Path) -> dict[str, Any]:
+    policy = load_overlay(path)
+    return {
+        "policy_id": policy.policy_id, "label": policy.label,
+        "base_checkpoint": policy.base_checkpoint, "stats_key": policy.stats_key,
+        "training_step": policy.training_step, "manifest": str(policy.path),
+    }
+
+
+def actor_losses(components, batch, device):
+    prediction = predict_batch(components, batch, device)
+    target = batch.get("actor_actions", batch["actions"])
+    mask = batch.get("actor_action_mask", batch["action_mask"])
+    if prediction.shape[1] != target.shape[1]:
+        prediction = prediction[:, :target.shape[1]]
+    error = (prediction.float() - target.to(device).float()).abs()
+    valid = mask.to(device).float().unsqueeze(-1).expand_as(error)
+    losses = (error * valid).sum((1, 2)) / valid.sum((1, 2)).clamp_min(1.0)
+    return losses, prediction
+
+
+def trainable_parameters(components):
+    from train.models.adaptation import trainable_parameters as parameters
+    return parameters(components)
+
+
+def parameter_counts(components):
+    from train.models.adaptation import parameter_counts as counts
+    return counts(components)
+
+
+def save_actor(components, settings, directory):
+    import torch
+    from train.models.adaptation import save_backbone
+    for name in ("action_head", "proprio_projector"):
+        torch.save({key: value.detach().cpu() for key, value in getattr(components, name).state_dict().items()},
+                   directory / f"{name}.pt")
+    save_backbone(components, settings, directory)
+
+
+def restore_actor(components, settings, directory):
+    import torch
+    from train.models.adaptation import restore_backbone
+    restore_backbone(components, settings, directory)
+    for name in ("action_head", "proprio_projector"):
+        getattr(components, name).load_state_dict(
+            torch.load(directory / f"{name}.pt", map_location="cpu", weights_only=True), strict=True)
+
+
+def export_actor(components, settings, directory, *, checkpoint):
+    import shutil
+    from train.models.adaptation import export_backbone
+    artifacts = {name: f"{name}.pt" for name in ("action_head", "proprio_projector")}
+    for name in artifacts.values():
+        shutil.copy2(checkpoint / name, directory / name)
+    adapted = export_backbone(components, settings, directory)
+    if adapted:
+        artifacts["backbone"] = "backbone.pt"
+    return {"schema_version": 3, "backbone": None, **artifacts,
+            "component_sha256": {name: sha256_file(directory / file) for name, file in artifacts.items()}}

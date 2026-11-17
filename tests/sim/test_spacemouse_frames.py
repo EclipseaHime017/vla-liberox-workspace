@@ -1,0 +1,218 @@
+from dataclasses import replace
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+from scipy.spatial.transform import Rotation
+
+from studio.devices.spacemouse import SpaceMouseInput, SpaceMouseTransform, load_spacemouse_config
+from studio.devices.spacemouse_motion import SpaceMouseActionMapper
+
+
+PANDA_DOWN = np.array([[0., 1., 0.], [1., 0., 0.], [0., 0., -1.]])
+
+
+def mapper_for(rotation, scale=(.05, .05, .05, .5, .5, .5)):
+    controller = SimpleNamespace(use_delta=True, control_dim=6, input_min=-1, input_max=1,
+        output_min=-np.array(scale), output_max=np.array(scale), eef_name="grip_site")
+    state = SimpleNamespace(rotation=rotation, forwards=0)
+    def forward():
+        state.forwards += 1
+    def site_rotation(name):
+        assert name == "grip_site"
+        return state.rotation
+    robot = SimpleNamespace(controller=controller, sim=SimpleNamespace(forward=forward,
+        data=SimpleNamespace(get_site_xmat=site_rotation)))
+    return SpaceMouseActionMapper(SimpleNamespace(env=SimpleNamespace(robots=[robot]))), state
+
+
+def test_world_is_unchanged_and_downward_tool_matches_operator_axes():
+    mapper, state = mapper_for(PANDA_DOWN)
+    action = np.array([.1, -.2, .3, -.4, .5, -.6, 1], dtype=np.float32)
+    assert np.array_equal(mapper.convert(action, "world"), action)
+    assert state.forwards == 0
+    assert np.allclose(mapper.convert(action, "tool"), action)
+    assert state.forwards == 1
+    assert np.array_equal(mapper.convert([0, 0, 0, 0, 0, 0, -1], "tool"), [0, 0, 0, 0, 0, 0, -1])
+    assert state.forwards == 1  # Neutral/stale doesn't invoke physics.
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ([0, 1, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0]),  # Push forward.
+    ([1, 0, 0, 0, 0, 0], [0, -1, 0, 0, 0, 0]),  # Push right.
+    ([0, 0, 1, 0, 0, 0], [0, 0, 1, 0, 0, 0]),  # Lift cap.
+    ([0, 0, 0, 1, 0, 0], [0, 0, 0, 1, 0, 0]),
+    ([0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 0]),
+    ([0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, -1]),
+])
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("yaw", [0, 90, -90])
+def test_raw_cap_directions_follow_tool_without_swapping_front_and_right(raw, expected, sign, yaw):
+    transform = SpaceMouseTransform(replace(load_spacemouse_config(), deadzone=0,
+        smoothing_alpha=1, translation_gain=.2, rotation_gain=.2))
+    _, command = transform.apply(np.array(raw) * sign)
+    turn = Rotation.from_euler("z", yaw, degrees=True).as_matrix()
+    mapper, _ = mapper_for(turn @ PANDA_DOWN)
+    result = mapper.convert(np.r_[command, 1.], "tool")
+    expected = np.asarray(expected) * sign * .2
+    np.testing.assert_allclose(result[:3], turn @ expected[:3], atol=1e-7)
+    np.testing.assert_allclose(result[3:6], turn @ expected[3:], atol=1e-7)
+    assert result[6] == 1.
+
+
+class PandaGripper:
+    dof = 1
+    speed = .01
+
+    def format_action(self, action):
+        self.current_action = np.clip(
+            self.current_action + np.array([-1., 1.]) * self.speed * np.sign(action), -1., 1.)
+        return self.current_action
+
+
+def takeover_mapper():
+    mapper, _ = mapper_for(np.eye(3))
+    mapper.env.model_timestep = .002
+    robot = mapper.robot
+    robot.gripper = PandaGripper()
+    robot.gripper.current_action = np.zeros(1)
+    calls = []
+    def update(*, force):
+        assert force
+        calls.append("update")
+        robot.controller.joint_pos = np.arange(7, dtype=float)
+    def reset(joints):
+        assert calls == ["update"]
+        calls.append("reset")
+        robot.controller.initial_joint = joints
+    def grip(gripper, command):
+        assert calls == ["update", "reset"]
+        robot.ctrl = np.array([.02, -.02]) + .02 * gripper.format_action(command)
+    robot.controller.update = update
+    robot.controller.update_initial_joints = reset
+    robot.grip_action = grip
+    return mapper
+
+
+@pytest.mark.parametrize("commands,hz,target,latch", [
+    ([], 20., [0., 0.], -1.),
+    ([1.] * 6, 20., [-1., 1.], 1.),
+    ([-1.] * 6, 20., [1., -1.], -1.),
+    ([1.] * 6 + [-1., 0.], 20., [-.75, .75], -1.),
+    ([1.] * 6 + [0.], 20., [-1., 1.], 1.),
+    ([1.] * 6 + [-1.], 10., [-.5, .5], -1.),
+])
+def test_takeover_restores_gripper_accumulator_and_pose_without_stepping(commands, hz, target, latch):
+    mapper = takeover_mapper()
+    actions = np.zeros((len(commands), 7))
+    actions[:, 6] = commands
+    original = actions.copy()
+    assert mapper.prepare_takeover(actions, control_hz=hz) == latch
+    np.testing.assert_allclose(mapper.robot.gripper.current_action, target, atol=1e-12)
+    np.testing.assert_allclose(mapper.robot.ctrl, np.array([.02, -.02]) + .02 * np.array(target), atol=1e-12)
+    np.testing.assert_array_equal(mapper.robot.controller.initial_joint, np.arange(7))
+    assert not np.shares_memory(mapper.robot.controller.initial_joint, mapper.robot.controller.joint_pos)
+    np.testing.assert_array_equal(actions, original)
+
+
+@pytest.mark.parametrize("actions,hz", [
+    ([[]], 20.), ([[0.] * 6], 20.), ([[float("nan")] * 7], 20.), ([], 0.), ([], 1000.),
+])
+def test_invalid_takeover_history_does_not_modify_controller(actions, hz):
+    mapper = takeover_mapper()
+    with pytest.raises(ValueError):
+        mapper.prepare_takeover(actions, control_hz=hz)
+    assert not hasattr(mapper.robot.controller, "initial_joint")
+
+
+@pytest.mark.parametrize("axis", range(6))
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("angles", [[0, 0, 0], [180, 0, 90], [35, -42, 90]])
+def test_tool_axes_use_current_orientation_and_real_osc_scales(axis, sign, angles):
+    operator_rotation = Rotation.from_euler("xyz", angles, degrees=True).as_matrix()
+    rotation = operator_rotation @ PANDA_DOWN
+    scales = np.array([.02, .05, .08, .2, .4, .6])
+    mapper, state = mapper_for(rotation, scales)
+    action = np.zeros(7)
+    action[axis], action[6] = sign * .1, -1
+    out = mapper.convert(action, "tool")
+    group = slice(0, 3) if axis < 3 else slice(3, 6)
+    assert np.allclose(out[:3] * scales[:3], operator_rotation @ (action[:3] * scales[:3]), atol=1e-9)
+    assert np.allclose(out[3:6] * scales[3:], operator_rotation @ (action[3:6] * scales[3:]), atol=1e-9)
+    assert out[6] == -1
+    assert not mapper.limited
+    # Local rotation is a right multiplication; world OSC is left multiplication.
+    assert np.allclose(Rotation.from_rotvec(out[3:6] * scales[3:]).as_matrix() @ operator_rotation,
+                       operator_rotation @ Rotation.from_rotvec(action[3:6] * scales[3:]).as_matrix())
+    state.rotation = PANDA_DOWN
+    assert np.allclose(mapper.convert(action, "tool")[group], action[group])
+    assert np.array_equal(mapper.convert(action, "world"), action.astype(np.float32))
+    assert state.forwards == 2
+
+
+def test_rotated_input_limits_preserve_direction_and_exclusivity():
+    mapper, _ = mapper_for(Rotation.from_euler("z", 45, degrees=True).as_matrix() @ PANDA_DOWN)
+    output = mapper.convert([1, 1, 0, 0, 0, 0, 1], "tool")
+    assert mapper.limited
+    assert np.allclose(output, [0, 1, 0, 0, 0, 0, 1], atol=1e-7)
+    assert np.max(np.abs(output)) <= 1
+    for mode in ("world", "tool"):
+        with pytest.raises(ValueError, match="finite seven-vector"):
+            mapper.convert([float("nan")] * 7, mode)
+    with pytest.raises(ValueError, match="control_frame"):
+        mapper.convert(np.zeros(7), "camera")
+
+
+def test_frame_switch_requires_real_neutral_not_ambiguous_or_stale_zero():
+    clock = [10.]
+    mouse = SpaceMouseInput(replace(load_spacemouse_config(), smoothing_alpha=.5), clock=lambda: clock[0])
+    mouse._connected = True
+    mouse.reset_for_arm(gripper=1)
+    mouse._accept_event(1, (.5, 0, 0, .5, 0, 0), (0, 0))
+    assert not any(mouse.latest_snapshot().command_axes)  # Ambiguous, not neutral!
+    mouse.request_control_frame("tool")
+    snapshot = mouse.latest_snapshot()
+    assert snapshot.control_frame == "world" and snapshot.pending_control_frame == "tool"
+    clock[0] += .3
+    assert mouse.latest_snapshot().stale
+    assert mouse.latest_snapshot().control_frame == "world"
+    mouse._accept_event(2, (0,) * 6, (0, 0))
+    snapshot = mouse.latest_snapshot()
+    assert snapshot.control_frame == "tool" and snapshot.pending_control_frame is None
+    assert snapshot.motion_intent == "idle"
+    assert snapshot.action == (0., 0., 0., 0., 0., 0., 1.)
+    mouse._accept_event(3, (.8, 0, 0, .1, 0, 0), (0, 0))
+    assert mouse.latest_snapshot().motion_intent == "translation"
+    mouse.request_control_frame("world")
+    assert mouse.latest_snapshot().control_frame == "tool"
+    mouse.request_control_frame("tool")  # Cancel a pending request without resetting input.
+    assert mouse.latest_snapshot().pending_control_frame is None
+    assert any(mouse.latest_snapshot().command_axes)
+    mouse.reset_for_arm(gripper=1, control_frame="world")
+    assert mouse.latest_snapshot().control_frame == "world"
+    assert not any(mouse.latest_snapshot().command_axes)
+
+
+def test_frame_switch_accepts_observed_silent_neutral_and_keeps_calibration():
+    clock = [10.]
+    mouse = SpaceMouseInput(load_spacemouse_config(), clock=lambda: clock[0])
+    mouse._connected = True
+    mouse.transform.bias[:] = .02
+    mouse._accept_event(1, (.02,) * 6, (0, 1))
+    clock[0] += 1  # Neutral devices need not keep sending reports.
+    mouse.request_control_frame("tool")
+    snapshot = mouse.latest_snapshot()
+    assert snapshot.control_frame == "tool" and snapshot.action[-1] == 1
+    assert np.all(mouse.transform.bias == .02)
+
+
+def test_config_frame_is_strict_and_defaults_world_for_old_files(tmp_path):
+    from studio.devices.spacemouse import DEFAULT_SPACEMOUSE_CONFIG
+    source = DEFAULT_SPACEMOUSE_CONFIG.read_text()
+    path = tmp_path / "mouse.yaml"
+    for invalid in ("camera", "true", "null"):
+        path.write_text(source.replace("control_frame: world", f"control_frame: {invalid}"))
+        with pytest.raises((TypeError, ValueError), match="control_frame"):
+            load_spacemouse_config(path)
+    path.write_text(source.replace("control_frame: world", ""))
+    assert load_spacemouse_config(path).control_frame == "world"

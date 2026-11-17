@@ -1,0 +1,105 @@
+"""Model-owned job snapshots; task services treat these as opaque selections."""
+from pathlib import Path
+import re
+
+from studio.policies.catalog import PolicyCatalog
+from studio.policies.registry import model_module, policy_adapter
+
+
+def _contract_identity(contract):
+    return model_module("image_transforms").canonical_contract(contract)
+
+
+COMMON = {"policy_id", "label", "base_checkpoint", "stats_key", "manifest", "action_head",
+          "proprio_projector", "training_step", "compatibility_sha256", "family",
+          "content_sha256", "base_revision"}
+
+
+def snapshot(entry):
+    value = {key: getattr(entry, key) for key in COMMON}
+    value["model_config"] = entry.settings
+    value["model_contract"] = model_module("base_models").model_contract(entry.settings)
+    if entry.manifest is None and "contract" not in (entry.model_config or {}):
+        value["model_config"].pop("contract", None)
+    if entry.backbone is not None:
+        value["backbone"] = entry.backbone
+    for name in policy_adapter(entry.family).SNAPSHOT_FIELDS:
+        value[name] = entry.artifact_path(name)
+    return {key: str(item) if isinstance(item, Path) else item for key, item in value.items()}
+
+
+def validate_snapshot(value):
+    if not isinstance(value, dict):
+        raise ValueError("Unsupported policy snapshot family")
+    adapter = policy_adapter(value.get("family"))
+    required = COMMON | ({"model_config", *adapter.SNAPSHOT_FIELDS} if adapter.SNAPSHOT_FIELDS else set())
+    allowed = required | {"model_config", "model_contract", "backbone"}
+    if not required <= value.keys() or value.keys() - allowed:
+        raise ValueError("policy_snapshot keys mismatch")
+    for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
+        if not isinstance(value[key], str) or not value[key].strip():
+            raise ValueError(f"Invalid policy_snapshot.{key}")
+    if Path(value["policy_id"]).name != value["policy_id"] or value["policy_id"] in {".", ".."}:
+        raise ValueError("Unsafe policy snapshot ID")
+    if re.fullmatch(r"[0-9a-f]{64}", str(value["content_sha256"])) is None:
+        raise ValueError("Unverified policy snapshot; register the evaluation again")
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(value["base_revision"])) is None:
+        raise ValueError("Base checkpoint revision must be immutable; register the evaluation again")
+    settings = None
+    if "model_config" in value:
+        settings = model_module("models").model_config({"model": value["model_config"]})
+        if any(settings[key] != value[key] for key in ("family", "base_checkpoint", "stats_key")):
+            raise ValueError("Snapshot model settings conflict with its identity")
+    if "model_contract" in value:
+        contract = model_module("base_models").validate_contract(value["model_contract"], value["family"])
+        if settings and "contract" in settings and _contract_identity(settings["contract"]) != _contract_identity(contract):
+            raise ValueError("Snapshot model input contract conflicts with its settings")
+    if any(value.get(key) is not None for key in adapter.FORBIDDEN_FIELDS):
+        raise ValueError("Snapshot contains artifacts from a different model adapter")
+    if value["manifest"] is None:
+        if value["policy_id"] != (settings["base_id"] if settings else "base"):
+            raise ValueError("Base policy ID does not match its model family")
+        for key in ("action_head", "proprio_projector", "backbone", *adapter.SNAPSHOT_FIELDS, "training_step", "compatibility_sha256"):
+            if value.get(key) is not None:
+                raise ValueError(f"Base policy snapshot must set {key} to null")
+    else:
+        for key in ("manifest", *adapter.ARTIFACTS, *(("backbone",) if "backbone" in value else ())):
+            name = value[key]
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"Invalid policy_snapshot.{key}")
+            path = Path(name).expanduser()
+            if not path.is_absolute() or path.is_symlink() or not path.is_file():
+                raise FileNotFoundError(f"policy_snapshot.{key} is not a safe existing absolute file")
+            value[key] = str(path.resolve())
+        if type(value["training_step"]) is not int or value["training_step"] < 1:
+            raise ValueError("Invalid policy_snapshot.training_step")
+        if re.fullmatch(r"[0-9a-f]{64}", str(value["compatibility_sha256"])) is None:
+            raise ValueError("policy_snapshot.compatibility_sha256 must be SHA256")
+    return value
+
+
+def catalog_from_snapshot(value, empty_registry):
+    validate_snapshot(value)
+    manifest = value["manifest"]
+    registry = Path(manifest).parent.parent if manifest else empty_registry
+    settings = value.get("model_config", {"family": value["family"],
+        "base_checkpoint": value["base_checkpoint"], "stats_key": value["stats_key"]})
+    base_id = model_module("models").model_config({"model": settings})["base_id"]
+    contract = value.get("model_contract")
+    if contract is None:
+        contract = model_module("model_artifacts").legacy_contract(settings)
+    catalog = PolicyCatalog(registry, base_models={base_id: settings},
+                            base_revisions={base_id: value["base_revision"]},
+                            base_contracts={base_id: contract})
+    entry = catalog.select(value["policy_id"])
+    if entry.content_sha256 != value["content_sha256"]:
+        raise ValueError("Selected policy weights changed after evaluation registration")
+    if _contract_identity(model_module("base_models").model_contract(entry.settings)) != _contract_identity(contract):
+        raise ValueError("Selected policy input contract changed after evaluation registration")
+    if manifest:
+        for key in ("manifest", *policy_adapter(entry.family).ARTIFACTS, *(("backbone",) if "backbone" in value else ())):
+            if entry.artifact_path(key) != Path(value[key]).resolve():
+                raise ValueError("Policy snapshot does not match its validated registry entry")
+        if (entry.training_step, entry.compatibility_sha256) != (value["training_step"], value["compatibility_sha256"]):
+            raise ValueError("Policy snapshot metadata differs from the validated model")
+    return catalog

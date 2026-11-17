@@ -1,0 +1,162 @@
+"""FastAPI composition root for the local LIBERO-X data studio."""
+
+from __future__ import annotations
+
+from core.paths import WEB
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+import sim.env as direct
+
+from studio.api import (
+    controller,
+    datasets,
+    drafts,
+    evaluations,
+    offline_jobs,
+    policies,
+    runs,
+    tools,
+    training_datasets,
+    websocket,
+)
+from studio.api.models import CreateBranchRequest, DeleteSessionRequest, DraftRequest, UpdateDraftRequest
+from studio.config import DEFAULT_UI_CONFIG, UIConfig, load_ui_config
+from studio.frontend import frontend_build_info
+from studio.services.run_service import RunService
+from studio.services.dataset_export_service import DatasetExportService
+from studio.services.offline_job_service import OfflineJobService
+from studio.services.critic_diagnostic_service import CriticDiagnosticService
+from studio.services.training_dataset_service import TrainingDatasetService
+from studio.services.trajectory_evaluation_service import TrajectoryEvaluationService
+from studio.services.robometer_evaluation_service import RobometerEvaluationService
+from studio.services.stage_annotation_service import StageAnnotationService
+from studio.services.storage_maintenance import StorageMaintenance, StorageRequestGate
+from studio.workers.simulation_worker import SimulationManager
+
+
+FRONTEND_ROOT = WEB
+FRONTEND_DIST = FRONTEND_ROOT / "dist"
+
+
+def create_app(
+    ui_config: UIConfig | None = None,
+    eval_config: direct.EvalConfig | None = None,
+    manager: SimulationManager | None = None,
+) -> FastAPI:
+    """Compose adapters while retaining injectable workers for tests."""
+    ui_config = ui_config or load_ui_config(DEFAULT_UI_CONFIG)
+    eval_config = eval_config or direct.load_config(direct.DEFAULT_CONFIG_PATH.resolve())
+    maintenance = StorageMaintenance(ui_config)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        with maintenance:
+            owned = manager is None
+            worker = manager or SimulationManager(ui_config, eval_config)
+            app.state.manager = worker  # compatibility for local diagnostics
+            app.state.run_service = RunService(worker)
+            if hasattr(ui_config, "project_root"):
+                app.state.robometer_evaluation_service = RobometerEvaluationService(
+                    app.state.run_service, ui_config.project_root
+                )
+                app.state.trajectory_evaluation_service = TrajectoryEvaluationService(
+                    app.state.run_service, ui_config.project_root
+                )
+                app.state.stage_annotation_service = StageAnnotationService(
+                    app.state.run_service, ui_config.workspace_root,
+                )
+                app.state.training_dataset_service = TrainingDatasetService(
+                    app.state.run_service, ui_config,
+                    app.state.trajectory_evaluation_service,
+                    app.state.robometer_evaluation_service,
+                )
+                app.state.offline_job_service = OfflineJobService(
+                    ui_config, worker, app.state.training_dataset_service,
+                    app.state.trajectory_evaluation_service,
+                    app.state.robometer_evaluation_service,
+                    stage_annotations=app.state.stage_annotation_service,
+                )
+                app.state.critic_diagnostic_service = CriticDiagnosticService(app.state.offline_job_service)
+                worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
+                worker.work_queue = app.state.offline_job_service
+                app.state.dataset_export_service = DatasetExportService(
+                    app.state.training_dataset_service, ui_config, app.state.offline_job_service)
+                app.state.offline_job_service.start_training_queue()
+            else:
+                app.state.dataset_export_service = None
+                app.state.training_dataset_service = None
+                app.state.trajectory_evaluation_service = None
+                app.state.robometer_evaluation_service = None
+                app.state.offline_job_service = None
+                app.state.critic_diagnostic_service = None
+                app.state.stage_annotation_service = None
+            try:
+                yield
+            finally:
+                exports = getattr(app.state, "dataset_export_service", None)
+                if exports is not None:
+                    await asyncio.to_thread(exports.close)
+                offline = getattr(app.state, "offline_job_service", None)
+                if offline is not None:
+                    # Physical output must stop before waiting for CUDA/local jobs.
+                    factr = getattr(worker, "factr_controller", None)
+                    if factr is not None:
+                        await asyncio.to_thread(factr.close)
+                    await asyncio.to_thread(offline.close)
+                if owned:
+                    await asyncio.to_thread(app.state.run_service.close)
+
+    app = FastAPI(
+        title="LIBERO-X Local Data Studio",
+        version="0.8.0",
+        lifespan=lifespan,
+    )
+    app.state.storage_maintenance = maintenance
+    app.add_middleware(StorageRequestGate, maintenance=maintenance)
+    app.include_router(runs.router)
+    app.include_router(drafts.router)
+    app.include_router(controller.router)
+    app.include_router(datasets.router)
+    app.include_router(training_datasets.router)
+    app.include_router(evaluations.router)
+    app.include_router(offline_jobs.router)
+    app.include_router(tools.router)
+    app.include_router(policies.router)
+    app.include_router(websocket.router)
+
+    @app.get("/api/build-info", tags=["diagnostics"])
+    async def build_info():
+        return frontend_build_info(FRONTEND_ROOT)
+
+    if (FRONTEND_DIST / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def frontend(path: str):
+        if path.startswith(("api/", "ws/")):
+            raise HTTPException(status_code=404)
+        index = FRONTEND_DIST / "index.html"
+        if index.is_file():
+            return FileResponse(index, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(
+            "<h1>LIBERO-X frontend is not built</h1>"
+            "<p>Run npm install && npm run build in frontend/.</p>",
+            status_code=503,
+        )
+
+    return app
+
+
+__all__ = [
+    "CreateBranchRequest",
+    "DeleteSessionRequest",
+    "DraftRequest",
+    "UpdateDraftRequest",
+    "create_app",
+]

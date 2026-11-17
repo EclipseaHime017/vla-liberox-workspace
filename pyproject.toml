@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vla-liberox"
+version = "0.9.0"
+description = "LIBERO-X VLA post-training: simulation studio, training methods, rewards and cluster runs"
+requires-python = ">=3.10,<3.12"
+# Only light dependencies shared by every environment. Heavy, version-conflicting
+# stacks (TensorFlow/VLA-Adapter, OpenPI, RynnValue, Robometer, simulation, UI)
+# are installed per device role from envs/, see docs/install.md.
+dependencies = ["numpy>=1.26,<2", "PyYAML>=6,<7", "Pillow>=10,<13"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "sim*", "rewards*", "train*", "cluster*", "studio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

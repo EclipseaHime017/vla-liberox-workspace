@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from core.data import REPLAY_POLICY, training_replay_policy
+from rewards.manifest import reward_manifest_digest
+from train.trainer import _restore_checkpoint, _save_checkpoint
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_resume_rejects_camera_direction_change(configured, tmp_path, legacy):
+    from core.registry import model_contract
+    from core.artifacts import parent_snapshot
+    from core.model_config import model_config
+
+    settings = model_config(configured.raw)
+    original = parent_snapshot(settings, "a" * 64)
+    settings["contract"] = model_contract(settings)
+    settings["contract"]["observation"].update(image_flip_vertical=True, image_flip_horizontal=False)
+    configured.raw["model"] = settings
+    components = SimpleNamespace(parent=parent_snapshot(settings, "a" * 64))
+    (tmp_path / "checkpoint.json").write_text(json.dumps({"model_parent": None if legacy else original}))
+    with pytest.raises(ValueError, match="different (model input contract|parent model)"):
+        _restore_checkpoint(tmp_path, components, None, None, None, torch.device("cpu"), configured, {}, None)
+
+
+@pytest.mark.parametrize("include", [True, False])
+def test_checkpoint_records_selected_replay_policy(configured, tmp_path, monkeypatch, include):
+    configured.raw["data"]["include_post_success"] = include
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    components = SimpleNamespace(
+        action_head=torch.nn.Linear(1, 1), proprio_projector=torch.nn.Linear(1, 1),
+        stats_key="test",
+    )
+    optimizer = torch.optim.Adam(components.action_head.parameters())
+    checkpoint = _save_checkpoint(
+        tmp_path, 1, components, SimpleNamespace(checkpoint=lambda: {}), optimizer,
+        torch.Generator(), configured, {"dataset_sha256": "dataset", "action_horizon": 8}, {},
+    )
+    assert json.loads((checkpoint / "checkpoint.json").read_text())["replay_policy"] == training_replay_policy(include)
+
+
+@pytest.mark.parametrize("split,terminal,recorded,policy,reject", [
+    ("train", 17, 22, None, True),
+    ("train", 17, 22, REPLAY_POLICY, False),
+    ("train", 17, 22, "confirmed_success_v1", True),
+    ("train", None, 22, None, False),
+    ("train", 21, 22, None, False),
+    ("validation", 17, 22, None, False),
+])
+@pytest.mark.parametrize("include", [True, False])
+def test_resume_checks_changed_training_sample_policy(
+    configured, tmp_path, monkeypatch, split, terminal, recorded, policy, reject, include,
+):
+    configured.raw["data"]["include_post_success"] = include
+    if split == "train" and terminal is not None and recorded > terminal + 1:
+        reject = policy != training_replay_policy(include)
+    rewards = {}
+    metadata = {
+        "training_layout": {"chunking": None, "actor_horizon": 8, "transition_horizon": 8},
+        "dataset_sha256": "dataset", "reward_sha256": reward_manifest_digest(rewards),
+        "base_checkpoint": configured.section("model")["base_checkpoint"],
+        "stats_key": "test", "replay_policy": policy,
+    }
+    (tmp_path / "checkpoint.json").write_text(json.dumps(metadata))
+    manifest = {"dataset_sha256": "dataset", "action_horizon": 8, "episodes": [{
+        "split": split, "terminal_step": terminal, "recorded_action_count": recorded,
+    }]}
+    components = SimpleNamespace(action_head=torch.nn.Linear(1, 1), stats_key="test")
+
+    class WeightsReached(Exception):
+        pass
+
+    def load_weights(*args, **kwargs):
+        raise WeightsReached
+
+    monkeypatch.setattr(torch, "load", load_weights)
+    expected = pytest.raises(ValueError, match="Start a new run") if reject else pytest.raises(WeightsReached)
+    with expected:
+        _restore_checkpoint(tmp_path, components, None, None, None,
+                            torch.device("cpu"), configured, manifest, rewards)
+
+
+# Server-branch coverage merged into main.
+from core.registry import model_contract  # noqa: E402
+
+@pytest.mark.parametrize("changed", ["actor_horizon", "transition_horizon", "chunking", "missing", "contract"])
+def test_resume_rejects_changed_training_geometry(configured, tmp_path, monkeypatch, changed):
+    manifest = {"dataset_sha256": "dataset", "action_horizon": 8, "episodes": []}
+    layout = {"chunking": None, "actor_horizon": 8, "transition_horizon": 8}
+    contract = model_contract(configured.section("model"))
+    metadata = {
+        "dataset_sha256": "dataset", "reward_sha256": reward_manifest_digest({}),
+        "base_checkpoint": configured.section("model")["base_checkpoint"], "stats_key": "test",
+        "training_layout": layout, "model_contract": contract,
+    }
+    if changed == "missing":
+        metadata.pop("training_layout")
+    elif changed == "contract":
+        contract["io"]["replay_horizon"] = 5
+    else:
+        layout[changed] = "old" if changed == "chunking" else 5
+    (tmp_path / "checkpoint.json").write_text(json.dumps(metadata))
+    components = SimpleNamespace(stats_key="test")
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("incompatible checkpoint must be rejected before loading weights")
+
+    monkeypatch.setattr(torch, "load", unexpected_load)
+    with pytest.raises(ValueError, match="input contract|training_layout"):
+        _restore_checkpoint(tmp_path, components, None, None, None,
+                            torch.device("cpu"), configured, manifest, {})

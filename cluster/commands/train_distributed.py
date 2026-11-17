@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""torchrun worker for registered models and BC/IQL methods."""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
+
+from core.config import load_train_config
+from cluster.config import distributed_config
+from train.distributed import train_distributed
+from core.resources import register_worker
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--execution", type=Path, required=True)
+    args = parser.parse_args()
+    execution = json.loads(args.execution.read_text())
+    register_worker(execution.get("resource_token"))
+    train_distributed(load_train_config(args.config), distributed_config(execution["distributed"]),
+                      Path(execution["cache_root"]), Path(execution["run_dir"]))
+
+
+if __name__ == "__main__":
+    main()

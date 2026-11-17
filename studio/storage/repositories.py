@@ -1,0 +1,436 @@
+"""Repository for managed run metadata and aggregate metrics."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from studio.storage.database import connect, migrate
+
+
+class RunRepository:
+    def __init__(self, database_path: Path, project_id: str):
+        self.database_path = database_path
+        self.project_id = project_id
+        migrate(database_path)
+
+    def upsert(self, run: dict[str, Any], run_path: Path) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO runs (
+                    id, project_id, kind, task_id, task_name, level, status,
+                    success, action_count, parent_session_id, created_at,
+                    completed_at, run_path, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind=excluded.kind,
+                    task_id=excluded.task_id,
+                    task_name=excluded.task_name,
+                    level=excluded.level,
+                    status=excluded.status,
+                    success=excluded.success,
+                    action_count=excluded.action_count,
+                    parent_session_id=excluded.parent_session_id,
+                    completed_at=excluded.completed_at,
+                    run_path=excluded.run_path,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    run["id"], self.project_id, run.get("kind", "original"),
+                    run.get("task_id"), run.get("task_name"), run.get("level"),
+                    run.get("status", "ERROR"), int(bool(run.get("success"))),
+                    int(run.get("action_count", 0) or 0), run.get("parent_session_id"),
+                    run.get("created_at"), run.get("completed_at"), str(run_path.resolve()),
+                ),
+            )
+
+    def delete(self, run_id: str) -> None:
+        with connect(self.database_path) as database:
+            database.execute("DELETE FROM run_labels WHERE run_id = ? AND project_id = ?",
+                             (run_id, self.project_id))
+            database.execute(
+                "DELETE FROM runs WHERE id = ? AND project_id = ?",
+                (run_id, self.project_id),
+            )
+
+    def summary(self) -> dict[str, Any]:
+        with connect(self.database_path) as database:
+            totals = database.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed,
+                       SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS errors,
+                       SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes
+                FROM runs WHERE project_id = ?
+                """,
+                (self.project_id,),
+            ).fetchone()
+            tasks = database.execute(
+                """
+                SELECT task_id, task_name, level, COUNT(*) AS runs,
+                       SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes
+                FROM runs WHERE project_id = ?
+                GROUP BY task_id, task_name, level ORDER BY runs DESC, task_name
+                """,
+                (self.project_id,),
+            ).fetchall()
+        total = int(totals["total"] or 0)
+        successes = int(totals["successes"] or 0)
+        return {
+            "project_id": self.project_id,
+            "runs": total,
+            "completed": int(totals["completed"] or 0),
+            "errors": int(totals["errors"] or 0),
+            "successes": successes,
+            "success_rate": successes / total if total else 0.0,
+            "tasks": [
+                {
+                    **dict(row),
+                    "runs": int(row["runs"]),
+                    "successes": int(row["successes"] or 0),
+                    "success_rate": int(row["successes"] or 0) / int(row["runs"]),
+                }
+                for row in tasks
+            ],
+        }
+
+
+class RunLabelRepository:
+    """Mutable catalog labels kept separate from immutable trajectory files."""
+
+    def __init__(self, database_path: Path, project_id: str):
+        self.database_path = database_path
+        self.project_id = project_id
+        migrate(database_path)
+
+    def is_test(self, run_id: str) -> bool:
+        with connect(self.database_path) as database:
+            row = database.execute(
+                "SELECT is_test FROM run_labels WHERE project_id = ? AND run_id = ?",
+                (self.project_id, run_id),
+            ).fetchone()
+        return bool(row["is_test"]) if row is not None else False
+
+    def test_ids(self) -> set[str]:
+        with connect(self.database_path) as database:
+            rows = database.execute(
+                "SELECT run_id FROM run_labels WHERE project_id = ? AND is_test = 1",
+                (self.project_id,),
+            ).fetchall()
+        return {str(row["run_id"]) for row in rows}
+
+    def set_test(self, run_id: str, is_test: bool) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO run_labels(project_id, run_id, is_test, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(project_id, run_id) DO UPDATE SET
+                    is_test=excluded.is_test,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (self.project_id, run_id, int(is_test)),
+            )
+
+
+class TrainingDatasetRepository:
+    """SQLite index for immutable dataset manifests and their run references."""
+
+    def __init__(self, database_path: Path, project_id: str):
+        self.database_path = database_path
+        self.project_id = project_id
+        migrate(database_path)
+
+    def upsert(self, dataset: dict[str, Any], manifest_path: Path) -> None:
+        members = dataset.get("members") or []
+        with connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO training_datasets (
+                    id, project_id, task_id, name, status, integrity_status,
+                    annotation_status, member_count, parent_dataset_id,
+                    manifest_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    status=excluded.status,
+                    integrity_status=excluded.integrity_status,
+                    annotation_status=excluded.annotation_status,
+                    member_count=excluded.member_count,
+                    manifest_path=excluded.manifest_path,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    dataset["id"], self.project_id, dataset["task_id"], dataset["name"],
+                    dataset["status"], dataset["integrity_status"],
+                    dataset["annotation_status"], len(members),
+                    dataset.get("parent_dataset_id"), str(manifest_path.resolve()),
+                    dataset["created_at"],
+                ),
+            )
+            database.execute(
+                "DELETE FROM training_dataset_members WHERE dataset_id = ?",
+                (dataset["id"],),
+            )
+            database.executemany(
+                """
+                INSERT INTO training_dataset_members (
+                    dataset_id, run_id, source_type, outcome
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (
+                        dataset["id"], member["run_id"], member["source_type"],
+                        member["outcome"],
+                    )
+                    for member in members
+                ],
+            )
+
+    def references_for_run(self, run_id: str) -> list[dict[str, Any]]:
+        with connect(self.database_path) as database:
+            rows = database.execute(
+                """
+                SELECT d.id, d.name, d.status, d.integrity_status
+                FROM training_dataset_members m
+                JOIN training_datasets d ON d.id = m.dataset_id
+                WHERE m.run_id = ? AND d.project_id = ?
+                ORDER BY d.created_at DESC
+                """,
+                (run_id, self.project_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete(self, dataset_id: str) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                "DELETE FROM training_datasets WHERE id = ? AND project_id = ?",
+                (dataset_id, self.project_id),
+            )
+
+
+class OfflineJobRepository:
+    """Small recoverable index; job.json remains the durable source of truth."""
+
+    def __init__(self, database_path: Path, project_id: str):
+        self.database_path = database_path
+        self.project_id = project_id
+        migrate(database_path)
+
+    def active_ids(self) -> list[str]:
+        with connect(self.database_path) as database:
+            return [row["id"] for row in database.execute(
+                "SELECT id FROM offline_jobs WHERE project_id=? AND status IN ('STARTING','RUNNING','STOPPING')",
+                (self.project_id,),
+            )]
+
+    def fail_unreadable_job(self, job_id: str) -> None:
+        # Keep corrupt/missing manifests untouched, but don't let an orphaned
+        # index entry permanently block unrelated pending jobs.
+        with connect(self.database_path) as database:
+            for table in ("offline_jobs", "training_runs", "annotation_runs"):
+                database.execute(f"UPDATE {table} SET status='FAILED', completed_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?",
+                                 (job_id, self.project_id))
+
+    def indexed_job(self, job_id: str) -> dict:
+        with connect(self.database_path) as database:
+            row = database.execute("SELECT * FROM offline_jobs WHERE id=? AND project_id=?",
+                                   (job_id, self.project_id)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            return dict(row)
+
+    def training_queue_ids(self, *, pending_only: bool = False) -> list[str]:
+        return self.queue_ids(kind="training", pending_only=pending_only)
+
+    def queue_ids(self, *, kind: str | None = None, pending_only: bool = False) -> list[str]:
+        """All pending runs plus a bounded recent history, in registration order."""
+        kind_filter = "1=1" if kind is None else "kind=?"
+        parameters = (self.project_id,) if kind is None else (self.project_id, kind)
+        with connect(self.database_path) as database:
+            if pending_only:
+                return [row["id"] for row in database.execute(
+                    f"""SELECT id FROM offline_jobs WHERE project_id=? AND {kind_filter}
+                    AND status IN ('QUEUED','STARTING','RUNNING','STOPPING') ORDER BY created_at, id""",
+                    parameters,
+                )]
+            return [row["id"] for row in database.execute(
+                f"""SELECT id FROM offline_jobs WHERE project_id=? AND {kind_filter}
+                AND (status IN ('QUEUED','STARTING','RUNNING','STOPPING') OR id IN (
+                    SELECT id FROM offline_jobs WHERE project_id=? AND {kind_filter}
+                    ORDER BY created_at DESC, id DESC LIMIT 20
+                )) ORDER BY created_at, id""", parameters + parameters,
+            )]
+
+    def upsert(self, job: dict[str, Any], job_path: Path) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO offline_jobs (
+                    id, project_id, kind, status, dataset_id, job_path, pid,
+                    created_at, completed_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    status=excluded.status, pid=excluded.pid,
+                    completed_at=excluded.completed_at,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    job["id"], self.project_id, job["kind"], job["status"],
+                    job.get("dataset_id"), str(job_path.resolve()), job.get("pid"),
+                    job["created_at"], job.get("completed_at"),
+                ),
+            )
+            if job["kind"] == "annotation":
+                output = Path(str(job.get("output_path") or ""))
+                reward_manifest = output / "work" / "rewards" / "reward_manifest.json"
+                database.execute(
+                    """
+                    INSERT INTO annotation_runs (
+                        id, project_id, dataset_id, job_id, status,
+                        manifest_path, created_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        status=excluded.status,
+                        manifest_path=excluded.manifest_path,
+                        completed_at=excluded.completed_at
+                    """,
+                    (
+                        job["id"], self.project_id, job["dataset_id"], job["id"],
+                        job["status"],
+                        str(reward_manifest.resolve()) if reward_manifest.is_file() else None,
+                        job["created_at"],
+                        job.get("completed_at"),
+                    ),
+                )
+
+            elif job["kind"] == "training":
+                # Sparse/Stage have no model annotation. Preserve JSON null, but
+                # use the existing NOT NULL catalog's empty-string sentinel.
+                annotation_id = (job.get("parameters") or {}).get("annotation_id") or ""
+                overlay = None
+                output = Path(str(job.get("output_path") or ""))
+                if output.is_dir():
+                    candidates = sorted(output.glob("*/summary.json"))
+                    if candidates:
+                        try:
+                            summary = json.loads(candidates[-1].read_text(encoding="utf-8"))
+                            overlay = summary.get("policy_overlay")
+                        except Exception:
+                            overlay = None
+                database.execute(
+                    """
+                    INSERT INTO training_runs (
+                        id, project_id, dataset_id, annotation_id, job_id,
+                        status, output_path, overlay_path, created_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        status=excluded.status,
+                        output_path=excluded.output_path,
+                        overlay_path=excluded.overlay_path,
+                        completed_at=excluded.completed_at
+                    """,
+                    (
+                        job["id"], self.project_id, job["dataset_id"],
+                        annotation_id,
+                        job["id"], job["status"], job.get("output_path"), overlay,
+                        job["created_at"], job.get("completed_at"),
+                    ),
+                )
+
+    def references_for_dataset(self, dataset_id: str) -> list[dict[str, Any]]:
+        with connect(self.database_path) as database:
+            rows = database.execute(
+                """
+                SELECT id, kind, status
+                FROM offline_jobs
+                WHERE project_id = ? AND dataset_id = ?
+                ORDER BY created_at DESC
+                """,
+                (self.project_id, dataset_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete(self, job_id: str) -> None:
+        with connect(self.database_path) as database:
+            for table in ("training_runs", "annotation_runs"):
+                database.execute(f"DELETE FROM {table} WHERE job_id = ? AND project_id = ?",
+                                 (job_id, self.project_id))
+            database.execute(
+                "DELETE FROM offline_jobs WHERE id = ? AND project_id = ?",
+                (job_id, self.project_id),
+            )
+
+
+class EvaluationRepository:
+    """Recoverable index for lightweight policy evaluation manifests."""
+
+    def __init__(self, database_path: Path, project_id: str):
+        self.database_path = database_path
+        self.project_id = project_id
+        migrate(database_path)
+
+    def upsert(self, evaluation: dict[str, Any], manifest_path: Path) -> None:
+        aggregate = evaluation.get("aggregate") or evaluation.get("summary") or {}
+        config = evaluation.get("config") or {}
+        evaluation_id = str(evaluation.get("evaluation_id") or evaluation.get("id"))
+        with connect(self.database_path) as database:
+            database.execute(
+                """
+                INSERT INTO evaluation_runs (
+                    id, project_id, task_id, policy_id, job_id, status, trials,
+                    attempted, successes, result_path, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    task_id=excluded.task_id,
+                    policy_id=excluded.policy_id,
+                    status=excluded.status,
+                    trials=excluded.trials,
+                    attempted=excluded.attempted,
+                    successes=excluded.successes,
+                    result_path=excluded.result_path,
+                    completed_at=excluded.completed_at
+                """,
+                (
+                    evaluation_id,
+                    self.project_id,
+                    (
+                        evaluation.get("task_snapshot")
+                        or evaluation.get("task")
+                        or {}
+                    ).get("task_id", ""),
+                    (
+                        evaluation.get("policy_snapshot")
+                        or evaluation.get("policy")
+                        or {}
+                    ).get("policy_id", ""),
+                    str(evaluation.get("job_id") or evaluation_id),
+                    str(evaluation.get("status") or "FAILED"),
+                    int(config.get("trials", evaluation.get("trial_count", 0)) or 0),
+                    int(aggregate.get("attempted", aggregate.get("attempted_count", 0)) or 0),
+                    int(aggregate.get("successes", aggregate.get("success_count", 0)) or 0),
+                    str(manifest_path.resolve()),
+                    str(evaluation.get("created_at") or ""),
+                    evaluation.get("completed_at"),
+                ),
+            )
+
+    def manifest_path(self, evaluation_id: str) -> Path | None:
+        with connect(self.database_path) as database:
+            row = database.execute(
+                """
+                SELECT result_path FROM evaluation_runs
+                WHERE id = ? AND project_id = ?
+                """,
+                (evaluation_id, self.project_id),
+            ).fetchone()
+        return None if row is None else Path(str(row["result_path"]))
+
+    def delete(self, evaluation_id: str) -> None:
+        with connect(self.database_path) as database:
+            database.execute(
+                "DELETE FROM evaluation_runs WHERE id = ? AND project_id = ?",
+                (evaluation_id, self.project_id),
+            )
