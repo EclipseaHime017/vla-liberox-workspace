@@ -15,6 +15,7 @@ from PIL import Image
 
 from core.config import LoadedConfig, UniqueKeyLoader
 from core.io import sha256_file, stable_hash
+from core.methods import DEFAULT_METHOD, METHODS
 from core.model_config import model_config
 from core.registry import model_contract
 from core.artifacts import parent_snapshot, decode_child, legacy_contract
@@ -423,10 +424,11 @@ def load_overlay(path: Path) -> PolicyOverlay:
             raise ValueError("Adapted overlay backbone must be a non-empty path")
     if not isinstance(raw, dict) or set(raw) != required or raw["schema_version"] not in (1, 2, 3):
         raise ValueError(f"Invalid policy overlay manifest: {path}")
-    if raw.get("algorithm", "iql") not in ("iql", "bc"):
+    method = METHODS.get(raw.get("algorithm", DEFAULT_METHOD))
+    if method is None:
         raise ValueError("Unknown policy overlay algorithm")
-    if raw.get("algorithm") == "bc" and raw["reward_sha256"] is not None:
-        raise ValueError("BC overlays must not reference rewards")
+    if not method.requires_rewards and raw["reward_sha256"] is not None:
+        raise ValueError(f"{method.label} overlays must not reference rewards")
     for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
         if not isinstance(raw[key], str) or not raw[key].strip():
             raise ValueError(f"Invalid policy overlay field {key}: {path}")

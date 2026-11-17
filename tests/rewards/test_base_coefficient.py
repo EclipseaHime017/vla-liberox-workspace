@@ -86,7 +86,7 @@ def test_materialized_and_pinned_gamma_reduction_keep_coefficient(configured):
 @pytest.mark.skipif(not os.environ.get("W1_SCREEN_SCRIPT"), reason="W-1 checkout not provided")
 def test_w1_reads_generated_independent_base_reward(configured):
     from test_rewards import FakeAnnotator
-    from rewards.manifest import annotate_manifest
+    from rewards.rynnvalue.annotate import annotate_manifest
     prepared = prepare_dataset(configured).manifest
     _save_annotations(configured, json.loads(prepared.read_text()))
     configured.raw["reward"].update(recipe(alpha=.5, base_coefficient=1., shaping_weight=.1,

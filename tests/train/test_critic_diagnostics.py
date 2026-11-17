@@ -127,7 +127,7 @@ def test_fixed_seed_batch_and_rng_are_reproducible(diagnostic_inputs, monkeypatc
 
 def test_exact_batch_size_padding_and_cancel_at_each_boundary(diagnostic_inputs, monkeypatch, tmp_path):
     training, probe = diagnostic_inputs
-    original = diagnostics.PixelIQL.update
+    original = diagnostics.ExpectileCritic.update
     batches = []
     progress = []
 
@@ -137,7 +137,7 @@ def test_exact_batch_size_padding_and_cancel_at_each_boundary(diagnostic_inputs,
         assert not batch["action_mask"][:, 8:].any()
         return original(agent, batch)
 
-    monkeypatch.setattr(diagnostics.PixelIQL, "update", update)
+    monkeypatch.setattr(diagnostics.ExpectileCritic, "update", update)
     output = tmp_path / "canceled"
     with pytest.raises(InterruptedError, match="batch boundary"):
         diagnostics.run_critic_diagnostic(training, probe, output,

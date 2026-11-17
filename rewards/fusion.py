@@ -11,12 +11,12 @@ import numpy as np
 from core.config import LoadedConfig, effective_cumulative, needs_rynnvalue, needs_stage
 from core.data import load_manifest
 from core.io import atomic_json, sha256_file, stable_hash
-from rewards.stage import stage_annotation_context, stage_chunk_reward, stage_scores
+from rewards.stage.reward import stage_annotation_context, stage_chunk_reward, stage_scores
 
 
 def import_saved_model_inputs(config: LoadedConfig, references: Path) -> None:
     """Freeze already evaluated signals, allowing per-trajectory inference recipes."""
-    from rewards.manifest import ANNOTATION_SCHEMA_VERSION
+    from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
     prepared = load_manifest(config)
     source = json.loads(references.read_text())
     if source.get("source_dataset_sha256") != prepared.get("source_dataset_sha256"):
@@ -30,7 +30,7 @@ def import_saved_model_inputs(config: LoadedConfig, references: Path) -> None:
 
 
 def _validate_saved_model_inputs(payload: dict, prepared: dict) -> None:
-    from rewards.manifest import ANNOTATION_SCHEMA_VERSION, OFFICIAL_OUTPUT_KEYS, validate_official_outputs
+    from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION, OFFICIAL_OUTPUT_KEYS, validate_official_outputs
     if (payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION or not payload.get("complete")
             or payload.get("dataset_sha256") != prepared["dataset_sha256"]):
         raise ValueError("Saved RynnValue input manifest is incomplete or mismatched")
@@ -53,7 +53,7 @@ def _validate_saved_model_inputs(payload: dict, prepared: dict) -> None:
 
 def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
     """Pure reduction; source model outputs and manual keyframes are never changed."""
-    from rewards.manifest import chunk_reward_components, sparse_macro_reward, sparse_primitive_return
+    from rewards.pbrs import chunk_reward_components, sparse_macro_reward, sparse_primitive_return
 
     count = int(episode["recorded_action_count"])
     chunks = episode.get("evaluation_chunks", episode["chunks"])
@@ -177,19 +177,10 @@ def _valid_cached_result(payload: dict, prepared: dict, snapshot: dict | None) -
 @with_dataset_lease
 def materialize_final_reward(config: LoadedConfig, *, force: bool = False) -> Path:
     """Recompute from saved signals only; missing inputs never instantiate a model."""
-    from rewards.manifest import (
-        REWARD_SCHEMA_VERSION,
-        OFFICIAL_OUTPUT_KEYS,
-        _episode_reward_metadata,
-        _episode_timeline_arrays,
-        _reward_generation_dir,
-        annotate_manifest,
-        load_annotation_index,
-        load_stage_annotations,
-        reward_derivation_config,
-        reward_implementation_fingerprint,
-        validate_official_outputs,
-    )
+    from rewards.manifest import REWARD_SCHEMA_VERSION, _episode_reward_metadata, _episode_timeline_arrays, _reward_generation_dir, reward_derivation_config, reward_implementation_fingerprint
+    from rewards.stage.keyframes import load_stage_annotations
+    from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS, validate_official_outputs
+    from rewards.rynnvalue.annotate import annotate_manifest, load_annotation_index
 
     manifest = load_manifest(config)
     reward = config.section("reward")

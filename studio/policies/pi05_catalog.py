@@ -8,6 +8,7 @@ from pathlib import Path
 from studio.services.inherited_reward_inputs import core_module
 from studio.policies.catalog import PolicyEntry, _stable_hash
 from studio.policies.registry import PROJECT, model_module
+from core.methods import METHODS
 
 PROVIDER = "studio.policies.pi05:Pi05PolicyProvider"
 ARTIFACTS = ("actor", "base_identity")
@@ -45,7 +46,7 @@ def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEn
         "family", "algorithm", "model_config", "actor", "base_identity"}
     if (set(raw) != required or raw["schema_version"] != 4
             or model_module("base_models").family_adapter(raw["family"]).POLICY_ADAPTER != __name__
-            or raw["algorithm"] not in {"bc", "iql"}):
+            or raw["algorithm"] not in METHODS):
         raise ValueError("Invalid π₀.₅ policy manifest")
     settings = core_module("models").model_config({"model": raw["model_config"]})
     if settings["family"] != raw["family"] or settings["base_checkpoint"] != raw["base_checkpoint"]:
@@ -69,7 +70,7 @@ def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEn
     if _stable_hash(compatibility) != raw["compatibility_sha256"]:
         raise ValueError("π₀.₅ compatibility hash mismatch")
     for key in ("dataset_sha256", "reward_sha256"):
-        if key == "reward_sha256" and raw["algorithm"] == "bc" and raw[key] is None:
+        if key == "reward_sha256" and not METHODS[raw["algorithm"]].requires_rewards and raw[key] is None:
             continue
         if re.fullmatch(r"[0-9a-f]{64}", str(raw[key])) is None:
             raise ValueError(f"Invalid π₀.₅ {key}")

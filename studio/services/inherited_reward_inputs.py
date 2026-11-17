@@ -23,7 +23,7 @@ CORE_MODULES = {
     "image_transforms": "core.image_transforms", "model_storage": "core.model_storage",
     "checkpoint_assets": "core.checkpoint_assets", "training": "train.trainer",
     "vla_adapter": "train.models.vla_adapter", "pi05": "train.models.pi05",
-    "rewards": "rewards.manifest", "stage_rewards": "rewards.stage", "fusion_rewards": "rewards.fusion",
+    "rewards": "rewards.manifest", "fusion_rewards": "rewards.fusion",
 }
 
 
@@ -32,13 +32,9 @@ def core_module(part: str):
     return importlib.import_module(CORE_MODULES[part])
 
 
-def reward_core():
-    return tuple(core_module(part) for part in ("config", "data", "rewards", "stage_rewards"))
-
-
 def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
     """Rebuild indices from frozen control data, never from evaluator predictions."""
-    config, data, _, _ = reward_core()
+    from core import config, data
     raw = jobs._effective_config(dataset)
     artifacts = member["artifacts"]
     for artifact in artifacts.values():
@@ -72,7 +68,8 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
 def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
                          use_dataset_labels: bool = True) -> tuple[dict, bytes]:
     """Global Stage labels and environment outcomes need no evaluation job."""
-    _, _, rewards, stage = reward_core()
+    from rewards import manifest as rewards, pbrs
+    from rewards.stage import keyframes, reward as stage_reward
     episode, header = reconstruct_episode(jobs, dataset, member)
     raw = jobs._load_base_config()["reward"]
     raw.update(source=source, rynnvalue=False)
@@ -94,19 +91,19 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
                 raise ValueError(label["error"])
             raise FileNotFoundError("数据集与全局均缺少已保存的 Stage 关键帧标注"
                 if use_dataset_labels else "缺少已保存的全局 Stage 关键帧标注")
-        annotation = stage.validate_stage_annotation(label["annotation"],
+        annotation = keyframes.validate_stage_annotation(label["annotation"],
             run_id=episode["run_id"], trajectory_sha256=episode["trajectory_sha256"],
             done=arrays["environment_done"], success_consecutive_steps=header["success_consecutive_steps"])
-        context = stage.stage_annotation_context(annotation, done=arrays["environment_done"],
+        context = stage_reward.stage_annotation_context(annotation, done=arrays["environment_done"],
             success_consecutive_steps=header["success_consecutive_steps"], exponent=recipe["stage_exponent"])
-        scores = stage.stage_scores(context)
-        final = [stage.stage_chunk_reward(scores, c["start"], c["length"], gamma, cumulative)
+        scores = stage_reward.stage_scores(context)
+        final = [stage_reward.stage_chunk_reward(scores, c["start"], c["length"], gamma, cumulative)
                  for c in episode["evaluation_chunks"]]
         arrays["stage_score"] = scores
         arrays["stage_chunk_reward"] = np.asarray(final, dtype=np.float32)
     else:
-        final = [(rewards.sparse_primitive_return(done, c["start"], c["length"], gamma) if cumulative
-                  else rewards.sparse_macro_reward(done, c["start"], c["length"]))
+        final = [(pbrs.sparse_primitive_return(done, c["start"], c["length"], gamma) if cumulative
+                  else pbrs.sparse_macro_reward(done, c["start"], c["length"]))
                  for c in episode["evaluation_chunks"]]
         arrays["sparse_reward"] = np.asarray(final, dtype=np.float32)
     arrays.update(boundary_steps=np.asarray(episode["reward_boundaries"], dtype=np.int64),
@@ -137,6 +134,6 @@ def validate_global_values(values: Path | bytes, episode: dict, source: str, off
                                    or not np.isfinite(arrays["stage_score"]).all()):
             raise ValueError("全局 Stage 奖励未覆盖完整轨迹")
         if source == "rynnvalue":
-            _, _, rewards, _ = reward_core()
-            rewards.validate_official_outputs({name: arrays[name] for name in rewards.OFFICIAL_OUTPUT_KEYS},
+            from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS, validate_official_outputs
+            validate_official_outputs({name: arrays[name] for name in OFFICIAL_OUTPUT_KEYS},
                                                 len(boundaries))

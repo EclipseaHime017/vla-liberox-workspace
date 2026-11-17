@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
 
 from studio.config import DEFAULT_UI_CONFIG, load_ui_config
-from core.run_layout import migrate_layout, plan_migration, rollback_migration
+from core.run_layout import CONSUMER_MODULES, migrate_layout, plan_migration, rollback_migration
 
 
 def assert_stopped(config):
@@ -34,7 +34,8 @@ def assert_stopped(config):
             args = (proc / "cmdline").read_bytes().decode(errors="replace").split("\0")
             if not args or "python" not in Path(args[0]).name:
                 continue
-            if any(Path(arg).name in scripts for arg in args[1:] if arg):
+            if (any(Path(arg).name in scripts for arg in args[1:] if arg)
+                    or any(flag == "-m" and module in CONSUMER_MODULES for flag, module in zip(args, args[1:]))):
                 raise RuntimeError(f"Stop data consumer PID {proc.name} before migration")
         except (FileNotFoundError, ProcessLookupError):
             continue

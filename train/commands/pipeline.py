@@ -26,7 +26,7 @@ from core.data import training_replay_policy, iter_unique_replay_chunks
 from core.io import atomic_json
 from core.methods import training_method, actor_lr_warmup
 from core.model_config import model_signature
-from rewards.manifest import load_stage_annotations
+from rewards.stage.keyframes import load_stage_annotations
 from train.pipeline import (
     annotation_cache_valid,
     bound_evaluation_count,
@@ -46,7 +46,7 @@ from train.pipeline import (
 
 
 STAGE_MODULES = {
-    "prepare_dataset.py": "train.commands.prepare_dataset", "annotate_rewards.py": "rewards.commands.annotate",
+    "prepare_dataset.py": "train.commands.prepare_dataset", "annotate_rewards.py": "rewards.commands.rynnvalue_annotate",
     "materialize_rewards.py": "rewards.commands.materialize", "train.py": "train.commands.train_policy",
 }
 

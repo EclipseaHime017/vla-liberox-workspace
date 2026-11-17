@@ -18,6 +18,7 @@ from studio.api import (
     datasets,
     drafts,
     evaluations,
+    methods,
     offline_jobs,
     policies,
     runs,
@@ -126,6 +127,7 @@ def create_app(
     app.include_router(training_datasets.router)
     app.include_router(evaluations.router)
     app.include_router(offline_jobs.router)
+    app.include_router(methods.router)
     app.include_router(tools.router)
     app.include_router(policies.router)
     app.include_router(websocket.router)

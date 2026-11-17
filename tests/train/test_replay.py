@@ -9,7 +9,8 @@ import pytest
 
 from core.data import load_manifest, prepare_dataset
 from train.replay import ActionDataset, ReplayDataset
-from rewards.manifest import annotate_manifest, load_reward_index
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.manifest import load_reward_index
 from train.models.vla_adapter import env_to_dataset_actions
 
 

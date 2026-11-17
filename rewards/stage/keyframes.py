@@ -1,14 +1,22 @@
-"""Human keyframe scores. Pure data/math: no model, simulator or UI imports."""
+"""Keyframe (Stage) annotations: schema, construction, validation and loading."""
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 
+from core.config import LoadedConfig
+from core.io import sha256_file
+from core.storage_paths import storage_path
+
+
 STAGE_SCHEMA_VERSION = 2
+
+
 STAGE_FILENAME = "stage_annotation.json"
 
 
@@ -17,7 +25,7 @@ def _digest(value: Any) -> str:
                                      allow_nan=False).encode()).hexdigest()
 
 
-def _exponent(value: float) -> float:
+def checked_exponent(value: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (float, int)):
         raise TypeError("Stage exponent must be a finite number >= 1")
     if not math.isfinite(value) or value < 1:
@@ -81,7 +89,7 @@ def build_stage_annotation(*, run_id: str, trajectory_sha256: str,
     # Retain these arguments for old callers, but never persist recipe settings
     # in the primary human-label identity.
     confirmed_success_step(done, success_consecutive_steps)
-    _exponent(exponent)
+    checked_exponent(exponent)
     if not isinstance(keyframes, list):
         raise TypeError("Stage keyframes must be a list")
     ordered = []
@@ -126,7 +134,7 @@ def validate_stage_annotation(payload: dict[str, Any], *, run_id: str,
             schema_version=1,
             success_consecutive_steps=payload.get("success_consecutive_steps"),
             success_step=confirmed_success_step(done, payload.get("success_consecutive_steps")),
-            exponent=_exponent(payload.get("exponent")),
+            exponent=checked_exponent(payload.get("exponent")),
         )
         expected["annotation_sha256"] = _digest(expected)
     if _digest(payload) != _digest(expected):
@@ -134,36 +142,40 @@ def validate_stage_annotation(payload: dict[str, Any], *, run_id: str,
     return expected
 
 
-def stage_annotation_context(annotation: dict[str, Any], *, done: Sequence[bool],
-                             success_consecutive_steps: int,
-                             exponent: float = 2.0) -> dict[str, Any]:
-    """Attach dataset-local evaluation settings without changing human labels."""
-    if len(done) != annotation["action_count"]:
-        raise ValueError("Stage evaluation action count does not match the keyframe labels")
-    return {
-        **annotation,
-        "success_consecutive_steps": success_consecutive_steps,
-        "success_step": confirmed_success_step(done, success_consecutive_steps),
-        "exponent": _exponent(exponent),
-    }
-
-
-def stage_scores(annotation: dict[str, Any], exponent: float | None = None) -> np.ndarray:
-    power = _exponent(annotation.get("exponent", 2.0) if exponent is None else exponent)
-    anchors = stage_anchors(annotation)
-    scores = np.full(int(annotation["action_count"]) + 1, anchors[-1]["score"], dtype=np.float64)
-    scores[0] = -1.0
-    for left, right in zip(anchors, anchors[1:]):
-        start, end = left["step"], right["step"]
-        x = np.arange(end - start + 1, dtype=np.float64) / (end - start)
-        scores[start:end + 1] = left["score"] + (right["score"] - left["score"]) * x ** power
-    return scores.astype(np.float32)
-
-
-def stage_chunk_reward(scores: np.ndarray, start: int, length: int,
-                       gamma: float, accumulate_primitive_steps: bool) -> float:
-    if length < 1 or start < 0 or start + length >= len(scores):
-        raise ValueError("Invalid stage reward chunk bounds")
-    if accumulate_primitive_steps:
-        return float(np.dot(np.power(gamma, np.arange(length)), scores[start + 1:start + length + 1]))
-    return float(scores[start + length])
+def load_stage_annotations(config: LoadedConfig, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Validate every selected member, including validation and deduplicated prefixes."""
+    frozen_path = config.section("data").get("stage_annotations_manifest")
+    frozen = None
+    if frozen_path is not None:
+        frozen = json.loads(Path(frozen_path).read_text(encoding="utf-8"))
+        if (not isinstance(frozen, dict) or set(frozen) != {"schema_version", "annotations"}
+                or frozen["schema_version"] != 1 or not isinstance(frozen["annotations"], dict)):
+            raise ValueError("Invalid frozen stage annotations manifest")
+    selected: dict[str, Any] = {}
+    invalid: list[str] = []
+    for episode in manifest["episodes"]:
+        run_id = str(episode["run_id"])
+        trajectory = storage_path(episode["trajectory_path"])
+        try:
+            if frozen is None and episode.get("observation_orientation") == "vla_policy":
+                raise ValueError(
+                    "Stage cannot reuse labels for a CSV/video-reconstructed trajectory; "
+                    "provide the original trajectory.npz, observations and bound stage_annotation.json. "
+                    "Annotation hashes are never silently rebound."
+                )
+            payload = (frozen["annotations"][run_id] if frozen is not None else
+                       json.loads((trajectory.parent / STAGE_FILENAME).read_text(encoding="utf-8")))
+            actual_sha = sha256_file(trajectory)
+            if actual_sha != episode["trajectory_sha256"]:
+                raise ValueError("Trajectory changed after Prepare; run Prepare again")
+            with np.load(trajectory, allow_pickle=False) as arrays:
+                done = np.asarray(arrays["done"])
+            selected[run_id] = validate_stage_annotation(
+                payload, run_id=run_id, trajectory_sha256=actual_sha, done=done,
+                success_consecutive_steps=int(config.section("data")["success_consecutive_steps"]),
+            )
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            invalid.append(f"{run_id}: {exc}")
+    if invalid:
+        raise ValueError("Stage annotations missing or invalid; training stopped:\n" + "\n".join(invalid))
+    return {"schema_version": 1, "annotations": selected}

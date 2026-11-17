@@ -15,21 +15,11 @@ from core.config import load_train_config
 from core.data import action_source_segments, prepare_dataset, replay_chunks
 from core.io import atomic_json, sha256_file, stable_hash
 from train.replay import ReplayDataset
-from rewards.manifest import (
-    annotate_manifest,
-    chunk_reward_components,
-    load_reward_index,
-    materialize_reward_manifest,
-    reward_manifest_digest,
-    sparse_macro_reward,
-    sparse_primitive_return,
-)
-from rewards.stage import (
-    build_stage_annotation,
-    stage_annotation_context,
-    stage_scores,
-    validate_stage_annotation,
-)
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.pbrs import chunk_reward_components, sparse_macro_reward, sparse_primitive_return
+from rewards.manifest import load_reward_index, materialize_reward_manifest, reward_manifest_digest
+from rewards.stage.keyframes import build_stage_annotation, validate_stage_annotation
+from rewards.stage.reward import stage_annotation_context, stage_scores
 from test_rewards import CountingAnnotator
 from test_replay import _stats
 from test_stage_rewards import _save_annotations, _select
@@ -295,7 +285,7 @@ def test_reward_config_change_reuses_rynn_outputs_and_preserves_previous_reward(
     old = load_reward_index(configured)
     old_path = Path(old["episodes"][0]["reward_path"])
     old_bytes = old_path.read_bytes()
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator",
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator",
                         lambda _: pytest.fail("Reward recipe changes never load the model"))
     configured.raw["reward"].update(gamma=.8, shaping_weight=.7, accumulate_primitive_steps=True)
     new = load_reward_index(configured)
@@ -371,7 +361,7 @@ def test_real_backend_seal_to_pinned_training_interface(configured, tmp_path, mo
     new_work = Path(configured.raw["paths"]["work_dir"])
     (new_work / "annotations").mkdir()
     shutil.copyfile(annotation_manifest, new_work / "annotations/annotation_manifest.json")
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator",
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator",
                         lambda _: pytest.fail("Sealed official outputs should avoid model forward"))
     annotate_manifest(configured)
     updated = load_reward_index(configured)
@@ -409,11 +399,11 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
                       for item in original["episodes"] if "official_annotation_path" in item}
     monkeypatch.setattr("rewards.manifest.materialize_reward_manifest",
                         lambda *_: pytest.fail("Pinned training must not regenerate evaluation rewards"))
-    monkeypatch.setattr("rewards.manifest.annotate_manifest",
+    monkeypatch.setattr("rewards.rynnvalue.annotate.annotate_manifest",
                         lambda *_: pytest.fail("Training must not repeat model evaluation"))
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator",
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator",
                         lambda _: pytest.fail("Training must not evaluate a model"))
-    monkeypatch.setattr("rewards.stage.stage_scores",
+    monkeypatch.setattr("rewards.stage.reward.stage_scores",
                         lambda *_: pytest.fail("Training must not recompute the Stage curve"))
     monkeypatch.setattr("rewards.manifest.load_stage_annotations",
                         lambda *_: pytest.fail("Training must not read live keyframes"))
@@ -508,10 +498,10 @@ def test_materialize_with_pinned_override_returns_training_local_manifest(config
 
 @pytest.mark.parametrize("field", ["trajectory_sha256", "observations_sha256", "prompt"])
 def test_shared_annotation_manifest_rejects_different_source_with_equal_run_and_boundaries(configured, field):
-    from rewards.manifest import _reusable_manifest_entry
+    from rewards.rynnvalue.outputs import reusable_manifest_entry
     prepared = json.loads(prepare_dataset(configured).manifest.read_text())
     manifest = json.loads(annotate_manifest(configured, CountingAnnotator()).read_text())
     episode = copy.deepcopy(prepared["episodes"][0])
-    assert _reusable_manifest_entry(episode, configured.raw["reward"], manifest) is not None
+    assert reusable_manifest_entry(episode, configured.raw["reward"], manifest) is not None
     episode[field] = "different-task" if field == "prompt" else "b" * 64
-    assert _reusable_manifest_entry(episode, configured.raw["reward"], manifest) is None
+    assert reusable_manifest_entry(episode, configured.raw["reward"], manifest) is None

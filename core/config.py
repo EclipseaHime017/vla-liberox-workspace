@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from core.paths import ROOT
 import functools
 import hashlib
 import json
@@ -12,9 +11,10 @@ from typing import Any
 
 import yaml
 
-from core.methods import COMMON_TRAINING_KEYS, training_method
+from core.methods import COMMON_TRAINING_KEYS, DEFAULT_METHOD, METHODS, missing_capabilities, training_method
 from core.model_config import model_config
-from core.registry import model_contract
+from core.paths import ROOT
+from core.registry import MODEL_FAMILIES, model_contract
 from core.config_sources import UniqueKeyLoader, compose_config, migrate_fields, read_source
 
 
@@ -212,7 +212,7 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     unknown = set(training) - COMMON_TRAINING_KEYS - {"method", "actor_lr_warmup_steps"}
     if unknown:
         raise ValueError(f"Unknown training keys: {sorted(unknown)}")
-    training.setdefault("method", "iql")
+    training.setdefault("method", DEFAULT_METHOD)
     method = training_method(raw)
     legacy_iql = raw.setdefault("iql", {})
     if not isinstance(legacy_iql, dict):
@@ -232,12 +232,20 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
                                             if method.name == "iql" else 1000)
     _number(training, "actor_lr_warmup_steps", low=0, integer=True)
     raw.setdefault("bc", {})
-    if method.name == "bc":
-        raw["iql"] = {}
+    # Sections of other methods (and rewards, when unused) carry no settings for this run.
+    for other in METHODS.values():
+        if other.config_section not in (None, method.config_section):
+            raw[other.config_section] = {}
+    if not method.requires_rewards:
         raw["reward"] = {}
     raw.setdefault("reward", {})
     raw["model"] = model_config(raw)
     raw.pop("vla", None)
+    family = MODEL_FAMILIES[raw["model"]["family"]]
+    missing = missing_capabilities(method, family.actor_capabilities)
+    if missing:
+        raise ValueError(f"{method.label} needs actor capabilities {sorted(missing)}, "
+                         f"which the {family.label} model family does not provide")
     raw["schema_version"] = 2
     # Canonicalize old boolean configs. Explicit contradictory choices fail fast.
     if method.requires_rewards and isinstance(raw.get("reward"), dict):

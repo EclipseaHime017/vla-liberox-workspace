@@ -7,6 +7,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
 from core.paths import CONFIGS  # noqa: E402
+from core.methods import METHODS  # noqa: E402
 
 from cluster.queue import DEFAULT_QUEUE, TrainingQueue
 
@@ -20,7 +21,7 @@ def main(argv=None):
     add.add_argument("--task")
     add.add_argument("--runs-root", type=Path)
     add.add_argument("--model")
-    add.add_argument("--method", choices=("bc", "iql"))
+    add.add_argument("--method", choices=tuple(METHODS))
     add.add_argument("--name")
     commands.add_parser("start", help="Start an independent background worker")
     run = commands.add_parser("run", help="Run the worker in this terminal")

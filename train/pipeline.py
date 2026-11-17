@@ -22,13 +22,8 @@ from core.execution import CHUNKING_RULE, execution_steps, nominal_chunk_count
 from core.io import atomic_json, sha256_file, stable_hash
 from core.methods import COMMON_TRAINING_KEYS
 from core.model_config import MODEL_CONFIG_KEYS
-from rewards.manifest import (
-    ANNOTATION_SCHEMA_VERSION,
-    REWARD_SCHEMA_VERSION,
-    official_inference_config,
-    reward_derivation_config,
-    reward_implementation_fingerprint,
-)
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION, official_inference_config
+from rewards.manifest import REWARD_SCHEMA_VERSION, reward_derivation_config, reward_implementation_fingerprint
 
 
 SOURCE_TYPES = frozenset({"inference", "manual", "policy_requery"})

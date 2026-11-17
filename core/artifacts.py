@@ -14,6 +14,7 @@ from core.registry import MODEL_FAMILIES, base_model, model_contract, validate_c
 from core.io import stable_hash, sha256_file
 from core.config_sources import UniqueKeyLoader
 from core.image_transforms import canonical_contract
+from core.methods import METHODS
 
 
 def legacy_contract(settings: dict) -> dict:
@@ -134,6 +135,11 @@ def validate_policy(path: Path, payload: dict) -> None:
         names = {"actor", "base_identity"}
     else:
         raise ValueError(f"Unsupported deployment backend: {backend}")
+    method = METHODS.get(native.get("algorithm"))
+    if method is not None and method.exports_critic:
+        # Sampling methods ship their critic and inference selector with the actor.
+        required = required | {"critic", "selector"}
+        names.add("critic")
     if set(native) != required:
         raise ValueError("Invalid child policy manifest fields")
     for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
@@ -142,13 +148,13 @@ def validate_policy(path: Path, payload: dict) -> None:
     if (native["policy_id"] in {".", ".."} or Path(native["policy_id"]).name != native["policy_id"]
             or path.parent.name != native["policy_id"]):
         raise ValueError("Policy directory must match its safe policy_id")
-    if native["algorithm"] not in {"bc", "iql"}:
+    if method is None:
         raise ValueError("Unknown policy training algorithm")
     for key in ("action_horizon", "action_dim", "proprio_dim", "training_step"):
         if type(native[key]) is not int or native[key] < 1:
             raise ValueError(f"Invalid policy integer: {key}")
     for key in ("dataset_sha256", "reward_sha256"):
-        if key == "reward_sha256" and native["algorithm"] == "bc":
+        if key == "reward_sha256" and not method.requires_rewards:
             if native[key] is not None:
                 raise ValueError("BC policy must not reference rewards")
         elif not isinstance(native[key], str) or re.fullmatch(r"[0-9a-f]{64}", native[key]) is None:

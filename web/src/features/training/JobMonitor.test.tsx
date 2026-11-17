@@ -17,7 +17,7 @@ const job: OfflineJob = {
   id: "train-1", kind: "training", status: "RUNNING", dataset_id: "ds",
   created_at: "now", started_at: "now", completed_at: null, stage: "train",
   stage_label: "Pixel-IQL", error: null, output_path: "/tmp/output",
-  parameters: { critic_warmup_steps: 5 }, log_size: 0,
+  parameters: { algorithm: "iql", critic: "expectile", requires_rewards: true, critic_warmup_steps: 5 }, log_size: 0,
 };
 afterEach(cleanup);
 

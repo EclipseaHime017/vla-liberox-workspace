@@ -30,6 +30,7 @@ from studio.storage.repositories import EvaluationRepository, OfflineJobReposito
 from studio.services.dataset_reward_versions import DatasetRewardVersions, macro_only_reward
 from studio.services.work_queue import WorkQueue
 from studio.services.inherited_reward_inputs import core_module
+from core.methods import DEFAULT_METHOD, METHODS
 
 
 ACTIVE_JOB_STATES = frozenset({"STARTING", "RUNNING", "STOPPING"})
@@ -192,17 +193,17 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
 
     def _load_base_config(self, algorithm: str | None = None, model_family: str | None = None) -> dict[str, Any]:
         config = core_module("config")
-        return config.load_train_config(self.base_config_path, method=algorithm or "iql", family=model_family).raw
+        return config.load_train_config(self.base_config_path, method=algorithm or DEFAULT_METHOD, family=model_family).raw
 
     def defaults(self, dataset_id: str | None = None, reward_source: str | None = None,
-                 algorithm: str = "iql", model_family: str | None = None,
+                 algorithm: str = DEFAULT_METHOD, model_family: str | None = None,
                  model_base_id: str | None = None) -> dict[str, Any]:
         self._validate_training_parameters({"algorithm": algorithm, **({"model_family": model_family} if model_family is not None else {})}, self.training_models)
         raw = self._load_base_config(algorithm, model_family)
         if model_base_id is not None:
             raw["model"] = self.training_models.apply_model_parameters(raw, {"model_base_id": model_base_id})
-        if algorithm == "bc":
-            # No reward lookup or lazy global-evaluation job may run for BC.
+        if not METHODS[algorithm].requires_rewards:
+            # No reward lookup or lazy global-evaluation job may run for reward-free methods.
             if dataset_id:
                 self.datasets.get(dataset_id, quick_verify=False)
             return self._training_defaults(raw, dataset_id=dataset_id)
@@ -286,8 +287,12 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
     def _training_defaults(self, raw: dict, *, dataset_id: str | None = None,
                            version=None, availability=None, reward_source=None,
                            macro_only=False) -> dict[str, Any]:
-        training, iql = raw["training"], raw["iql"]
+        training = raw["training"]
         algorithm = training["method"]
+        method = METHODS[algorithm]
+        rewarded, critic = method.requires_rewards, method.critic is not None
+        section = raw.get(method.config_section) or {} if method.config_section else {}
+        iql = section
         common_advanced = {name: training[name] for name in ("policy_peak_lr", "policy_final_lr")}
         return {
             "algorithm": algorithm,
@@ -298,12 +303,12 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "reward_parameters_locked": False,
             "reward_locked_parameters": [
                 "reward_stage_exponent", "reward_shaping_weight", "reward_alpha", "reward_fusion_mode",
-            ] if dataset_id and algorithm == "iql" else [],
-            "reward_editable_parameters": (["reward_gamma"] + ([] if macro_only else ["reward_accumulate_primitive_steps"])) if algorithm == "iql" else [],
+            ] if dataset_id and rewarded else [],
+            "reward_editable_parameters": (["reward_gamma"] + ([] if macro_only else ["reward_accumulate_primitive_steps"])) if rewarded else [],
             "basic": {name: training[name] for name in (
                 "train_steps", "micro_batch_size", "gradient_accumulation_steps",
                 "checkpoint_interval", "seed", "actor_lr_warmup_steps",
-            )} | ({"critic_warmup_steps": iql["critic_warmup_steps"]} if algorithm == "iql" else {}),
+            )} | ({"critic_warmup_steps": iql["critic_warmup_steps"]} if critic else {}),
             "advanced": common_advanced | ({
                 name: iql[name] for name in (
                     "critic_optimizer", "critic_lr", "critic_weight_decay",
@@ -311,7 +316,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                     "value_weight_decay", "value_max_grad_norm",
                     "expectile", "beta", "max_advantage_weight", "target_tau",
                 )
-            } | {
+            } if critic else {}) | ({
                 "reward_source": reward_source,
                 "reward_stage_exponent": raw["reward"].get("stage_exponent", 2.0),
                 "reward_alpha": raw["reward"].get("alpha", 0.0),
@@ -323,7 +328,10 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                 "reward_accumulate_primitive_steps": raw["reward"][
                     "accumulate_primitive_steps"
                 ],
-            } if algorithm == "iql" else {}) | {
+            } if rewarded else {}) | {
+                parameter["name"]: section.get(parameter["name"], parameter.get("default"))
+                for parameter in method.parameters
+            } | {
                 "console_interval_steps": raw["logging"]["console_interval_steps"],
                 "flush_seconds": raw["logging"]["flush_seconds"],
             },
@@ -340,7 +348,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             },
             "fixed": {
                 "dtype": training["dtype"],
-                **({"critic_image_size": iql["critic_image_size"]} if algorithm == "iql" else {}),
+                **({"critic_image_size": iql["critic_image_size"]} if critic else {}),
                 "action_horizon": raw["data"]["action_horizon"],
                 "action_dim": raw["data"]["action_dim"],
                 "proprio_dim": raw["data"]["proprio_dim"],
@@ -900,7 +908,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             config_path = job_dir / "rynnvalue_config.yaml"
             atomic_write_yaml(config_path, raw)
             config_paths["rynnvalue"] = str(config_path)
-            annotate_argv = ["python", "-m", "rewards.commands.annotate", "--config", str(config_path)]
+            annotate_argv = ["python", "-m", "rewards.commands.rynnvalue_annotate", "--config", str(config_path)]
             if overwrite:
                 annotate_argv.append("--overwrite")
             stages.extend([
@@ -1001,23 +1009,29 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "reward_version_id", "reward_alpha", "reward_fusion_mode",
         }
         allowed.update(models.parameter_paths())
+        allowed.update(parameter["name"] for method in METHODS.values() for parameter in method.parameters)
         unknown = sorted(set(parameters) - allowed)
         if unknown:
             raise ValueError(f"Unknown training parameters: {unknown}")
         # Validate individual fields here; actual defaults and all-frozen checks
         # are resolved together in _launch_training, before creating job files.
         models.apply_model_parameters({}, parameters, partial=True)
-        if parameters.get("algorithm", "iql") not in ("iql", "bc"):
-            raise ValueError("algorithm must be iql or bc")
-        if parameters.get("algorithm") == "bc" and any(
+        if parameters.get("algorithm", DEFAULT_METHOD) not in METHODS:
+            raise ValueError(f"algorithm must be one of {', '.join(METHODS)}")
+        method = METHODS[parameters.get("algorithm", DEFAULT_METHOD)]
+        if not method.requires_rewards and any(
             key.startswith("reward_") and value is not None for key, value in parameters.items()
         ):
-            raise ValueError("BC does not accept reward parameters or reward versions")
-        if parameters.get("algorithm") == "bc" and any(
+            raise ValueError(f"{method.label} does not accept reward parameters or reward versions")
+        if method.critic is None and any(
             key.startswith(("critic_", "value_")) or key in {"expectile", "beta", "max_advantage_weight", "target_tau"}
             for key in parameters
         ):
-            raise ValueError("BC does not accept IQL parameters")
+            raise ValueError(f"{method.label} does not accept critic parameters")
+        foreign = {parameter["name"] for other in METHODS.values() if other is not method
+                   for parameter in other.parameters} - {parameter["name"] for parameter in method.parameters}
+        if foreign & set(parameters):
+            raise ValueError(f"{method.label} does not accept {sorted(foreign & set(parameters))}")
         integer_positive = (
             "train_steps", "micro_batch_size", "gradient_accumulation_steps",
             "checkpoint_interval", "console_interval_steps", "wandb_log_interval_steps",
@@ -1227,7 +1241,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
 
     def training_inputs(self, dataset: dict, parameters: dict) -> tuple[dict | None, dict]:
         """Bind only the inputs consumed by the selected training method."""
-        if parameters.get("algorithm", "iql") == "bc":
+        if not METHODS[parameters.get("algorithm", DEFAULT_METHOD)].requires_rewards:
             return None, dict(parameters)
         return self.pinned_reward(dataset, parameters)
 
@@ -1236,7 +1250,8 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         *, reward_version: dict[str, Any] | None,
         queued: bool = False,
     ) -> dict[str, Any]:
-        algorithm = parameters.get("algorithm", "iql")
+        algorithm = parameters.get("algorithm", DEFAULT_METHOD)
+        method = METHODS[algorithm]
         job_id = f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         job_dir = self.jobs_root / job_id
         raw = self._effective_config(dataset, algorithm=algorithm, model_family=parameters.get("model_family"))
@@ -1254,7 +1269,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         raw["data"].update(action_horizon=model_io["replay_horizon"], action_dim=model_io["action_dim"],
                             proprio_dim=model_io["proprio_dim"])
         source = None
-        if algorithm == "iql":
+        if method.requires_rewards:
             raw["reward"].setdefault("final_normalization", "none")
             source = self._reward_source(raw, parameters)
             raw["reward"].update(source=source, rynnvalue=source == "rynnvalue" or (
@@ -1267,7 +1282,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             if prepared.get("chunking") != core_module("execution").CHUNKING_RULE:
                 raise ValueError("奖励使用旧的固定长度切片，请在数据集配置中重新生成评价／奖励后训练")
             replay_counts = _training_replay_counts(prepared, include_post_success)
-        if algorithm == "iql":
+        if method.requires_rewards:
             raw["reward"].update(
                 manifest_path=reward_version["reward_manifest_path"] if reward_version else None,
                 manifest_sha256=reward_version["reward_manifest_sha256"] if reward_version else None,
@@ -1279,8 +1294,10 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         for key, value in parameters.items():
             if key in raw["training"]:
                 raw["training"][key] = value
-            elif key in raw["iql"]:
-                raw["iql"][key] = value
+            elif method.config_section and key in raw[method.config_section]:
+                raw[method.config_section][key] = value
+            elif any(key == parameter["name"] for parameter in method.parameters):
+                raw[method.config_section][key] = value
             elif key in raw["logging"]:
                 raw["logging"][key] = value
         for parameter_name, config_name in {
@@ -1316,7 +1333,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         config = core_module("config")
         raw = config.validate_train_config(raw, job_dir / "effective_config.yaml").raw
         job_dir.mkdir(parents=True, exist_ok=False)
-        if algorithm == "bc":
+        if not method.requires_rewards:
             # Pin the frozen selection for queued jobs without evaluating it.
             selection_path = job_dir / "dataset.json"
             shutil.copy2(raw["data"]["selection_manifest"], selection_path)
@@ -1336,9 +1353,9 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                 "cwd": str(self.ui_config.workspace_root),
             },
         ]
-        if algorithm == "bc":
+        if not method.requires_rewards:
             stages.insert(0, {
-                "id": "prepare", "label": "准备 BC 动作样本（无需评价）",
+                "id": "prepare", "label": f"准备 {method.label} 动作样本（无需评价）",
                 "environment": self.ui_config.train_environment,
                 "argv": ["python", "-m", "train.commands.prepare_dataset", "--config", str(config_path)],
                 "cwd": str(self.ui_config.workspace_root),
@@ -1349,6 +1366,8 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             queued=queued,
             parameters={
                 "algorithm": algorithm,
+                "critic": method.critic,
+                "requires_rewards": method.requires_rewards,
                 "model": copy.deepcopy(raw["model"]),
                 **raw["training"],
                 "dataset_name": dataset["name"],
@@ -1372,7 +1391,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         "accumulate_primitive_steps"
                     ],
                 } if reward_version else None,
-                **{name: value for name, value in raw["iql"].items() if name in (
+                **{name: value for name, value in (raw.get(method.config_section) or {}).items() if name in (
                     "train_steps", "critic_warmup_steps", "micro_batch_size",
                     "gradient_accumulation_steps", "checkpoint_interval", "seed",
                     "critic_optimizer", "critic_lr", "critic_weight_decay",

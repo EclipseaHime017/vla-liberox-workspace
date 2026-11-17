@@ -10,7 +10,8 @@ import yaml
 from core.config import load_train_config
 from core.data import prepare_dataset
 from rewards.evaluation_store import bind_reward_manifest, valid_bound_evaluation
-from rewards.manifest import annotate_manifest, materialize_reward_manifest
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.manifest import materialize_reward_manifest
 from train.pipeline import (
     annotation_cache_valid,
     build_selection_manifest,

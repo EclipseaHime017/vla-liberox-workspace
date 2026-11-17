@@ -68,6 +68,10 @@ class ModelDefinition:
     def implementation(self):
         return get_adapter(self.adapter)
 
+    @property
+    def actor_capabilities(self) -> frozenset[str]:
+        return frozenset(getattr(self.implementation, "ACTOR_CAPABILITIES", frozenset()))
+
 
 @dataclass(frozen=True)
 class BaseModel:
@@ -238,3 +242,8 @@ def resolve_open_loop_steps(settings: dict, value: int | None, *, trained: bool 
     inference = execution_config(settings, trained=trained)
     return validate_open_loop_steps(inference["open_loop_steps"] if value is None else value,
                                     inference["max_open_loop_steps"])
+
+
+def family_capabilities() -> dict[str, frozenset[str]]:
+    """Actor capabilities of every registered model family (see ``core.methods``)."""
+    return {name: family.actor_capabilities for name, family in MODEL_FAMILIES.items()}

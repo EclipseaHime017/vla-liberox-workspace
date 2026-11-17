@@ -163,7 +163,7 @@ def test_terminal_preserves_nested_lora_defaults_and_explicit_legacy_override(co
 @pytest.mark.parametrize("supervision", [4, 8])
 def test_overlay_cli_round_trip_including_backbone(configured, tmp_path, monkeypatch, mode, supervision):
     from train.trainer import _publish_overlay, _save_checkpoint
-    from train.methods.algorithms import BehaviorCloning
+    from train.methods.bc import BehaviorCloning
     from train.models import vla_adapter
     from test_replay import _stats
 

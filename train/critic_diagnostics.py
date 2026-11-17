@@ -15,7 +15,7 @@ from torch.utils.data import default_collate
 from core.registry import model_contract
 from core.config import LoadedConfig, reward_source
 from core.data import load_manifest, replay_end_step
-from train.methods.iql import PixelIQL, chunk_bellman_target
+from train.methods.critics import ExpectileCritic as ExpectileCritic, chunk_bellman_target
 from core.io import atomic_json, sha256_file
 from core.model_config import model_config, replay_stats
 from train.replay import ActionDataset, ReplayDataset
@@ -104,7 +104,7 @@ def _finite_returns(dataset: ReplayDataset, discount: float, cumulative: bool) -
 
 
 @torch.no_grad()
-def _evaluate(agent: PixelIQL, dataset: ActionDataset, split: str, horizon: int,
+def _evaluate(agent: ExpectileCritic, dataset: ActionDataset, split: str, horizon: int,
               batch_size: int, device: torch.device,
               stop_requested: Callable[[], bool] | None = None) -> list[dict]:
     has_rewards = isinstance(dataset, ReplayDataset)
@@ -247,7 +247,7 @@ def _run(training_config, probe_config, output, *, train_steps, batch_size, seed
         if target.type == "cuda":
             with torch.cuda.device(target):
                 torch.cuda.manual_seed(seed)
-        agent = PixelIQL(horizon=horizon, action_dim=train_manifest["action_dim"],
+        agent = ExpectileCritic(horizon=horizon, action_dim=train_manifest["action_dim"],
             proprio_dim=train_manifest["proprio_dim"], discount=derivation["gamma"], expectile=cfg["expectile"],
             tau=cfg["target_tau"], accumulate_primitive_steps=derivation["accumulate_primitive_steps"],
             **{key: cfg[key] for key in ("critic_lr", "value_lr", "critic_optimizer", "critic_weight_decay",

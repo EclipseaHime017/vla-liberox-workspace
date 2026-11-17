@@ -16,7 +16,7 @@ from train.replay import ActionDataset, ReplayDataset
 from rewards.manifest import load_reward_index
 from cluster.inputs import discover_tasks, open_run_source, prepare_global_inputs
 from train.replay_cache import CachedReplayDataset, build_replay_cache
-from rewards.stage import build_stage_annotation
+from rewards.stage.keyframes import build_stage_annotation
 
 
 def _record_producers(config):

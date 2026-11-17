@@ -147,7 +147,7 @@ def test_final_cpu_materialization_and_pinned_training_reduction(configured, mon
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
     configured.raw["reward"].update(recipe(alpha=.6), stage_exponent=2.)
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator", lambda _: pytest.fail("model load"))
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator", lambda _: pytest.fail("model load"))
     index = load_reward_index(configured)
     path = Path(configured.raw["paths"]["work_dir"]) / "rewards" / "reward_manifest.json"
     saved = path.read_bytes()
@@ -168,7 +168,7 @@ def test_final_cpu_materialization_and_pinned_training_reduction(configured, mon
 
 @pytest.mark.parametrize("normalization", ["none", "initial_chunk_v1"])
 def test_pinned_gamma_change_recomputes_reference_without_changing_saved_semantics(configured, normalization):
-    from rewards.manifest import annotate_manifest
+    from rewards.rynnvalue.annotate import annotate_manifest
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
     annotate_manifest(configured, FakeAnnotator())
@@ -196,18 +196,19 @@ def test_pinned_gamma_change_recomputes_reference_without_changing_saved_semanti
 def test_missing_rynn_is_error_not_a_model_forward(configured, monkeypatch):
     prepare_dataset(configured)
     configured.raw["reward"].update(recipe(shaping_weight=.1))
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator", lambda _: pytest.fail("model load"))
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator", lambda _: pytest.fail("model load"))
     with pytest.raises(ValueError, match="Required RynnValue"):
         load_reward_index(configured)
 
 
 def test_regenerate_unscaled_final_reuses_inputs_and_keeps_old_arrays(configured, monkeypatch):
-    from rewards.manifest import annotate_manifest, OFFICIAL_OUTPUT_KEYS
+    from rewards.rynnvalue.annotate import annotate_manifest
+    from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
     annotation_path = annotate_manifest(configured, FakeAnnotator())
     annotations_before = annotation_path.read_bytes()
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator", lambda _: pytest.fail("model load"))
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator", lambda _: pytest.fail("model load"))
     configured.raw["reward"].update(recipe(alpha=.5, shaping_weight=.1), final_normalization="none")
     old = load_reward_index(configured)
     before = {entry["reward_path"]: Path(entry["reward_path"]).read_bytes() for entry in old["episodes"]}
@@ -255,14 +256,15 @@ def test_bad_cache_is_rebuilt_without_overwriting_old_arrays(configured, damage)
 
 
 def test_reuses_official_outputs_without_mutation_or_forward(configured, monkeypatch):
-    from rewards.manifest import annotate_manifest, OFFICIAL_OUTPUT_KEYS
+    from rewards.rynnvalue.annotate import annotate_manifest
+    from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS
     from rewards.evaluation_store import bind_reward_manifest
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
     annotation_path = annotate_manifest(configured, FakeAnnotator())
     annotations = json.loads(annotation_path.read_text())
     original = {e["run_id"]: (e["annotation_path"], sha256_file(Path(e["annotation_path"]))) for e in annotations["episodes"]}
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator", lambda _: pytest.fail("model load"))
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator", lambda _: pytest.fail("model load"))
     configured.raw["reward"].update(recipe(alpha=.5, shaping_weight=.1))
     index = load_reward_index(configured)
     for entry in index["episodes"]:
@@ -278,7 +280,7 @@ def test_reuses_official_outputs_without_mutation_or_forward(configured, monkeyp
 
 
 def test_dataset_final_uses_saved_inference_recipes_not_current_defaults(configured, monkeypatch, tmp_path):
-    from rewards.manifest import annotate_manifest
+    from rewards.rynnvalue.annotate import annotate_manifest
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     annotations = json.loads(annotate_manifest(configured, FakeAnnotator()).read_text())
     refs = {"source_dataset_sha256": manifest.get("source_dataset_sha256"), "episodes": []}
@@ -288,7 +290,7 @@ def test_dataset_final_uses_saved_inference_recipes_not_current_defaults(configu
     path = tmp_path / "model_inputs.json"
     path.write_text(json.dumps(refs))
     configured.raw["reward"].update(recipe(shaping_weight=.1))
-    monkeypatch.setattr("rewards.manifest.RynnValueAnnotator", lambda _: pytest.fail("model load"))
+    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator", lambda _: pytest.fail("model load"))
     import_saved_model_inputs(configured, path)
     result = load_reward_index(configured)
     assert all(entry["annotation_config"]["max_frames"] == 32 for entry in result["episodes"])

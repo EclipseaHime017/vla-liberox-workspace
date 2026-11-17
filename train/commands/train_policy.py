@@ -16,14 +16,14 @@ from core.paths import ROOT  # noqa: E402
 from core.config import DEFAULT_TRAIN_CONFIG, load_train_config
 from train.trainer import TrainingCancelled, request_training_stop, train
 from core.runtime import run_cuda_stage
-from core.methods import training_method
+from core.methods import METHODS, training_method
 from core.model_config import model_config
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train a registered model with BC or IQL")
     parser.add_argument("--config", type=Path, default=DEFAULT_TRAIN_CONFIG)
-    parser.add_argument("--method", choices=("bc", "iql"))
+    parser.add_argument("--method", choices=tuple(METHODS))
     parser.add_argument("--model", help="Registered model variant ID")
     parser.add_argument(
         "--result-file", type=Path,

@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
 from core.paths import ROOT  # noqa: E402
 
 from core.config import DEFAULT_TRAIN_CONFIG, load_train_config
-from rewards.manifest import materialize_reward_manifest, load_annotation_index
+from rewards.manifest import materialize_reward_manifest
+from rewards.rynnvalue.annotate import load_annotation_index
 from rewards.fusion import import_saved_model_inputs
 from core.io import atomic_json
 from core.data import load_manifest

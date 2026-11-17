@@ -10,7 +10,8 @@ from core import run_layout
 from core.data import load_manifest, prepare_dataset, iter_episode_arrays
 from core.io import atomic_json, sha256_file, stable_hash
 from train.replay import ReplayDataset
-from rewards.manifest import annotate_manifest, load_reward_index, reward_manifest_digest
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.manifest import load_reward_index, reward_manifest_digest
 from core.storage_paths import JOURNAL, REGISTRY, clear_storage_cache, storage_lease, storage_path
 from test_replay import FakeAnnotator, _stats
 

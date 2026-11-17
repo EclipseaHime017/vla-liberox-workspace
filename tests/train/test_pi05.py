@@ -14,10 +14,11 @@ import yaml
 from core import registry as base_models
 from train.models import pi05
 from train.models import vla_adapter
-from train.methods.algorithms import BehaviorCloning, ImplicitQLearning
+from train.methods.bc import BehaviorCloning
+from train.methods.iql import ImplicitQLearning
 from core.config import PROJECT_ROOT, load_train_config
 from core.data import prepare_dataset
-from train.methods.iql import weighted_masked_l1
+from train.methods.base import weighted_masked_l1
 from core.model_config import apply_model_parameters, model_config, model_parameters
 from core.registry import base_model
 from train.replay import ActionDataset

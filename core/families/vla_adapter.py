@@ -5,6 +5,7 @@ import math
 BACKEND = "train.models.vla_adapter"
 POLICY_ADAPTER = "studio.policies.vla_adapter_catalog"
 TRAINING_MODES = ("frozen", "lora", "full")
+ACTOR_CAPABILITIES = frozenset()  # deterministic L1 action head
 DEFAULT_KEYS = {"environment", "backbone", "action_head", "proprio_projector", "lora", "use_pro_version", "base_revision"}
 REVISION_PATTERN = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
 PIN_SOURCE_REVISION = True

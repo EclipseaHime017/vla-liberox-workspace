@@ -2,9 +2,9 @@
 from core.cli import dispatch
 
 COMMANDS = {
-    "annotate": ("rewards.commands.annotate", "Run RynnValue on a prepared dataset (rynnvalue environment)"),
     "materialize": ("rewards.commands.materialize", "Derive sparse/PBRS/Stage/fusion rewards from saved signals"),
-    "verify": ("rewards.commands.verify", "Check the pinned RynnValue checkout and environment"),
+    "rynnvalue-annotate": ("rewards.commands.rynnvalue_annotate", "Run RynnValue on a prepared dataset (rynnvalue environment)"),
+    "rynnvalue-verify": ("rewards.commands.rynnvalue_verify", "Check the pinned RynnValue checkout and environment"),
     "robometer-evaluate": ("rewards.commands.robometer_evaluate", "Score trajectories with Robometer (robometer environment)"),
     "robometer-verify": ("rewards.commands.robometer_verify", "Check the pinned Robometer runtime"),
 }

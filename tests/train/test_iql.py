@@ -2,13 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from train.methods.iql import (
-    PixelIQL,
-    advantage_weights,
-    chunk_bellman_target,
-    expectile_loss,
-    weighted_masked_l1,
-)
+from train.methods.critics import ExpectileCritic, advantage_weights, chunk_bellman_target, expectile_loss
+from train.methods.base import weighted_masked_l1
 
 
 def _batch(batch_size=2):
@@ -23,7 +18,7 @@ def _batch(batch_size=2):
 
 
 def test_iql_update_and_advantage_are_finite():
-    model = PixelIQL()
+    model = ExpectileCritic()
     metrics = model.update(_batch())
     assert torch.isfinite(torch.tensor([metrics.q_loss, metrics.value_loss])).all()
     assert model.advantage(_batch()).shape == (2,)
@@ -34,7 +29,7 @@ def test_iql_update_and_advantage_are_finite():
 
 
 def test_iql_optimizer_and_gradient_clip_are_configurable():
-    model = PixelIQL(
+    model = ExpectileCritic(
         critic_optimizer="adamw", critic_weight_decay=1e-4,
         value_optimizer="adamw", value_weight_decay=2e-4,
         critic_max_grad_norm=7.0, value_max_grad_norm=8.0,
@@ -78,16 +73,16 @@ def test_bellman_target_uses_actual_duration_for_accumulated_step_rewards():
 
 def test_iql_checkpoint_restores_models_and_optimizers():
     torch.manual_seed(3)
-    source = PixelIQL()
+    source = ExpectileCritic()
     source.update(_batch())
-    restored = PixelIQL()
+    restored = ExpectileCritic()
     restored.restore(source.checkpoint())
     for left, right in zip(source.state_dict().values(), restored.state_dict().values()):
         torch.testing.assert_close(left, right)
 
 
 def test_policy_advantage_uses_online_q_by_default():
-    model = PixelIQL()
+    model = ExpectileCritic()
     with torch.no_grad():
         for parameter in model.q1.parameters():
             parameter.zero_()
@@ -111,10 +106,10 @@ def test_policy_advantage_uses_online_q_by_default():
 
 def test_update_advantage_matches_a_fresh_online_critic_pass():
     import torch
-    from train.methods.iql import PixelIQL
+    from train.methods.critics import ExpectileCritic as ExpectileCritic
 
     torch.manual_seed(0)
-    agent = PixelIQL(horizon=8, action_dim=7, proprio_dim=8)
+    agent = ExpectileCritic(horizon=8, action_dim=7, proprio_dim=8)
     batch = {"pixels": torch.randint(0, 255, (3, 6, 32, 32), dtype=torch.uint8),
              "next_pixels": torch.randint(0, 255, (3, 6, 32, 32), dtype=torch.uint8),
              "proprio": torch.randn(3, 8), "next_proprio": torch.randn(3, 8),

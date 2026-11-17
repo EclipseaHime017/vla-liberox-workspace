@@ -1,5 +1,6 @@
 import { Badge } from "../../components/ui/Badge";
 import type { TrainingQueueItem, TrainingQueueState } from "../run-control/types";
+import { recordedMethod } from "./methods";
 
 const pending = new Set(["QUEUED", "STARTING", "RUNNING", "STOPPING"]);
 const labels = { QUEUED: "等待中", STARTING: "启动中", RUNNING: "训练中", STOPPING: "停止中",
@@ -20,7 +21,7 @@ export function TrainingQueuePanel({ queue, onInspect, onStop, busyId }: {
       <div className="queue-parameters"><span>{job.id}</span>
         <span>梯度累积：{String(job.parameters.gradient_accumulation_steps ?? "—")}</span>
         <span>注册时间：{new Date(job.created_at).toLocaleString()}</span>
-        {job.parameters.algorithm !== "bc" && <span>Discount γ：{String((job.parameters.reward as Record<string, unknown> | undefined)?.gamma ?? "—")}</span>}
+        {recordedMethod(job.parameters).rewards && <span>Discount γ：{String((job.parameters.reward as Record<string, unknown> | undefined)?.gamma ?? "—")}</span>}
       </div>
       {job.error && <p className="job-error">{job.error}</p>}
     </details>

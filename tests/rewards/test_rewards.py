@@ -9,22 +9,16 @@ import numpy as np
 import torch
 import yaml
 
-import rewards.manifest as rewards_module
+import rewards.rynnvalue.annotate as rynnvalue_module
 from core.data import load_manifest, prepare_dataset
 from core.config import load_train_config
 from rewards.evaluation_store import bind_reward_manifest
 from core.io import sha256_file, stable_hash
-from rewards.manifest import (
-    ANNOTATION_SCHEMA_VERSION,
-    RynnValueAnnotator,
-    annotate_manifest,
-    chunk_reward_components,
-    load_reward_index,
-    materialize_reward_manifest,
-    shaped_chunk_reward,
-    validate_rynnvalue_config_contract,
-    validate_rynnvalue_runtime_dtype,
-)
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
+from rewards.rynnvalue.model import RynnValueAnnotator, validate_rynnvalue_config_contract, validate_rynnvalue_runtime_dtype
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.pbrs import chunk_reward_components, shaped_chunk_reward
+from rewards.manifest import load_reward_index, materialize_reward_manifest
 from core.runtime import run_cuda_stage
 
 
@@ -177,7 +171,7 @@ def test_reward_mode_change_reuses_heads_and_rebuilds_manifest(
         def __init__(self, _config):
             raise AssertionError("reward-only relabel must not load RynnValue")
 
-    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    monkeypatch.setattr(rynnvalue_module, "RynnValueAnnotator", UnexpectedModelLoad)
     rebuilt = load_reward_index(configured)
     assert rebuilt["reward_config"]["accumulate_primitive_steps"] is True
     annotation_after = json.loads(annotation_path.read_text(encoding="utf-8"))
@@ -198,7 +192,7 @@ def test_disabling_rynnvalue_reuses_evaluation_and_materializes_sparse_only(
         def __init__(self, _config):
             raise AssertionError("reward ablation must not load RynnValue")
 
-    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    monkeypatch.setattr(rynnvalue_module, "RynnValueAnnotator", UnexpectedModelLoad)
     rebuilt = load_reward_index(configured)
     assert rebuilt["reward_config"]["rynnvalue"] is False
     assert json.loads(annotation_path.read_text(encoding="utf-8")) == annotation_before
@@ -220,7 +214,7 @@ def test_manifest_without_explicit_reward_mode_is_rebuilt(configured, monkeypatc
         def __init__(self, _config):
             raise AssertionError("mode migration must reuse stored RynnValue heads")
 
-    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    monkeypatch.setattr(rynnvalue_module, "RynnValueAnnotator", UnexpectedModelLoad)
     rebuilt = load_reward_index(configured)
     assert rebuilt["reward_config"]["accumulate_primitive_steps"] is False
 
@@ -278,7 +272,7 @@ def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
         def __init__(self, _config):
             raise AssertionError("v4 official outputs should avoid loading RynnValue")
 
-    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    monkeypatch.setattr(rynnvalue_module, "RynnValueAnnotator", UnexpectedModelLoad)
     migrated_path = annotate_manifest(configured)
     migrated = json.loads(migrated_path.read_text(encoding="utf-8"))
     assert migrated["schema_version"] == ANNOTATION_SCHEMA_VERSION
@@ -324,7 +318,7 @@ def test_existing_v5_sidecar_survives_reward_parameter_changes_without_model_for
         def __init__(self, _config):
             raise AssertionError("valid v5 evaluations must not run RynnValue again")
 
-    monkeypatch.setattr(rewards_module, "RynnValueAnnotator", UnexpectedModelLoad)
+    monkeypatch.setattr(rynnvalue_module, "RynnValueAnnotator", UnexpectedModelLoad)
     migrated = annotate_manifest(configured)
     assert migrated.is_file()
     rewards = load_reward_index(configured)
@@ -391,14 +385,14 @@ def test_reward_cache_is_reused_across_dataset_versions(configured, tmp_path, mo
     # A different package can seed official per-trajectory outputs without
     # loading a model even when its own cache is empty.
     import shutil
-    from rewards import manifest as rewards
+    from rewards.rynnvalue import annotate as rynnvalue
     parent_index = Path(configured.section("paths")["work_dir"]) / "annotations/annotation_manifest.json"
     child_index = Path(second_config.section("paths")["work_dir"]) / "annotations/annotation_manifest.json"
     shutil.copyfile(parent_index, child_index)
     second_config.raw["paths"]["annotation_cache"] = str(tmp_path / "empty-cache")
     def unexpected(_):
         raise AssertionError("Compatible output reuse must not construct RynnValue")
-    monkeypatch.setattr(rewards, "RynnValueAnnotator", unexpected)
+    monkeypatch.setattr(rynnvalue, "RynnValueAnnotator", unexpected)
     annotate_manifest(second_config, reuse_only=True)
 
 

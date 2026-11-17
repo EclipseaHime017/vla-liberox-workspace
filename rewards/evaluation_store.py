@@ -14,7 +14,8 @@ from typing import Any
 import numpy as np
 
 from core.io import atomic_json, sha256_file
-from rewards.manifest import ANNOTATION_SCHEMA_VERSION, REWARD_SCHEMA_VERSION, OFFICIAL_OUTPUT_KEYS
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION, OFFICIAL_OUTPUT_KEYS
+from rewards.manifest import REWARD_SCHEMA_VERSION
 
 
 SIDECAR_NAME = "rynnvalue_evaluation.json"

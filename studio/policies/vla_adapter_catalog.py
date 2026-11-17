@@ -4,6 +4,7 @@ import re
 
 from studio.policies.catalog import PolicyEntry, _stable_hash
 from studio.policies.registry import model_module
+from core.methods import METHODS
 
 PROVIDER = "studio.policies.vla_adapter:VLAAdapterPolicyProvider"
 ARTIFACTS = ("action_head", "proprio_projector")
@@ -46,7 +47,7 @@ def load_overlay(catalog, manifest, raw, *, parent=None):
         if config["backbone"] != "frozen" and (not isinstance(raw["backbone"], str) or not raw["backbone"].strip()):
             raise ValueError("Adapted overlay backbone must be a non-empty path")
     algorithm = raw.get("algorithm", "iql")
-    if algorithm not in ("iql", "bc"):
+    if algorithm not in METHODS:
         raise ValueError("Unknown policy overlay algorithm")
     policy_id = raw["policy_id"]
     label = raw["label"]
@@ -93,7 +94,7 @@ def load_overlay(catalog, manifest, raw, *, parent=None):
     if not isinstance(hashes, dict) or set(hashes) != names:
         raise ValueError(f"Overlay {policy_id} has invalid component hashes")
     for key in ("dataset_sha256", "reward_sha256", "compatibility_sha256"):
-        if key == "reward_sha256" and algorithm == "bc":
+        if key == "reward_sha256" and not METHODS[algorithm].requires_rewards:
             if raw[key] is not None:
                 raise ValueError("BC overlays must not reference rewards")
             continue

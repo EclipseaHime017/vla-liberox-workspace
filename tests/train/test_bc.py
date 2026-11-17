@@ -11,13 +11,14 @@ import pytest
 import torch
 import yaml
 
-from train.methods.algorithms import BehaviorCloning, ImplicitQLearning
+from train.methods.bc import BehaviorCloning
+from train.methods.iql import ImplicitQLearning
 from core.config import PROJECT_ROOT, load_train_config
 from core.data import prepare_dataset
-from train.methods.iql import weighted_masked_l1
+from train.methods.base import weighted_masked_l1
 from core.methods import actor_lr_warmup, training_method
 from train.replay import ActionDataset, ReplayDataset
-from rewards.manifest import annotate_manifest
+from rewards.rynnvalue.annotate import annotate_manifest
 from train import trainer as training
 from train.models import vla_adapter
 from train.models.vla_adapter import load_overlay, validate_overlay
@@ -135,7 +136,7 @@ def test_terminal_explicit_legacy_override_wins_over_base_common_values(configur
 
 
 def test_iql_adapter_preserves_update_and_actor_objective(configured):
-    from train.methods.iql import advantage_weights
+    from train.methods.critics import advantage_weights
     torch.manual_seed(12)
     method = ImplicitQLearning(configured, torch.device("cpu"))
     original = copy.deepcopy(method.agent)
@@ -178,7 +179,7 @@ def test_bc_cpu_training_resume_and_overlay(configured, monkeypatch):
     monkeypatch.setattr(training, "_device", lambda _: torch.device("cpu"))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(training, "load_reward_index", lambda _: pytest.fail("BC loaded rewards"))
-    monkeypatch.setattr("train.methods.algorithms.PixelIQL", lambda **_: pytest.fail("BC created Q/V"))
+    monkeypatch.setattr("train.methods.iql.ExpectileCritic", lambda **_: pytest.fail("BC created Q/V"))
     monkeypatch.setattr(vla_adapter, "processor_inputs", lambda c, prompts, *args: len(prompts))
     monkeypatch.setattr(vla_adapter, "extract_action_hidden_states", lambda c, n: c.model(torch.ones(n, 3)).detach())
     calls = 0

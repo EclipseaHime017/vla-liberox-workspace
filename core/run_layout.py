@@ -25,18 +25,26 @@ _COLUMNS = {"runs": ("run_path",), "training_datasets": ("manifest_path",),
             "training_runs": ("output_path", "overlay_path"), "evaluation_runs": ("result_path",)}
 
 
+CONSUMER_MODULES = {
+    "studio", "studio.commands.serve", "train", "train.commands.prepare_dataset", "train.commands.train_policy",
+    "train.commands.pipeline", "rewards", "rewards.commands.materialize", "rewards.commands.rynnvalue_annotate",
+    "rewards.commands.robometer_evaluate",
+}
+
+
 def _legacy_processes():
     """Conservative compatibility guard for consumers predating storage leases."""
+    # Script names from before the package layout, and current command modules (after ``-m``).
     consumers = {"run_ui.py", "train.py", "train_iql.py", "train_terminal.py", "prepare_dataset.py",
-                 "materialize_rewards.py", "annotate_rewards.py",
-                 "evaluate_trajectories.py"}
+                 "materialize_rewards.py", "annotate_rewards.py", "evaluate_trajectories.py"}
     for proc in Path("/proc").glob("[0-9]*"):
         if proc.name == str(os.getpid()):
             continue
         try:
             args = (proc / "cmdline").read_bytes().decode(errors="replace").split("\0")
-            if args and "python" in Path(args[0]).name and any(
-                Path(arg).name in consumers for arg in args[1:] if arg
+            if args and "python" in Path(args[0]).name and (
+                any(Path(arg).name in consumers for arg in args[1:] if arg)
+                or any(flag == "-m" and module in CONSUMER_MODULES for flag, module in zip(args, args[1:]))
             ):
                 yield proc.name
         except (FileNotFoundError, ProcessLookupError, PermissionError):

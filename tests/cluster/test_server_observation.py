@@ -13,7 +13,8 @@ from core.io import stable_hash
 from core.artifacts import decode_child, parent_identity, parent_snapshot
 from core.model_config import base_model_config
 from train.replay import ActionDataset, ReplayDataset
-from rewards.manifest import annotate_manifest, load_reward_index
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.manifest import load_reward_index
 from train.replay_cache import build_replay_cache, CachedReplayDataset
 from test_replay import FakeAnnotator, _stats
 

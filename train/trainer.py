@@ -27,8 +27,8 @@ from torch.utils.data import default_collate
 from core.config import LoadedConfig, reward_source
 from core.data import load_manifest, training_replay_policy, validate_training_manifest
 from core.io import atomic_json, sha256_file, stable_hash
-from train.methods.algorithms import TrainingAlgorithm, build_algorithm
-from core.methods import actor_lr_warmup, training_method
+from train.methods.base import TrainingAlgorithm, build_algorithm
+from core.methods import METHODS, actor_lr_warmup, training_method
 from core.model_config import model_backend, model_config, model_signature
 from core.registry import model_contract, family_adapter
 from core.image_transforms import canonical_contract
@@ -331,7 +331,7 @@ def _publish_overlay(
         "algorithm": method,
         "model_config": settings,
         "policy_id": policy_id,
-        "label": f"{reward_label} IQL · step {step}" if method == "iql" else f"BC · step {step}",
+        "label": " ".join(filter(None, [reward_label, f"{METHODS[method].label} · step {step}"])),
         **compatibility,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
@@ -482,7 +482,7 @@ def train(config: LoadedConfig) -> Path:
     )
     accumulation = int(training_cfg["gradient_accumulation_steps"])
     total_steps = int(training_cfg["train_steps"])
-    warmup = int(config.section("iql")["critic_warmup_steps"]) if method.name == "iql" else 0
+    warmup = int(config.section(method.config_section)["critic_warmup_steps"]) if method.critic else 0
     lr_warmup = actor_lr_warmup(config.raw)
     start_step = 0
     if training_cfg["resume_checkpoint"] is not None:

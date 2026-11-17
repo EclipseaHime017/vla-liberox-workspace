@@ -12,7 +12,8 @@ from core.config import LoadedConfig
 from core.data import prepare_dataset, load_manifest
 from core.io import atomic_json, sha256_file, stable_hash
 from train.replay import ReplayDataset
-from rewards.manifest import annotate_manifest, load_reward_index, reward_manifest_digest
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.manifest import load_reward_index, reward_manifest_digest
 from cluster.inputs import discover_tasks, prepare_global_inputs, saved_reward, open_run_source
 
 
@@ -282,7 +283,7 @@ def test_training_settings_do_not_change_input_identity(configured, tmp_path):
 
 
 def test_implicit_global_stage_reuses_keyframes_without_resaving(configured, tmp_path):
-    from rewards.stage import build_stage_annotation
+    from rewards.stage.keyframes import build_stage_annotation
     task, config, _ = global_runs(configured)
     for run in task.runs:
         path = run.episode_dir / "trajectory.npz"

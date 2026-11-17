@@ -235,7 +235,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
     loader = DataLoader(dataset, **loader_kwargs)
     progress = TrainingProgressReporter(total_steps=total, start_step=start,
         interval_steps=config.section("logging")["console_interval_steps"],
-        warmup_steps=config.section("iql")["critic_warmup_steps"] if method.name == "iql" else 0,
+        warmup_steps=config.section(method.config_section)["critic_warmup_steps"] if method.critic else 0,
         samples_per_step=global_batch)
     logs = config.section("logging")
     if rank == 0:

@@ -159,7 +159,7 @@ class FakeAnnotator:
 
 
 def test_sealed_rynn_and_final_keep_independent_inputs(tmp_path, tmp_path_factory, monkeypatch):
-    from rewards.manifest import annotate_manifest
+    from rewards.rynnvalue.annotate import annotate_manifest
     jobs, dataset, run = setup_recording(tmp_path, monkeypatch)
     local_stage(jobs, dataset, exponent=4)
     for source, options in (("rynnvalue", {}), ("final", {"alpha": .5, "stage_exponent": 2, "shaping_weight": 0})):
@@ -186,7 +186,7 @@ def test_sealed_rynn_and_final_keep_independent_inputs(tmp_path, tmp_path_factor
 
 def test_global_snapshot_outlives_original_annotation_directory(tmp_path, tmp_path_factory, monkeypatch):
     from studio.services.trajectory_reward_snapshot import bind_reward_snapshot
-    from rewards.manifest import annotate_manifest
+    from rewards.rynnvalue.annotate import annotate_manifest
     jobs, dataset, run = setup_recording(tmp_path, monkeypatch)
     job = jobs.start_annotation(dataset["id"], source="rynnvalue")
     config = load_train_config(job["config_path"])

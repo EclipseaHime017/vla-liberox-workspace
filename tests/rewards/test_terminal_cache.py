@@ -1,5 +1,6 @@
 from core.data import prepare_dataset
-from rewards.manifest import annotate_manifest, load_reward_index
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.manifest import load_reward_index
 from train.replay_cache import build_replay_cache, CachedReplayDataset
 from test_replay import FakeAnnotator, _stats
 

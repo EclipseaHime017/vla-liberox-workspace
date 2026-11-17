@@ -5,6 +5,7 @@ from pathlib import Path
 BACKEND = "train.models.pi05"
 POLICY_ADAPTER = "studio.policies.pi05_catalog"
 TRAINING_MODES = ("frozen", "full")
+ACTOR_CAPABILITIES = frozenset({"sample"})  # flow-matching head: several chunks per observation
 DEFAULT_KEYS = {"environment", "backbone", "base_revision", "num_inference_steps"}
 REVISION_PATTERN = r"[0-9a-f]{64}"
 PIN_SOURCE_REVISION = False

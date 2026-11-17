@@ -36,7 +36,7 @@ export type PolicyInfo = {
   io?: { native_action_horizon: number; replay_horizon: number };
   observation?: { image_flip_vertical: boolean; image_flip_horizontal: boolean };
   inference?: { open_loop_steps: number; max_open_loop_steps: number };
-  algorithm?: "iql" | "bc" | null;
+  algorithm?: string | null;
   model_config?: {
     [key: string]: unknown;
     family: string; backbone: string;
@@ -481,8 +481,21 @@ export type EvaluationFilters = {
   date_to?: string;
 };
 
+export type MethodParameter = {
+  name: string; label: string; type: "number" | "select";
+  default?: number | string | boolean | null; min?: number; max?: number; step?: number | "any";
+  options?: Array<{ value: string; label: string }>;
+};
+export type TrainingMethod = {
+  id: string; label: string; summary: string;
+  requires_rewards: boolean; requires_transitions: boolean;
+  critic: string | null; exports_critic: boolean; actor_capabilities: string[];
+  parameters: MethodParameter[]; families: string[];
+};
+export type MethodCatalog = { methods: TrainingMethod[]; default: string };
+
 export type TrainingDefaults = {
-  algorithm?: "iql" | "bc";
+  algorithm?: string;
   models?: Array<{ id: string; label: string; backbone_modes: string[];
     training_ui?: {
       fields: Array<{ name: string; label: string; type: "select" | "number";

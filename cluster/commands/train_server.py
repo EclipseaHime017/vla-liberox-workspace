@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
 from core.paths import CONFIGS  # noqa: E402
+from core.methods import METHODS  # noqa: E402
 
 from cluster.config import configure_server
 from cluster.pipeline import ServerRun, execution_plan, training_settings
@@ -57,7 +58,7 @@ def main(argv=None):
     parser.add_argument("--task", help="Canonical task ID from the export or run collection")
     parser.add_argument("--runs-root", type=Path, help="Copied runs, exported dataset directory or ZIP")
     parser.add_argument("--model", help="Registered model variant ID")
-    parser.add_argument("--method", choices=("bc", "iql"), help="Training method; overrides YAML")
+    parser.add_argument("--method", choices=tuple(METHODS), help="Training method; overrides YAML")
     parser.add_argument("--dry-run", action="store_true", help="Validate and show plan without writing a training run")
     args = parser.parse_args(argv)
     server = configure_server(args.config, task=args.task, runs_root=args.runs_root,

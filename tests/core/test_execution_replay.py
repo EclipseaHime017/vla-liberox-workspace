@@ -244,7 +244,8 @@ def test_vla_loss_uses_actor_window_not_critic_padding(monkeypatch):
 
 
 def test_critic_capacity_follows_transitions_while_actor_loss_uses_model_window(configured):
-    from train.methods.algorithms import BehaviorCloning, ImplicitQLearning
+    from train.methods.bc import BehaviorCloning
+    from train.methods.iql import ImplicitQLearning
 
     algorithm = ImplicitQLearning(configured, torch.device("cpu"), transition_horizon=5)
     pixels = torch.zeros(1, 6, 32, 32)

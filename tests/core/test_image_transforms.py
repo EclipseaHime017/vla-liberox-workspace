@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from core.image_transforms import orient_image, policy_view, vla_adapter_observation, canonical_contract
-from rewards.manifest import reward_view
+from rewards.rynnvalue.model import reward_view
 
 
 MODES = [("none", (1, 1)), ("flip_vertical", (-1, 1)),

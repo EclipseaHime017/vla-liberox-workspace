@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repository root
 from core.paths import ROOT  # noqa: E402
 
 from core.config import DEFAULT_TRAIN_CONFIG, load_train_config, reward_source, needs_rynnvalue
-from rewards.manifest import annotate_manifest
+from rewards.rynnvalue.annotate import annotate_manifest
 from core.runtime import run_cuda_stage
 
 

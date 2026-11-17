@@ -9,7 +9,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from train.methods.algorithms import ImplicitQLearning, BehaviorCloning
+from train.methods.iql import ImplicitQLearning
+from train.methods.bc import BehaviorCloning
 from core.config import LoadedConfig
 from train.methods.distributed import ActorModule, DistributedAlgorithm, wrap, zero_optimizer
 from train.models.adaptation import trainable_parameters
@@ -58,8 +59,8 @@ def _worker(rank, world, rendezvous, raw, result, horizon=8):
                                   torch.device("cpu"), valid_actions=rank + 1)
         assert reduced["q_mean"] == 1.5
         assert reduced["actor_l1_x"] == pytest.approx(5 / 3)
-        from train.methods import iql
-        iql.QNetwork, iql.ValueNetwork = TinyQ, TinyValue
+        from train.methods import critics
+        critics.QNetwork, critics.ValueNetwork = TinyQ, TinyValue
         config = LoadedConfig(Path("test.yaml"), raw)
         torch.manual_seed(8)
         reference = ImplicitQLearning(config, torch.device("cpu"), transition_horizon=horizon)
@@ -160,14 +161,14 @@ def flow_losses(components, batch, device):
 
 def _native_worker(rank, world, rendezvous, raw):
     from contextlib import nullcontext
-    from train.methods import iql
+    from train.methods import critics
     from train.models import pi05
-    from train.methods.algorithms import build_algorithm
+    from train.methods.base import build_algorithm
     torch.set_num_threads(1)
     dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank,
                             world_size=world, timeout=timedelta(seconds=45))
     try:
-        iql.QNetwork, iql.ValueNetwork = TinyQ, TinyValue
+        critics.QNetwork, critics.ValueNetwork = TinyQ, TinyValue
         config = LoadedConfig(Path("test.yaml"), raw)
         torch.manual_seed(8)
         single_algorithm = build_algorithm(config, torch.device("cpu"))

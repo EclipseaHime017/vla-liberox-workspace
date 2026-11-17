@@ -14,15 +14,10 @@ import yaml
 from core.config import load_train_config
 from core.data import prepare_dataset
 from core.io import atomic_json
-from rewards.manifest import load_reward_index, load_stage_annotations, reward_manifest_digest
-from rewards.stage import (
-    build_stage_annotation,
-    stage_anchors,
-    stage_chunk_reward,
-    stage_scores,
-    stage_annotation_context,
-    validate_stage_annotation,
-)
+from rewards.manifest import load_reward_index, reward_manifest_digest
+from rewards.stage.keyframes import load_stage_annotations
+from rewards.stage.keyframes import build_stage_annotation, stage_anchors, validate_stage_annotation
+from rewards.stage.reward import stage_chunk_reward, stage_scores, stage_annotation_context
 
 
 def annotation(frames, *, done=None, exponent=2):

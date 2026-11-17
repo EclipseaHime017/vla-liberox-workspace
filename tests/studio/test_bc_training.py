@@ -43,7 +43,7 @@ def test_bc_defaults_never_inspect_global_evaluations(tmp_path, monkeypatch):
         jobs.start_training(dataset["id"], {"algorithm": "bc", "reward_gamma": .9})
     with pytest.raises(ValueError, match="algorithm"):
         jobs.defaults(dataset["id"], algorithm="unknown")
-    with pytest.raises(ValueError, match="IQL parameters"):
+    with pytest.raises(ValueError, match="does not accept critic parameters"):
         jobs.start_training(dataset["id"], {"algorithm": "bc", "critic_lr": .01})
 
 

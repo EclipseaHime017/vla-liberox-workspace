@@ -12,7 +12,7 @@ from studio.services.inherited_reward_inputs import reconstruct_episode
 from core.config import load_train_config
 from core.data import prepare_dataset
 from rewards.manifest import load_pinned_reward_index, materialize_reward_manifest, reward_derivation_config
-from rewards.stage import build_stage_annotation
+from rewards.stage.keyframes import build_stage_annotation
 import test_dataset_reward_versions as fixture
 from test_training_platform import make_run
 

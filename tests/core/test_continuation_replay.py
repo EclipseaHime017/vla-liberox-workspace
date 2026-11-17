@@ -8,7 +8,7 @@ import numpy as np
 from core.registry import model_contract
 from core.data import add_episode_chunks, iter_unique_replay_chunks, load_manifest, prepare_dataset
 from train.replay import ActionDataset, ReplayDataset
-from rewards.manifest import annotate_manifest
+from rewards.rynnvalue.annotate import annotate_manifest
 from train.trainer import _sample_batch
 from test_replay import FakeAnnotator, _stats
 

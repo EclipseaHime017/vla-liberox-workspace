@@ -5,6 +5,7 @@ from starlette.concurrency import run_in_threadpool
 
 from studio.api.dependencies import http_error, offline_job_service
 from studio.api.models import DeleteJobRequest, TrainingRunRequest
+from core.methods import DEFAULT_METHOD
 
 
 router = APIRouter(prefix="/api", tags=["offline-jobs"])
@@ -59,7 +60,7 @@ async def delete_job(job_id: str, body: DeleteJobRequest, request: Request):
 @router.get("/training/defaults")
 async def defaults(
     request: Request, dataset_id: str | None = Query(default=None), reward_source: str | None = Query(default=None),
-    algorithm: str = "iql", model_family: str | None = None, model_base_id: str | None = None,
+    algorithm: str = DEFAULT_METHOD, model_family: str | None = None, model_base_id: str | None = None,
 ):
     try:
         return await run_in_threadpool(offline_job_service(request).defaults, dataset_id, reward_source, algorithm, model_family, model_base_id)

@@ -316,7 +316,7 @@ class DatasetRewardVersions:
             atomic_write_yaml(config_path, raw)
             stage("prepare", "准备冻结数据集", "train.commands.prepare_dataset", config_path, self.ui_config.train_environment)
             if source == "rynnvalue":
-                stage("annotate", "RynnValue 轨迹评价", "rewards.commands.annotate", config_path,
+                stage("annotate", "RynnValue 轨迹评价", "rewards.commands.rynnvalue_annotate", config_path,
                       self.ui_config.reward_environment, *(["--overwrite"] if parameters["force_model"] else []))
             stage("rewards", "计算数据集奖励", "rewards.commands.materialize", config_path,
                   self.ui_config.train_environment,

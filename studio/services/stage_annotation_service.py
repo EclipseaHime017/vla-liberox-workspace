@@ -16,6 +16,7 @@ import yaml
 
 from studio.exceptions import ConflictError
 from studio.storage.files import atomic_write_json
+from rewards.stage import keyframes as stage_keyframes, reward as stage_reward
 
 
 SIDECAR_NAME = "stage_annotation.json"
@@ -28,17 +29,12 @@ class StageAnnotationService:
         self.offline_root = Path(offline_root)
         self._lock = threading.RLock()
         self._sources: OrderedDict[str, tuple[tuple, dict]] = OrderedDict()
-        self._math = None
         self.datasets = None
 
     def bind_datasets(self, datasets) -> None:
         self.datasets = datasets
         # One lock order for dataset creation, label edits and reward snapshots.
         self._lock = datasets.lock
-
-    def _module(self):
-        import rewards.stage
-        return rewards.stage
 
     def _defaults(self) -> tuple[int, float]:
         from studio.services.inherited_reward_inputs import core_module
@@ -128,10 +124,9 @@ class StageAnnotationService:
         source, payload, data, dataset, entry = self._labels(run, dataset_id)
         if dataset is not None:
             threshold = dataset["success_consecutive_steps"]
-        math = self._module()
         response = {"run_id": run["id"], "status": "missing", "error": None,
                     "action_count": source["action_count"], "time_seconds": source["time_seconds"],
-                    "success_step": math.confirmed_success_step(source["done"], threshold),
+                    "success_step": stage_keyframes.confirmed_success_step(source["done"], threshold),
                     "success_consecutive_steps": threshold, "exponent": exponent,
                     "keyframes": [], "scores": [], "anchors": [],
                     "dataset_id": dataset_id, "dataset_name": dataset["name"] if dataset else None,
@@ -144,7 +139,7 @@ class StageAnnotationService:
                 response["error"] = "数据集与全局均缺少已保存的 Stage 关键帧标注"
             return response
         try:
-            valid = math.validate_stage_annotation(
+            valid = stage_keyframes.validate_stage_annotation(
                 payload, run_id=run["id"], trajectory_sha256=source["trajectory_sha256"],
                 done=source["done"], success_consecutive_steps=threshold,
             )
@@ -153,12 +148,12 @@ class StageAnnotationService:
             # Labels remain valid when a reward recipe cannot be evaluated.
             # The preview is disposable; only manual marks are persisted.
             try:
-                context = math.stage_annotation_context(
+                context = stage_reward.stage_annotation_context(
                     valid, done=source["done"], success_consecutive_steps=threshold,
                     exponent=exponent,
                 )
-                response.update(scores=math.stage_scores(context).tolist(),
-                                anchors=math.stage_anchors(context), derivation_error=None)
+                response.update(scores=stage_reward.stage_scores(context).tolist(),
+                                anchors=stage_keyframes.stage_anchors(context), derivation_error=None)
             except (ValueError, TypeError, KeyError) as exc:
                 response.update(derivation_error=str(exc))
         except (ValueError, TypeError, KeyError) as exc:
@@ -193,11 +188,11 @@ class StageAnnotationService:
                 global_labels, _ = self._read_sidecar(sidecar)
                 if global_labels is None:
                     raise ValueError("缺少有效的全局关键帧标注")
-                valid = self._module().validate_stage_annotation(global_labels,
+                valid = stage_keyframes.validate_stage_annotation(global_labels,
                     run_id=run_id, trajectory_sha256=source["trajectory_sha256"],
                     done=source["done"], success_consecutive_steps=threshold)
                 keyframes = valid["keyframes"]
-            payload = self._module().build_stage_annotation(
+            payload = stage_keyframes.build_stage_annotation(
                 run_id=run_id, trajectory_sha256=source["trajectory_sha256"], done=source["done"],
                 keyframes=keyframes, success_consecutive_steps=threshold, exponent=exponent,
             )
@@ -227,15 +222,14 @@ class StageAnnotationService:
                         raise ValueError(entry.get("error") or (
                             "数据集与全局均缺少已保存的 Stage 关键帧标注" if dataset_id
                             else "缺少已保存的全局 Stage 关键帧标注"))
-                    result[run_id] = self._module().validate_stage_annotation(
+                    result[run_id] = stage_keyframes.validate_stage_annotation(
                         payload, run_id=run_id, trajectory_sha256=source["trajectory_sha256"],
                         done=source["done"], success_consecutive_steps=success_consecutive_steps,
                     )
                     if nonpositive:
-                        core = self._module()
-                        context = core.stage_annotation_context(result[run_id], done=source["done"],
+                        context = stage_reward.stage_annotation_context(result[run_id], done=source["done"],
                             success_consecutive_steps=success_consecutive_steps, exponent=exponent)
-                        if np.any(core.stage_scores(context) > 0):
+                        if np.any(stage_reward.stage_scores(context) > 0):
                             raise ValueError("Stage 分数大于 0，请检查关键帧；Final Reward 不会裁剪标注结果")
                 except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
                     errors.append(f"{run_id}: {exc}")

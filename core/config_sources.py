@@ -161,7 +161,7 @@ def read_source(path: Path) -> dict[str, Any]:
 def compose_config(path: Path, *, method: str | None = None,
                    family: str | None = None, overrides: dict | None = None,
                    overrides_path: Path | None = None) -> dict:
-    from core.methods import METHODS
+    from core.methods import DEFAULT_METHOD, METHODS
     from core.model_config import MODELS, model_preset
 
     training_override = (overrides or {}).get("training", {})
@@ -190,7 +190,7 @@ def compose_config(path: Path, *, method: str | None = None,
     if not presets and method is None and family is None:
         # A sealed effective config is self-contained, not a live preset reference.
         return raw
-    method = requested_method or raw.get("training", {}).get("method", "iql")
+    method = requested_method or raw.get("training", {}).get("method", DEFAULT_METHOD)
     if not isinstance(method, str) or method not in METHODS:
         raise ValueError(f"Unknown training.method: {method}")
     if not METHODS[method].requires_rewards:

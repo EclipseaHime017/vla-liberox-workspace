@@ -66,7 +66,8 @@ def test_detail_never_recalculates_and_rejects_corrupted_artifacts(tmp_path, mon
     first = attach_dataset_context(copy.deepcopy(result), service, "a", "v1")
     # Once published, plotted values come from the file even if formula code changes.
     import studio.services.stage_annotation_service as stage
-    monkeypatch.setattr(stage.StageAnnotationService, "_module", lambda _: pytest.fail("must not evaluate"))
+    for formula in ("stage_annotation_context", "stage_scores"):
+        monkeypatch.setattr(stage.stage_reward, formula, lambda *_, **__: pytest.fail("must not evaluate"))
     assert attach_dataset_context(copy.deepcopy(result), service, "a", "v1") == first
     manifest = json.loads(Path(versions[("a", "v1")]["reward_manifest_path"]).read_text())
     Path(manifest["episodes"][0]["reward_path"]).write_bytes(b"corrupt")

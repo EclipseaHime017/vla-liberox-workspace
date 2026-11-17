@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
+from core.methods import DEFAULT_METHOD, METHODS
+
 
 ACTION_NAMES = ("dx", "dy", "dz", "drx", "dry", "drz", "gripper")
 
@@ -111,10 +113,10 @@ class TrainingProgressReporter:
         width = 20
         complete = min(width, int(fraction * width))
         bar = "#" * complete + "-" * (width - complete)
-        method = metric.get("algorithm", "iql")
-        phase = "BC" if method == "bc" else "BC-warmup" if step <= self.warmup_steps else "IQL"
+        method = METHODS[metric.get("algorithm", DEFAULT_METHOD)]
+        phase = "BC-warmup" if method.critic and step <= self.warmup_steps else method.label
         objective = (
-            f"loss(actor)={_metric_number(metric, 'actor_loss')} | " if method == "bc" else
+            f"loss(actor)={_metric_number(metric, 'actor_loss')} | " if method.critic is None else
             f"loss(q/v/actor)={_metric_number(metric, 'q_loss')}/"
             f"{_metric_number(metric, 'value_loss')}/{_metric_number(metric, 'actor_loss')} | "
             f"Q/V/A={_metric_number(metric, 'q_mean')}/{_metric_number(metric, 'value_mean')}/"

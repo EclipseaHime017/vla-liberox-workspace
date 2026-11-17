@@ -9,12 +9,9 @@ import pytest
 from core.config import load_train_config
 from core.data import prepare_dataset
 from train.replay import ReplayDataset
-from rewards.manifest import (
-    annotate_manifest,
-    chunk_reward_components,
-    load_reward_index,
-    reward_derivation_config,
-)
+from rewards.rynnvalue.annotate import annotate_manifest
+from rewards.pbrs import chunk_reward_components
+from rewards.manifest import load_reward_index, reward_derivation_config
 from core.io import sha256_file
 from test_replay import FakeAnnotator, _stats
 

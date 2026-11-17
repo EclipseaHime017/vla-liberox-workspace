@@ -5,7 +5,7 @@ import * as api from "../features/run-control/api";
 import type { Bootstrap, OfflineJob, TrainingDataset, TrainingDefaults } from "../features/run-control/types";
 
 vi.mock("../features/run-control/api", () => ({
-  getBootstrap: vi.fn(), getTensorBoard: vi.fn(), getTrainingDefaults: vi.fn(),
+  getBootstrap: vi.fn(), getMethods: vi.fn(), getTensorBoard: vi.fn(), getTrainingDefaults: vi.fn(),
   listOfflineJobs: vi.fn(), listTrainingDatasets: vi.fn(), startTensorBoard: vi.fn(), enqueueTraining: vi.fn(),
   getTrainingQueue: vi.fn(), getOfflineJob: vi.fn(), stopOfflineJob: vi.fn(),
   getDatasetRewardConfig: vi.fn(), annotateTrainingDataset: vi.fn(), verifyTrainingDataset: vi.fn(),
@@ -68,6 +68,12 @@ beforeEach(() => {
     task_catalog: [{ task_id: "task", prompt: "pick bowl" }] } as unknown as Bootstrap);
   vi.mocked(api.getTrainingDefaults).mockImplementation(async (datasetId) => datasetId === "unready"
     ? { ...defaults, reward_version: null } : defaults);
+  vi.mocked(api.getMethods).mockResolvedValue({ default: "iql", methods: [
+    { id: "iql", label: "IQL", summary: "奖励加权后训练", requires_rewards: true, requires_transitions: true, critic: "expectile",
+      exports_critic: false, actor_capabilities: [], parameters: [], families: ["pi05", "vla_adapter"] },
+    { id: "bc", label: "BC", summary: "等权行为克隆", requires_rewards: false, requires_transitions: false, critic: null,
+      exports_critic: false, actor_capabilities: [], parameters: [], families: ["pi05", "vla_adapter"] },
+  ] });
   vi.mocked(api.listOfflineJobs).mockResolvedValue([]);
   vi.mocked(api.getTrainingQueue).mockResolvedValue({ jobs: [], waiting_reason: null });
   vi.mocked(api.listTrainingDatasets).mockResolvedValue(datasets);

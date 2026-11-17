@@ -22,15 +22,8 @@ from core.data import load_manifest, prepare_dataset
 from core.execution import validate_task_prompt
 from core.io import atomic_json, sha256_file, stable_hash
 from core.methods import training_method
-from rewards.manifest import (
-    _episode_reward_metadata,
-    _episode_timeline_arrays,
-    load_pinned_reward_index,
-    materialize_reward_manifest,
-    reward_derivation_config,
-    OFFICIAL_OUTPUT_KEYS,
-    validate_official_outputs,
-)
+from rewards.manifest import _episode_reward_metadata, _episode_timeline_arrays, load_pinned_reward_index, materialize_reward_manifest, reward_derivation_config
+from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS, validate_official_outputs
 
 REWARD_SOURCES = ("final", "rynnvalue", "stage", "sparse")
 
@@ -338,12 +331,8 @@ def _validate_reward_layout(metadata: dict, arrays, episode: dict) -> None:
 
 def _stage_from_labels(run: GlobalRun, episode: dict, directory: Path, raw: dict) -> tuple[dict, Path]:
     """Same implicit global Stage semantics as the PC: labels + configured p."""
-    from rewards.stage import (
-        stage_annotation_context,
-        stage_chunk_reward,
-        stage_scores,
-        validate_stage_annotation,
-    )
+    from rewards.stage.reward import stage_annotation_context, stage_chunk_reward, stage_scores
+    from rewards.stage.keyframes import validate_stage_annotation
     arrays = _episode_timeline_arrays(episode)
     threshold = raw["data"]["success_consecutive_steps"]
     annotation = validate_stage_annotation(_json(run.rewards["stage"]), run_id=run.run_id,

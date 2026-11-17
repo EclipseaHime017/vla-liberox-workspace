@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.optim import ZeroRedundancyOptimizer
 
-from train.methods.algorithms import build_algorithm
+from train.methods.base import build_algorithm
 
 
 def unwrap(module):
