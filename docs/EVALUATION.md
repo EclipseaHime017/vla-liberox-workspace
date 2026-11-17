@@ -39,3 +39,39 @@ Ubuntu 的通用加载器可安装 `libegl1 libglvnd0 libgl1`；CPU 渲染另外
 保持调度器的 `CUDA_VISIBLE_DEVICES` 分配。若需指定渲染设备，在启动进程前设置 `MUJOCO_EGL_DEVICE_ID`，它是 EGL 的设备枚举索引，不要直接当作 CUDA 进程内的逻辑编号。通过预检确认渲染器后再进行正式评测。
 
 评测复用 server 的资源锁，已有训练占用资源时直接提示忙碌；任务可放在训练完成后的作业中。Ctrl+C 或 SIGTERM 取消当前评测，保留已完成回合和错误日志。新入口本身不申请 PBS 资源，也不改变已有训练队列。
+
+## 本地仿真、远端推理
+
+服务器不具备渲染环境时，可以在本地运行 LIBERO-X，只把双视角图像、机器人状态和任务指令发给服务器。服务器加载训练导出的模型，返回动作 chunk；本地执行动作后再发送新的观测。图像使用无损 PNG，翻转和动作转换仍由服务器上的模型接口完成。
+
+两端使用相同版本的本模块。远端只安装对应模型的推理环境，不需要 LIBERO-X、EGL 或 robosuite。本地在仿真环境中执行评测脚本，不需要下载策略权重。
+
+先生成一个仅本人可读的随机令牌文件，安全复制到另一端。远端在所分配的 GPU 上启动服务：
+
+```bash
+python vla-adapter-rynn-iql/scripts/serve_evaluation.py \
+  --policy /path/to/policy-registry/POLICY_ID/policy.yaml \
+  --gpu 0 --port 18210 --token-file /private/path/evaluation.token
+```
+
+服务仅监听 `127.0.0.1`，不直接暴露到公网；默认空闲 15 分钟退出。每个服务绑定一个 checkpoint 和一张 GPU，复用 GPU 资源锁；启动前仍需确认资源归属及是否有其他程序占用。服务器有多张空闲 GPU 时，可使用不同端口启动同一模型的副本。
+
+本地建立 SSH 转发（需要跳板机时使用现有 SSH 配置）：
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 18210:127.0.0.1:18210 TRAIN_HOST
+```
+
+从服务器的 `sha256sum /path/to/policy.yaml` 获取模型清单哈希，然后运行：
+
+```bash
+python vla-adapter-rynn-iql/scripts/evaluate_remote.py \
+  --config vla-adapter-rynn-iql/configs/server_evaluation.yaml \
+  --endpoint http://127.0.0.1:18210 \
+  --token-file /private/path/evaluation.token \
+  --policy-sha256 MODEL_MANIFEST_SHA256 --concurrency 4
+```
+
+此模式的模型由远端服务和清单哈希指定，不读取配置中的本地 `policies` 路径；任务、次数、初始状态、执行步数和输出位置仍使用同一份评测 YAML。脚本直接使用当前本地 Python 仿真环境，不使用 `check_environment` 启动子环境。多个 `--endpoint` 分配同一模型的副本；不同 checkpoint 分别运行并保留各自结果。
+
+每个回合拥有独立的随机数状态和严格递增的请求序号；超时或断线明确报错，不重放请求、不回退到其他模型。`summary.json` 另外记录端到端往返时间、远端推理与排队时间、请求大小和显存。并发量受本地渲染、网络及远端推理共同限制，应先进行短回合压测，再扩大正式评测。多回合共享一个模型服务时，推理调用串行处理，不等同于模型批推理。
