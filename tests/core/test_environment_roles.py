@@ -74,6 +74,33 @@ def test_reward_roles_use_only_their_own_environment_and_model():
     assert clones(plan("reward-robometer")[1]) == {"robometer"}
 
 
+def test_reward_environments_are_started_from_the_root_and_never_install_the_repository():
+    from_root = {name for name, spec in CONFIG["environments"].items() if not setup.installs_repository(spec)}
+    assert from_root == {"rynnvalue-reward", "robometer-reward"}
+    for unit, spec in CONFIG["units"].items():
+        for step in spec["steps"]:
+            (kind, value), = step.items()
+            if spec["environment"] in from_root:
+                assert not (kind == "pip" and "." in value), (unit, step)
+    with pytest.raises(SystemExit, match="installed or from-root"):
+        setup.installs_repository({"repository": "copied"})
+
+
+def test_verify_imports_isolated_where_installed_and_from_the_root_elsewhere(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setenv("CONDA_EXE", "conda")
+    monkeypatch.setattr(setup.subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    installer = setup.Installer(CONFIG, LOCK, dry_run=False)
+    installer.ready.update(CONFIG["environments"])
+    installer.run_step("vla-liberox", "verify", "packages")
+    installer.run_step("rynnvalue-reward", "verify", "packages")
+    (installed, installed_kwargs), (from_root, from_root_kwargs) = calls
+    assert installed[installed.index("python") + 1] == "-I"
+    assert from_root[from_root.index("python") + 1] == "-E"
+    assert installed_kwargs["cwd"] == from_root_kwargs["cwd"] == ROOT
+    assert "repository root (not installed)" in capsys.readouterr().out
+
+
 def test_dev_downloads_no_weights_and_studio_adds_pi05_only_when_asked():
     assert not [unit for unit in plan("dev")[0] if unit.endswith("-weights")]
     assert environments(plan("studio")[1]) == {"vla-liberox"}

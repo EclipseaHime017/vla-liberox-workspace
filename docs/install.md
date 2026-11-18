@@ -57,7 +57,7 @@ python envs/setup.py --role train --role eval --family pi05
 - `clone`：把上游克隆到 `third_party/<目录>/` 并检出锁定 commit。已有检出只核对 commit，不一致时停止，不会重置你的修改。
 - `patch`：校验补丁哈希后应用一次（VLA-Adapter）；
 - 安装 `envs/layers/*.txt` 中的依赖层；
-- `pip install --no-deps -e .` 安装本仓库，并用 `python -I` 核对 `core/sim/rewards/train/cluster/studio` 六个包都从本仓库导入；
+- vla-liberox、pi05 用 `pip install --no-deps -e .` 安装本仓库，并用 `python -I` 核对 `core/sim/rewards/train/cluster/studio` 六个包都从本仓库导入；rynnvalue-reward、robometer-reward 不安装本仓库（`repository: from-root`），在仓库根目录下核对；
 - vla-liberox 最后安装 CUDA 12.8 的 PyTorch（支持 RTX 50 系列，需要匹配的驱动），并固定 `numpy==1.26.4`；
 - 下载或转换权重：π₀.₅ 由 `python -m train prepare-pi05` 转换（首次下载约 12 GiB，另生成约 7 GiB，占用较多内存）；RynnValue 和 Robometer 用 `hf download` 下载锁定的 revision；VLA-Adapter 在首次加载时下载到 `models/`。
 
@@ -119,18 +119,3 @@ conda run -n vla-liberox npm --prefix web test
 ```
 
 VLA-Adapter 的源码、补丁和 TensorFlow 版本由 `tests/core/test_upstream_environment.py` 核对：除字节码和 egg-info 外，检出不得包含补丁以外的修改。
-
-## 6. 从 0.8.0 升级已安装的设备
-
-`third_party/`、`models/`、`dataset-root/`、`policy-registry/` 的位置不变，数据无需迁移。旧的训练包和 Robometer 接入包不再存在，需要在每个用到它们的环境中换成本仓库：
-
-```bash
-conda run -n vla-liberox python -m pip uninstall -y vla-rynn-iql
-conda run -n vla-liberox python -m pip install --no-deps -e .
-conda run -n pi05 python -m pip uninstall -y vla-rynn-iql
-conda run -n pi05 python -m pip install --no-deps -e .
-conda run -n robometer-reward python -m pip uninstall -y vla-adapter-robometer
-conda run -n robometer-reward python -m pip install --no-deps -e .
-```
-
-然后运行对应角色的 `--dry-run` 核对计划，并按 [CHANGELOG](../CHANGELOG.md) 的路径对照更新自定义 YAML 和脚本。

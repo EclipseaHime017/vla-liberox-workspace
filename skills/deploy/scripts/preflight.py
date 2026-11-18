@@ -25,17 +25,23 @@ ROOT = Path(__file__).resolve().parents[3]
 PACKAGES = ("core", "sim", "rewards", "train", "cluster", "studio")
 LEGACY_DIRECTORIES = ("liberox-vla-adapter-terminal", "vla-adapter-rynn-iql", "vla-adapter-robometer")
 STALE_DISTRIBUTIONS = ("vla-rynn-iql", "vla-adapter-robometer")
-# Runs inside each environment with `python -I`: the working directory cannot mask the install.
+DISTRIBUTION = "vla-liberox"  # this repository's pyproject name
+# Runs inside each environment: with `python -I` where the repository is installed (the
+# working directory cannot mask the install), with `python -E` in the repository root for
+# from-root environments (the way the platform starts them). Installed distributions are
+# looked up outside the working directory, whose build leftovers (*.egg-info) are not installs.
 PROBE = (
-    "import importlib.metadata, importlib.util, json, sys\n"
+    "import importlib.metadata, importlib.util, json, os, sys\n"
     f"packages = {{name: getattr(importlib.util.find_spec(name), 'origin', None) for name in {PACKAGES!r}}}\n"
-    "stale = {}\n"
-    f"for name in {STALE_DISTRIBUTIONS!r}:\n"
-    "    try:\n"
-    "        stale[name] = importlib.metadata.version(name)\n"
-    "    except importlib.metadata.PackageNotFoundError:\n"
-    "        pass\n"
-    "print(json.dumps({'python': sys.version.split()[0], 'packages': packages, 'stale': stale}))\n"
+    "site = [entry for entry in sys.path if entry and os.path.abspath(entry) != os.getcwd()]\n"
+    "versions = {}\n"
+    f"for name in {(*STALE_DISTRIBUTIONS, DISTRIBUTION)!r}:\n"
+    "    found = next(iter(importlib.metadata.distributions(name=name, path=site)), None)\n"
+    "    if found is not None:\n"
+    "        versions[name] = found.version\n"
+    f"installed = versions.pop({DISTRIBUTION!r}, None)\n"
+    "print(json.dumps({'python': sys.version.split()[0], 'packages': packages, 'stale': versions,\n"
+    "                  'installed': installed}))\n"
 )
 
 
@@ -104,10 +110,12 @@ def conda_environments() -> tuple[str | None, set[str]]:
     return conda, {Path(prefix).name for prefix in json.loads(listing.stdout)["envs"]}
 
 
-def check_environment(conda: str, name: str, root: Path) -> dict:
+def check_environment(conda: str, name: str, root: Path, *, installed: bool = True) -> dict:
+    """``installed``: the repository is pip-installed here; otherwise the environment is
+    started from the repository root and must not have it installed."""
     area = "environments"
-    probe = subprocess.run([conda, "run", "-n", name, "python", "-I", "-c", PROBE],
-                           capture_output=True, text=True, timeout=300)
+    probe = subprocess.run([conda, "run", "-n", name, "python", "-I" if installed else "-E", "-c", PROBE],
+                           capture_output=True, text=True, timeout=300, cwd=root)
     lines = probe.stdout.strip().splitlines()
     if probe.returncode or not lines:
         return result(area, name, "fail", f"python does not start: {probe.stderr.strip()[-300:]}",
@@ -116,17 +124,26 @@ def check_environment(conda: str, name: str, root: Path) -> dict:
     origins = {package: report["packages"][package] for package in PACKAGES}
     foreign = {package: origin for package, origin in origins.items()
                if origin is not None and Path(origin).resolve() != root / package / "__init__.py"}
-    reinstall = f"conda run -n {name} python -m pip install --no-deps -e ."
+    install = f"conda run -n {name} python -m pip install --no-deps -e ."
     if foreign:
         return result(area, name, "fail", f"packages imported from elsewhere: {foreign}",
-                      f"uninstall the shadowing distribution, then {reinstall}")
+                      "uninstall the shadowing distribution" + (f", then {install}" if installed else ""))
     if report["stale"]:
         stale = " ".join(report["stale"])
         return result(area, name, "warn", f"python {report['python']}; 0.8.0 editable installs remain: {report['stale']}",
-                      f"conda run -n {name} python -m pip uninstall -y {stale} && {reinstall}")
+                      f"conda run -n {name} python -m pip uninstall -y {stale}" + (f" && {install}" if installed else ""))
+    if not installed:
+        if report.get("installed"):
+            return result(area, name, "warn", f"python {report['python']}; {DISTRIBUTION} {report['installed']} is installed, "
+                          "but this environment is started from the repository root and should not have it",
+                          f"conda run -n {name} python -m pip uninstall -y {DISTRIBUTION}")
+        if any(origin is None for origin in origins.values()):
+            return result(area, name, "fail", f"python {report['python']}; packages do not import from the repository root",
+                          "run from a complete checkout")
+        return result(area, name, "ok", f"python {report['python']}; packages import from the repository root (not installed)")
     if any(origin is None for origin in origins.values()):
         return result(area, name, "warn", f"python {report['python']}; repository not installed (commands work only from the repository root)",
-                      reinstall)
+                      install)
     return result(area, name, "ok", f"python {report['python']}; packages import from this checkout")
 
 
@@ -180,7 +197,8 @@ def run(roles: list[str], families: list[str], *, root: Path = ROOT) -> dict:
         if conda is None:
             break
         if name in existing:
-            results.append(check_environment(conda, name, root))
+            results.append(check_environment(conda, name, root,
+                                             installed=setup.installs_repository(config["environments"][name])))
         else:
             results.append(result("environments", name, "fail", "missing",
                                   f"python envs/setup.py {' '.join(f'--role {r}' for r in roles)} --dry-run"))

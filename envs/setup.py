@@ -28,7 +28,9 @@ ROLES = ROOT / "envs" / "roles.yaml"
 LOCK = THIRD_PARTY / "lock.yaml"
 PACKAGES = ("core", "sim", "rewards", "train", "cluster", "studio")
 DEFAULT_FAMILY = "vla_adapter"
-# Run with `python -I` so neither the working directory nor PYTHONPATH can mask the install.
+# Installed environments run this with `python -I`, so neither the working directory nor
+# PYTHONPATH can mask the install. From-root environments run it with `python -E` in the
+# repository root, the way the platform starts them.
 VERIFY_PACKAGES = (
     "import importlib.util, pathlib, sys\n"
     "root = pathlib.Path(sys.argv[1])\n"
@@ -51,6 +53,15 @@ def load_yaml(path: Path) -> dict:
             raise SystemExit("envs/setup.py needs PyYAML or ruamel.yaml; run it with conda's base Python") from None
         return YAML(typ="safe", pure=True).load(text)
     return yaml.safe_load(text)
+
+
+def installs_repository(spec: dict) -> bool:
+    """True when the repository is pip-installed into the environment, False when it is
+    only started from the repository root (``repository: from-root`` in envs/roles.yaml)."""
+    mode = spec.get("repository", "installed")
+    if mode not in {"installed", "from-root"}:
+        raise SystemExit(f"repository must be installed or from-root, not {mode!r}")
+    return mode == "installed"
 
 
 def fill(value, lock: dict):
@@ -187,8 +198,10 @@ class Installer:
             pin = self.lock[value]
             self.call(self.inside(environment, "hf", "download", pin["weights"], "--revision", pin["weights_revision"]))
         elif kind == "verify" and value == "packages":
-            self.call(self.inside(environment, "python", "-I", "-c", VERIFY_PACKAGES, str(ROOT)),
-                      shown=f"check in {environment}: {', '.join(PACKAGES)} import from this checkout")
+            installed = installs_repository(self.environments[environment])
+            where = "this checkout" if installed else "the repository root (not installed)"
+            self.call(self.inside(environment, "python", "-I" if installed else "-E", "-c", VERIFY_PACKAGES, str(ROOT)),
+                      shown=f"check in {environment}: {', '.join(PACKAGES)} import from {where}")
         else:
             raise SystemExit(f"Unknown step {kind}: {value}")
 

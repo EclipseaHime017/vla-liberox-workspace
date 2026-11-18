@@ -67,8 +67,11 @@ python envs/setup.py --role <角色> [--family <家族>]              # 耗时�
 ```bash
 conda run -n vla-liberox python -m pip uninstall -y vla-rynn-iql
 conda run -n vla-liberox python -m pip install --no-deps -e .
-# pi05 同上；robometer-reward 卸载的是 vla-adapter-robometer
+# pi05 同上
+conda run -n robometer-reward python -m pip uninstall -y vla-adapter-robometer   # 只卸载
 ```
+
+奖励环境（rynnvalue-reward、robometer-reward）不安装本仓库；preflight 提示其中装了 `vla-liberox` 时按提示卸载。
 
 用户自定义的 YAML 和脚本按 `CHANGELOG.md` 的 0.8.0 → 0.8.5 路径对照表更新。数据目录不需要迁移。
 
@@ -98,7 +101,7 @@ conda run -n vla-liberox python -m pip install --no-deps -e .
 | --- | --- |
 | pytest 报 `No module named 'lark'` | shell 里 source 了 ROS：加 `env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` |
 | `third_party/<X> is at ..., the lock pins ...` | 检出被改动或切换过；问用户后再检出锁定 commit，不要 reset |
-| packages imported from elsewhere | 有同名包遮蔽（`core`、`sim`、`train` 是通用名）：卸载遮蔽的分发，再 `pip install --no-deps -e .` |
+| packages imported from elsewhere | 有同名包遮蔽（`core`、`sim`、`train` 是通用名）：卸载遮蔽的分发，再 `pip install --no-deps -e .`（奖励环境只卸载，不安装） |
 | 安装后 torch 版本不对 | vla-liberox 的 `torch-cu128` 单元必须最后执行；重跑该角色即可 |
 | `Incompatible Robometer runtime` | 按锁定矩阵重建 robometer-reward，不要单独升降 torchao |
 | Hugging Face 401／403 | 需要授权的模型（pi05-liberox-base）先 `hf auth login` |

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -60,6 +61,53 @@ def test_roles_select_only_their_environments_and_upstreams():
     assert preflight.required(config, setup, ["train"], ["pi05"]) == (["pi05"], ["openpi"], False)
     environments, upstreams, web = preflight.required(config, setup, ["dev"], [])
     assert environments == ["vla-liberox"] and set(upstreams) == {"vla_adapter", "libero_x"} and web
+
+
+def probe(monkeypatch, *, installed, stale=None, packages_from=None):
+    """Fake one environment probe; returns the python flag and working directory it ran with."""
+    seen = {}
+    origins = {name: None if packages_from is None else str(packages_from / name / "__init__.py")
+               for name in preflight.PACKAGES}
+
+    def run(command, **kwargs):
+        seen.update(flag=command[command.index("python") + 1], cwd=kwargs.get("cwd"))
+        report = {"python": "3.10.0", "packages": origins, "stale": stale or {}, "installed": installed}
+        return subprocess.CompletedProcess(command, 0, json.dumps(report) + "\n", "")
+
+    monkeypatch.setattr(preflight.subprocess, "run", run)
+    return seen
+
+
+def test_installed_environment_is_probed_isolated_and_must_have_the_repository(monkeypatch, tmp_path):
+    seen = probe(monkeypatch, installed="0.8.5", packages_from=tmp_path)
+    assert preflight.check_environment("conda", "vla-liberox", tmp_path)["status"] == "ok"
+    assert seen == {"flag": "-I", "cwd": tmp_path}
+    probe(monkeypatch, installed=None)
+    missing = preflight.check_environment("conda", "vla-liberox", tmp_path)
+    assert missing["status"] == "warn" and "pip install --no-deps -e ." in missing["hint"]
+
+
+def test_from_root_environment_must_import_from_the_root_without_installing(monkeypatch, tmp_path):
+    seen = probe(monkeypatch, installed=None, packages_from=tmp_path)
+    assert preflight.check_environment("conda", "rynnvalue-reward", tmp_path, installed=False)["status"] == "ok"
+    assert seen == {"flag": "-E", "cwd": tmp_path}
+    probe(monkeypatch, installed="0.8.5", packages_from=tmp_path)
+    extra = preflight.check_environment("conda", "rynnvalue-reward", tmp_path, installed=False)
+    assert extra["status"] == "warn" and extra["hint"].endswith("pip uninstall -y vla-liberox")
+    probe(monkeypatch, installed=None, packages_from=tmp_path, stale={"vla-adapter-robometer": "0.8.0"})
+    stale = preflight.check_environment("conda", "robometer-reward", tmp_path, installed=False)
+    assert stale["status"] == "warn" and "install" not in stale["hint"].replace("uninstall", "")
+    probe(monkeypatch, installed=None, packages_from=tmp_path / "elsewhere")
+    assert preflight.check_environment("conda", "rynnvalue-reward", tmp_path, installed=False)["status"] == "fail"
+
+
+def test_probe_ignores_build_leftovers_in_the_working_directory(tmp_path):
+    leftover = tmp_path / "vla_rynn_iql.egg-info"
+    leftover.mkdir()
+    (leftover / "PKG-INFO").write_text("Metadata-Version: 2.1\nName: vla-rynn-iql\nVersion: 0.8.0\n")
+    output = subprocess.run([sys.executable, "-E", "-c", preflight.PROBE], cwd=tmp_path,
+                            check=True, capture_output=True, text=True).stdout
+    assert "vla-rynn-iql" not in json.loads(output.splitlines()[-1])["stale"]
 
 
 def test_missing_conda_fails_and_only_read_only_git_commands_run(monkeypatch, capsys):

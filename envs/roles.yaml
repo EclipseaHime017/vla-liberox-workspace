@@ -11,13 +11,18 @@
 # conda [...] (conda install), npm [...] (npm --prefix web), hf <upstream> (download pinned
 # weights to the Hugging Face cache), verify packages (the six packages import from this
 # checkout), note / manual (printed only; manual steps need sudo or a person).
+#
+# repository: installed (default) means this repository is `pip install -e .`'d into the
+# environment, which runs commands on its own (platform, training, serving). from-root means
+# a helper environment for one upstream model: the platform starts it with `conda run` and
+# the repository root as working directory, so the repository is never installed into it.
 schema_version: 1
 
 environments:
   vla-liberox: {python: "3.10.16"}      # platform, simulator, VLA-Adapter
-  pi05: {python: "3.11"}                # π₀.₅, built from the OpenPI uv.lock
-  rynnvalue-reward: {python: "3.10"}
-  robometer-reward: {python: "3.10"}
+  pi05: {python: "3.11"}                # π₀.₅ family: training, export, evaluation, serving
+  rynnvalue-reward: {python: "3.10", repository: from-root}
+  robometer-reward: {python: "3.10", repository: from-root}
 
 units:
   vla-adapter:                          # the vla-liberox base: VLA-Adapter and its dependency set
@@ -107,7 +112,6 @@ units:
       - clone: rynnvalue                               # loaded from source, not pip-installed
       - pip: [torch==2.8.0, torchvision==0.23.0, --index-url, https://download.pytorch.org/whl/cu128]
       - pip: [-r, envs/rynnvalue.txt]
-      - pip: [--no-deps, -e, .]
       - verify: packages
       - run: [-m, rewards, rynnvalue-verify]
   rynnvalue-weights:
@@ -122,7 +126,6 @@ units:
       - pip: ["xformers=={lock[robometer][runtime][xformers]}", --index-url, "{lock[robometer][runtime][cuda_wheel_index]}"]
       - pip: [-c, envs/robometer-constraints.txt, -e, "third_party/Robometer[robometer]"]
       - pip: [-r, envs/robometer.txt]
-      - pip: [--no-deps, -e, .]
       - verify: packages
       - run: [-m, rewards, robometer-verify]
   robometer-weights:

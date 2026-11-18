@@ -62,6 +62,7 @@ cd web && conda run -n vla-liberox npx vitest run && conda run -n vla-liberox np
   - `studio/devices/factr_usb_rule.py`（以 `python3 -I` 提权运行）。
 - 不在平台和前端写死方法名：读 `core.methods.METHODS` 的标志（`requires_rewards`、`critic`、`config_section`、`parameters`），前端读 `/api/methods`。
 - 模型家族的差异通过适配器声明表达，不在业务代码里按家族名分支。
+- 本仓库只安装进主环境（vla-liberox、pi05）。奖励模型的辅助环境（rynnvalue-reward、robometer-reward，`envs/roles.yaml` 中的 `repository: from-root`）不安装本仓库：主环境以 `conda run -n <环境> python -m <模块>` 启动它们，工作目录为仓库根目录（`core.paths.module_command` + `cwd=ROOT`）。新增奖励模型照此办理，在辅助环境里运行的入口只导入 `rewards` 和 `core`。
 
 **数据与可复现性**
 

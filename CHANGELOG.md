@@ -27,6 +27,7 @@
 ### 按设备用途安装
 
 - `envs/roles.yaml` 定义 dev、studio、teleop、reward-rynnvalue、reward-robometer、train、hpc、eval、infer 九种角色；`python envs/setup.py --role <角色> [--family <家族>] [--dry-run]` 只安装该角色需要的环境、上游和权重。
+- 本仓库只安装进 vla-liberox、pi05；rynnvalue-reward、robometer-reward 不安装本仓库，由主环境在仓库根目录下启动。
 - 上游锁合并为 `third_party/lock.yaml`，LIBERO-X、VLA-Adapter、OpenPI、RynnValue、Robometer、FACTR 为同级条目；读取接口为 `core.upstream.upstream_lock`。
 - 删除未使用的补丁 `vla_adapter_liberox_registry.patch`。
 
@@ -41,7 +42,7 @@
 
 - **数据不需要迁移**：`dataset-root/`、`models/`、`policy-registry/`、`evaluator/`、`third_party/` 的位置不变；已导出的策略、RynnValue 原始输出和数据集清单照常使用。
 - **派生奖励会重新物化**：奖励缓存按实现文件的名称和内容建立指纹，文件移动后首次使用会在 CPU 上重新计算，不需要重跑模型评价。
-- **替换旧的可编辑安装**：在 vla-liberox、pi05 中卸载 `vla-rynn-iql`，在 robometer-reward 中卸载 `vla-adapter-robometer`，再执行 `pip install --no-deps -e .`，见 [docs/install.md](docs/install.md#6-从-080-升级已安装的设备)。
+- **替换旧的可编辑安装**：在 vla-liberox、pi05 中卸载 `vla-rynn-iql` 后执行 `pip install --no-deps -e .`；在 robometer-reward 中只卸载 `vla-adapter-robometer`。
 - **自定义 YAML 和脚本**：按下表更新路径与命令。
 
 | 0.8.0 | 0.8.5 |
