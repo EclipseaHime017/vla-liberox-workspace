@@ -10,7 +10,7 @@
 
 ### 仓库结构
 
-- 顶层目录即 Python 包：`core/ sim/ rewards/ train/ cluster/ studio/`，前端为 `web/`，入口统一为 `python -m <包> <命令>`。依赖方向 `core ← sim, rewards ← train ← cluster, studio` 由测试检查。
+- 顶层目录即 Python 包：`core/ sim/ rewards/ train/ cluster/ studio/`，前端为 `web/`；`studio`、`train`、`rewards`、`cluster` 的命令入口统一为 `python -m <包> <命令>`，`core`、`sim` 只作为库。依赖方向 `core ← sim, rewards ← train ← cluster, studio` 由测试检查。
 - 根目录一个 `pyproject.toml`，替代原来三个子项目。
 - 配置集中到 `configs/`，按 studio、devices、tasks、models、methods、rewards、cluster 分组。
 - RynnValue 与 Robometer 作为同级的第三方奖励模型：接入代码在 `rewards/rynnvalue/`、`rewards/robometer/`，关键帧稠密奖励在 `rewards/stage/`，PBRS 公式在 `rewards/pbrs.py`。
@@ -28,6 +28,7 @@
 
 - `envs/roles.yaml` 定义 dev、studio、teleop、reward-rynnvalue、reward-robometer、train、hpc、eval、infer 九种角色；`python envs/setup.py --role <角色> [--family <家族>] [--dry-run]` 只安装该角色需要的环境、上游和权重。
 - 上游锁合并为 `third_party/lock.yaml`，LIBERO-X、VLA-Adapter、OpenPI、RynnValue、Robometer、FACTR 为同级条目；读取接口为 `core.upstream.upstream_lock`。
+- 删除未使用的补丁 `vla_adapter_liberox_registry.patch`。
 
 ### 文档
 

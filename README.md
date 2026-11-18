@@ -14,7 +14,7 @@ Run VLA policies in LIBERO-X simulation, take over by hand and record trajectori
 
 ## Layout
 
-The six top-level directories are Python packages, run as `python -m <package> <command>`:
+The six top-level directories are Python packages. `studio`, `train`, `rewards` and `cluster` provide commands, run as `python -m <package> <command>`; `core` and `sim` are libraries only:
 
 | Directory | Contents |
 | --- | --- |

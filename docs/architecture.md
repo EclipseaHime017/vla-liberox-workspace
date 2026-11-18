@@ -2,7 +2,7 @@
 
 ## 1. 顶层目录
 
-仓库根目录下的六个目录就是六个 Python 包，入口统一为 `python -m <包> <命令>`。
+仓库根目录下的六个目录就是六个 Python 包。其中 `studio`、`train`、`rewards`、`cluster` 提供命令，入口为 `python -m <包> <命令>`；`core`、`sim` 只作为库被导入。
 
 ```text
 vla-liberox-workspace/

@@ -16,7 +16,7 @@
 | `configs/` `envs/` `third_party/` `tests/` `docs/` | 配置、按角色的环境、上游锁与补丁、测试、文档 | — |
 
 - 依赖方向：`core ← sim, rewards ← train ← cluster, studio`，同层互不导入，由 `tests/core/test_layout.py` 检查。
-- 命令登记在各包 `__main__.py` 的 `COMMANDS`（`"命令": ("模块", "说明")`），实现放在 `<包>/commands/`，每个模块提供 `main()`。
+- 命令登记在各包 `__main__.py` 的 `COMMANDS`（`"命令": ("模块", "说明")`），实现放在 `<包>/commands/`，每个模块提供 `main()`。例外：`cluster` 的 `transfer-*` 直接指向 `cluster/transfer/` 下兼作库的模块。`core`、`sim` 只作为库，没有命令。
 - 路径一律从 `core.paths`（`ROOT`、`CONFIGS`、`THIRD_PARTY`、`MODELS`、`OUTPUTS`、`WEB`）推导；YAML 中的相对路径以该 YAML 所在目录为起点。不要依赖当前工作目录，也不要用超出仓库根目录的 `parents[n]`。
 - 详细说明：[架构](architecture.md)、[训练](training.md)、[训练方法](methods.md)、[模型](models.md)、[奖励](rewards.md)、[评测](evaluation.md)、[服务器](cluster.md)、[数据](data.md)。
 
@@ -74,7 +74,9 @@ cd web && conda run -n vla-liberox npx vitest run && conda run -n vla-liberox np
 
 - 文档以中文为主，`README.md` 是精简英文版；用户可见的变化写进 `CHANGELOG.md`。
 - 仓库公开：不提交主机地址、账号、密码、个人路径和数据。本机部署配置放 `configs/cluster/local/`，本地实验放 `experiments/`，两者都不提交。
-- 按主题提交，提交信息一行；只在用户要求时提交和推送，不强制推送。
+- 按主题提交；只在用户要求时提交和推送，不强制推送；不加 Co-Authored-By 等署名行。
+- 提交信息用英文标题 `type(scope): ...`。普通提交一行即可，改动较多时在正文加几条 `- ` 要点。
+- 发布版本时，标题写 `feat: release vX.Y.Z with <概括>`，正文逐条列出这一版的全部功能性改动（每条一行、动词开头），并同时更新版本相关文件。
 
 ## 5. 安全边界
 
