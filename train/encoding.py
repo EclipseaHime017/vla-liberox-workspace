@@ -1,9 +1,10 @@
-"""Critic inputs, shared by training replay and inference-time candidate scoring.
+"""Deterministic encoding of replay observations and action chunks (no learned parameters).
 
-Both sides must encode observations and action chunks identically: the two policy-view
-camera images stacked on channels and resized to ``critic_image_size``, proprio and actions
-normalized with the model's own statistics, and chunks padded to the transition horizon
-with a mask over the executed steps.
+Training replay (actor and critic fields), inference-time candidate scoring and Value Flows'
+next-chunk sampling must encode identically: the two policy-view camera images stacked on
+channels and resized to ``critic_image_size``, proprio and actions normalized with the
+model's own statistics, and chunks padded to the transition horizon with a mask over the
+executed steps. The server replay cache fingerprints this file, so keep only encoding here.
 """
 from __future__ import annotations
 

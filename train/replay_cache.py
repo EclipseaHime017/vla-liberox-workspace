@@ -25,7 +25,7 @@ from rewards.manifest import reward_manifest_digest
 
 
 # Sources whose behaviour shapes cached samples; any edit rebuilds the cache.
-IMPLEMENTATION_FILES = ("train/replay_cache.py", "train/replay.py", "train/methods/critic_inputs.py", "core/data.py", "core/execution.py",
+IMPLEMENTATION_FILES = ("train/replay_cache.py", "train/replay.py", "train/encoding.py", "core/data.py", "core/execution.py",
                         "core/image_transforms.py", "train/models/vla_adapter.py", "train/models/pi05.py")
 
 

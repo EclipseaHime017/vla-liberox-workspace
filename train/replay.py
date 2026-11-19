@@ -17,7 +17,7 @@ from core.methods import training_method
 from core.frame_cache import FrameCache
 from core.image_transforms import policy_view, image_orientation
 from rewards.manifest import load_reward_index
-from train.methods.critic_inputs import critic_pixels, encode_actions, encode_proprio
+from train.encoding import critic_pixels, encode_actions, encode_proprio
 from train.models.vla_adapter import proprio_from_trajectory
 
 

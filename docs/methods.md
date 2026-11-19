@@ -66,7 +66,7 @@ class TrainingAlgorithm(Protocol):
 `build_algorithm(config, device)` 按 `IMPLEMENTATIONS` 中的 `"模块:类"` 惰性导入。可复用的部件：
 
 - `train/methods/critics.py`：`ExpectileCritic`（双 Q + V，target 网络，`advantage = min(Q1, Q2) − V`；单卡与多卡的 checkpoint 格式相同）、`ValueFlowCritic`（双回报向量场 `ValueVectorField`）及对应的推理打分类 `ExpectileScorer`、`ValueFlowScorer`，以及 `expectile_loss`、`chunk_bellman_target`、`advantage_weights`。编码器通过 `encoder_factory` 替换，默认 `PixelEncoder`。
-- `train/methods/critic_inputs.py`：critic 的图像、本体状态和动作块编码（`encode_chunks` 处理采样得到的动作块），训练回放、推理打分和 VF 的下一状态采样共用同一份实现。
+- `train/encoding.py`：图像、本体状态和动作块的确定性编码（`encode_chunks` 处理采样得到的动作块），训练回放、推理打分和 VF 的下一状态采样共用同一份实现；服务器回放缓存按该文件建立指纹，文件中只放编码。
 - `train/methods/selectors.py`：`SELECTORS`（名称在 `core.methods.SELECTOR_KINDS` 中声明）、`load_critic`、`choose`。
 - `train/methods/base.py`：`critic_batch`、`save_critic`、`critic_artifacts`、`weighted_masked_l1`。
 

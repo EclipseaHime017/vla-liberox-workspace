@@ -13,7 +13,7 @@ from core.artifacts import validate_policy
 from core.config import LoadedConfig, load_train_config
 from core.io import sha256_file
 from train.methods.base import build_algorithm, critic_artifacts, save_critic
-from train.methods.critic_inputs import candidate_batch, critic_pixels, encode_actions, encode_proprio
+from train.encoding import candidate_batch, critic_pixels, encode_actions, encode_proprio
 from train.methods.ifql import ImplicitFlowQLearning
 from train.methods.selectors import CRITIC_FILE, choose, load_critic
 

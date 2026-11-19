@@ -13,7 +13,7 @@ from typing import Any, Callable, Protocol
 import numpy as np
 import torch
 
-from train.methods.critic_inputs import candidate_batch
+from train.encoding import candidate_batch
 
 CRITIC_FILE = "critic.pt"
 CRITIC_SCHEMA_VERSION = 1

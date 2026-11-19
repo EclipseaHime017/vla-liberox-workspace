@@ -25,7 +25,7 @@ import torch
 from core.config import LoadedConfig
 from core.registry import execution_config
 from train.methods.base import CRITIC_BATCH_KEYS, NEXT_ACTOR_KEYS, weighted_masked_l1
-from train.methods.critic_inputs import encode_chunks
+from train.encoding import encode_chunks
 from train.methods.critics import ValueFlowCritic
 from train.methods.selectors import CRITIC_SCHEMA_VERSION
 
