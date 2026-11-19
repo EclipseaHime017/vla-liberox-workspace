@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { getModelTrainingConfig } from "../run-control/api";
 import type { OfflineJob, TrainingConfiguration } from "../run-control/types";
 import { Badge } from "../../components/ui/Badge";
+import { recordedMethod } from "./methods";
 
 function TrainingRecord({ policyId, job }: { policyId: string; job: OfflineJob }) {
   const configId = useId();
@@ -37,6 +38,8 @@ function TrainingRecord({ policyId, job }: { policyId: string; job: OfflineJob }
   const reward = parameters.reward as Record<string, unknown> | undefined;
   const method = String(parameters.algorithm ?? "—").toUpperCase();
   const title = `${method} · ${String(parameters.dataset_name ?? job.dataset_id ?? "数据集未知")}`;
+  // Records carry the method's reward flag; older ones only the id, when BC was the one reward-free method.
+  const rewarded = "requires_rewards" in parameters ? recordedMethod(parameters).rewards : method !== "BC";
   return <article className="model-training-record" aria-label={title}>
     <header className="model-training-record-head">
       <div><strong>{title}</strong>
@@ -50,7 +53,7 @@ function TrainingRecord({ policyId, job }: { policyId: string; job: OfflineJob }
       <div><dt>Batch size</dt><dd>{String(parameters.micro_batch_size ?? "—")}</dd></div>
       <div><dt>梯度累积</dt><dd>{String(parameters.gradient_accumulation_steps ?? "—")}</dd></div>
       <div><dt>Seed</dt><dd>{String(parameters.seed ?? "—")}</dd></div>
-      <div className="model-training-field-wide"><dt>奖励</dt><dd>{method === "BC" ? "无需奖励" : String(reward?.source ?? "未记录")}</dd></div>
+      <div className="model-training-field-wide"><dt>奖励</dt><dd>{rewarded ? String(reward?.source ?? "未记录") : "无需奖励"}</dd></div>
     </dl>
     <div className="model-training-meta">
       <time dateTime={job.created_at}>{job.created_at ? new Date(job.created_at).toLocaleString() : "—"}</time>

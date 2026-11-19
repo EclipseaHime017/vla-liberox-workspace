@@ -1,4 +1,4 @@
-"""DDP/ZeRO execution adapters. All objectives and update order live in algorithms.py."""
+"""DDP/ZeRO execution adapters. Objectives and update order live in the method modules."""
 from __future__ import annotations
 
 import time
@@ -9,10 +9,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.optim import ZeroRedundancyOptimizer
 
 from train.methods.base import build_algorithm
-
-
-def unwrap(module):
-    return module.module if isinstance(module, DDP) else module
 
 
 def zero_optimizer(parameters, optimizer_class, **kwargs):
@@ -86,24 +82,19 @@ def wrap(module, device, *, unused=False, meter=None, move_inputs=True):
 
 
 class DistributedAlgorithm:
+    """Run a training method under DDP; the method wraps its own critic through ``distribute``."""
     def __init__(self, config, device, meter=None, *, transition_horizon=None):
         self.inner = build_algorithm(config, device, transition_horizon=transition_horizon)
-        self.optimizers = []
-        agent = getattr(self.inner, "agent", None)
-        if agent is None:  # BC: no Q/V, no reward evaluation.
-            return
-        for name in ("q1", "q2", "value"):
-            setattr(agent, name, wrap(getattr(agent, name), device, meter=meter))
-        for online, target in ((agent.q1, agent.target_q1), (agent.q2, agent.target_q2)):
-            target.load_state_dict(unwrap(online).state_dict())
-        cfg = config.section("iql")
-        optimizers = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
-        agent.q_optimizer = zero_optimizer(
-            list(agent.q1.parameters()) + list(agent.q2.parameters()),
-            optimizers[cfg["critic_optimizer"]], lr=cfg["critic_lr"], weight_decay=cfg["critic_weight_decay"])
-        agent.value_optimizer = zero_optimizer(agent.value.parameters(),
-            optimizers[cfg["value_optimizer"]], lr=cfg["value_lr"], weight_decay=cfg["value_weight_decay"])
-        self.optimizers = [agent.q_optimizer, agent.value_optimizer]
+        distribute = getattr(self.inner, "distribute", None)
+        # BC has no critic: nothing to wrap and no optimizer to consolidate.
+        self.optimizers = [] if distribute is None else distribute(
+            lambda module: wrap(module, device, meter=meter), zero_optimizer)
+
+    def __getattr__(self, name):
+        # Optional hooks (critic_batch_keys, export_critic) belong to the method.
+        if name == "inner":
+            raise AttributeError(name)
+        return getattr(self.inner, name)
 
     def update(self, batch, step):
         return self.inner.update(batch, step)
@@ -115,24 +106,10 @@ class DistributedAlgorithm:
         return self.inner.weight_actor_losses(losses, context)
 
     def checkpoint(self):
-        agent = getattr(self.inner, "agent", None)
-        if agent is None:
-            return self.inner.checkpoint()
-        state = {f"{name}.{key}": value for name in ("q1", "q2", "target_q1", "target_q2", "value")
-                 for key, value in unwrap(getattr(agent, name)).state_dict().items()}
-        return {"model": state, "q_optimizer": agent.q_optimizer.state_dict(),
-                "value_optimizer": agent.value_optimizer.state_dict()}
+        return self.inner.checkpoint()
 
     def restore(self, state):
-        agent = getattr(self.inner, "agent", None)
-        if agent is None:
-            return self.inner.restore(state)
-        for name in ("q1", "q2", "target_q1", "target_q2", "value"):
-            prefix = f"{name}."
-            unwrap(getattr(agent, name)).load_state_dict({key[len(prefix):]: value
-                for key, value in state["model"].items() if key.startswith(prefix)}, strict=True)
-        agent.q_optimizer.load_state_dict(state["q_optimizer"])
-        agent.value_optimizer.load_state_dict(state["value_optimizer"])
+        return self.inner.restore(state)
 
 
 class ActorModule(torch.nn.Module):

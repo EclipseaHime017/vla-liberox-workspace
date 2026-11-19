@@ -158,6 +158,33 @@ def _number(section: dict[str, Any], name: str, *, low: float | None = None,
     return value
 
 
+# Value rules for keys of a training method's own section, shared by every method that uses them.
+_SECTION_INTEGERS = {"critic_image_size": 1, "critic_warmup_steps": 0, "num_samples": 1,
+                     "train_num_samples": 1, "num_flow_steps": 1}
+_SECTION_NUMBERS = {key: 0 for key in (
+    "critic_lr", "value_lr", "beta", "max_advantage_weight", "target_tau",
+    "critic_weight_decay", "value_weight_decay", "bcfm_lambda", "dcfm_lambda", "confidence_weight_temp")}
+_SECTION_NUMBERS.update(critic_max_grad_norm=1e-12, value_max_grad_norm=1e-12)
+_SECTION_CHOICES = {"critic_optimizer": ("adam", "adamw"), "value_optimizer": ("adam", "adamw"),
+                    "ret_agg": ("mean", "min"), "q_agg": ("mean", "min")}
+
+
+def _validate_method_section(name: str, section: dict[str, Any]) -> None:
+    for key in section:
+        if key in _SECTION_INTEGERS:
+            _number(section, key, low=_SECTION_INTEGERS[key], integer=True)
+        elif key in _SECTION_NUMBERS:
+            _number(section, key, low=_SECTION_NUMBERS[key])
+        elif key == "expectile":
+            _number(section, key, low=0, high=1)
+        elif key in _SECTION_CHOICES and section[key] not in _SECTION_CHOICES[key]:
+            raise ValueError(f"{name}.{key} must be {' or '.join(_SECTION_CHOICES[key])}")
+        elif key == "clip_flow_returns" and type(section[key]) is not bool:
+            raise TypeError(f"{name}.clip_flow_returns must be boolean")
+    if "confidence_weight_temp" in section and section["confidence_weight_temp"] <= 0:
+        raise ValueError(f"{name}.confidence_weight_temp must be positive")
+
+
 def _cuda_device(value: Any, name: str) -> None:
     if not isinstance(value, str) or re.fullmatch(r"cuda:\d+", value) is None:
         raise ValueError(f"{name} must identify one CUDA device, for example cuda:0")
@@ -285,15 +312,19 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         diagnostics.setdefault("interval_steps", 100)
         schema["logging"] = {**TRAIN_SCHEMA["logging"], "diagnostics": {
             "enabled": None, "interval_steps": None}}
+    # Sections of the other methods were emptied above; only the active one keeps its keys.
+    for other in METHODS.values():
+        if other.config_section not in (None, method.config_section):
+            schema[other.config_section] = {}
     if not method.requires_rewards:
-        schema.update(reward=None, iql={})
+        schema["reward"] = None
     _validate_schema(raw, schema)
     _resolve_paths(
         raw, path,
         ("work_dir", "output_dir", "annotation_cache", "vla_adapter_root", "libero_x_root",
          "rynnvalue_root", "policy_registry"),
     )
-    data, reward, iql, logging_cfg = raw["data"], raw["reward"], raw["iql"], raw["logging"]
+    data, reward, logging_cfg = raw["data"], raw["reward"], raw["logging"]
     if method.requires_rewards:
         pinned = [reward[name] for name in ("manifest_path", "manifest_sha256", "version_id")]
         if any(value is not None for value in pinned):
@@ -392,18 +423,8 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
     if training["dtype"] != "bfloat16":
         raise ValueError("training.dtype must be bfloat16")
     _cuda_device(training["device"], "training.device")
-    if method.name == "iql":
-        for key in ("critic_image_size", "critic_warmup_steps"):
-            _number(iql, key, low=0 if key == "critic_warmup_steps" else 1, integer=True)
-        for key in ("critic_lr", "value_lr", "beta", "max_advantage_weight",
-                    "target_tau", "critic_weight_decay", "value_weight_decay"):
-            _number(iql, key, low=0)
-        for key in ("critic_max_grad_norm", "value_max_grad_norm"):
-            _number(iql, key, low=1e-12)
-        for key in ("critic_optimizer", "value_optimizer"):
-            if iql[key] not in {"adam", "adamw"}:
-                raise ValueError(f"iql.{key} must be adam or adamw")
-        _number(iql, "expectile", low=0, high=1)
+    if method.config_section is not None:
+        _validate_method_section(method.config_section, raw[method.config_section])
     if type(logging_cfg["tensorboard"]) is not bool:
         raise TypeError("logging.tensorboard must be boolean")
     wandb_cfg = logging_cfg["wandb"]

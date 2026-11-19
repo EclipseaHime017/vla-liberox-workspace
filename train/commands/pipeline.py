@@ -101,7 +101,9 @@ def _print_preflight(
         member["root_run_id"] for member in members if member["split"] == "validation"
     }
     method = training_method(raw)
-    print(f"\n=== VLA-Adapter {method.name.upper()} terminal pipeline ===")
+    from core.registry import MODEL_FAMILIES
+    family = MODEL_FAMILIES[raw["model"]["family"]].label
+    print(f"\n=== {family} {method.label} terminal pipeline ===")
     print(f"Task              : {task_id}")
     print(f"Eligible          : {len(task_candidates)} ({_category_counts(task_candidates)})")
     print(f"Selected          : {len(selected)} ({_category_counts(selected)})")

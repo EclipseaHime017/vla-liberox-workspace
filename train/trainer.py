@@ -27,8 +27,8 @@ from torch.utils.data import default_collate
 from core.config import LoadedConfig, reward_source
 from core.data import load_manifest, training_replay_policy, validate_training_manifest
 from core.io import atomic_json, sha256_file, stable_hash
-from train.methods.base import TrainingAlgorithm, build_algorithm
-from core.methods import METHODS, actor_lr_warmup, training_method
+from train.methods.base import TrainingAlgorithm, build_algorithm, critic_batch
+from core.methods import METHODS, actor_lr_warmup, critic_warmup_steps, training_method
 from core.model_config import model_backend, model_config, model_signature
 from core.registry import model_contract, family_adapter
 from core.image_transforms import canonical_contract
@@ -482,7 +482,7 @@ def train(config: LoadedConfig) -> Path:
     )
     accumulation = int(training_cfg["gradient_accumulation_steps"])
     total_steps = int(training_cfg["train_steps"])
-    warmup = int(config.section(method.config_section)["critic_warmup_steps"]) if method.critic else 0
+    warmup = critic_warmup_steps(config.raw)
     lr_warmup = actor_lr_warmup(config.raw)
     start_step = 0
     if training_cfg["resume_checkpoint"] is not None:
@@ -597,13 +597,7 @@ def train(config: LoadedConfig) -> Path:
             batch = _sample_batch(
                 dataset, micro_batch_size, data_generator
             )
-            critic_batch = {
-                key: value.to(device, non_blocking=True)
-                for key, value in batch.items() if isinstance(value, torch.Tensor)
-                and key in {"pixels", "next_pixels", "proprio", "next_proprio", "actions",
-                               "action_mask", "reward", "bootstrap_mask", "chunk_length"}
-            }
-            context, algorithm_metrics = agent.update(critic_batch, step)
+            context, algorithm_metrics = agent.update(critic_batch(agent, batch, device), step)
             losses, prediction = backend.actor_losses(components, batch, device)
             actor_loss = agent.weight_actor_losses(losses, context)
             action_metrics = _action_diagnostics(

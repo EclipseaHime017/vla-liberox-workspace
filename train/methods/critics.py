@@ -8,6 +8,30 @@ from typing import Any, Callable
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel
+
+
+def unwrap(module: nn.Module) -> nn.Module:
+    return module.module if isinstance(module, DistributedDataParallel) else module
+
+
+_OPTIMIZERS = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
+
+
+def module_state(owner: nn.Module, names: tuple[str, ...]) -> dict[str, Any]:
+    """``owner.state_dict()`` with DDP wrappers removed, so 1 GPU and N GPUs save alike."""
+    return {f"{name}.{key}": value for name in names
+            for key, value in unwrap(getattr(owner, name)).state_dict().items()}
+
+
+def load_module_state(owner: nn.Module, names: tuple[str, ...], state: dict[str, Any]) -> None:
+    prefixes = tuple(f"{name}." for name in names)
+    if any(not key.startswith(prefixes) for key in state):
+        raise ValueError("Critic checkpoint contains unknown modules")
+    for name in names:
+        prefix = f"{name}."
+        unwrap(getattr(owner, name)).load_state_dict(
+            {key[len(prefix):]: value for key, value in state.items() if key.startswith(prefix)}, strict=True)
 
 
 class PixelEncoder(nn.Module):
@@ -114,16 +138,31 @@ class ExpectileCritic(nn.Module):
         self.critic_max_grad_norm = float(critic_max_grad_norm)
         self.value_max_grad_norm = float(value_max_grad_norm)
         self.accumulate_primitive_steps = bool(accumulate_primitive_steps)
-        optimizer_types = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}
-        if critic_optimizer not in optimizer_types or value_optimizer not in optimizer_types:
+        if critic_optimizer not in _OPTIMIZERS or value_optimizer not in _OPTIMIZERS:
             raise ValueError("critic_optimizer and value_optimizer must be adam or adamw")
-        self.q_optimizer = optimizer_types[critic_optimizer](
-            list(self.q1.parameters()) + list(self.q2.parameters()),
-            lr=critic_lr, weight_decay=critic_weight_decay,
-        )
-        self.value_optimizer = optimizer_types[value_optimizer](
-            self.value.parameters(), lr=value_lr, weight_decay=value_weight_decay,
-        )
+        self.optimizer_settings = {
+            "q": (_OPTIMIZERS[critic_optimizer], {"lr": critic_lr, "weight_decay": critic_weight_decay}),
+            "value": (_OPTIMIZERS[value_optimizer], {"lr": value_lr, "weight_decay": value_weight_decay}),
+        }
+        q_class, q_kwargs = self.optimizer_settings["q"]
+        value_class, value_kwargs = self.optimizer_settings["value"]
+        self.q_optimizer = q_class(list(self.q1.parameters()) + list(self.q2.parameters()), **q_kwargs)
+        self.value_optimizer = value_class(self.value.parameters(), **value_kwargs)
+
+    MODULES = ("q1", "q2", "target_q1", "target_q2", "value")
+
+    def distribute(self, wrap: Callable[[nn.Module], nn.Module], zero_optimizer: Callable) -> list:
+        """Wrap the trained networks for DDP; targets stay local copies of rank 0's online Q."""
+        for name in ("q1", "q2", "value"):
+            setattr(self, name, wrap(getattr(self, name)))
+        for online, target in ((self.q1, self.target_q1), (self.q2, self.target_q2)):
+            target.load_state_dict(unwrap(online).state_dict())
+        q_class, q_kwargs = self.optimizer_settings["q"]
+        value_class, value_kwargs = self.optimizer_settings["value"]
+        self.q_optimizer = zero_optimizer(list(self.q1.parameters()) + list(self.q2.parameters()),
+                                          q_class, **q_kwargs)
+        self.value_optimizer = zero_optimizer(self.value.parameters(), value_class, **value_kwargs)
+        return [self.q_optimizer, self.value_optimizer]
 
     @torch.no_grad()
     def advantage(self, batch: dict[str, torch.Tensor], target: bool = False) -> torch.Tensor:
@@ -205,13 +244,13 @@ class ExpectileCritic(nn.Module):
 
     def checkpoint(self) -> dict[str, Any]:
         return {
-            "model": self.state_dict(),
+            "model": module_state(self, self.MODULES),
             "q_optimizer": self.q_optimizer.state_dict(),
             "value_optimizer": self.value_optimizer.state_dict(),
         }
 
     def restore(self, state: dict[str, Any]) -> None:
-        self.load_state_dict(state["model"])
+        load_module_state(self, self.MODULES, state["model"])
         self.q_optimizer.load_state_dict(state["q_optimizer"])
         self.value_optimizer.load_state_dict(state["value_optimizer"])
 

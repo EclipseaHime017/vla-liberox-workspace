@@ -292,7 +292,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         method = METHODS[algorithm]
         rewarded, critic = method.requires_rewards, method.critic is not None
         section = raw.get(method.config_section) or {} if method.config_section else {}
-        iql = section
         common_advanced = {name: training[name] for name in ("policy_peak_lr", "policy_final_lr")}
         return {
             "algorithm": algorithm,
@@ -308,15 +307,11 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "basic": {name: training[name] for name in (
                 "train_steps", "micro_batch_size", "gradient_accumulation_steps",
                 "checkpoint_interval", "seed", "actor_lr_warmup_steps",
-            )} | ({"critic_warmup_steps": iql["critic_warmup_steps"]} if critic else {}),
-            "advanced": common_advanced | ({
-                name: iql[name] for name in (
-                    "critic_optimizer", "critic_lr", "critic_weight_decay",
-                    "critic_max_grad_norm", "value_optimizer", "value_lr",
-                    "value_weight_decay", "value_max_grad_norm",
-                    "expectile", "beta", "max_advantage_weight", "target_tau",
-                )
-            } if critic else {}) | ({
+            )} | ({"critic_warmup_steps": section["critic_warmup_steps"]}
+                  if "critic_warmup_steps" in method.critic_keys else {}),
+            "advanced": common_advanced | {
+                name: section[name] for name in method.critic_keys if name != "critic_warmup_steps"
+            } | ({
                 "reward_source": reward_source,
                 "reward_stage_exponent": raw["reward"].get("stage_exponent", 2.0),
                 "reward_alpha": raw["reward"].get("alpha", 0.0),
@@ -348,7 +343,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             },
             "fixed": {
                 "dtype": training["dtype"],
-                **({"critic_image_size": iql["critic_image_size"]} if critic else {}),
+                **({"critic_image_size": section["critic_image_size"]} if critic else {}),
                 "action_horizon": raw["data"]["action_horizon"],
                 "action_dim": raw["data"]["action_dim"],
                 "proprio_dim": raw["data"]["proprio_dim"],
@@ -1010,6 +1005,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         }
         allowed.update(models.parameter_paths())
         allowed.update(parameter["name"] for method in METHODS.values() for parameter in method.parameters)
+        allowed.update(key for method in METHODS.values() for key in method.critic_keys)
         unknown = sorted(set(parameters) - allowed)
         if unknown:
             raise ValueError(f"Unknown training parameters: {unknown}")
@@ -1023,11 +1019,14 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             key.startswith("reward_") and value is not None for key, value in parameters.items()
         ):
             raise ValueError(f"{method.label} does not accept reward parameters or reward versions")
+        shared_critic = {key for other in METHODS.values() for key in other.critic_keys}
         if method.critic is None and any(
-            key.startswith(("critic_", "value_")) or key in {"expectile", "beta", "max_advantage_weight", "target_tau"}
-            for key in parameters
+            key.startswith(("critic_", "value_")) or key in shared_critic for key in parameters
         ):
             raise ValueError(f"{method.label} does not accept critic parameters")
+        unused_critic = (shared_critic - set(method.critic_keys)) & set(parameters)
+        if method.critic is not None and unused_critic:
+            raise ValueError(f"{method.label} does not accept {sorted(unused_critic)}")
         foreign = {parameter["name"] for other in METHODS.values() if other is not method
                    for parameter in other.parameters} - {parameter["name"] for parameter in method.parameters}
         if foreign & set(parameters):

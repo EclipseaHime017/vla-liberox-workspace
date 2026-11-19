@@ -9,7 +9,7 @@ import type {
   Bootstrap, OfflineJob, TensorBoardStatus, TrainingDataset, TrainingDefaults, TrainingMethod, TrainingQueueState,
 } from "../features/run-control/types";
 import { JobMonitor } from "../features/training/JobMonitor";
-import { isCriticParameter } from "../features/training/methods";
+import { acceptsField, sharedCriticKeys } from "../features/training/methods";
 import { TrainingQueuePanel } from "../features/training/TrainingQueuePanel";
 import { ModelConfigPanel, modelConfigurationError } from "../features/training/ModelConfigPanel";
 import { Badge } from "../components/ui/Badge";
@@ -49,7 +49,8 @@ export function TrainingPage() {
   const [algorithm, setAlgorithm] = useState("");
   const method = methods.find((item) => item.id === algorithm);
   const rewardFree = method?.requires_rewards === false;
-  const criticFree = method !== undefined && method.critic === null;
+  const criticFields = useMemo(() => sharedCriticKeys(methods), [methods]);
+  const applies = (name: string) => acceptsField(name, method, criticFields);
   const [modelFamily, setModelFamily] = useState("");
   const [modelBaseId, setModelBaseId] = useState("");
   const appliedSelection = useRef({ family: "", baseId: "", algorithm: "" });
@@ -219,7 +220,7 @@ export function TrainingPage() {
       const own = new Set(method?.parameters.map((item) => item.name));
       const foreign = new Set(methods.flatMap((item) => item.parameters.map((field) => field.name)).filter((name) => !own.has(name)));
       const accepted = Object.fromEntries(Object.entries(parameters).filter(([key]) => !foreign.has(key)
-        && !(rewardFree && key.startsWith("reward_")) && !(criticFree && isCriticParameter(key))));
+        && !(rewardFree && key.startsWith("reward_")) && applies(key)));
       const next = await enqueueTraining(datasetId, rewardFree
         ? { ...accepted, algorithm, resume_checkpoint: null }
         : { ...accepted, algorithm, resume_checkpoint: null, reward_source: rewardSource,
@@ -299,15 +300,15 @@ export function TrainingPage() {
             robometerUnavailable={bootstrap?.evaluation_capabilities?.robometer?.available === false
               ? bootstrap.evaluation_capabilities.robometer.reason ?? "Robometer 不可用" : undefined}
             onRefresh={refreshDataset} onJob={setJob} onError={setError} />}
-          <div className="parameter-grid">{basicFields.filter(([name]) => !criticFree || !isCriticParameter(name)).map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name.endsWith("warmup_steps") || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
+          <div className="parameter-grid">{basicFields.filter(([name]) => applies(name)).map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name.endsWith("warmup_steps") || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
           <details><summary>{`高级 ${method?.label ?? algorithm.toUpperCase()} 参数`}</summary><div className="parameter-grid advanced-parameters">
             {!rewardFree && <><label>Discount ratio γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} disabled={defaultsLoading || !rewardReady}
               onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
             {cumulativeAllowed && <label>cumulative reward<select disabled={defaultsLoading || !rewardReady} value={String(Boolean(parameters.reward_accumulate_primitive_steps))}
               onChange={(event) => patchParameter("reward_accumulate_primitive_steps", event.target.value === "true")}><option value="false">Off</option><option value="true">On</option></select></label>}</>}
-            {!criticFree && <><label>Critic optimizer<select value={String(parameters.critic_optimizer ?? "adamw")} onChange={(event) => patchParameter("critic_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>
-            <label>Value optimizer<select value={String(parameters.value_optimizer ?? "adamw")} onChange={(event) => patchParameter("value_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label></>}
-            {advancedFields.filter(([name]) => !criticFree || !isCriticParameter(name)).map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}
+            {applies("critic_optimizer") && <label>Critic optimizer<select value={String(parameters.critic_optimizer ?? "adamw")} onChange={(event) => patchParameter("critic_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>}
+            {applies("value_optimizer") && <label>Value optimizer<select value={String(parameters.value_optimizer ?? "adamw")} onChange={(event) => patchParameter("value_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>}
+            {advancedFields.filter(([name]) => applies(name)).map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}
             {method?.parameters.map((field) => <label key={field.name}>{field.label}{field.type === "select"
               ? <select value={String(parameters[field.name] ?? field.default ?? "")} onChange={(event) => patchParameter(field.name, event.target.value)}>
                 {field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>

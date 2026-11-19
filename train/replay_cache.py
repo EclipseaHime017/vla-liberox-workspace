@@ -25,7 +25,7 @@ from rewards.manifest import reward_manifest_digest
 
 
 # Sources whose behaviour shapes cached samples; any edit rebuilds the cache.
-IMPLEMENTATION_FILES = ("train/replay_cache.py", "train/replay.py", "core/data.py", "core/execution.py",
+IMPLEMENTATION_FILES = ("train/replay_cache.py", "train/replay.py", "train/methods/critic_inputs.py", "core/data.py", "core/execution.py",
                         "core/image_transforms.py", "train/models/vla_adapter.py", "train/models/pi05.py")
 
 
@@ -83,7 +83,8 @@ def build_replay_cache(config, root: Path, action_stats: dict, proprio_stats: di
         "model_contract": model_contract(model_config(config.raw)),
         "include_post_success": source.include_post_success, "transitions": transitions,
         "bootstrap_failed_end": config.section("data").get("bootstrap_failed_end", False),
-        "image_size": config.section("iql")["critic_image_size"] if transitions else None,
+        "image_size": (config.section(training_method(config.raw).config_section)["critic_image_size"]
+                       if transitions else None),
         "implementation": {Path(name).name: sha256_file(ROOT / name) for name in IMPLEMENTATION_FILES},
     }
     # Source bytes, not timestamps or the original PC's absolute paths, bind the cache.

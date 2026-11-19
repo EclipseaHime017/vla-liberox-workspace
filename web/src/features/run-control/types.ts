@@ -490,6 +490,8 @@ export type TrainingMethod = {
   id: string; label: string; summary: string;
   requires_rewards: boolean; requires_transitions: boolean;
   critic: string | null; exports_critic: boolean; actor_capabilities: string[];
+  /** Shared critic form fields this method edits (optimizers, learning rates, expectile…). */
+  critic_keys: string[];
   parameters: MethodParameter[]; families: string[];
 };
 export type MethodCatalog = { methods: TrainingMethod[]; default: string };

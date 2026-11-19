@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 
 from core.config import LoadedConfig
 from core.data import load_manifest, training_replay_policy, validate_training_manifest
+from train.methods.base import critic_batch
 from train.methods.distributed import (
     ActorModule,
     CommunicationMeter,
@@ -26,7 +27,7 @@ from train.methods.distributed import (
     zero_optimizer,
 )
 from core.io import atomic_json
-from core.methods import actor_lr_warmup, training_method
+from core.methods import actor_lr_warmup, critic_warmup_steps, training_method
 from core.model_config import model_backend, model_signature
 from core.registry import model_contract
 from train.monitoring import TrainingProgressReporter, log_tensorboard_metric, log_wandb_metric
@@ -42,6 +43,10 @@ from train.trainer import (
     _save_checkpoint,
     _validate_single_task_micro_batch,
 )
+
+
+# Actor targets used for per-step action diagnostics alongside the critic fields.
+ACTOR_DIAGNOSTIC_KEYS = frozenset({"actor_actions", "actor_action_mask"})
 
 
 def rank_zero_call(function):
@@ -235,7 +240,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
     loader = DataLoader(dataset, **loader_kwargs)
     progress = TrainingProgressReporter(total_steps=total, start_step=start,
         interval_steps=config.section("logging")["console_interval_steps"],
-        warmup_steps=config.section(method.config_section)["critic_warmup_steps"] if method.critic else 0,
+        warmup_steps=critic_warmup_steps(raw),
         samples_per_step=global_batch)
     logs = config.section("logging")
     if rank == 0:
@@ -276,10 +281,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
             # workers independently reconstruct batches for prefetch/resume.
             sampler.draw_batch(generator)
             data_time = time.perf_counter() - begin
-            tensors = {key: value.to(device, non_blocking=True) for key, value in batch.items()
-                       if isinstance(value, torch.Tensor) and key in {
-                           "pixels", "next_pixels", "proprio", "next_proprio", "actions",
-                           "action_mask", "actor_actions", "actor_action_mask", "reward", "bootstrap_mask", "chunk_length"}}
+            tensors = critic_batch(algorithm, batch, device, extra=ACTOR_DIAGNOSTIC_KEYS)
             torch.cuda.synchronize(device)
             tick = time.perf_counter()
             context, metrics = algorithm.update(tensors, step)

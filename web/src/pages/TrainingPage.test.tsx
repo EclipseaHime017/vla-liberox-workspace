@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrainingPage } from "./TrainingPage";
 import * as api from "../features/run-control/api";
-import type { Bootstrap, OfflineJob, TrainingDataset, TrainingDefaults } from "../features/run-control/types";
+import type { Bootstrap, OfflineJob, TrainingDataset, TrainingDefaults, TrainingMethod } from "../features/run-control/types";
 
 vi.mock("../features/run-control/api", () => ({
   getBootstrap: vi.fn(), getMethods: vi.fn(), getTensorBoard: vi.fn(), getTrainingDefaults: vi.fn(),
@@ -62,18 +62,24 @@ const datasets = [
   { id: "broken", name: "Broken dataset", member_count: 3, integrity_status: "BROKEN", annotation_status: "READY" },
 ] as TrainingDataset[];
 
+const expectileKeys = ["critic_optimizer", "critic_lr", "critic_weight_decay", "critic_max_grad_norm",
+  "value_optimizer", "value_lr", "value_weight_decay", "value_max_grad_norm", "expectile", "target_tau"];
+const methods: TrainingMethod[] = [
+  { id: "iql", label: "IQL", summary: "奖励加权后训练", requires_rewards: true, requires_transitions: true, critic: "expectile",
+    exports_critic: false, actor_capabilities: [], parameters: [], families: ["pi05", "vla_adapter"],
+    critic_keys: ["critic_warmup_steps", ...expectileKeys, "beta", "max_advantage_weight"] },
+  { id: "bc", label: "BC", summary: "等权行为克隆", requires_rewards: false, requires_transitions: false, critic: null,
+    exports_critic: false, actor_capabilities: [], parameters: [], families: ["pi05", "vla_adapter"],
+    critic_keys: [] },
+];
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.getBootstrap).mockResolvedValue({ task: { task_id: "task" },
     task_catalog: [{ task_id: "task", prompt: "pick bowl" }] } as unknown as Bootstrap);
   vi.mocked(api.getTrainingDefaults).mockImplementation(async (datasetId) => datasetId === "unready"
     ? { ...defaults, reward_version: null } : defaults);
-  vi.mocked(api.getMethods).mockResolvedValue({ default: "iql", methods: [
-    { id: "iql", label: "IQL", summary: "奖励加权后训练", requires_rewards: true, requires_transitions: true, critic: "expectile",
-      exports_critic: false, actor_capabilities: [], parameters: [], families: ["pi05", "vla_adapter"] },
-    { id: "bc", label: "BC", summary: "等权行为克隆", requires_rewards: false, requires_transitions: false, critic: null,
-      exports_critic: false, actor_capabilities: [], parameters: [], families: ["pi05", "vla_adapter"] },
-  ] });
+  vi.mocked(api.getMethods).mockResolvedValue({ default: "iql", methods });
   vi.mocked(api.listOfflineJobs).mockResolvedValue([]);
   vi.mocked(api.getTrainingQueue).mockResolvedValue({ jobs: [], waiting_reason: null });
   vi.mocked(api.listTrainingDatasets).mockResolvedValue(datasets);

@@ -115,14 +115,7 @@ class TrainingProgressReporter:
         bar = "#" * complete + "-" * (width - complete)
         method = METHODS[metric.get("algorithm", DEFAULT_METHOD)]
         phase = "BC-warmup" if method.critic and step <= self.warmup_steps else method.label
-        objective = (
-            f"loss(actor)={_metric_number(metric, 'actor_loss')} | " if method.critic is None else
-            f"loss(q/v/actor)={_metric_number(metric, 'q_loss')}/"
-            f"{_metric_number(metric, 'value_loss')}/{_metric_number(metric, 'actor_loss')} | "
-            f"Q/V/A={_metric_number(metric, 'q_mean')}/{_metric_number(metric, 'value_mean')}/"
-            f"{_metric_number(metric, 'advantage_mean')} | "
-            f"weight={_metric_number(metric, 'advantage_weight_mean')} | "
-        )
+        objective = _OBJECTIVE_FORMATS[method.critic](metric)
         finish = metric.get("estimated_completion_time") or "unknown"
         return (
             f"TRAIN [{bar}] {step}/{self.total_steps} "
@@ -135,6 +128,24 @@ class TrainingProgressReporter:
             f"lr={_metric_number(metric, 'actor_learning_rate', 3)} | "
             f"VRAM={_metric_number(metric, 'cuda_peak_memory_gib', 3)} GiB"
         )
+
+
+def _expectile_objective(metric: dict[str, Any]) -> str:
+    text = (f"loss(q/v/actor)={_metric_number(metric, 'q_loss')}/"
+            f"{_metric_number(metric, 'value_loss')}/{_metric_number(metric, 'actor_loss')} | "
+            f"Q/V/A={_metric_number(metric, 'q_mean')}/{_metric_number(metric, 'value_mean')}/"
+            f"{_metric_number(metric, 'advantage_mean')} | ")
+    # Only methods that weight the actor by the advantage (IQL) report the weight.
+    if "advantage_weight_mean" in metric:
+        text += f"weight={_metric_number(metric, 'advantage_weight_mean')} | "
+    return text
+
+
+# Console objective per critic kind (core.methods.TrainingMethod.critic).
+_OBJECTIVE_FORMATS = {
+    None: lambda metric: f"loss(actor)={_metric_number(metric, 'actor_loss')} | ",
+    "expectile": _expectile_objective,
+}
 
 
 def log_tensorboard_metric(writer: Any, metric: dict[str, Any]) -> None:

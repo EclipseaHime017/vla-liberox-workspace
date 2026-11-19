@@ -8,16 +8,17 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from core.config import LoadedConfig
 from core.registry import model_observation, model_contract
 from core.data import iter_unique_replay_chunks, load_manifest, replay_chunks, replay_end_step
+from core.methods import training_method
 from core.frame_cache import FrameCache
 from core.image_transforms import policy_view, image_orientation
 from rewards.manifest import load_reward_index
-from train.models.vla_adapter import env_to_dataset_actions, normalize_with_stats, proprio_from_trajectory
+from train.methods.critic_inputs import critic_pixels, encode_actions, encode_proprio
+from train.models.vla_adapter import proprio_from_trajectory
 
 
 class ActionDataset(Dataset):
@@ -59,9 +60,7 @@ class ActionDataset(Dataset):
         return len(self.items)
 
     def _pixels(self, agent: np.ndarray, wrist: np.ndarray) -> torch.Tensor:
-        value = torch.from_numpy(np.concatenate((agent, wrist), axis=-1).copy()).permute(2, 0, 1)
-        value = F.interpolate(value.unsqueeze(0).float(), size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
-        return value.squeeze(0).clamp(0, 255).to(torch.uint8)
+        return critic_pixels(agent, wrist, self.image_size)
 
     def __getitem__(self, item: int) -> dict[str, Any]:
         return self._sample(item, transitions=False)
@@ -99,15 +98,9 @@ class ActionDataset(Dataset):
             next_agent = policy_view(frames.frame("agentview_image", end), orientation, self.image_orientation)
             next_wrist = policy_view(frames.frame("wrist_image", end), orientation, self.image_orientation)
         raw_proprio = proprio_from_trajectory(trajectory)
-        if self.action_stats.get("codec") == "openpi_quantile":
-            from train.models.pi05 import normalize
-            proprio = normalize(raw_proprio, self.proprio_stats)
-            encoded_actions = normalize(trajectory["env_action"][start:end], self.action_stats)
-            actor_encoded = normalize(trajectory["env_action"][start:actor_end], self.action_stats)
-        else:
-            proprio = normalize_with_stats(raw_proprio, self.proprio_stats)
-            encoded_actions = env_to_dataset_actions(trajectory["env_action"][start:end], self.action_stats)
-            actor_encoded = env_to_dataset_actions(trajectory["env_action"][start:actor_end], self.action_stats)
+        proprio = encode_proprio(raw_proprio, self.action_stats, self.proprio_stats)
+        encoded_actions = encode_actions(trajectory["env_action"][start:end], self.action_stats)
+        actor_encoded = encode_actions(trajectory["env_action"][start:actor_end], self.action_stats)
         actions = np.zeros((self.manifest["action_horizon"], self.manifest["action_dim"]), dtype=np.float32)
         action_mask = np.zeros(self.manifest["action_horizon"], dtype=bool)
         actions[:length] = encoded_actions
@@ -159,7 +152,7 @@ class ReplayDataset(ActionDataset):
                  proprio_stats: dict[str, Any], split: str = "train",
                  reward_index: dict[str, Any] | None = None):
         super().__init__(config, action_stats, proprio_stats, split)
-        self.image_size = int(config.section("iql")["critic_image_size"])
+        self.image_size = int(config.section(training_method(config.raw).config_section)["critic_image_size"])
         index = load_reward_index(config) if reward_index is None else reward_index
         if index.get("complete") is False:
             raise ValueError("Reward annotation manifest is incomplete")

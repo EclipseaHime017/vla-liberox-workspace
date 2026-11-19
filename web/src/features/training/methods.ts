@@ -1,8 +1,12 @@
-/** Shared parameter names of the critic trained alongside the actor (expectile Q/V). */
-const CRITIC_KEYS = new Set(["expectile", "beta", "max_advantage_weight", "target_tau"]);
+import type { TrainingMethod } from "../run-control/types";
 
-export const isCriticParameter = (name: string) =>
-  name.startsWith("critic_") || name.startsWith("value_") || CRITIC_KEYS.has(name);
+/** Critic form fields declared by any method in the catalog (its `critic_keys`). */
+export const sharedCriticKeys = (methods: TrainingMethod[]) =>
+  new Set(methods.flatMap((method) => method.critic_keys));
+
+/** A shared critic field applies only to methods that declare it; other fields always apply. */
+export const acceptsField = (name: string, method: TrainingMethod | undefined, shared: Set<string>) =>
+  !shared.has(name) || Boolean(method?.critic_keys.includes(name));
 
 /** Method flags recorded with a training job; records before 0.9 carry only the method id and reward. */
 export function recordedMethod(parameters: Record<string, unknown>) {

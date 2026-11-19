@@ -78,8 +78,9 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
       {method.critic && <><span><small>Q loss</small><b>{metricNumber(metric.q_loss)}</b></span>
       <span><small>Value loss</small><b>{metricNumber(metric.value_loss)}</b></span></>}
       <span><small>Actor loss</small><b>{metricNumber(metric.actor_loss)}</b></span>
-      {method.critic && <><span><small>Q / V / Advantage</small><b>{metricNumber(metric.q_mean)} / {metricNumber(metric.value_mean)} / {metricNumber(metric.advantage_mean)}</b></span>
-      <span><small>Advantage weight</small><b>{metricNumber(metric.advantage_weight_mean)}</b></span></>}
+      {method.critic && <span><small>Q / V / Advantage</small><b>{metricNumber(metric.q_mean)} / {metricNumber(metric.value_mean)} / {metricNumber(metric.advantage_mean)}</b></span>}
+      {/* Only methods that weight the actor by the advantage (IQL) report it. */}
+      {metric.advantage_weight_mean !== undefined && <span><small>Advantage weight</small><b>{metricNumber(metric.advantage_weight_mean)}</b></span>}
       <span><small>Policy LR</small><b>{metricNumber(metric.actor_learning_rate, 3)}</b></span>
       <span><small>梯度范数</small><b>{metricNumber(metric.actor_grad_norm)}</b></span>
       <span><small>峰值显存</small><b>{metricNumber(metric.cuda_peak_memory_gib, 3)} GiB</b></span>

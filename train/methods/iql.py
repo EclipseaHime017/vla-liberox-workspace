@@ -42,6 +42,9 @@ class ImplicitQLearning:
         return weighted_masked_l1(prediction, batch.get("actor_actions", batch["actions"]),
                                   batch.get("actor_action_mask", batch["action_mask"]), context)
 
+    def distribute(self, wrap, zero_optimizer) -> list:
+        return self.agent.distribute(wrap, zero_optimizer)
+
     def checkpoint(self) -> dict:
         return self.agent.checkpoint()
 
