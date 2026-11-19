@@ -1,6 +1,6 @@
 # LIBERO-X 仿真、接管与后训练平台
 
-版本 **0.8.5** · [更新记录](CHANGELOG.md) · [English](README.md)
+版本 **0.8.5** · [English](README.md)
 
 在 LIBERO-X 仿真中运行 VLA 策略，人工接管并录制轨迹，用模型评价和人工关键帧给轨迹打奖励，再用 BC／IQL 后训练策略并做闭环测试。平台在网页中完成全部操作；训练也可以在服务器、多卡或 PBS 集群上进行。
 
@@ -52,7 +52,7 @@ python envs/setup.py --role studio                # 执行
 | `train`、`hpc` | 训练服务器、PBS 节点：只装所选家族 |
 | `eval`、`infer` | 无头闭环评测、远程推理服务 |
 
-系统依赖和人工步骤（udev、ROS、Hugging Face 授权）见 [安装](docs/install.md)；从 0.8.0 升级见 [更新记录](CHANGELOG.md) 的升级说明和 [skills/deploy](skills/deploy/SKILL.md)。
+系统依赖和人工步骤（udev、ROS、Hugging Face 授权）见 [安装](docs/install.md)；从 0.8.0 升级见 [skills/deploy](skills/deploy/SKILL.md)。
 
 ## 快速开始
 

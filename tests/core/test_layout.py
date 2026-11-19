@@ -76,6 +76,5 @@ def test_every_version_string_matches_the_version_file():
         "Sidebar.tsx": search("web/src/components/layout/Sidebar.tsx", r"本机工作区 · v([0-9.]+)"),
         "README.md": search("README.md", r"Version \*\*([0-9.]+)\*\*"),
         "README_CN.md": search("README_CN.md", r"版本 \*\*([0-9.]+)\*\*"),
-        "CHANGELOG.md": search("CHANGELOG.md", r"^## ([0-9.]+)$"),
     }
     assert {name: value for name, value in found.items() if value != version} == {}

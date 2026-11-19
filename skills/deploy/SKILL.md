@@ -73,7 +73,7 @@ conda run -n robometer-reward python -m pip uninstall -y vla-adapter-robometer  
 
 奖励环境（rynnvalue-reward、robometer-reward）不安装本仓库；preflight 提示其中装了 `vla-liberox` 时按提示卸载。
 
-用户自定义的 YAML 和脚本按 `CHANGELOG.md` 的 0.8.0 → 0.8.5 路径对照表更新。数据目录不需要迁移。
+用户自定义的 YAML 和脚本按 0.8.0 → 0.8.5 路径对照表更新（开发机的 `logs/CHANGELOG.md`，不随仓库分发）。数据目录不需要迁移。
 
 **6. 验证**
 

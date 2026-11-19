@@ -49,7 +49,7 @@ cd web && conda run -n vla-liberox npx vitest run && conda run -n vla-liberox np
 | 新增命令 | `<包>/commands/<名>.py` + `<包>/__main__.py` 的 `COMMANDS` | — |
 | 新增上游或改版本 | `third_party/lock.yaml`、`third_party/patches/`、`envs/roles.yaml` | [third_party](../third_party/README.md) |
 | 新增依赖或设备角色 | `envs/layers/*.txt`、`envs/roles.yaml`；`tests/core/test_environment_roles.py` | [安装](install.md) |
-| 发布新版本 | `VERSION`、`pyproject.toml`、`studio/main.py`、`web/package.json`、`web/package-lock.json`、`web/src/components/layout/Sidebar.tsx`、README 两份、`CHANGELOG.md` 顶部标题；`test_layout.py` 检查它们一致 | — |
+| 发布新版本 | `VERSION`、`pyproject.toml`、`studio/main.py`、`web/package.json`、`web/package-lock.json`、`web/src/components/layout/Sidebar.tsx`、README 两份；`test_layout.py` 检查它们一致 | — |
 
 ## 4. 必须保持的约定
 
@@ -68,12 +68,12 @@ cd web && conda run -n vla-liberox npx vitest run && conda run -n vla-liberox np
 
 - `dataset-root/`、`models/`、`policy-registry/`、`evaluator/` 的目录名不能改，数据清单和数据库记录了其中的路径。
 - 记录不可变：续跑、接管、重新评价都写新记录或新版本，不改写历史文件。
-- 奖励缓存按实现文件的名称和内容建立指纹。移动或改动 `rewards/manifest.py`、`pbrs.py`、`stage/`、`fusion.py` 会让派生奖励重新物化（只用 CPU）；RynnValue 原始输出的复用由 `rewards/rynnvalue/outputs.py` 的推理契约决定。改动这些文件时在 CHANGELOG 中说明。
+- 奖励缓存按实现文件的名称和内容建立指纹。移动或改动 `rewards/manifest.py`、`pbrs.py`、`stage/`、`fusion.py` 会让派生奖励重新物化（只用 CPU）；RynnValue 原始输出的复用由 `rewards/rynnvalue/outputs.py` 的推理契约决定。改动这些文件时在更新记录中说明。
 - 第三方源码不直接修改：补丁放 `third_party/patches/`，哈希写进 `third_party/lock.yaml`；读锁定信息用 `core.upstream.upstream_lock`。
 
 **文档与提交**
 
-- 文档以中文为主，`README.md` 是精简英文版；用户可见的变化写进 `CHANGELOG.md`。
+- 文档以中文为主，`README.md` 是精简英文版；用户可见的变化写进更新记录 `logs/CHANGELOG.md`（本地，不提交）。
 - 仓库公开：不提交主机地址、账号、密码、个人路径和数据。本机部署配置放 `configs/cluster/local/`，本地实验放 `experiments/`，两者都不提交。
 - 按主题提交；只在用户要求时提交和推送，不强制推送；不加 Co-Authored-By 等署名行。
 - 提交信息用英文标题 `type(scope): ...`。普通提交一行即可，改动较多时在正文加几条 `- ` 要点。

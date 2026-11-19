@@ -91,6 +91,6 @@ class TrainingAlgorithm(Protocol):
 | 新的 critic 类型 | `train/methods/critics.py` 增加训练与打分两个类，在 `selectors._scorers` 登记打分类；`train/monitoring.py` 的 `_OBJECTIVE_FORMATS` 增加终端显示；任务监视器（`web/src/features/training/JobMonitor.tsx`）需要时增加指标 |
 | 新的选择方式 | `core/methods.py` 的 `SELECTOR_KINDS` 与 `train/methods/selectors.py` 的 `SELECTORS` 同时登记 |
 | `tests/` | 方法目录与兼容性、配置校验、更新与导出往返、平台参数校验 |
-| `docs/`、README 能力矩阵、`CHANGELOG.md` | 补充说明 |
+| `docs/`、README 能力矩阵 | 补充说明 |
 
 平台后端的方法列表、默认参数、参数校验和前端训练页都来自登记表，通常不需要修改。
