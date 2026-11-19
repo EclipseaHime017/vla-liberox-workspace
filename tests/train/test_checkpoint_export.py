@@ -163,12 +163,13 @@ def test_lora_checkpoint_is_restored_then_merged_without_changing_source(tmp_pat
     assert len(calls) == 1
 
 
-def test_ifql_checkpoint_export_carries_its_critic_and_selector(tmp_path, monkeypatch):
-    checkpoint, *_ = make_checkpoint(tmp_path, monkeypatch, "pi05-liberox-base", method="ifql")
-    result = exporter.export_checkpoint(checkpoint, tmp_path / "registry" / "ifql")
+@pytest.mark.parametrize("method,samples", [("ifql", 32), ("vf", 16)])
+def test_sampling_checkpoint_export_carries_its_critic_and_selector(tmp_path, monkeypatch, method, samples):
+    checkpoint, *_ = make_checkpoint(tmp_path, monkeypatch, "pi05-liberox-base", method=method)
+    result = exporter.export_checkpoint(checkpoint, tmp_path / "registry" / method)
     payload = yaml.safe_load(result.read_text())
     validate_policy(result, payload)
-    assert payload["algorithm"] == "ifql" and payload["critic"] == "critic.pt"
-    assert payload["selector"] == {"kind": "argmax", "num_samples": 32}
+    assert payload["algorithm"] == method and payload["critic"] == "critic.pt"
+    assert payload["selector"] == {"kind": "argmax", "num_samples": samples}
     assert (payload["component_sha256"]["critic"] == sha256_file(result.parent / "critic.pt")
             == sha256_file(checkpoint / "critic.pt"))

@@ -91,7 +91,7 @@ class DistributedAlgorithm:
             lambda module: wrap(module, device, meter=meter), zero_optimizer)
 
     def __getattr__(self, name):
-        # Optional hooks (critic_batch_keys, export_critic) belong to the method.
+        # Optional hooks (critic_batch_keys, export_critic, bind_*) belong to the method.
         if name == "inner":
             raise AttributeError(name)
         return getattr(self.inner, name)

@@ -75,6 +75,11 @@ TRAIN_SCHEMA = {
              "value_optimizer": None, "value_weight_decay": None,
              "critic_max_grad_norm": None, "value_max_grad_norm": None,
              "expectile": None, "target_tau": None, "num_samples": None},
+    "vf": {"critic_image_size": None, "critic_lr": None, "critic_optimizer": None,
+           "critic_weight_decay": None, "critic_max_grad_norm": None, "target_tau": None,
+           "num_samples": None, "train_num_samples": None, "num_flow_steps": None,
+           "bcfm_lambda": None, "dcfm_lambda": None, "confidence_weight_temp": None,
+           "ret_agg": None, "q_agg": None, "clip_flow_returns": None},
     "logging": {
         "tensorboard": None,
         "wandb": {

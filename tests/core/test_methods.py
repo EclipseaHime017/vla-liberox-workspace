@@ -12,13 +12,16 @@ from core.registry import family_capabilities
 
 def test_catalog_lists_methods_in_display_order_with_their_flags():
     catalog = methods.method_catalog(family_capabilities())
-    assert [item["id"] for item in catalog] == ["iql", "bc", "ifql"]
-    iql, bc, ifql = catalog
+    assert [item["id"] for item in catalog] == ["iql", "bc", "ifql", "vf"]
+    iql, bc, ifql, vf = catalog
     assert (iql["label"], iql["summary"], iql["requires_rewards"], iql["critic"]) == ("IQL", "奖励加权后训练", True, "expectile")
     assert (bc["label"], bc["summary"], bc["requires_rewards"], bc["critic"]) == ("BC", "等权行为克隆", False, None)
     assert set(iql["families"]) == set(bc["families"]) == set(family_capabilities())
     assert (ifql["label"], ifql["requires_rewards"], ifql["critic"], ifql["exports_critic"]) == ("IFQL", True, "expectile", True)
     assert ifql["families"] == ["pi05"]
+    assert (vf["critic"], vf["exports_critic"], vf["actor_samples_in_training"], vf["families"]) == (
+        "value_flow", True, True, ["pi05"])
+    assert not any(item["actor_samples_in_training"] for item in (iql, bc, ifql))
 
 
 def test_methods_declare_the_critic_fields_they_accept():
@@ -73,3 +76,15 @@ def test_config_rejects_a_method_the_model_family_cannot_train(sampling_method):
     with pytest.raises(ValueError, match="needs actor capabilities \\['sample'\\]"):
         load_train_config(method="bc", family="vla_adapter")
     assert load_train_config(method="bc", family="pi05").raw["training"]["method"] == "bc"
+
+
+def test_vf_configuration_validates_its_own_section():
+    raw = load_train_config(method="vf", family="pi05").raw
+    assert raw["vf"]["clip_flow_returns"] is True and raw["ifql"] == {} == raw["iql"]
+    from core.config import validate_train_config
+    from pathlib import Path
+    for key, value in (("ret_agg", "max"), ("confidence_weight_temp", 0), ("clip_flow_returns", "yes"),
+                       ("num_flow_steps", 0), ("critic_optimizer", "sgd")):
+        broken = {**raw, "vf": {**raw["vf"], key: value}}
+        with pytest.raises((TypeError, ValueError)):
+            validate_train_config(broken, Path("vf.yaml"))

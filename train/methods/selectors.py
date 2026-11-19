@@ -34,8 +34,8 @@ SELECTORS: dict[str, Selector] = {"argmax": argmax}
 
 
 def _scorers() -> dict[str, Callable[[dict[str, Any]], torch.nn.Module]]:
-    from train.methods.critics import ExpectileScorer
-    return {"expectile": ExpectileScorer}
+    from train.methods.critics import ExpectileScorer, ValueFlowScorer
+    return {"expectile": ExpectileScorer, "value_flow": ValueFlowScorer}
 
 
 def load_critic(path: Path, device: torch.device | str) -> torch.nn.Module:
@@ -69,12 +69,11 @@ def choose(scorer: torch.nn.Module, selector: dict[str, Any], candidates: np.nda
     the policy's own action post-processing, encoded exactly as in training replay.
     """
     check_executed(scorer, executed)
-    executed_actions = np.stack([np.stack([process_action(step) for step in candidate[:executed]])
-                                 for candidate in candidates])
     settings = scorer.settings
-    batch = candidate_batch(agent, wrist, raw_proprio, executed_actions, executed,
+    batch = candidate_batch(agent, wrist, raw_proprio, np.asarray(candidates), executed,
                             image_size=settings["image_size"], horizon=settings["horizon"],
-                            action_stats=action_stats, proprio_stats=proprio_stats)
+                            action_stats=action_stats, proprio_stats=proprio_stats,
+                            process_action=process_action)
     device = next(scorer.parameters()).device
     scores = scorer({key: value.to(device) for key, value in batch.items()}).float().cpu()
     return SELECTORS[selector["kind"]](torch.from_numpy(np.asarray(candidates)), scores), scores

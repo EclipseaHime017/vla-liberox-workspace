@@ -80,6 +80,19 @@ describe("offline job monitor", () => {
     expect(screen.getByText("12.5 GiB")).toBeTruthy();
   });
 
+  it("shows the flow critic's metrics for Value Flows instead of expectile Q/V", () => {
+    render(<JobMonitor initial={{ ...job, parameters: { algorithm: "vf", critic: "value_flow", requires_rewards: true },
+      metrics: { step: 3, progress_percent: 10, critic_loss: 0.4, bcfm_loss: 0.25, dcfm_loss: 0.15,
+        q_mean: -2, q_std: 0.5, confidence_weight_mean: 0.9, actor_loss: 0.1 } }} />);
+    expect(screen.getByText("VF")).toBeTruthy();
+    expect(screen.getByText("Critic loss")).toBeTruthy();
+    expect(screen.getByText("BCFM / DCFM").nextElementSibling?.textContent).toBe("0.2500 / 0.1500");
+    expect(screen.getByText("Q mean / std")).toBeTruthy();
+    expect(screen.queryByText("Q / V / Advantage")).toBeNull();
+    expect(screen.queryByText("Value loss")).toBeNull();
+    expect(screen.queryByText("Advantage weight")).toBeNull();
+  });
+
   it("allows a terminal record to be dismissed", () => {
     const onDismiss = vi.fn();
     render(<JobMonitor initial={{ ...job, status: "COMPLETED" }} onDismiss={onDismiss} />);

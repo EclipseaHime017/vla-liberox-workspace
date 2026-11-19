@@ -7,7 +7,7 @@
 | | 支持 |
 | --- | --- |
 | 策略模型 | VLA-Adapter（LIBERO-Object-Pro、LIBERO-X）、π₀.₅（LIBERO、LIBERO-X） |
-| 训练方法 | BC（等权行为克隆）、IQL（奖励加权后训练）、IFQL（仅 π₀.₅：推理时采样多个动作块，由导出的 critic 选择） |
+| 训练方法 | BC（等权行为克隆）、IQL（奖励加权后训练）、IFQL 与 Value Flows（仅 π₀.₅：推理时采样多个动作块，由导出的 critic 选择） |
 | 奖励 | sparse、RynnValue（PBRS 整形）、Stage（人工关键帧）、Final Reward 融合；Robometer 进度与成功概率评价 |
 | 场景 | LIBERO-X 五类任务、LEVEL1–4 共 21 个场景，可用 YAML 登记自备场景 |
 | 接管设备 | SpaceMouse、FACTR 力反馈主臂 |
@@ -19,7 +19,7 @@
 core/      共享基础：配置、目录布局、模型登记、方法目录、上游锁
 sim/       LIBERO-X 仿真与评测 rollout
 rewards/   奖励：pbrs、stage/、fusion、manifest；rynnvalue/、robometer/
-train/     训练：models/（家族实现）、methods/（BC、IQL、IFQL、critic、选择器）、回放、训练循环、导出
+train/     训练：models/（家族实现）、methods/（BC、IQL、IFQL、VF、critic、选择器）、回放、训练循环、导出
 cluster/   服务器：多卡训练、队列、PBS、闭环评测、远程推理、模型传输
 studio/    平台后端（FastAPI）
 web/       平台前端（React + Vite）

@@ -7,6 +7,7 @@
 | BC | 等权行为克隆：直接学习数据集中的全部有效动作 | 否 |
 | IQL | 奖励加权后训练：expectile 训练 Q/V，按 `min(exp(β·A), 上限)` 加权 actor 的 BC 损失 | 是，先在数据集配置中准备评价和 Final Reward |
 | IFQL | 仅 π₀.₅：actor 等权 flow BC，同时训练 expectile Q/V；导出的策略推理时采样 N 个动作块，执行 critic 评分最高的一个 | 是，同 IQL |
+| VF | 仅 π₀.₅：actor 等权 flow BC，同时训练回报分布的 flow critic（下一状态的动作块由当前 actor 采样）；推理同 IFQL | 是，同 IQL |
 
 方法由登记表声明，平台、配置校验和训练循环都从登记表读取；各方法的细节与新增方法的步骤见 [训练方法](methods.md)。
 
@@ -30,7 +31,7 @@
 
 ## 在终端训练
 
-**单卡流水线**：一次完成数据选择、准备、评价和训练。编辑 `configs/pipeline.yaml`：`base_config` 选择 `./methods/iql.yaml`、`./methods/bc.yaml` 或 `./methods/ifql.yaml`，`selection` 选择数据，`overrides` 覆盖训练参数（方法段写在与方法同名的键下）。BC 会跳过全部奖励评价。
+**单卡流水线**：一次完成数据选择、准备、评价和训练。编辑 `configs/pipeline.yaml`：`base_config` 选择 `./methods/iql.yaml`、`./methods/bc.yaml`、`./methods/ifql.yaml` 或 `./methods/vf.yaml`，`selection` 选择数据，`overrides` 覆盖训练参数（方法段写在与方法同名的键下）。BC 会跳过全部奖励评价。
 
 ```bash
 conda activate vla-liberox
@@ -49,7 +50,7 @@ python -m train export-checkpoint --checkpoint <checkpoints/step_N> --output pol
 python -m train export-policy --policy <policy.yaml> --output <目录> --base-checkpoint <新设备上的基模路径>
 ```
 
-命令行训练默认输出到 `outputs/training/`（`configs/runtime.yaml` 的 `paths.output_dir`）。`checkpoints/step_*/trainer.pt` 是训练恢复文件；用于仿真和评测的是导出目录中的 `policy.yaml` 及同目录权重（IFQL 另有 `critic.pt`）。跨设备使用导出模型时，用 `export-policy` 改写基础权重的位置。
+命令行训练默认输出到 `outputs/training/`（`configs/runtime.yaml` 的 `paths.output_dir`）。`checkpoints/step_*/trainer.pt` 是训练恢复文件；用于仿真和评测的是导出目录中的 `policy.yaml` 及同目录权重（IFQL、VF 另有 `critic.pt`）。跨设备使用导出模型时，用 `export-policy` 改写基础权重的位置。
 
 多卡服务器和 PBS 集群见 [服务器](cluster.md)。
 

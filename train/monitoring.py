@@ -16,6 +16,7 @@ TENSORBOARD_GROUPS = {
     "loss": ("q_loss", "value_loss", "actor_loss", "actor_flow_mse"),
     "value": ("q_mean", "value_mean", "advantage_mean"),
     "iql": ("advantage_weight_mean",),
+    "value_flow": ("critic_loss", "bcfm_loss", "dcfm_loss", "q_std", "confidence_weight_mean"),
     "optimization": (
         "actor_learning_rate",
         "actor_grad_norm",
@@ -141,10 +142,18 @@ def _expectile_objective(metric: dict[str, Any]) -> str:
     return text
 
 
+def _flow_objective(metric: dict[str, Any]) -> str:
+    return (f"loss(critic/actor)={_metric_number(metric, 'critic_loss')}/{_metric_number(metric, 'actor_loss')} | "
+            f"BCFM/DCFM={_metric_number(metric, 'bcfm_loss')}/{_metric_number(metric, 'dcfm_loss')} | "
+            f"Q/std={_metric_number(metric, 'q_mean')}/{_metric_number(metric, 'q_std')} | "
+            f"weight={_metric_number(metric, 'confidence_weight_mean')} | ")
+
+
 # Console objective per critic kind (core.methods.TrainingMethod.critic).
 _OBJECTIVE_FORMATS = {
     None: lambda metric: f"loss(actor)={_metric_number(metric, 'actor_loss')} | ",
     "expectile": _expectile_objective,
+    "value_flow": _flow_objective,
 }
 
 

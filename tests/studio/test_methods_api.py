@@ -14,7 +14,7 @@ def test_methods_api_serves_catalog_and_default():
     assert body["default"] == "iql"
     assert [(item["id"], f"{item['label']} · {item['summary']}") for item in body["methods"]] == [
         ("iql", "IQL · 奖励加权后训练"), ("bc", "BC · 等权行为克隆"),
-        ("ifql", "IFQL · flow 策略采样 + IQL critic 选择")]
+        ("ifql", "IFQL · flow 策略采样 + IQL critic 选择"), ("vf", "VF · Value Flows：flow 回报分布 critic + 采样选择")]
     assert all({"requires_rewards", "critic", "critic_keys", "parameters", "families"} <= item.keys()
                for item in body["methods"])
     ifql = body["methods"][2]

@@ -75,7 +75,7 @@ def test_candidate_batch_encodes_like_training_replay():
     raw_proprio = rng.normal(size=8).astype(np.float32)
     candidates = rng.uniform(-1, 1, size=(4, 10, 7)).astype(np.float32)
     batch = candidate_batch(agent, wrist, raw_proprio, candidates, 5, image_size=128, horizon=10,
-                            action_stats=QUANTILE, proprio_stats=QUANTILE)
+                            action_stats=QUANTILE, proprio_stats=QUANTILE, process_action=lambda action: action)
     torch.testing.assert_close(batch["pixels"][2], critic_pixels(agent, wrist, 128))
     np.testing.assert_allclose(batch["proprio"][0].numpy(), encode_proprio(raw_proprio[None], QUANTILE, QUANTILE)[0])
     np.testing.assert_allclose(batch["actions"][3, :5].numpy(), encode_actions(candidates[3, :5], QUANTILE))

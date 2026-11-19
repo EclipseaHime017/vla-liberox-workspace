@@ -255,6 +255,28 @@ def process_action(action):
     return np.clip(action, -1.0, 1.0)
 
 
+class NextActionSampler:
+    """Chunks from the current actor at replay next observations (Value Flows' critic targets)."""
+
+    process_action = staticmethod(process_action)
+
+    def __init__(self, components):
+        self.components, self.action_stats = components, components.action_stats
+
+    def __call__(self, batch: dict, rows: list[int], count: int) -> np.ndarray:
+        def array(value):
+            return value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+        observations = [{"observation/image": array(batch["next_agent_image"][row]),
+                         "observation/wrist_image": array(batch["next_wrist_image"][row]),
+                         "observation/state": array(batch["next_raw_proprio"][row]).astype(np.float32),
+                         "prompt": batch["prompt"][row]} for row in rows]
+        return sample_chunks(self.components, observations, count)
+
+
+def next_action_sampler(components) -> NextActionSampler:
+    return NextActionSampler(components)
+
+
 def choose_chunk(components, critic, selector: dict, observation: dict, executed: int) -> np.ndarray:
     """Sample ``selector['num_samples']`` chunks and return the one the exported critic prefers."""
     from train.methods.selectors import check_executed, choose

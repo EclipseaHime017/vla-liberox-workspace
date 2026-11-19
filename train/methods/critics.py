@@ -68,9 +68,7 @@ class QNetwork(nn.Module):
 
     def forward(self, pixels: torch.Tensor, proprio: torch.Tensor,
                 actions: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
-        masked = actions.float() * action_mask.float().unsqueeze(-1)
-        action_features = torch.cat((masked.flatten(1), action_mask.float().unsqueeze(-1).expand_as(actions).flatten(1)), dim=-1)
-        return self.head(torch.cat((self.encoder(pixels, proprio), action_features), dim=-1)).squeeze(-1)
+        return self.head(torch.cat((self.encoder(pixels, proprio), action_features(actions, action_mask)), dim=-1)).squeeze(-1)
 
 
 class ValueNetwork(nn.Module):
@@ -275,6 +273,234 @@ class ExpectileScorer(nn.Module):
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         inputs = (batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
         return torch.minimum(self.q1(*inputs), self.q2(*inputs))
+
+
+def action_features(actions: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
+    """Masked chunk plus its mask, flattened: the critic sees which steps exist."""
+    masked = actions.float() * action_mask.float().unsqueeze(-1)
+    return torch.cat((masked.flatten(1), action_mask.float().unsqueeze(-1).expand_as(actions).flatten(1)), dim=-1)
+
+
+class ValueVectorField(nn.Module):
+    """Vector field v(x_t, t | s, a) of a flow from N(0, 1) to the return of chunk ``a`` at ``s``.
+
+    The observation/chunk condition is encoded once per sample; ``returns`` and ``times`` hold
+    K query points per sample, shape (B, K). The MLP mirrors the reference ``ValueVectorField``
+    (Dense → GELU → LayerNorm per hidden layer).
+    """
+
+    def __init__(self, horizon: int = 8, action_dim: int = 7, proprio_dim: int = 8,
+                 encoder_factory: Callable[[int], nn.Module] = PixelEncoder,
+                 hidden: tuple[int, ...] = (512, 512, 512, 512)):
+        super().__init__()
+        self.encoder = encoder_factory(proprio_dim)
+        width = self.encoder.output_dim + 2 * horizon * action_dim + 2
+        layers: list[nn.Module] = []
+        for size in hidden:
+            layers.extend((nn.Linear(width, size), nn.GELU(approximate="tanh"), nn.LayerNorm(size)))
+            width = size
+        self.head = nn.Sequential(*layers, nn.Linear(width, 1))
+
+    def condition(self, pixels, proprio, actions, action_mask) -> torch.Tensor:
+        return torch.cat((self.encoder(pixels, proprio), action_features(actions, action_mask)), dim=-1)
+
+    def field(self, returns: torch.Tensor, times: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        points = returns.shape[1]
+        inputs = torch.cat((returns.unsqueeze(-1), times.unsqueeze(-1),
+                            condition.unsqueeze(1).expand(-1, points, -1)), dim=-1)
+        return self.head(inputs).squeeze(-1)
+
+    def forward(self, returns, times, pixels, proprio, actions, action_mask) -> torch.Tensor:
+        return self.field(returns, times, self.condition(pixels, proprio, actions, action_mask))
+
+
+def _aggregate(first: torch.Tensor, second: torch.Tensor, how: str) -> torch.Tensor:
+    return torch.minimum(first, second) if how == "min" else (first + second) / 2
+
+
+class ValueFlowCritic(nn.Module):
+    """Value Flows' distributional critic: twin flows over the chunk return, trained with the
+    bootstrapped (BCFM) and distributional (DCFM) conditional flow-matching losses, weighted by
+    the confidence sigmoid(-temp / std) + 0.5 where std is the flow's d(return)/d(noise) (jvp).
+
+    Follows chongyi-zheng/value-flows@01833354 ``ValueFlowsAgent.critic_loss``; next chunks come
+    from the actor through ``select_next`` (rejection sampling with the online flows).
+    """
+
+    MODULES = ("flow1", "flow2", "target_flow1", "target_flow2")
+
+    def __init__(self, *, horizon: int = 8, action_dim: int = 7, proprio_dim: int = 8,
+                 discount: float = 0.99, tau: float = 0.005, num_flow_steps: int = 10,
+                 bcfm_lambda: float = 1.0, dcfm_lambda: float = 1.0, confidence_weight_temp: float = 0.3,
+                 ret_agg: str = "mean", q_agg: str = "mean", clip_flow_returns: bool = True,
+                 critic_lr: float = 3e-4, critic_optimizer: str = "adam", critic_weight_decay: float = 0.0,
+                 critic_max_grad_norm: float = 10.0, accumulate_primitive_steps: bool = False,
+                 encoder_factory: Callable[[int], nn.Module] = PixelEncoder):
+        super().__init__()
+        self.flow1 = ValueVectorField(horizon, action_dim, proprio_dim, encoder_factory)
+        self.flow2 = ValueVectorField(horizon, action_dim, proprio_dim, encoder_factory)
+        self.target_flow1 = copy.deepcopy(self.flow1).requires_grad_(False)
+        self.target_flow2 = copy.deepcopy(self.flow2).requires_grad_(False)
+        if critic_optimizer not in _OPTIMIZERS or ret_agg not in ("mean", "min") or q_agg not in ("mean", "min"):
+            raise ValueError("Invalid flow critic optimizer or aggregation")
+        self.geometry = {"horizon": int(horizon), "action_dim": int(action_dim), "proprio_dim": int(proprio_dim)}
+        self.discount, self.tau, self.steps = float(discount), float(tau), int(num_flow_steps)
+        self.bcfm_lambda, self.dcfm_lambda = float(bcfm_lambda), float(dcfm_lambda)
+        self.temperature, self.ret_agg, self.q_agg = float(confidence_weight_temp), ret_agg, q_agg
+        self.clip_flow_returns = bool(clip_flow_returns)
+        self.accumulate_primitive_steps = bool(accumulate_primitive_steps)
+        self.max_grad_norm = float(critic_max_grad_norm)
+        self.return_bounds: tuple[float, float] | None = None
+        self.optimizer_settings = (_OPTIMIZERS[critic_optimizer],
+                                   {"lr": critic_lr, "weight_decay": critic_weight_decay})
+        optimizer, kwargs = self.optimizer_settings
+        self.optimizer = optimizer(list(self.flow1.parameters()) + list(self.flow2.parameters()), **kwargs)
+
+    def set_reward_range(self, low: float, high: float) -> None:
+        """Clip flow returns to [low, high] / (1 - γ) like the reference (dataset reward range)."""
+        if not self.clip_flow_returns:
+            return
+        if not self.discount < 1 or not low <= high:
+            raise ValueError("Clipping flow returns needs discount < 1 and a valid reward range")
+        self.return_bounds = (float(low) / (1 - self.discount), float(high) / (1 - self.discount))
+
+    def _clip(self, returns: torch.Tensor) -> torch.Tensor:
+        return returns if self.return_bounds is None else returns.clamp(*self.return_bounds)
+
+    def integrate(self, flow: ValueVectorField, noise: torch.Tensor, condition: torch.Tensor,
+                  end: torch.Tensor | None = None, *, tangent: bool = False):
+        """Euler integration from t=0 to ``end`` (default 1); optionally d(return)/d(noise) via jvp."""
+        returns = noise
+        derivative = torch.ones_like(noise) if tangent else None
+        step = (torch.ones_like(noise) if end is None else end) / self.steps
+        for index in range(self.steps):
+            times = index * step
+            if tangent:
+                field, change = torch.func.jvp(lambda value: flow.field(value, times, condition),
+                                               (returns,), (derivative,))
+                derivative = derivative + step * change
+            else:
+                field = flow.field(returns, times, condition)
+            returns = self._clip(returns + step * field)
+        return returns, derivative
+
+    def one_step_q(self, flows, conditions, noise: torch.Tensor) -> torch.Tensor:
+        """Q sample from one Euler step at t=0 (the reference's scoring), aggregated over flows."""
+        values = [self._clip(noise + flow.field(noise, torch.zeros_like(noise), condition))
+                  for flow, condition in zip(flows, conditions)]
+        return _aggregate(*values, self.q_agg)
+
+    @torch.no_grad()
+    def select_next(self, pixels, proprio, candidates: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+        """Index of the best of N encoded candidate chunks per next observation (online flows)."""
+        rows, count = candidates.shape[:2]
+        flows = (unwrap(self.flow1), unwrap(self.flow2))
+        inputs = (pixels.repeat_interleave(count, 0), proprio.repeat_interleave(count, 0),
+                  candidates.flatten(0, 1), masks.flatten(0, 1))
+        conditions = [flow.condition(*inputs) for flow in flows]
+        noise = torch.randn(rows * count, 1, device=pixels.device)
+        return self.one_step_q(flows, conditions, noise).view(rows, count).argmax(dim=1)
+
+    def update(self, batch: dict[str, torch.Tensor], next_actions: torch.Tensor,
+               next_mask: torch.Tensor) -> dict[str, float]:
+        if self.clip_flow_returns and self.return_bounds is None:
+            raise RuntimeError("Bind the dataset reward range before training a clipped flow critic")
+        here = (batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
+        there = (batch["next_pixels"], batch["next_proprio"], next_actions, next_mask)
+        reward = batch["reward"].float().unsqueeze(-1)
+        if self.accumulate_primitive_steps:
+            discount = self.discount ** batch["chunk_length"].float()
+        else:
+            discount = torch.full_like(batch["reward"], self.discount, dtype=torch.float32)
+        discount = (discount * batch["bootstrap_mask"].float()).unsqueeze(-1)
+        targets = (self.target_flow1, self.target_flow2)
+        with torch.no_grad():
+            target_here = [flow.condition(*here) for flow in targets]
+            target_there = [flow.condition(*there) for flow in targets]
+            spread = torch.randn_like(reward)
+            stds = [self.integrate(flow, spread, condition, tangent=True)[1].abs()
+                    for flow, condition in zip(targets, target_here)]
+            std = _aggregate(*stds, self.q_agg)
+            weights = (torch.sigmoid(-self.temperature / std) + 0.5).squeeze(-1)
+            noise, times = torch.randn_like(reward), torch.rand_like(reward)
+            next_returns = _aggregate(*[self.integrate(flow, noise, condition)[0]
+                                        for flow, condition in zip(targets, target_there)], self.ret_agg)
+            returns = reward + discount * next_returns
+            bootstrapped = times * returns + (1 - times) * noise
+            noisy_next = _aggregate(*[self.integrate(flow, noise, condition, end=times)[0]
+                                      for flow, condition in zip(targets, target_there)], self.ret_agg)
+            distributional = reward + discount * noisy_next
+            target_field = _aggregate(*[flow.field(noisy_next, times, condition)
+                                        for flow, condition in zip(targets, target_there)], self.ret_agg)
+            goal = torch.cat((returns - noise, target_field), dim=1)
+        # One forward per online flow (DDP-safe): column 0 is BCFM, column 1 is DCFM.
+        points, point_times = torch.cat((bootstrapped, distributional), dim=1), torch.cat((times, times), dim=1)
+        errors = sum((flow(points, point_times, *here) - goal).square() for flow in (self.flow1, self.flow2))
+        bcfm, dcfm = errors[:, 0], errors[:, 1]
+        loss = (weights * (self.bcfm_lambda * bcfm + self.dcfm_lambda * dcfm)).mean()
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        nn.utils.clip_grad_norm_(list(self.flow1.parameters()) + list(self.flow2.parameters()), self.max_grad_norm)
+        self.optimizer.step()
+        self.soft_update()
+        with torch.no_grad():
+            online = (unwrap(self.flow1), unwrap(self.flow2))
+            q = self.one_step_q(online, [flow.condition(*here) for flow in online], torch.randn_like(reward))
+        return {"critic_loss": float(loss.detach()), "bcfm_loss": float(bcfm.mean().detach()),
+                "dcfm_loss": float(dcfm.mean().detach()), "q_mean": float(q.mean()),
+                "q_std": float(std.mean()), "confidence_weight_mean": float(weights.mean())}
+
+    @torch.no_grad()
+    def soft_update(self) -> None:
+        for source, target in ((self.flow1, self.target_flow1), (self.flow2, self.target_flow2)):
+            for source_parameter, target_parameter in zip(source.parameters(), target.parameters()):
+                target_parameter.lerp_(source_parameter, self.tau)
+
+    def distribute(self, wrap: Callable[[nn.Module], nn.Module], zero_optimizer: Callable) -> list:
+        for name in ("flow1", "flow2"):
+            setattr(self, name, wrap(getattr(self, name)))
+        for online, target in ((self.flow1, self.target_flow1), (self.flow2, self.target_flow2)):
+            target.load_state_dict(unwrap(online).state_dict())
+        optimizer, kwargs = self.optimizer_settings
+        self.optimizer = zero_optimizer(list(self.flow1.parameters()) + list(self.flow2.parameters()),
+                                        optimizer, **kwargs)
+        return [self.optimizer]
+
+    def inference_payload(self, image_size: int) -> dict[str, Any]:
+        bounds = None if self.return_bounds is None else list(self.return_bounds)
+        return {"kind": "value_flow",
+                "settings": {**self.geometry, "image_size": int(image_size), "q_agg": self.q_agg,
+                             "return_bounds": bounds},
+                "state": module_state(self, ("flow1", "flow2"))}
+
+    def checkpoint(self) -> dict[str, Any]:
+        return {"model": module_state(self, self.MODULES), "optimizer": self.optimizer.state_dict()}
+
+    def restore(self, state: dict[str, Any]) -> None:
+        load_module_state(self, self.MODULES, state["model"])
+        self.optimizer.load_state_dict(state["optimizer"])
+
+
+class ValueFlowScorer(nn.Module):
+    """Inference view of an exported flow critic: one-step Q sample per candidate, as in ``'rs'``."""
+
+    def __init__(self, settings: dict[str, Any]):
+        super().__init__()
+        self.settings = dict(settings)
+        geometry = (settings["horizon"], settings["action_dim"], settings["proprio_dim"])
+        self.flow1, self.flow2 = ValueVectorField(*geometry), ValueVectorField(*geometry)
+        bounds = settings["return_bounds"]
+        self.bounds = None if bounds is None else tuple(bounds)
+
+    @torch.no_grad()
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        inputs = (batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
+        noise = torch.randn(len(batch["pixels"]), 1, device=batch["pixels"].device)
+        values = []
+        for flow in (self.flow1, self.flow2):
+            value = noise + flow.field(noise, torch.zeros_like(noise), flow.condition(*inputs))
+            values.append(value if self.bounds is None else value.clamp(*self.bounds))
+        return _aggregate(*values, self.settings["q_agg"]).squeeze(-1)
 
 
 def advantage_weights(advantage: torch.Tensor, beta: float, maximum: float) -> torch.Tensor:

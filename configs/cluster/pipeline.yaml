@@ -34,7 +34,7 @@ model_profiles:
       backbone: full
 overrides:
   training:
-    method: iql  # iql | bc | ifql (pi05 only); BC never reads rewards
+    method: iql  # iql | bc | ifql | vf (ifql/vf: pi05 only); BC never reads rewards
     train_steps: 10000
     checkpoint_interval: 512
   model:

@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 
 from core.config import LoadedConfig
 from core.data import load_manifest, training_replay_policy, validate_training_manifest
-from train.methods.base import critic_batch
+from train.methods.base import bind_training_inputs, critic_batch
 from train.methods.distributed import (
     ActorModule,
     CommunicationMeter,
@@ -205,6 +205,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
     diagnostic_episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     meter = CommunicationMeter()
     algorithm = DistributedAlgorithm(config, device, meter, transition_horizon=manifest["action_horizon"])
+    bind_training_inputs(algorithm, config, backend, components, dataset)
     # Pro retains a legacy FiLM block not used by every prediction path, even
     # when the backbone is frozen. Never assume all registered parameters fire.
     # Model adapters own CPU image/token transforms and device transfers. DDP

@@ -31,6 +31,8 @@ class ActionDataset(Dataset):
         self.include_post_success = config.section("data").get("include_post_success", True)
         self.manifest = load_manifest(config)
         self.action_stats, self.proprio_stats = action_stats, proprio_stats
+        # Value Flows samples next chunks from the actor: transitions carry the s' actor inputs.
+        self.next_actor_inputs = training_method(config.raw).actor_samples_in_training
         self.chunks = {
             episode["run_id"]: replay_chunks(episode)
             for episode in self.manifest["episodes"]
@@ -143,6 +145,10 @@ class ActionDataset(Dataset):
                 next_proprio=torch.from_numpy(proprio[end]),
                 bootstrap_mask=torch.tensor(0.0 if terminal else 1.0),
             )
+            if self.next_actor_inputs:
+                sample.update(next_agent_image=torch.from_numpy(next_agent.copy()),
+                              next_wrist_image=torch.from_numpy(next_wrist.copy()),
+                              next_raw_proprio=torch.from_numpy(raw_proprio[end].astype(np.float32)))
         return sample
 
 
@@ -176,14 +182,22 @@ class ReplayDataset(ActionDataset):
                       for episode, chunk_index, _ in self.items]
         self._rewards: dict[Path, np.ndarray] = {}
 
-    def __getitem__(self, item: int) -> dict[str, Any]:
-        sample = self._sample(item, transitions=True)
-        _, chunk_index, annotation = self.items[item]
+    def _chunk_rewards(self, annotation: Path) -> np.ndarray:
         rewards = self._rewards.get(annotation)
         if rewards is None:
             with np.load(annotation, allow_pickle=False) as source:
                 key = "final_reward" if "final_reward" in source else "pbrs_chunk_reward"
                 rewards = np.asarray(source[key], dtype=np.float32)
             self._rewards[annotation] = rewards
-        sample["reward"] = torch.tensor(float(rewards[chunk_index]), dtype=torch.float32)
+        return rewards
+
+    def __getitem__(self, item: int) -> dict[str, Any]:
+        sample = self._sample(item, transitions=True)
+        _, chunk_index, annotation = self.items[item]
+        sample["reward"] = torch.tensor(float(self._chunk_rewards(annotation)[chunk_index]), dtype=torch.float32)
         return sample
+
+    def reward_range(self) -> tuple[float, float]:
+        """Lowest and highest chunk reward of this split's transitions."""
+        values = [self._chunk_rewards(annotation)[chunk_index] for _, chunk_index, annotation in self.items]
+        return float(min(values)), float(max(values))

@@ -7,7 +7,7 @@ with a mask over the executed steps.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -52,24 +52,29 @@ def padded_chunk(encoded: np.ndarray, horizon: int, action_dim: int) -> tuple[np
     return actions, mask
 
 
+def encode_chunks(chunks: np.ndarray, executed: int, horizon: int, action_stats: dict[str, Any],
+                  process_action: Callable[[np.ndarray], np.ndarray]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sampled environment-space chunks (M, native_horizon, action_dim) as the critic sees them.
+
+    Only the ``executed`` prefix counts, after the same post-processing the environment applies.
+    """
+    if chunks.ndim != 3 or not 1 <= executed <= chunks.shape[1]:
+        raise ValueError("Chunks must be (M, horizon, action_dim) with a valid executed length")
+    action_dim = chunks.shape[2]
+    encoded = [padded_chunk(encode_actions(np.stack([process_action(step) for step in chunk[:executed]]),
+                                           action_stats), horizon, action_dim) for chunk in chunks]
+    return (torch.from_numpy(np.stack([actions for actions, _ in encoded])),
+            torch.from_numpy(np.stack([mask for _, mask in encoded])))
+
+
 def candidate_batch(agent: np.ndarray, wrist: np.ndarray, raw_proprio: np.ndarray,
                     candidates: np.ndarray, executed: int, *, image_size: int, horizon: int,
-                    action_stats: dict[str, Any], proprio_stats: dict[str, Any]) -> dict[str, torch.Tensor]:
-    """Score inputs for N candidate chunks of one observation: only the executed prefix counts.
-
-    ``candidates`` are environment-space actions (N, native_horizon, action_dim), already
-    passed through the same action post-processing the environment receives.
-    """
-    if candidates.ndim != 3 or not 1 <= executed <= candidates.shape[1]:
-        raise ValueError("Candidates must be (N, horizon, action_dim) with a valid executed length")
-    count, _, action_dim = candidates.shape
+                    action_stats: dict[str, Any], proprio_stats: dict[str, Any],
+                    process_action: Callable[[np.ndarray], np.ndarray]) -> dict[str, torch.Tensor]:
+    """Score inputs for N candidate chunks (N, native_horizon, action_dim) of one observation."""
+    actions, mask = encode_chunks(candidates, executed, horizon, action_stats, process_action)
+    count = len(candidates)
     pixels = critic_pixels(agent, wrist, image_size)
     proprio = torch.as_tensor(np.asarray(encode_proprio(raw_proprio[None], action_stats, proprio_stats))[0])
-    chunks = [padded_chunk(encode_actions(candidate[:executed], action_stats), horizon, action_dim)
-              for candidate in candidates]
-    return {
-        "pixels": pixels.unsqueeze(0).expand(count, -1, -1, -1),
-        "proprio": proprio.unsqueeze(0).expand(count, -1),
-        "actions": torch.from_numpy(np.stack([actions for actions, _ in chunks])),
-        "action_mask": torch.from_numpy(np.stack([mask for _, mask in chunks])),
-    }
+    return {"pixels": pixels.unsqueeze(0).expand(count, -1, -1, -1),
+            "proprio": proprio.unsqueeze(0).expand(count, -1), "actions": actions, "action_mask": mask}

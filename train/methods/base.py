@@ -12,7 +12,10 @@ Optional hooks, used only when present:
   optimizers with ZeRO ones; returns those optimizers;
 - ``export_critic()``: inference-only critic payload saved as ``critic.pt`` beside each
   checkpoint, and ``selector(config)`` (static): the exported policy's ``selector`` section
-  (methods declaring ``exports_critic``).
+  (methods declaring ``exports_critic``);
+- ``bind_actor_sampler(sampler)``: the backend's sampler of action chunks at replay next
+  observations, and ``bind_reward_range(low, high)``: the training replay's reward range
+  (methods declaring ``actor_samples_in_training``).
 """
 from __future__ import annotations
 
@@ -29,6 +32,8 @@ from core.methods import training_method
 # Replay fields of one (s, a, r, s') chunk transition.
 CRITIC_BATCH_KEYS = frozenset({"pixels", "next_pixels", "proprio", "next_proprio", "actions",
                                "action_mask", "reward", "bootstrap_mask", "chunk_length"})
+# Actor inputs at s' (replay adds them for methods declaring actor_samples_in_training).
+NEXT_ACTOR_KEYS = frozenset({"next_agent_image", "next_wrist_image", "next_raw_proprio", "prompt"})
 
 
 class TrainingAlgorithm(Protocol):
@@ -51,6 +56,7 @@ IMPLEMENTATIONS = {
     "bc": "train.methods.bc:BehaviorCloning",
     "iql": "train.methods.iql:ImplicitQLearning",
     "ifql": "train.methods.ifql:ImplicitFlowQLearning",
+    "vf": "train.methods.vf:ValueFlows",
 }
 
 
@@ -66,6 +72,13 @@ def build_algorithm(config: LoadedConfig, device: torch.device, *,
     if method.requires_transitions:
         return cls(config, device, transition_horizon=transition_horizon)
     return cls(config, device)
+
+
+def bind_training_inputs(algorithm: Any, config: LoadedConfig, backend: Any, components: Any, dataset: Any) -> None:
+    """Give methods that sample the actor during training its sampler and the replay reward range."""
+    if training_method(config.raw).actor_samples_in_training:
+        algorithm.bind_actor_sampler(backend.next_action_sampler(components))
+        algorithm.bind_reward_range(*dataset.reward_range())
 
 
 def save_critic(algorithm: Any, config: LoadedConfig, directory: Path) -> None:

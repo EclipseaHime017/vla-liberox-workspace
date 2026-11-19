@@ -1,7 +1,7 @@
 schema_version: 1
 
 # Paths in this file are resolved relative to this YAML file.
-base_config: ./methods/iql.yaml  # BC: ./methods/bc.yaml; IFQL (π₀.₅): ./methods/ifql.yaml
+base_config: ./methods/iql.yaml  # BC: ./methods/bc.yaml; IFQL / VF (π₀.₅): ./methods/ifql.yaml, ./methods/vf.yaml
 pipeline_root: ../outputs/terminal-pipelines
 
 environments:

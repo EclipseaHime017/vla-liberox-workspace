@@ -16,6 +16,8 @@ class TrainingMethod:
     ``exports_critic``: exported policies carry the critic and an inference-time selector.
     ``critic_keys``: keys of ``config_section`` edited through the platform's shared critic
     fields (optimizers, learning rates, expectile, warmup); empty without a critic.
+    ``actor_samples_in_training``: the critic update draws action chunks from the current
+    actor at the next observation, so replay also carries the next actor inputs.
     ``parameters``: extra platform form fields beyond the shared training/critic/reward ones,
     each ``{"name", "label", "type", "default", "min", "max", "step"}``; stored in ``config_section``.
     """
@@ -29,6 +31,7 @@ class TrainingMethod:
     actor_capabilities: frozenset[str] = frozenset()
     exports_critic: bool = False
     critic_keys: tuple[str, ...] = ()
+    actor_samples_in_training: bool = False
     parameters: tuple[dict[str, Any], ...] = ()
 
 
@@ -38,6 +41,11 @@ EXPECTILE_CRITIC_KEYS = (
     "value_optimizer", "value_lr", "value_weight_decay", "value_max_grad_norm",
     "expectile", "target_tau",
 )
+
+# Shared fields of the flow (return-distribution) critic of Value Flows.
+FLOW_CRITIC_KEYS = ("critic_optimizer", "critic_lr", "critic_weight_decay", "critic_max_grad_norm", "target_tau")
+
+_AGGREGATION = [{"value": "mean", "label": "mean"}, {"value": "min", "label": "min"}]
 
 # Inference-time choice among sampled action chunks; implemented in train.methods.selectors.
 SELECTOR_KINDS = ("argmax",)
@@ -53,6 +61,20 @@ METHODS = {
         critic_keys=EXPECTILE_CRITIC_KEYS,
         parameters=({"name": "num_samples", "label": "推理采样数 N", "type": "number",
                      "default": 32, "min": 1, "max": 256, "step": 1},)),
+    "vf": TrainingMethod(
+        "vf", "VF", "Value Flows：flow 回报分布 critic + 采样选择", True, True, config_section="vf",
+        critic="value_flow", actor_capabilities=frozenset({"sample"}), exports_critic=True,
+        critic_keys=FLOW_CRITIC_KEYS, actor_samples_in_training=True,
+        parameters=(
+            {"name": "num_samples", "label": "推理采样数 N", "type": "number", "default": 16, "min": 1, "max": 256, "step": 1},
+            {"name": "train_num_samples", "label": "训练时 s′ 采样数", "type": "number", "default": 16, "min": 1, "max": 256, "step": 1},
+            {"name": "num_flow_steps", "label": "Flow 积分步数", "type": "number", "default": 10, "min": 1, "max": 100, "step": 1},
+            {"name": "bcfm_lambda", "label": "BCFM 权重", "type": "number", "default": 1.0, "min": 0, "step": "any"},
+            {"name": "dcfm_lambda", "label": "DCFM 权重", "type": "number", "default": 1.0, "min": 0, "step": "any"},
+            {"name": "confidence_weight_temp", "label": "置信度权重温度", "type": "number", "default": 0.3, "min": 0, "step": "any"},
+            {"name": "ret_agg", "label": "回报聚合", "type": "select", "default": "mean", "options": _AGGREGATION},
+            {"name": "q_agg", "label": "Q 聚合", "type": "select", "default": "mean", "options": _AGGREGATION},
+        )),
 }
 DEFAULT_METHOD = "iql"
 
@@ -93,6 +115,7 @@ def method_catalog(family_capabilities: dict[str, frozenset[str]]) -> list[dict[
         "requires_rewards": method.requires_rewards, "requires_transitions": method.requires_transitions,
         "critic": method.critic, "exports_critic": method.exports_critic,
         "critic_keys": list(method.critic_keys),
+        "actor_samples_in_training": method.actor_samples_in_training,
         "actor_capabilities": sorted(method.actor_capabilities), "parameters": list(method.parameters),
         "families": [family for family, capabilities in family_capabilities.items()
                      if not missing_capabilities(method, capabilities)],

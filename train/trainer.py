@@ -27,7 +27,8 @@ from torch.utils.data import default_collate
 from core.config import LoadedConfig, reward_source
 from core.data import load_manifest, training_replay_policy, validate_training_manifest
 from core.io import atomic_json, sha256_file, stable_hash
-from train.methods.base import TrainingAlgorithm, build_algorithm, critic_artifacts, critic_batch, save_critic
+from train.methods.base import (TrainingAlgorithm, bind_training_inputs, build_algorithm, critic_artifacts,
+                                critic_batch, save_critic)
 from core.methods import METHODS, actor_lr_warmup, critic_warmup_steps, training_method
 from core.model_config import model_backend, model_config, model_signature
 from core.registry import model_contract, family_adapter
@@ -474,6 +475,7 @@ def train(config: LoadedConfig) -> Path:
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
     agent = build_algorithm(config, device, transition_horizon=manifest["action_horizon"])
+    bind_training_inputs(agent, config, backend, components, dataset)
     actor_parameters = backend.trainable_parameters(components)
     counts = backend.parameter_counts(components)
     print(f"MODEL ready | config={model_signature(config.raw)} | parameters={counts}", flush=True)

@@ -27,6 +27,13 @@ function displayLine(line: string) {
   return { time: "", level: "OUT", message: line };
 }
 
+/** Critic metrics by label: expectile Q/V (IQL, IFQL) and the flow critic (Value Flows). */
+const criticMetrics: Array<[string, string[]]> = [
+  ["Q loss", ["q_loss"]], ["Value loss", ["value_loss"]], ["Critic loss", ["critic_loss"]],
+  ["BCFM / DCFM", ["bcfm_loss", "dcfm_loss"]], ["Q / V / Advantage", ["q_mean", "value_mean", "advantage_mean"]],
+  ["Q mean / std", ["q_mean", "q_std"]], ["置信度权重", ["confidence_weight_mean"]],
+];
+
 export function JobMonitor({ initial, onUpdate, onDismiss }: {
   initial: OfflineJob;
   onUpdate?: (job: OfflineJob) => void;
@@ -75,11 +82,10 @@ export function JobMonitor({ initial, onUpdate, onDismiss }: {
       {terminal.has(job.status) && onDismiss && <button onClick={onDismiss}>关闭记录</button>}
     </div>
     {metric && <div className="job-metric-grid">
-      {method.critic && <><span><small>Q loss</small><b>{metricNumber(metric.q_loss)}</b></span>
-      <span><small>Value loss</small><b>{metricNumber(metric.value_loss)}</b></span></>}
+      {/* Each critic reports its own metrics; show those present in this record. */}
+      {method.critic && criticMetrics.filter(([, keys]) => keys.every((key) => metric[key] !== undefined)).map(([label, keys]) =>
+        <span key={label}><small>{label}</small><b>{keys.map((key) => metricNumber(metric[key])).join(" / ")}</b></span>)}
       <span><small>Actor loss</small><b>{metricNumber(metric.actor_loss)}</b></span>
-      {method.critic && <span><small>Q / V / Advantage</small><b>{metricNumber(metric.q_mean)} / {metricNumber(metric.value_mean)} / {metricNumber(metric.advantage_mean)}</b></span>}
-      {/* Only methods that weight the actor by the advantage (IQL) report it. */}
       {metric.advantage_weight_mean !== undefined && <span><small>Advantage weight</small><b>{metricNumber(metric.advantage_weight_mean)}</b></span>}
       <span><small>Policy LR</small><b>{metricNumber(metric.actor_learning_rate, 3)}</b></span>
       <span><small>梯度范数</small><b>{metricNumber(metric.actor_grad_norm)}</b></span>

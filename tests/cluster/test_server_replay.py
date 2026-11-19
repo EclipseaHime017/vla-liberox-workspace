@@ -11,7 +11,7 @@ from train.replay_cache import build_replay_cache, CachedReplayDataset, Distribu
 from test_replay import FakeAnnotator, _stats
 
 
-@pytest.mark.parametrize("method", ["bc", "iql"])
+@pytest.mark.parametrize("method", ["bc", "iql", "vf"])
 @pytest.mark.parametrize("keep_tail", [False, True])
 @pytest.mark.parametrize("family", ["vla_adapter", "pi05"])
 def test_cache_matches_shared_replay(configured, tmp_path, method, keep_tail, family):
@@ -23,10 +23,13 @@ def test_cache_matches_shared_replay(configured, tmp_path, method, keep_tail, fa
         for stats in (action_stats, proprio_stats):
             stats["codec"] = "openpi_quantile"
     config.raw["training"]["method"] = method
+    if method == "vf":
+        from core.config import load_train_config
+        config.raw["vf"] = load_train_config(method="vf", family="pi05").raw["vf"]
     config.raw["data"]["include_post_success"] = keep_tail
     prepare_dataset(config)
     reward = None
-    if method == "iql":
+    if method != "bc":
         annotate_manifest(config, FakeAnnotator())
         reward = load_reward_index(config)
         original = ReplayDataset(config, action_stats, proprio_stats, reward_index=reward)
@@ -44,6 +47,12 @@ def test_cache_matches_shared_replay(configured, tmp_path, method, keep_tail, fa
                 assert torch.equal(value, b[key]), key
             else:
                 assert value == b[key], key
+    if method == "vf":
+        # Value Flows samples next chunks from the actor: s' actor inputs travel with each transition.
+        assert {"next_agent_image", "next_wrist_image", "next_raw_proprio"} <= set(cached[0])
+        assert cached.reward_range() == original.reward_range()
+    else:
+        assert "next_agent_image" not in cached[0]
     assert build_replay_cache(config, tmp_path / "cache", action_stats, proprio_stats, reward)[1]
     damaged = path / "actions.npy"
     with damaged.open("r+b") as stream:

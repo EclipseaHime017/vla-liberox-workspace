@@ -29,7 +29,7 @@ python -m cluster evaluate --config configs/cluster/evaluation.yaml
 | `render_backend` | `egl`（GPU 离屏）或 `osmesa`（CPU 软件渲染）；`check_environment` 只决定 `--check-render` 使用的环境 |
 | `output_root`、`liberox_root`、`vla_adapter_root` | 结果目录与上游路径，相对本 YAML |
 
-每回合在模型预测时重新渲染主视角和手腕视角的 256×256 图像；翻转、图像处理和动作转换来自模型冻结的配置和家族实现。带 critic 的策略（IFQL）每次预测采样 `selector.num_samples` 个动作块，按实际执行的 `open_loop_steps` 打分后选择，单次推理更慢。仿真依赖版本和 LIBERO-X commit 由 `third_party/lock.yaml` 锁定，启动时核对。
+每回合在模型预测时重新渲染主视角和手腕视角的 256×256 图像；翻转、图像处理和动作转换来自模型冻结的配置和家族实现。带 critic 的策略（IFQL、VF）每次预测采样 `selector.num_samples` 个动作块，按实际执行的 `open_loop_steps` 打分后选择，单次推理更慢。仿真依赖版本和 LIBERO-X commit 由 `third_party/lock.yaml` 锁定，启动时核对。
 
 **结果**：`summary.json` 汇总模型与任务；每个模型的 `result.json` 保存模型清单、任务文件哈希、执行安排、渲染器信息、逐回合结果、成功率和置信区间。运行错误单独计数并计入已尝试回合的分母，同时给出完成覆盖率，未执行的回合不算作失败。
 

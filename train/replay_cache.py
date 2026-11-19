@@ -82,6 +82,7 @@ def build_replay_cache(config, root: Path, action_stats: dict, proprio_stats: di
         "action_stats": action_stats, "proprio_stats": proprio_stats,
         "model_contract": model_contract(model_config(config.raw)),
         "include_post_success": source.include_post_success, "transitions": transitions,
+        "next_actor_inputs": source.next_actor_inputs if transitions else False,
         "bootstrap_failed_end": config.section("data").get("bootstrap_failed_end", False),
         "image_size": (config.section(training_method(config.raw).config_section)["critic_image_size"]
                        if transitions else None),
@@ -166,10 +167,18 @@ class CachedReplayDataset(Dataset):
     def __getstate__(self):
         return {**self.__dict__, "arrays": None}
 
-    def __getitem__(self, index):
+    def _open(self):
         if self.arrays is None:
             self.arrays = {name: np.load(self.directory / f"{name}.npy", mmap_mode="c", allow_pickle=False)
                            for name in self.metadata["arrays"]}
+
+    def reward_range(self) -> tuple[float, float]:
+        """Lowest and highest chunk reward of the cached transitions."""
+        self._open()
+        return float(self.arrays["reward"].min()), float(self.arrays["reward"].max())
+
+    def __getitem__(self, index):
+        self._open()
         return {**self.metadata["records"][index], **{
             name: torch.as_tensor(value[index]) for name, value in self.arrays.items()}}
 

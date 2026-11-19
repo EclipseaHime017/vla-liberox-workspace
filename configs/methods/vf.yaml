@@ -1,0 +1,32 @@
+extends: ../runtime.yaml
+presets:
+  # Value Flows samples several chunks per observation: only flow policies (π₀.₅) qualify.
+  model: ../models/pi05.yaml
+  reward: ../rewards/reward.yaml
+
+training:
+  method: vf
+  actor_lr_warmup_steps: 1000
+# Value Flows: equal-weight flow BC actor, a flow critic over the return distribution trained
+# with next chunks sampled from the current actor, best-of-N chunk at inference. Defaults follow
+# the reference (chongyi-zheng/value-flows agents/value_flows.py): Adam 3e-4 without weight
+# decay, tau 0.005, 16 samples, 10 flow steps, BCFM/DCFM weights 1, confidence temperature 0.3.
+vf:
+  critic_image_size: 128
+  critic_lr: 0.0003
+  critic_optimizer: adam
+  critic_weight_decay: 0.0
+  critic_max_grad_norm: 10.0
+  target_tau: 0.005
+  num_samples: 16
+  train_num_samples: 16
+  num_flow_steps: 10
+  bcfm_lambda: 1.0
+  dcfm_lambda: 1.0
+  confidence_weight_temp: 0.3
+  ret_agg: mean
+  q_agg: mean
+  clip_flow_returns: true
+logging:
+  wandb:
+    tags: [liberox, vf]
