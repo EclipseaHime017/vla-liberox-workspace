@@ -12,11 +12,41 @@ from core.registry import family_capabilities
 
 def test_catalog_lists_methods_in_display_order_with_their_flags():
     catalog = methods.method_catalog(family_capabilities())
-    assert [item["id"] for item in catalog] == ["iql", "bc"]
-    iql, bc = catalog
+    assert [item["id"] for item in catalog] == ["iql", "bc", "ifql"]
+    iql, bc, ifql = catalog
     assert (iql["label"], iql["summary"], iql["requires_rewards"], iql["critic"]) == ("IQL", "奖励加权后训练", True, "expectile")
     assert (bc["label"], bc["summary"], bc["requires_rewards"], bc["critic"]) == ("BC", "等权行为克隆", False, None)
     assert set(iql["families"]) == set(bc["families"]) == set(family_capabilities())
+    assert (ifql["label"], ifql["requires_rewards"], ifql["critic"], ifql["exports_critic"]) == ("IFQL", True, "expectile", True)
+    assert ifql["families"] == ["pi05"]
+
+
+def test_methods_declare_the_critic_fields_they_accept():
+    iql, bc, ifql = (methods.METHODS[name] for name in ("iql", "bc", "ifql"))
+    assert bc.critic_keys == ()
+    assert {"beta", "max_advantage_weight", "critic_warmup_steps"} <= set(iql.critic_keys)
+    # IFQL's actor is plain flow BC: no advantage weighting or warmup.
+    assert set(ifql.critic_keys) == set(methods.EXPECTILE_CRITIC_KEYS)
+
+
+def test_selector_registry_matches_the_torch_free_declaration():
+    from train.methods.selectors import SELECTORS
+    assert tuple(SELECTORS) == methods.SELECTOR_KINDS
+
+
+def test_ifql_configuration_validates_its_own_section():
+    raw = load_train_config(method="ifql", family="pi05").raw
+    assert raw["ifql"]["num_samples"] == 32 and raw["ifql"]["expectile"] == 0.9
+    assert raw["iql"] == {} and raw["training"]["method"] == "ifql"
+    assert methods.critic_warmup_steps(raw) == 0
+    with pytest.raises(ValueError, match="needs actor capabilities"):
+        load_train_config(method="ifql", family="vla_adapter")
+    from core.config import validate_train_config
+    from pathlib import Path
+    for key, value in (("num_samples", 0), ("expectile", 1.5), ("critic_optimizer", "sgd")):
+        broken = {**raw, "ifql": {**raw["ifql"], key: value}}
+        with pytest.raises((TypeError, ValueError)):
+            validate_train_config(broken, Path("ifql.yaml"))
 
 
 def test_families_declare_actor_capabilities():

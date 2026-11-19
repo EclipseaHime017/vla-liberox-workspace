@@ -1,0 +1,28 @@
+extends: ../runtime.yaml
+presets:
+  # IFQL samples several chunks per observation: only flow policies (π₀.₅) qualify.
+  model: ../models/pi05.yaml
+  reward: ../rewards/reward.yaml
+
+training:
+  method: ifql
+  actor_lr_warmup_steps: 1000
+# IFQL: equal-weight flow BC actor, IQL expectile critic, best-of-N chunk at inference.
+# Defaults follow the FQL reference (seohongpark/fql agents/ifql.py): expectile 0.9,
+# tau 0.005, 32 samples; optimizers match the repository's IQL critic.
+ifql:
+  critic_image_size: 128
+  critic_lr: 0.0003
+  value_lr: 0.0003
+  critic_optimizer: adamw
+  critic_weight_decay: 0.01
+  value_optimizer: adamw
+  value_weight_decay: 0.01
+  critic_max_grad_norm: 10.0
+  value_max_grad_norm: 10.0
+  expectile: 0.9
+  target_tau: 0.005
+  num_samples: 32
+logging:
+  wandb:
+    tags: [liberox, ifql]

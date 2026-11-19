@@ -15,6 +15,7 @@ from core.config_sources import read_source
 from core.io import sha256_file, stable_hash
 from core.artifacts import parent_identity, validate_parent, validate_policy
 from core.model_config import model_backend, model_config, model_signature
+from train.methods.base import critic_artifacts
 
 
 def _source_hashes(checkpoint: Path) -> dict[str, str]:
@@ -90,6 +91,10 @@ def export_checkpoint(checkpoint: Path, destination: Path) -> Path:
             staging = Path(temporary) / destination.name
             staging.mkdir()
             artifacts = backend.export_actor(components, settings, staging, checkpoint=checkpoint)
+            critic = critic_artifacts(config, checkpoint, staging)
+            if critic:
+                artifacts = {**artifacts, **critic, "component_sha256": {
+                    **artifacts["component_sha256"], **critic["component_sha256"]}}
             io = parent["contract"]["io"]
             compatibility = {"base_checkpoint": parent["checkpoint"], "stats_key": parent["stats_key"],
                              "action_horizon": io["replay_horizon"], "action_dim": io["action_dim"],

@@ -9,11 +9,16 @@ Optional hooks, used only when present:
 
 - ``critic_batch_keys``: replay fields ``update`` reads (default ``CRITIC_BATCH_KEYS``);
 - ``distribute(wrap, zero_optimizer)``: wrap critic modules for DDP and replace their
-  optimizers with ZeRO ones; returns those optimizers.
+  optimizers with ZeRO ones; returns those optimizers;
+- ``export_critic()``: inference-only critic payload saved as ``critic.pt`` beside each
+  checkpoint, and ``selector(config)`` (static): the exported policy's ``selector`` section
+  (methods declaring ``exports_critic``).
 """
 from __future__ import annotations
 
 import importlib
+import shutil
+from pathlib import Path
 from typing import Any, Protocol
 
 import torch
@@ -45,6 +50,7 @@ def critic_batch(algorithm: Any, batch: dict, device: torch.device, extra: froze
 IMPLEMENTATIONS = {
     "bc": "train.methods.bc:BehaviorCloning",
     "iql": "train.methods.iql:ImplicitQLearning",
+    "ifql": "train.methods.ifql:ImplicitFlowQLearning",
 }
 
 
@@ -60,6 +66,31 @@ def build_algorithm(config: LoadedConfig, device: torch.device, *,
     if method.requires_transitions:
         return cls(config, device, transition_horizon=transition_horizon)
     return cls(config, device)
+
+
+def save_critic(algorithm: Any, config: LoadedConfig, directory: Path) -> None:
+    """Write the inference critic beside a checkpoint's actor (methods that export one)."""
+    if training_method(config.raw).exports_critic:
+        from train.methods.selectors import CRITIC_FILE
+        torch.save(algorithm.export_critic(), directory / CRITIC_FILE)
+
+
+def critic_artifacts(config: LoadedConfig, checkpoint: Path, target: Path) -> dict[str, Any]:
+    """Policy manifest fields for the checkpoint's critic and the method's selector."""
+    method = training_method(config.raw)
+    if not method.exports_critic:
+        return {}
+    from core.io import sha256_file
+    from train.methods.selectors import CRITIC_FILE
+    source = checkpoint / CRITIC_FILE
+    if source.is_symlink() or not source.is_file():
+        raise ValueError(f"{method.label} checkpoint lacks its exported critic: {source}")
+    shutil.copyfile(source, target / CRITIC_FILE)
+    digest = sha256_file(target / CRITIC_FILE)
+    if digest != sha256_file(source):
+        raise ValueError("Critic changed while exporting")
+    return {"critic": CRITIC_FILE, "selector": implementation(method.name).selector(config),
+            "component_sha256": {"critic": digest}}
 
 
 def weighted_masked_l1(

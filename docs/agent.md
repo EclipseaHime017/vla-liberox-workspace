@@ -42,7 +42,7 @@ cd web && conda run -n vla-liberox npx vitest run && conda run -n vla-liberox np
 | --- | --- | --- |
 | 新增基础权重 | `configs/models/<家族>.yaml` 的 `variants`；权重放 `models/` | [模型](models.md) §3 |
 | 新增模型家族 | `core/families/`、`train/models/`、`studio/policies/`、`configs/models/`、`third_party/lock.yaml`、`envs/roles.yaml` | [模型](models.md) §4 |
-| 新增训练方法（IDQL、VF 等） | `core/methods.py`、`train/methods/`、`configs/methods/`、导出与推理链路 | [训练方法](methods.md) |
+| 新增训练方法（如 Value Flows） | `core/methods.py`、`core/config.py` 的 `TRAIN_SCHEMA`、`train/methods/`、`configs/methods/`；带 critic 的方法另见导出与推理链路 | [训练方法](methods.md) |
 | 修改奖励公式 | `rewards/pbrs.py`、`rewards/stage/`、`rewards/fusion.py`、`configs/rewards/reward.yaml` | [奖励](rewards.md) |
 | 新增任务场景 | `configs/tasks/`、`tasks/` | [任务](tasks.md) |
 | 新增接口与页面 | `studio/api/`（在 `studio/main.py` 注册）、`studio/services/`；`web/src/pages/`、`web/src/features/` | [平台](studio.md) |

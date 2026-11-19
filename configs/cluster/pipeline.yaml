@@ -34,13 +34,13 @@ model_profiles:
       backbone: full
 overrides:
   training:
-    method: iql  # iql | bc; BC never reads rewards
+    method: iql  # iql | bc | ifql (pi05 only); BC never reads rewards
     train_steps: 10000
     checkpoint_interval: 512
   model:
     family: vla_adapter  # vla_adapter | pi05
     base_id: base  # pi05-libero-base | pi05-liberox-base for pi05
-  # Other model/training/iql/logging fields use the current shared configuration.
+  # Other model/training/method-section/logging fields use the current shared configuration.
   # Copy complete run directories from the PC, including adjacent global evaluations.
   # Evaluator/fusion parameters come from each run's saved global reward.
   reward: {}  # optional gamma / accumulate_primitive_steps overrides only

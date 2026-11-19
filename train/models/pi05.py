@@ -190,8 +190,100 @@ def export_actor(components, settings, directory, *, checkpoint=None):
                                  "base_identity": sha256_file(directory / IDENTITY_FILE)}}
 
 
+@torch.no_grad()
+def _sample_shared_prefix(model, device, observation, count: int, num_steps: int, noise=None) -> torch.Tensor:
+    """OpenPI ``sample_actions`` with each observation's image/prompt prefix encoded once.
+
+    Mirrors ``PI0Pytorch.sample_actions`` at the pinned OpenPI commit; the prefix KV cache,
+    masks and state are repeated ``count`` times per observation (observation-major order)
+    before the Euler denoising loop, so N candidates cost one prefix pass plus N suffixes.
+    """
+    from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
+    images, img_masks, lang_tokens, lang_masks, state = model._preprocess_observation(observation, train=False)
+    prefix_embs, prefix_pad_masks, prefix_att_masks = model.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+    prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+    prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+    prefix_att_2d_masks_4d = model._prepare_attention_masks_4d(prefix_att_2d_masks)
+    model.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+    _, past_key_values = model.paligemma_with_expert.forward(
+        attention_mask=prefix_att_2d_masks_4d, position_ids=prefix_position_ids,
+        past_key_values=None, inputs_embeds=[prefix_embs, None], use_cache=True)
+    past_key_values.batch_repeat_interleave(count)
+    prefix_pad_masks = prefix_pad_masks.repeat_interleave(count, dim=0)
+    state = state.repeat_interleave(count, dim=0)
+    total = prefix_pad_masks.shape[0]
+    if noise is None:
+        noise = model.sample_noise((total, model.config.action_horizon, model.config.action_dim), device)
+    dt = torch.tensor(-1.0 / num_steps, dtype=torch.float32, device=device)
+    x_t, time = noise, torch.tensor(1.0, dtype=torch.float32, device=device)
+    while time >= -dt / 2:
+        v_t = model.denoise_step(state, prefix_pad_masks, past_key_values, x_t, time.expand(total))
+        x_t = x_t + dt * v_t
+        time += dt
+    return x_t
+
+
+def sample_chunks(components, observations: list[dict], count: int, *, noise=None) -> np.ndarray:
+    """``count`` environment-space action chunks per observation: (B, count, horizon, action_dim).
+
+    Observations use the inference keys (``observation/image``, ``observation/wrist_image``,
+    ``observation/state``, ``prompt``); transforms are the same as ``Policy.infer``.
+    """
+    from openpi.models.model import Observation
+    from torch.utils.data import default_collate
+    from torch.utils._pytree import tree_map
+
+    device = next(components.model.parameters()).device
+    transformed = [components.input_transform(dict(observation)) for observation in observations]
+    inputs = tree_map(lambda value: value.to(device), default_collate(
+        [{key: value for key, value in item.items() if key != "actions"} for item in transformed]))
+    actions = _sample_shared_prefix(components.model, device, Observation.from_dict(inputs), count,
+                                    components.settings["num_inference_steps"], noise=noise)
+    actions = actions.float().cpu().numpy().reshape(len(observations), count, *actions.shape[1:])
+    contract = model_contract(components.settings)["io"]
+    result = np.empty((len(observations), count, contract["native_action_horizon"], contract["action_dim"]),
+                      dtype=np.float32)
+    for index, item in enumerate(transformed):
+        state = np.asarray(item["state"])
+        for candidate in range(count):
+            result[index, candidate] = components.output_transform(
+                {"state": state, "actions": actions[index, candidate]})["actions"]
+    return result
+
+
+def process_action(action):
+    return np.clip(action, -1.0, 1.0)
+
+
+def choose_chunk(components, critic, selector: dict, observation: dict, executed: int) -> np.ndarray:
+    """Sample ``selector['num_samples']`` chunks and return the one the exported critic prefers."""
+    from train.methods.selectors import check_executed, choose
+    check_executed(critic, executed)  # before sampling: fail fast on an unscoreable length
+    candidates = sample_chunks(components, [observation], selector["num_samples"])[0]
+    index, _ = choose(critic, selector, candidates, agent=observation["observation/image"],
+                      wrist=observation["observation/wrist_image"], raw_proprio=observation["observation/state"],
+                      executed=executed, action_stats=components.action_stats,
+                      proprio_stats=components.proprio_stats, process_action=process_action)
+    return candidates[index]
+
+
+def load_selection(manifest: Path, device="cuda:0"):
+    """(critic, selector) of an exported sampling policy, or None for policies without a critic."""
+    import yaml
+    from core.config_sources import UniqueKeyLoader
+    from train.methods.selectors import load_critic
+    payload = yaml.load(Path(manifest).read_text(), Loader=UniqueKeyLoader)
+    if "critic" not in payload:
+        return None
+    return load_critic(Path(manifest).parent / payload["critic"], device), dict(payload["selector"])
+
+
 def evaluation_policy(config, manifest, parent):
-    """Load a validated export with the same inference transforms as main."""
+    """Load a validated export with the same inference transforms as main.
+
+    ``predict(observation, prompt, executed)``: policies exported with a critic sample
+    several chunks and return the one their critic prefers for the ``executed`` steps.
+    """
     from openpi.policies.policy import Policy
     from core.image_transforms import image_orientation, observation_config, orient_image
     from sim.runtime import proprio_from_observation
@@ -203,12 +295,16 @@ def evaluation_policy(config, manifest, parent):
                     output_transforms=[components.output_transform], is_pytorch=True,
                     pytorch_device="cuda:0", sample_kwargs={"num_steps": settings["num_inference_steps"]})
     orientation = image_orientation(observation_config(model_contract(settings)))
+    selection = load_selection(manifest)
 
-    def predict(observation, prompt):
-        return policy.infer({
+    def predict(observation, prompt, executed=None):
+        inputs = {
             "observation/image": orient_image(observation["agentview_image"], orientation),
             "observation/wrist_image": orient_image(observation["robot0_eye_in_hand_image"], orientation),
             "observation/state": proprio_from_observation(observation), "prompt": prompt,
-        })["actions"]
+        }
+        if selection is None:
+            return policy.infer(inputs)["actions"]
+        return choose_chunk(components, *selection, inputs, executed)
 
-    return predict, lambda action: np.clip(action, -1.0, 1.0)
+    return predict, process_action

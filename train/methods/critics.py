@@ -135,6 +135,7 @@ class ExpectileCritic(nn.Module):
         self.target_q2 = copy.deepcopy(self.q2).requires_grad_(False)
         self.value = ValueNetwork(proprio_dim, encoder_factory)
         self.discount, self.expectile, self.tau = discount, expectile, tau
+        self.geometry = {"horizon": int(horizon), "action_dim": int(action_dim), "proprio_dim": int(proprio_dim)}
         self.critic_max_grad_norm = float(critic_max_grad_norm)
         self.value_max_grad_norm = float(value_max_grad_norm)
         self.accumulate_primitive_steps = bool(accumulate_primitive_steps)
@@ -242,6 +243,11 @@ class ExpectileCritic(nn.Module):
             for source_parameter, target_parameter in zip(source.parameters(), target.parameters()):
                 target_parameter.lerp_(source_parameter, self.tau)
 
+    def inference_payload(self, image_size: int) -> dict[str, Any]:
+        """Online Q1/Q2 (scores) and V (diagnostics) for scoring chunks at inference."""
+        return {"kind": "expectile", "settings": {**self.geometry, "image_size": int(image_size)},
+                "state": module_state(self, ("q1", "q2", "value"))}
+
     def checkpoint(self) -> dict[str, Any]:
         return {
             "model": module_state(self, self.MODULES),
@@ -253,6 +259,22 @@ class ExpectileCritic(nn.Module):
         load_module_state(self, self.MODULES, state["model"])
         self.q_optimizer.load_state_dict(state["q_optimizer"])
         self.value_optimizer.load_state_dict(state["value_optimizer"])
+
+
+class ExpectileScorer(nn.Module):
+    """Inference view of an exported expectile critic: score = min(Q1, Q2) of the online heads."""
+
+    def __init__(self, settings: dict[str, Any]):
+        super().__init__()
+        self.settings = dict(settings)
+        geometry = (settings["horizon"], settings["action_dim"], settings["proprio_dim"])
+        self.q1, self.q2 = QNetwork(*geometry), QNetwork(*geometry)
+        self.value = ValueNetwork(settings["proprio_dim"])
+
+    @torch.no_grad()
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        inputs = (batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
+        return torch.minimum(self.q1(*inputs), self.q2(*inputs))
 
 
 def advantage_weights(advantage: torch.Tensor, beta: float, maximum: float) -> torch.Tensor:

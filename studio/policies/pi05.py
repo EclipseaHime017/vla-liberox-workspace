@@ -22,6 +22,7 @@ class Pi05PolicyProvider:
         self.process = None
         self.current_policy_entry = None
         self.current_policy_id = None
+        self.executed = None
         self._lock = threading.RLock()
 
     @property
@@ -54,6 +55,9 @@ class Pi05PolicyProvider:
             if (model_module("base_models").family_adapter(entry.family).POLICY_ADAPTER != "studio.policies.pi05_catalog"
                     or (expected_content_sha256 is not None and entry.content_sha256 != expected_content_sha256)):
                 raise ValueError("Selected π₀.₅ identity changed; select the model again")
+            # Critic-selected policies score candidates over the steps this run executes.
+            self.executed = (entry.resolve_open_loop_steps(open_loop_steps)
+                             if getattr(entry, "selector", None) else None)
             if self.loaded and self.current_policy_entry.content_sha256 == entry.content_sha256:
                 self.current_policy_entry, self.current_policy_id = entry, policy_id
                 return
@@ -79,7 +83,10 @@ class Pi05PolicyProvider:
                     "parent": entry.parent,
                     "base_revision": entry.base_revision, "content_sha256": entry.content_sha256,
                     "actor": str(entry.actor) if entry.actor else None,
-                    "actor_sha256": entry.component_sha256.get("actor")}, timeout=600)
+                    "actor_sha256": entry.component_sha256.get("actor"),
+                    "critic": str(entry.artifact_path("critic")) if entry.selector else None,
+                    "critic_sha256": entry.component_sha256.get("critic"),
+                    "selector": entry.selector}, timeout=600)
                 if ready.get("identity") != entry.content_sha256:
                     raise ValueError("π₀.₅ worker loaded an unexpected model")
                 if self.catalog.select(policy_id).content_sha256 != entry.content_sha256:
@@ -114,7 +121,8 @@ class Pi05PolicyProvider:
             ]).astype(np.float32)
             buffer = io.BytesIO()
             np.savez(buffer, **images)
-            result = self._send({"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(), "prompt": prompt})
+            result = self._send({"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(),
+                                 "prompt": prompt, "executed": self.executed})
             actions = np.asarray(result["actions"], dtype=np.float32)
             if actions.shape != (contract["io"]["native_action_horizon"], contract["io"]["action_dim"]) or not np.isfinite(actions).all():
                 self.unload()
@@ -148,6 +156,7 @@ class Pi05PolicyProvider:
         entry = self.current_policy_entry
         contract = model_module("base_models").model_contract(entry.settings if entry else {"family": "pi05"})["io"]
         return {"provider": "pi05", "loaded": self.loaded, "gpu": "cuda:0 (π₀.₅ worker)",
+                "selector": entry.selector if entry else None,
                 "model_device": "cuda:0" if self.loaded else None,
                 "checkpoint": entry.base_checkpoint if entry else None,
                 "policy_id": self.current_policy_id, "policy_label": entry.label if entry else "π₀.₅ · LIBERO",

@@ -246,7 +246,8 @@ def evaluation_policy(config, manifest, parent):
     resize = get_image_resize_size(cfg)
     orientation = image_orientation(model_observation(model_config(config.raw)))
 
-    def predict(observation, prompt):
+    def predict(observation, prompt, executed=None):
+        # A deterministic actor: the executed length does not change its single chunk.
         prepared, _ = prepare_observation(vla_adapter_observation(observation, orientation), resize)
         return get_action(cfg, components.model, prepared, prompt,
                           processor=components.processor, action_head=components.action_head,

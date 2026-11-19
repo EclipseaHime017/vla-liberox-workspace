@@ -39,11 +39,20 @@ EXPECTILE_CRITIC_KEYS = (
     "expectile", "target_tau",
 )
 
+# Inference-time choice among sampled action chunks; implemented in train.methods.selectors.
+SELECTOR_KINDS = ("argmax",)
+
 # Order is the platform's display order.
 METHODS = {
     "iql": TrainingMethod("iql", "IQL", "奖励加权后训练", True, True, config_section="iql", critic="expectile",
                           critic_keys=("critic_warmup_steps", *EXPECTILE_CRITIC_KEYS, "beta", "max_advantage_weight")),
     "bc": TrainingMethod("bc", "BC", "等权行为克隆", False, False),
+    "ifql": TrainingMethod(
+        "ifql", "IFQL", "flow 策略采样 + IQL critic 选择", True, True, config_section="ifql",
+        critic="expectile", actor_capabilities=frozenset({"sample"}), exports_critic=True,
+        critic_keys=EXPECTILE_CRITIC_KEYS,
+        parameters=({"name": "num_samples", "label": "推理采样数 N", "type": "number",
+                     "default": 32, "min": 1, "max": 256, "step": 1},)),
 }
 DEFAULT_METHOD = "iql"
 

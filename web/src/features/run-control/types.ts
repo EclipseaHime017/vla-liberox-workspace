@@ -37,6 +37,8 @@ export type PolicyInfo = {
   observation?: { image_flip_vertical: boolean; image_flip_horizontal: boolean };
   inference?: { open_loop_steps: number; max_open_loop_steps: number };
   algorithm?: string | null;
+  /** Sampling methods (IFQL): N chunks per query, the exported critic picks one. */
+  selector?: { kind: string; num_samples: number } | null;
   model_config?: {
     [key: string]: unknown;
     family: string; backbone: string;

@@ -27,7 +27,7 @@ from torch.utils.data import default_collate
 from core.config import LoadedConfig, reward_source
 from core.data import load_manifest, training_replay_policy, validate_training_manifest
 from core.io import atomic_json, sha256_file, stable_hash
-from train.methods.base import TrainingAlgorithm, build_algorithm, critic_batch
+from train.methods.base import TrainingAlgorithm, build_algorithm, critic_artifacts, critic_batch, save_critic
 from core.methods import METHODS, actor_lr_warmup, critic_warmup_steps, training_method
 from core.model_config import model_backend, model_config, model_signature
 from core.registry import model_contract, family_adapter
@@ -245,6 +245,7 @@ def _save_checkpoint(
     target = directory / f"step_{step:08d}"
     target.mkdir(parents=True, exist_ok=True)
     model_backend(config.raw).save_actor(components, model_config(config.raw), target)
+    save_critic(algorithm, config, target)
     if rng is None:
         rng = {"torch_rng": torch.get_rng_state(),
                "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -316,6 +317,11 @@ def _publish_overlay(
         settings.update(base_revision=parent["revision"], stats_key=parent["stats_key"],
                         contract=parent["contract"])
     native_artifacts = model_backend(config.raw).export_actor(components, settings, target, checkpoint=checkpoint)
+    critic = critic_artifacts(config, checkpoint, target)
+    if critic:
+        # Sampling methods ship their critic and selector with the actor.
+        native_artifacts = {**native_artifacts, **critic, "component_sha256": {
+            **native_artifacts["component_sha256"], **critic["component_sha256"]}}
     io = model_contract(settings)["io"]
     compatibility = {
         "base_checkpoint": config.section("model")["base_checkpoint"],

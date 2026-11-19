@@ -115,11 +115,11 @@ def run_episode(monkeypatch, predict, process=lambda x: x):
 
 def test_closed_loop_queries_new_state_and_runs_full_horizon(monkeypatch):
     seen = []
-    def predict(obs, prompt):
-        seen.append(obs["step"])
+    def predict(obs, prompt, executed):
+        seen.append((obs["step"], executed))
         return np.zeros((10, 7))
     result = run_episode(monkeypatch, predict)
-    assert seen == [0, 3, 6]
+    assert seen == [(0, 3), (3, 3), (6, 3)]
     assert result["success"] and result["first_success_step"] == 5
     assert result["steps"] == 8 and not result["final_done"]
     assert result["policy_queries"] == 3
@@ -132,7 +132,7 @@ def test_invalid_chunk_fails_without_stepping(monkeypatch, chunk):
 
 
 def test_error_after_success_is_not_counted_as_success(monkeypatch):
-    def predict(obs, _):
+    def predict(obs, *_):
         if obs["step"] >= 6:
             raise RuntimeError("policy lost")
         return np.zeros((10, 7))

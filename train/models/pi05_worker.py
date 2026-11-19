@@ -66,6 +66,14 @@ def main():
             policy = Policy(components.model, transforms=[components.input_transform],
                             output_transforms=[components.output_transform], is_pytorch=True,
                             pytorch_device="cuda:0", sample_kwargs={"num_steps": settings["num_inference_steps"]})
+            selection = None
+            if request.get("critic"):
+                # Sampling methods: N chunks per query, the exported critic picks one.
+                from train.methods.selectors import load_critic
+                critic = Path(request["critic"])
+                if sha256_file(critic) != request["critic_sha256"]:
+                    raise ValueError("Selected π₀.₅ critic changed before loading")
+                selection = (load_critic(critic, "cuda:0"), dict(request["selector"]))
         reply({"ready": True, "identity": request["content_sha256"]})
         for line in sys.stdin:
             request = json.loads(line)
@@ -78,7 +86,8 @@ def main():
                 observation = {name: arrays[name] for name in arrays.files}
             observation["prompt"] = request["prompt"]
             with contextlib.redirect_stdout(sys.stderr):
-                actions = policy.infer(observation)["actions"]
+                actions = (policy.infer(observation)["actions"] if selection is None else
+                           pi05.choose_chunk(components, *selection, observation, request.get("executed")))
             if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
                 raise ValueError(f"π₀.₅ returned invalid actions: {actions.shape}")
             reply({"actions": actions.tolist()})

@@ -5,6 +5,7 @@ import copy
 import json
 import re
 from pathlib import Path
+from typing import Any
 import shutil
 import tempfile
 
@@ -14,7 +15,7 @@ from core.registry import MODEL_FAMILIES, base_model, model_contract, validate_c
 from core.io import stable_hash, sha256_file
 from core.config_sources import UniqueKeyLoader
 from core.image_transforms import canonical_contract
-from core.methods import METHODS
+from core.methods import METHODS, SELECTOR_KINDS
 
 
 def legacy_contract(settings: dict) -> dict:
@@ -142,6 +143,8 @@ def validate_policy(path: Path, payload: dict) -> None:
         names.add("critic")
     if set(native) != required:
         raise ValueError("Invalid child policy manifest fields")
+    if method is not None and method.exports_critic:
+        validate_selector(native["selector"])
     for key in ("policy_id", "label", "base_checkpoint", "stats_key"):
         if not isinstance(native[key], str) or not native[key].strip():
             raise ValueError(f"Invalid policy field: {key}")
@@ -170,7 +173,7 @@ def validate_policy(path: Path, payload: dict) -> None:
         name = native[key]
         if not isinstance(name, str) or name in {".", ".."} or Path(name).name != name:
             raise ValueError(f"Unsafe policy component: {key}")
-        if backend == "train.models.pi05" and name != {"actor": "actor.pt", "base_identity": "pi05_identity.json"}[key]:
+        if backend == "train.models.pi05" and name != PI05_COMPONENT_FILES[key]:
             raise ValueError(f"Unexpected policy component filename: {key}")
         component = path.parent / name
         if component.is_symlink() or not component.is_file() or sha256_file(component) != hashes[key]:
@@ -180,6 +183,19 @@ def validate_policy(path: Path, payload: dict) -> None:
         identity = json.loads((path.parent / native["base_identity"]).read_text())
         if identity_digest(identity) != parent["revision"]:
             raise ValueError("Policy checkpoint identity conflicts with its parent")
+
+
+PI05_COMPONENT_FILES = {"actor": "actor.pt", "base_identity": "pi05_identity.json", "critic": "critic.pt"}
+
+
+def validate_selector(selector: Any) -> None:
+    """Inference choice among sampled chunks: ``{kind, num_samples}``."""
+    if not isinstance(selector, dict) or set(selector) != {"kind", "num_samples"}:
+        raise ValueError("Policy selector must contain exactly kind and num_samples")
+    if selector["kind"] not in SELECTOR_KINDS:
+        raise ValueError(f"Unknown policy selector: {selector['kind']}")
+    if type(selector["num_samples"]) is not int or selector["num_samples"] < 1:
+        raise ValueError("Policy selector num_samples must be a positive integer")
 
 
 def export_policy(source: Path, destination: Path, base_checkpoint: str) -> Path:

@@ -53,7 +53,7 @@ def test_vla_inference_compensates_upstream_flip_once(monkeypatch, base, axes):
 
 
 @pytest.mark.parametrize("base,axes", [("pi05-libero-base", (0, 1)), ("pi05-liberox-base", (0,))])
-def test_pi05_preserves_native_actions_and_variant_images(monkeypatch, base, axes):
+def test_pi05_preserves_native_actions_and_variant_images(monkeypatch, tmp_path, base, axes):
     from train.models import pi05
     settings = registered_defaults("pi05", base)
     config = LoadedConfig(Path("fixture"), {"model": settings})
@@ -69,7 +69,9 @@ def test_pi05_preserves_native_actions_and_variant_images(monkeypatch, base, axe
             captured.append(obs)
             return {"actions": np.zeros((10, 7))}
     install_module(monkeypatch, "openpi.policies.policy", Policy=Policy)
-    predict, action = pi05.evaluation_policy(config, Path("fixture/policy.yaml"), None)
+    manifest = tmp_path / "policy.yaml"
+    manifest.write_text("algorithm: bc\n")
+    predict, action = pi05.evaluation_policy(config, manifest, None)
     obs = observation()
     predict(obs, "task")
     np.testing.assert_array_equal(captured[0]["observation/image"], np.flip(obs["agentview_image"], axes))

@@ -7,7 +7,7 @@
 | | 支持 |
 | --- | --- |
 | 策略模型 | VLA-Adapter（LIBERO-Object-Pro、LIBERO-X）、π₀.₅（LIBERO、LIBERO-X） |
-| 训练方法 | BC（等权行为克隆）、IQL（奖励加权后训练）；方法接口已为 IDQL 等采样类方法预留 |
+| 训练方法 | BC（等权行为克隆）、IQL（奖励加权后训练）、IFQL（仅 π₀.₅：推理时采样多个动作块，由导出的 critic 选择） |
 | 奖励 | sparse、RynnValue（PBRS 整形）、Stage（人工关键帧）、Final Reward 融合；Robometer 进度与成功概率评价 |
 | 场景 | LIBERO-X 五类任务、LEVEL1–4 共 21 个场景，可用 YAML 登记自备场景 |
 | 接管设备 | SpaceMouse、FACTR 力反馈主臂 |
@@ -19,7 +19,7 @@
 core/      共享基础：配置、目录布局、模型登记、方法目录、上游锁
 sim/       LIBERO-X 仿真与评测 rollout
 rewards/   奖励：pbrs、stage/、fusion、manifest；rynnvalue/、robometer/
-train/     训练：models/（家族实现）、methods/（BC、IQL、critic）、回放、训练循环、导出
+train/     训练：models/（家族实现）、methods/（BC、IQL、IFQL、critic、选择器）、回放、训练循环、导出
 cluster/   服务器：多卡训练、队列、PBS、闭环评测、远程推理、模型传输
 studio/    平台后端（FastAPI）
 web/       平台前端（React + Vite）
@@ -52,7 +52,7 @@ python envs/setup.py --role studio                # 执行
 | `train`、`hpc` | 训练服务器、PBS 节点：只装所选家族 |
 | `eval`、`infer` | 无头闭环评测、远程推理服务 |
 
-系统依赖、人工步骤（udev、ROS、Hugging Face 授权）和从 0.8.0 升级见 [安装](docs/install.md)。
+系统依赖和人工步骤（udev、ROS、Hugging Face 授权）见 [安装](docs/install.md)；从 0.8.0 升级见 [更新记录](CHANGELOG.md) 的升级说明和 [skills/deploy](skills/deploy/SKILL.md)。
 
 ## 快速开始
 
@@ -86,11 +86,11 @@ python -m cluster evaluate            # 无头闭环评测，configs/cluster/eva
 
 | 文档 | 内容 |
 | --- | --- |
-| [安装](docs/install.md) | 角色、环境层、人工步骤、升级 |
+| [安装](docs/install.md) | 角色、环境层、人工步骤、检查安装 |
 | [架构](docs/architecture.md) | 包与依赖方向、数据流、配置组合 |
 | [平台使用](docs/studio.md) | 页面操作、接管设备、平台命令 |
 | [训练](docs/training.md) | 网页与终端训练、导出、监控 |
-| [训练方法](docs/methods.md) | 方法接口、模型能力、新增方法（IDQL）的步骤 |
+| [训练方法](docs/methods.md) | 现有方法、方法接口、带 critic 的导出与推理、新增方法的步骤 |
 | [模型](docs/models.md) | 模型家族与权重变体、添加权重或新家族 |
 | [任务](docs/tasks.md) | 登记场景与任务 |
 | [奖励](docs/rewards.md) | 奖励定义、评价与物化、全局与数据集结果 |

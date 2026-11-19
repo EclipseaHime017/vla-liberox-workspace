@@ -7,7 +7,7 @@ Run VLA policies in LIBERO-X simulation, take over by hand and record trajectori
 | | Supported |
 | --- | --- |
 | Policies | VLA-Adapter (LIBERO-Object-Pro, LIBERO-X), π₀.₅ (LIBERO, LIBERO-X) |
-| Methods | BC, IQL; the method interface leaves room for sampling methods such as IDQL |
+| Methods | BC, IQL; IFQL (π₀.₅: best-of-N action chunks scored by an exported critic) |
 | Rewards | sparse, RynnValue (PBRS shaping), Stage (human keyframes), Final Reward fusion; Robometer progress/success scoring |
 | Scenes | 21 LIBERO-X scenes (5 tasks × LEVEL1–4); custom scenes via YAML |
 | Takeover | SpaceMouse, FACTR force-feedback leader arm |
@@ -21,7 +21,7 @@ The six top-level directories are Python packages. `studio`, `train`, `rewards` 
 | `core/` | Shared config, storage layout, model registry, method catalog, upstream lock |
 | `sim/` | LIBERO-X simulation and evaluation rollouts |
 | `rewards/` | PBRS, Stage, fusion, reward versions; RynnValue and Robometer integrations |
-| `train/` | Model families, methods (BC, IQL, critics), replay, training loop, export |
+| `train/` | Model families, methods (BC, IQL, IFQL, critics, selectors), replay, training loop, export |
 | `cluster/` | Multi-GPU training, queue, PBS, closed-loop and remote evaluation |
 | `studio/` | Platform backend (FastAPI) |
 | `web/` | Platform frontend (React + Vite) |

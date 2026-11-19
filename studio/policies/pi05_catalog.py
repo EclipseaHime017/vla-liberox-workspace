@@ -44,6 +44,11 @@ def assets():
 def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEntry:
     required = (catalog.REQUIRED - {"action_head", "proprio_projector"}) | {
         "family", "algorithm", "model_config", "actor", "base_identity"}
+    # Sampling methods (IFQL, Value Flows) ship a critic and an inference selector.
+    sampling = raw.get("algorithm") in METHODS and METHODS[raw["algorithm"]].exports_critic
+    names = ARTIFACTS + (("critic",) if sampling else ())
+    if sampling:
+        required = required | {"critic", "selector"}
     if (set(raw) != required or raw["schema_version"] != 4
             or model_module("base_models").family_adapter(raw["family"]).POLICY_ADAPTER != __name__
             or raw["algorithm"] not in METHODS):
@@ -74,11 +79,13 @@ def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEn
             continue
         if re.fullmatch(r"[0-9a-f]{64}", str(raw[key])) is None:
             raise ValueError(f"Invalid π₀.₅ {key}")
-    if set(raw["component_sha256"]) != {"actor", "base_identity"}:
+    if set(raw["component_sha256"]) != set(names):
         raise ValueError("Invalid π₀.₅ artifact set")
+    if sampling:
+        core_module("model_artifacts").validate_selector(raw["selector"])
     paths = {}
-    for key in ("actor", "base_identity"):
-        if raw[key] != {"actor": "actor.pt", "base_identity": "pi05_identity.json"}[key]:
+    for key in names:
+        if raw[key] != core_module("model_artifacts").PI05_COMPONENT_FILES[key]:
             raise ValueError(f"Unexpected π₀.₅ artifact filename: {key}")
         value = manifest.parent / raw[key]
         if value.is_symlink() or value.resolve().parent != manifest.parent.resolve() or not value.is_file():
@@ -95,4 +102,6 @@ def load_overlay(catalog, manifest: Path, raw: dict, *, parent=None) -> PolicyEn
         proprio_projector=None, training_step=raw["training_step"],
         compatibility_sha256=raw["compatibility_sha256"], algorithm=raw["algorithm"],
         model_config=settings, component_sha256=raw["component_sha256"], family=settings["family"],
-        base_revision=assets().identity_digest(identity), parent=parent, **paths)
+        base_revision=assets().identity_digest(identity), parent=parent,
+        selector=dict(raw["selector"]) if sampling else None,
+        artifacts={"critic": paths.pop("critic")} if sampling else {}, **paths)

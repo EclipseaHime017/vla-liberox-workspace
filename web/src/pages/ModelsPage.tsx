@@ -73,7 +73,7 @@ export function ModelsPage() {
       <main className="surface model-detail">{busy && !detail ? <div className="empty-table">加载模型信息…</div> : detail ? <>
         <div className="model-detail-head"><div><p className="eyebrow">{detail.kind}</p><h2>{detail.label}</h2><code>{detail.policy_id}</code></div><div>{detail.kind !== "base" && <><button disabled={busy} onClick={() => void rename()}>重命名</button><button disabled={busy} onClick={() => void duplicate()}>复制模型</button><button className="danger" disabled={busy} onClick={() => void remove()}>删除</button></>}</div></div>
         <ModelTrainingRecords policyId={detail.policy_id} jobs={detail.kind === "base" ? [] : detail.training_records} />
-        <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd><dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
+        <dl className="model-properties"><dt>基础 checkpoint</dt><dd>{detail.base_checkpoint}</dd><dt>Stats key</dt><dd>{detail.stats_key}</dd><dt>训练 step</dt><dd>{detail.training_step ?? "—"}</dd>{detail.selector && <><dt>推理选择</dt><dd>每次采样 {detail.selector.num_samples} 个动作块，执行 critic 评分最高的一个</dd></>}<dt>兼容性哈希</dt><dd><code>{detail.compatibility_sha256 ?? "基础模型"}</code></dd></dl>
         {detail.model_config && <dl className="model-properties">
           <dt>上下翻转</dt><dd>{detail.observation?.image_flip_vertical ? "On" : "Off"}</dd>
           <dt>左右镜像</dt><dd>{detail.observation?.image_flip_horizontal ? "On" : "Off"}</dd>

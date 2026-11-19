@@ -241,3 +241,70 @@ def test_training_defaults_select_liberox_without_loading_weights(tmp_path):
     assert defaults["model"]["model_base_id"] == "pi05-liberox-base"
     with pytest.raises(ValueError):
         jobs.defaults(algorithm="bc", model_family="vla_adapter", model_base_id="pi05-liberox-base")
+
+
+def sampling_overlay(tmp_path, *, num_samples=8, with_critic=True):
+    settings, identity = checkpoint(tmp_path, "pi05-liberox-base")
+    directory = tmp_path / "registry" / "pi-ifql"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "actor.pt").write_bytes(b"fake-deltas")
+    (directory / "critic.pt").write_bytes(b"fake-critic")
+    (directory / "pi05_identity.json").write_text(json.dumps(identity))
+    from studio.policies.registry import model_module
+    compatibility = {"base_checkpoint": settings["base_checkpoint"], "stats_key": settings["stats_key"],
+                     "action_horizon": 10, "action_dim": 7, "proprio_dim": 8}
+    names = {"actor": "actor.pt", "base_identity": "pi05_identity.json", "critic": "critic.pt"}
+    payload = {"schema_version": 5, "family": "pi05", "algorithm": "ifql", "model_config": settings,
+               "policy_id": "pi-ifql", "label": "IFQL", **names,
+               "selector": {"kind": "argmax", "num_samples": num_samples},
+               "dataset_sha256": "d" * 64, "reward_sha256": "e" * 64, "training_step": 1,
+               "component_sha256": {key: _sha256(directory / name) for key, name in names.items()},
+               **compatibility, "compatibility_sha256": _stable_hash(compatibility),
+               "parent": model_module("model_artifacts").parent_snapshot(settings, assets().identity_digest(identity))}
+    if not with_critic:
+        payload.pop("critic")
+        payload["component_sha256"].pop("critic")
+    (directory / "policy.yaml").write_text(yaml.safe_dump(payload))
+    return PolicyCatalog(tmp_path / "registry", base_models={"pi05-liberox-base": settings}), directory
+
+
+def test_sampling_overlay_carries_critic_and_selector_into_its_identity(tmp_path):
+    catalog, directory = sampling_overlay(tmp_path)
+    entry = catalog.select("pi-ifql")
+    assert entry.selector == {"kind": "argmax", "num_samples": 8}
+    assert entry.artifact_path("critic") == (directory / "critic.pt").resolve()
+    assert entry.public()["selector"] == entry.selector and "critic" in entry.component_sha256
+    first = entry.content_sha256
+    payload = yaml.safe_load((directory / "policy.yaml").read_text())
+    payload["selector"]["num_samples"] = 16
+    (directory / "policy.yaml").write_text(yaml.safe_dump(payload))
+    catalog.refresh()
+    assert catalog.select("pi-ifql").content_sha256 != first
+
+
+def test_sampling_overlay_without_its_critic_is_rejected(tmp_path):
+    catalog, _ = sampling_overlay(tmp_path, with_critic=False)
+    with pytest.raises(ValueError):
+        catalog.select("pi-ifql")
+
+
+def test_sampling_policy_forwards_executed_steps_to_the_worker(monkeypatch):
+    selected = SimpleNamespace(family="pi05", policy_id="ifql", label="IFQL", content_sha256="a" * 64,
+                               selector={"kind": "argmax", "num_samples": 4},
+                               settings=configured_models()["pi05-liberox-base"],
+                               resolve_open_loop_steps=lambda value: 10 if value is None else value)
+    provider = Pi05PolicyProvider(None, None, SimpleNamespace(select=lambda _: selected))
+    provider.process = SimpleNamespace(poll=lambda: None)
+    provider.current_policy_entry = SimpleNamespace(content_sha256=selected.content_sha256)
+    provider.load(None, "ifql", expected_content_sha256=selected.content_sha256)
+    assert provider.executed == 10
+    provider.load(6, "ifql", expected_content_sha256=selected.content_sha256)
+    captured = {}
+    def send(request):
+        captured.update(request)
+        return {"actions": np.zeros((10, 7)).tolist()}
+    monkeypatch.setattr(provider, "_send", send)
+    obs = {"agentview_image": np.zeros((4, 4, 3), np.uint8), "robot0_eye_in_hand_image": np.zeros((4, 4, 3), np.uint8),
+           "robot0_eef_pos": [0, 0, 0], "robot0_eef_quat": [0, 0, 0, 1], "robot0_gripper_qpos": [0, 0]}
+    provider.predict(obs, "task")
+    assert captured["executed"] == 6

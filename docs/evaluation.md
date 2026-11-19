@@ -15,7 +15,7 @@ python -m cluster evaluate --config configs/cluster/evaluation.yaml --check-rend
 python -m cluster evaluate --config configs/cluster/evaluation.yaml
 ```
 
-使用训练结果中完整的 `policy-registry/<模型ID>/policy.yaml` 及同目录权重；`checkpoints/step_*/state.pt` 是训练恢复文件，不能直接评测。跨设备迁移时先用 `python -m train export-policy` 更新基础权重的位置。加载时检查基础模型身份、子模型权重哈希和冻结的输入输出配置，不回退到其他模型。
+使用训练结果中完整的 `policy-registry/<模型ID>/policy.yaml` 及同目录权重；`checkpoints/step_*/trainer.pt` 是训练恢复文件，不能直接评测。跨设备迁移时先用 `python -m train export-policy` 更新基础权重的位置。加载时检查基础模型身份、子模型权重哈希和冻结的输入输出配置，不回退到其他模型。
 
 **配置（`configs/cluster/evaluation.yaml`）**
 
@@ -29,7 +29,7 @@ python -m cluster evaluate --config configs/cluster/evaluation.yaml
 | `render_backend` | `egl`（GPU 离屏）或 `osmesa`（CPU 软件渲染）；`check_environment` 只决定 `--check-render` 使用的环境 |
 | `output_root`、`liberox_root`、`vla_adapter_root` | 结果目录与上游路径，相对本 YAML |
 
-每回合在模型预测时重新渲染主视角和手腕视角的 256×256 图像；翻转、图像处理和动作转换来自模型冻结的配置和家族实现。仿真依赖版本和 LIBERO-X commit 由 `third_party/lock.yaml` 锁定，启动时核对。
+每回合在模型预测时重新渲染主视角和手腕视角的 256×256 图像；翻转、图像处理和动作转换来自模型冻结的配置和家族实现。带 critic 的策略（IFQL）每次预测采样 `selector.num_samples` 个动作块，按实际执行的 `open_loop_steps` 打分后选择，单次推理更慢。仿真依赖版本和 LIBERO-X commit 由 `third_party/lock.yaml` 锁定，启动时核对。
 
 **结果**：`summary.json` 汇总模型与任务；每个模型的 `result.json` 保存模型清单、任务文件哈希、执行安排、渲染器信息、逐回合结果、成功率和置信区间。运行错误单独计数并计入已尝试回合的分母，同时给出完成覆盖率，未执行的回合不算作失败。
 
@@ -74,4 +74,4 @@ LIBERO-X 使用 MuJoCo 的 OpenGL 渲染，不需要显示器：EGL 用 GPU 离�
      --policy-sha256 <MANIFEST_SHA256> --concurrency 4
    ```
 
-此模式的模型由远端服务和清单哈希指定，不读取配置中的 `policies`；任务、次数、初始状态、执行步数和输出位置仍用同一份 YAML。多个 `--endpoint` 分配同一模型的副本。每个回合有独立的随机数状态和递增的请求序号；超时或断线明确报错，不重放请求。`summary.json` 另外记录往返时间、远端推理与排队时间、请求大小和显存。多个回合共享一个服务时推理串行处理，正式评测前先用短回合压测并发量。
+此模式的模型由远端服务和清单哈希指定，不读取配置中的 `policies`；任务、次数、初始状态、执行步数和输出位置仍用同一份 YAML，执行步数随每次请求发给服务端，供带 critic 的策略打分。多个 `--endpoint` 分配同一模型的副本。每个回合有独立的随机数状态和递增的请求序号；超时或断线明确报错，不重放请求。`summary.json` 另外记录往返时间、远端推理与排队时间、请求大小和显存。多个回合共享一个服务时推理串行处理，正式评测前先用短回合压测并发量。

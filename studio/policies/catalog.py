@@ -75,6 +75,8 @@ class PolicyEntry:
     parent: dict | None = None
     contract: dict | None = None
     artifacts: dict[str, Path] = field(default_factory=dict)
+    # Exported critic's inference choice ({kind, num_samples}) for sampling methods.
+    selector: dict | None = None
 
     @property
     def settings(self) -> dict:
@@ -98,6 +100,8 @@ class PolicyEntry:
         }
         if self.parent is not None:
             value["parent"] = self.parent
+        if self.selector is not None:
+            value["selector"] = self.selector
         orientation = model_module("image_transforms").image_orientation(
             model_module("base_models").model_observation(self.settings))
         if orientation != "rotate_180":
@@ -146,6 +150,7 @@ class PolicyEntry:
             "family_label": model_module("base_models").MODEL_FAMILIES[self.family].label,
             "content_sha256": self.content_sha256,
             "base_revision": self.base_revision,
+            "selector": self.selector,
         }
 
 

@@ -14,11 +14,11 @@ from core.model_config import model_signature
 from test_policy_export import make_policy
 
 
-def make_checkpoint(tmp_path, monkeypatch, base_id="pi05-libero-base", step=2000, mode="full"):
+def make_checkpoint(tmp_path, monkeypatch, base_id="pi05-libero-base", step=2000, mode="full", method="bc"):
     source, policy = make_policy(tmp_path, base_id, algorithm="bc")
     settings = copy.deepcopy(policy["model_config"])
     settings["backbone"] = mode
-    config = load_train_config(method="bc", family=settings["family"], overrides={"model": settings})
+    config = load_train_config(method=method, family=settings["family"], overrides={"model": settings})
     parent = copy.deepcopy(policy["parent"])
     settings = config.section("model")
     checkpoint = tmp_path / f"step_{step:08d}"
@@ -33,12 +33,16 @@ def make_checkpoint(tmp_path, monkeypatch, base_id="pi05-libero-base", step=2000
     original = SimpleNamespace(model=torch.nn.Linear(2, 2), action_head=torch.nn.Linear(2, 2),
                                proprio_projector=torch.nn.Linear(2, 2), identity=identity, parent=parent)
     backend.save_actor(original, settings, checkpoint)
+    if method != "bc":
+        from train.methods.base import build_algorithm, save_critic
+        save_critic(build_algorithm(config, torch.device("cpu"),
+                                    transition_horizon=config.section("data")["action_horizon"]), config, checkpoint)
     metadata = {"schema_version": 2, "step": step, "config_sha256": config.digest,
-                "algorithm": "bc", "model_config": model_signature(config.raw),
+                "algorithm": method, "model_config": model_signature(config.raw),
                 "model_parent": parent, "model_identity": identity,
                 "model_contract": parent["contract"], "stats_key": parent["stats_key"],
                 "base_checkpoint": settings["base_checkpoint"],
-                "dataset_sha256": "d" * 64, "reward_sha256": None}
+                "dataset_sha256": "d" * 64, "reward_sha256": None if method == "bc" else "e" * 64}
     (checkpoint / "checkpoint.json").write_text(json.dumps(metadata))
     (checkpoint / "effective_config.yaml").write_text(yaml.safe_dump(config.raw))
     # Export must not deserialize optimizer/trainer state at all.
@@ -157,3 +161,14 @@ def test_lora_checkpoint_is_restored_then_merged_without_changing_source(tmp_pat
     assert torch.equal(merged["weight"], torch.eye(2) + 0.5)
     assert before == sha256_file(checkpoint / "backbone.pt")
     assert len(calls) == 1
+
+
+def test_ifql_checkpoint_export_carries_its_critic_and_selector(tmp_path, monkeypatch):
+    checkpoint, *_ = make_checkpoint(tmp_path, monkeypatch, "pi05-liberox-base", method="ifql")
+    result = exporter.export_checkpoint(checkpoint, tmp_path / "registry" / "ifql")
+    payload = yaml.safe_load(result.read_text())
+    validate_policy(result, payload)
+    assert payload["algorithm"] == "ifql" and payload["critic"] == "critic.pt"
+    assert payload["selector"] == {"kind": "argmax", "num_samples": 32}
+    assert (payload["component_sha256"]["critic"] == sha256_file(result.parent / "critic.pt")
+            == sha256_file(checkpoint / "critic.pt"))

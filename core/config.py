@@ -70,6 +70,11 @@ TRAIN_SCHEMA = {
             "expectile": None,
             "beta": None, "max_advantage_weight": None, "target_tau": None,
             "critic_warmup_steps": None},
+    "ifql": {"critic_image_size": None, "critic_lr": None, "value_lr": None,
+             "critic_optimizer": None, "critic_weight_decay": None,
+             "value_optimizer": None, "value_weight_decay": None,
+             "critic_max_grad_norm": None, "value_max_grad_norm": None,
+             "expectile": None, "target_tau": None, "num_samples": None},
     "logging": {
         "tensorboard": None,
         "wandb": {

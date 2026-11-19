@@ -89,8 +89,8 @@ def simulation_worker(request):
                 env.seed(schedule["seed"])
                 env.reset()
             action_digest = hashlib.sha256()
-            def predict(observation, prompt):
-                actions = client.predict(observation, prompt)
+            def predict(observation, prompt, executed):
+                actions = client.predict(observation, prompt, executed)
                 action_digest.update(actions.astype("<f4").tobytes())
                 return actions
             trial = episode(env, states[schedule["init_state_index"]], predict, lambda a: a,

@@ -149,7 +149,8 @@ def episode(env, state, predict, process_action, prompt, schedule, *, steps, ope
             if not actions:
                 observation = capture(env, observation)
                 query_started = time.monotonic()
-                chunk = np.asarray(predict(observation, prompt), dtype=np.float32)
+                # Critic-selected policies score candidates over the steps actually executed.
+                chunk = np.asarray(predict(observation, prompt, open_loop_steps), dtype=np.float32)
                 latencies.append(1000 * (time.monotonic() - query_started))
                 if chunk.shape != (native_horizon, 7) or not np.isfinite(chunk).all():
                     raise ValueError(f"Invalid policy chunk: {chunk.shape}; expected {(native_horizon, 7)}")

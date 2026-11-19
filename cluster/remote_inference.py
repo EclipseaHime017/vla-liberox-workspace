@@ -164,13 +164,16 @@ class Sessions:
             prompt = payload["prompt"]
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4096:
                 raise ValueError("Invalid task prompt")
+            executed = payload.get("executed")
+            horizon = self.metadata["contract"]["io"]["native_action_horizon"]
+            if executed is not None and (type(executed) is not int or not 1 <= executed <= horizon):
+                raise ValueError("Invalid executed step count")
             observation = unpack_observation(payload["observation"])
             self.restore_rng(item["rng"])
             started = time.monotonic()
             try:
                 with torch.inference_mode():
-                    raw = np.asarray(self.predict(observation, prompt), dtype=np.float32)
-                    horizon = self.metadata["contract"]["io"]["native_action_horizon"]
+                    raw = np.asarray(self.predict(observation, prompt, executed), dtype=np.float32)
                     if raw.shape != (horizon, 7) or not np.isfinite(raw).all():
                         raise ValueError("Invalid policy output")
                     actions = np.asarray([self.process_action(action.copy()) for action in raw], dtype=np.float32)
@@ -278,12 +281,15 @@ class Client:
         self.session_id = self._request("/session", {**self._payload(), "seed": seed})["session_id"]
         self.sequence = 0
 
-    def predict(self, observation, prompt):
+    def predict(self, observation, prompt, executed=None):
+        """``executed``: steps the client will run from this chunk (critic-selected policies need it)."""
         if self.session_id is None:
             raise ValueError("Create a rollout session before inference")
         started = time.monotonic()
         packed = pack_observation(observation)
         payload = {**self._payload(), "sequence": self.sequence, "prompt": prompt, "observation": packed}
+        if executed is not None:
+            payload["executed"] = executed
         result = self._request("/infer", payload)
         if result["sequence"] != self.sequence:
             raise ValueError("Wrong inference response sequence")

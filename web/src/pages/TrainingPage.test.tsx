@@ -71,6 +71,10 @@ const methods: TrainingMethod[] = [
   { id: "bc", label: "BC", summary: "等权行为克隆", requires_rewards: false, requires_transitions: false, critic: null,
     exports_critic: false, actor_capabilities: [], parameters: [], families: ["pi05", "vla_adapter"],
     critic_keys: [] },
+  { id: "ifql", label: "IFQL", summary: "flow 策略采样 + IQL critic 选择", requires_rewards: true, requires_transitions: true,
+    critic: "expectile", exports_critic: true, actor_capabilities: ["sample"], families: ["pi05"],
+    critic_keys: expectileKeys,
+    parameters: [{ name: "num_samples", label: "推理采样数 N", type: "number", default: 32, min: 1, max: 256, step: 1 }] },
 ];
 
 beforeEach(() => {
@@ -257,6 +261,34 @@ describe("dataset-pinned training reward", () => {
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
       reward_source: "rynnvalue", reward_accumulate_primitive_steps: true,
     })));
+  });
+
+  it("IFQL shows only its critic fields and sends its sample count", async () => {
+    const pi05 = { id: "pi05", label: "π₀.₅", backbone_modes: ["frozen", "full"],
+      bases: [{ id: "pi05-liberox-base", label: "LIBERO-X", source: "x" }] };
+    vi.mocked(api.getTrainingDefaults).mockImplementation(async (_dataset, _source, algorithm) => ({
+      ...defaults, algorithm: algorithm ?? "iql", models: [...defaults.models!, pi05],
+      model: { model_family: "pi05", model_base_id: "pi05-liberox-base", model_backbone: "frozen" },
+      basic: algorithm === "ifql" ? defaults.basic : { ...defaults.basic, critic_warmup_steps: 1000 },
+      advanced: algorithm === "ifql" ? { ...defaults.advanced, expectile: .9, num_samples: 32 } : defaults.advanced,
+    }));
+    render(<TrainingPage />);
+    const start = await screen.findByRole("button", { name: "注册训练任务" });
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByLabelText("Advantage beta")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("训练方法"), { target: { value: "ifql" } });
+    await waitFor(() => expect(vi.mocked(api.getTrainingDefaults).mock.lastCall?.slice(0, 4)).toEqual(["ready", "final", "ifql", "pi05"]));
+    await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByLabelText("Advantage beta")).toBeNull();
+    expect(screen.queryByLabelText("Critic warmup")).toBeNull();
+    expect((screen.getByLabelText("Expectile") as HTMLInputElement).value).toBe("0.9");
+    expect((screen.getByLabelText("推理采样数 N") as HTMLInputElement).value).toBe("32");
+    fireEvent.change(screen.getByLabelText("推理采样数 N"), { target: { value: "16" } });
+    fireEvent.click(start);
+    await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalled());
+    const [, parameters] = vi.mocked(api.enqueueTraining).mock.calls[0];
+    expect(parameters).toMatchObject({ algorithm: "ifql", num_samples: 16, expectile: .9 });
+    expect("beta" in parameters).toBe(false);
   });
 
   it("trains BC on an unannotated dataset without sending reward or critic settings", async () => {
