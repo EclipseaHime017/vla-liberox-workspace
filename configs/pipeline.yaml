@@ -44,7 +44,6 @@ overrides:
     alpha: 0.0
     shaping_weight: 0.1  # kappa; zero disables RynnValue dependency
     stage_exponent: 2.0
-    accumulate_primitive_steps: false
   model: {}  # e.g. {backbone: lora, lora: {rank: 32, alpha: 64, dropout: 0.0}}
   iql:
     critic_warmup_steps: 1000

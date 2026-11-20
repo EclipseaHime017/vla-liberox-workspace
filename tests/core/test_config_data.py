@@ -44,25 +44,15 @@ def test_reward_dtype_must_match_pinned_bfloat16_checkpoint(configured, tmp_path
         load_train_config(path)
 
 
-def test_reward_accumulation_mode_must_be_boolean(configured, tmp_path: Path):
-    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
-    raw["reward"]["accumulate_primitive_steps"] = "false"
-    path = tmp_path / "invalid-reward-mode.yaml"
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    with pytest.raises(TypeError, match="accumulate_primitive_steps"):
-        load_train_config(path)
-
-
-@pytest.mark.parametrize("mode, expected", [("additive", True), ("multiplicative", False)])
-def test_final_cumulative_config_and_recipe_agree(configured, tmp_path, mode, expected):
+def test_macro_action_reward_mode_no_longer_exists(configured, tmp_path: Path):
     from rewards.manifest import reward_derivation_config
-    raw = yaml.safe_load(configured.path.read_text())
-    raw["reward"].update(source="final", fusion_mode=mode, alpha=.5, accumulate_primitive_steps=True)
-    path = tmp_path / "fusion.yaml"
-    path.write_text(yaml.safe_dump(raw))
-    reward = load_train_config(path).section("reward")
-    assert reward["accumulate_primitive_steps"] is expected
-    assert reward_derivation_config(reward)["accumulate_primitive_steps"] is expected
+    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
+    raw["reward"]["accumulate_primitive_steps"] = False
+    path = tmp_path / "macro-reward.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="accumulate_primitive_steps"):
+        load_train_config(path)
+    assert "accumulate_primitive_steps" not in reward_derivation_config(configured.section("reward"))
 
 
 @pytest.mark.parametrize("normalization", [None, "none", "initial_chunk_v1"])

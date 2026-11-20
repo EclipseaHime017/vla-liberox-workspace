@@ -27,7 +27,8 @@ import yaml
 from studio.exceptions import ConflictError
 from studio.storage.files import atomic_write_json, atomic_write_yaml
 from studio.storage.repositories import EvaluationRepository, OfflineJobRepository
-from studio.services.dataset_reward_versions import DatasetRewardVersions, macro_only_reward
+from studio.services.dataset_reward_versions import DatasetRewardVersions
+from core.config import current_reward_settings
 from studio.services.work_queue import WorkQueue
 from studio.services.inherited_reward_inputs import core_module
 from core.methods import DEFAULT_METHOD, METHODS
@@ -209,7 +210,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             return self._training_defaults(raw, dataset_id=dataset_id)
         version = None
         availability = None
-        macro_only = False
         if reward_source is not None:
             self._reward_source(raw, {"reward_source": reward_source})
         if dataset_id:
@@ -233,7 +233,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         settings = sealed.get("reward") if isinstance(sealed, dict) else None
                         if not isinstance(settings, dict):
                             raise ValueError("缺少 reward 配置")
-                        required = {"gamma", "accumulate_primitive_steps"}
+                        required = {"gamma"}
                         if version["evaluator"] == "stage":
                             required.add("stage_exponent")
                         elif version["evaluator"] == "rynnvalue":
@@ -244,7 +244,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         prepared = json.loads(Path(version["prepared_manifest_path"]).read_text(encoding="utf-8"))
                         if prepared.get("chunking") != core_module("execution").CHUNKING_RULE:
                             raise ValueError("旧切片布局，请重新生成评价／奖励")
-                        raw["reward"].update(settings)
+                        raw["reward"].update(current_reward_settings(settings))
                         raw["reward"]["final_normalization"] = settings.get("final_normalization", "none")
                         availability["ready"] = bool(version.get("complete") and version.get("status") == "READY")
                     except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
@@ -270,23 +270,17 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         availability["pending"] = True
                         self.schedule_first_reward_snapshot(run)
                 if records:
-                    raw["reward"].update(records[0][1]["reward_config"])
+                    raw["reward"].update(current_reward_settings(records[0][1]["reward_config"]))
                     raw["reward"]["final_normalization"] = records[0][1]["reward_config"].get("final_normalization", "none")
-                    macro_only = any(macro_only_reward(record[1]["reward_config"]) for record in records)
         if reward_source is not None:
             raw["reward"].update(source=reward_source, rynnvalue=reward_source == "rynnvalue" or (
                 reward_source == "final" and raw["reward"]["shaping_weight"] > 0))
         reward_source = self._reward_source(raw, {})
-        macro_only = macro_only or macro_only_reward({**raw["reward"], "source": reward_source})
-        if macro_only:
-            raw["reward"]["accumulate_primitive_steps"] = False
         return self._training_defaults(raw, dataset_id=dataset_id, version=version,
-                                       availability=availability, reward_source=reward_source,
-                                       macro_only=macro_only)
+                                       availability=availability, reward_source=reward_source)
 
     def _training_defaults(self, raw: dict, *, dataset_id: str | None = None,
-                           version=None, availability=None, reward_source=None,
-                           macro_only=False) -> dict[str, Any]:
+                           version=None, availability=None, reward_source=None) -> dict[str, Any]:
         training = raw["training"]
         algorithm = training["method"]
         method = METHODS[algorithm]
@@ -303,7 +297,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "reward_locked_parameters": [
                 "reward_stage_exponent", "reward_shaping_weight", "reward_alpha", "reward_fusion_mode",
             ] if dataset_id and rewarded else [],
-            "reward_editable_parameters": (["reward_gamma"] + ([] if macro_only else ["reward_accumulate_primitive_steps"])) if rewarded else [],
+            "reward_editable_parameters": ["reward_gamma"] if rewarded else [],
             "basic": {name: training[name] for name in (
                 "train_steps", "micro_batch_size", "gradient_accumulation_steps",
                 "checkpoint_interval", "seed", "actor_lr_warmup_steps",
@@ -320,9 +314,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                     reward_source == "final" and raw["reward"]["shaping_weight"] > 0),
                 "reward_gamma": raw["reward"]["gamma"],
                 "reward_shaping_weight": raw["reward"]["shaping_weight"],
-                "reward_accumulate_primitive_steps": raw["reward"][
-                    "accumulate_primitive_steps"
-                ],
             } if rewarded else {}) | {
                 parameter["name"]: section.get(parameter["name"], parameter.get("default"))
                 for parameter in method.parameters
@@ -450,10 +441,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                 if not synchronized:
                     parameters = job.get("parameters") or {}
                     annotation_config = {"max_frames": parameters.get("max_frames")}
-                    if "accumulate_primitive_steps" in parameters:
-                        annotation_config["accumulate_primitive_steps"] = parameters[
-                            "accumulate_primitive_steps"
-                        ]
                     self.datasets.update_annotation(
                         job["dataset_id"], desired, annotation_id=job["id"],
                         annotation_config=annotation_config,
@@ -773,10 +760,9 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
 
     def start_annotation(
         self, dataset_id: str, *, max_frames: int | None = None,
-        accumulate_primitive_steps: bool | None = None, source: str = "rynnvalue", **options: Any,
+        source: str = "rynnvalue", **options: Any,
     ) -> dict[str, Any]:
-        return self.start_reward_version(dataset_id, source=source, max_frames=max_frames,
-            accumulate_primitive_steps=accumulate_primitive_steps, **options)
+        return self.start_reward_version(dataset_id, source=source, max_frames=max_frames, **options)
 
     def start_trajectory_evaluation(
         self,
@@ -1000,7 +986,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             "wandb_mode", "wandb_project", "wandb_entity", "wandb_run_name",
             "wandb_group", "wandb_tags", "wandb_log_interval_steps",
             "reward_rynnvalue", "reward_gamma", "reward_shaping_weight",
-            "reward_accumulate_primitive_steps", "reward_source", "reward_stage_exponent",
+            "reward_source", "reward_stage_exponent",
             "reward_version_id", "reward_alpha", "reward_fusion_mode",
         }
         allowed.update(models.parameter_paths())
@@ -1075,8 +1061,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             or not 0 <= reward_gamma <= 1
         ):
             raise ValueError("reward_gamma must be in [0, 1]")
-        if "reward_accumulate_primitive_steps" in parameters and type(parameters["reward_accumulate_primitive_steps"]) is not bool:
-            raise ValueError("reward_accumulate_primitive_steps must be boolean")
         if "reward_source" in parameters and parameters["reward_source"] not in (
             "sparse", "rynnvalue", "stage", "final",
         ):
@@ -1102,7 +1086,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
             raise ValueError("wandb_mode must be online, offline, or disabled")
         for name in (
             "tensorboard", "wandb_enabled", "reward_rynnvalue",
-            "reward_accumulate_primitive_steps",
         ):
             value = parameters.get(name)
             if value is not None and type(value) is not bool:
@@ -1302,7 +1285,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
         for parameter_name, config_name in {
             "reward_gamma": "gamma",
             "reward_shaping_weight": "shaping_weight",
-            "reward_accumulate_primitive_steps": "accumulate_primitive_steps",
             "reward_stage_exponent": "stage_exponent",
             "reward_alpha": "alpha", "reward_fusion_mode": "fusion_mode",
         }.items():
@@ -1386,9 +1368,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                     "rynnvalue": raw["reward"]["rynnvalue"],
                     "gamma": raw["reward"]["gamma"],
                     "shaping_weight": raw["reward"]["shaping_weight"],
-                    "accumulate_primitive_steps": raw["reward"][
-                        "accumulate_primitive_steps"
-                    ],
                 } if reward_version else None,
                 **{name: value for name, value in (raw.get(method.config_section) or {}).items() if name in (
                     "train_steps", "critic_warmup_steps", "micro_batch_size",

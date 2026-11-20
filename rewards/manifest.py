@@ -15,11 +15,12 @@ from typing import Any
 
 import numpy as np
 
-from core.config import effective_cumulative, LoadedConfig, needs_rynnvalue, reward_source
+from core.config import (LEGACY_REWARD_KEYS, LoadedConfig, current_reward_settings, needs_rynnvalue,
+                         reward_source)
 from core.data import load_manifest
 from core.io import atomic_json, sha256_file, stable_hash
 from core.storage_paths import storage_path, with_dataset_lease
-from rewards.pbrs import chunk_reward_components, sparse_macro_reward, sparse_primitive_return
+from rewards.pbrs import chunk_reward_components, sparse_primitive_return
 from rewards.rynnvalue.annotate import load_annotation_index
 from rewards.rynnvalue.outputs import (
     official_inference_config,
@@ -35,12 +36,11 @@ LOG = logging.getLogger(__name__)
 REWARD_SCHEMA_VERSION = 1
 
 
-REWARD_DERIVATION_CONFIG_KEYS = frozenset({
-    "rynnvalue", "gamma", "shaping_weight", "accumulate_primitive_steps",
-})
+REWARD_DERIVATION_CONFIG_KEYS = frozenset({"rynnvalue", "gamma", "shaping_weight"})
 
 
-TRAINING_REDUCTION_CONFIG_KEYS = frozenset({"gamma", "accumulate_primitive_steps", "zero_success_potential"})
+# Saved versions recording LEGACY_REWARD_KEYS are always re-derived from their signals.
+TRAINING_REDUCTION_CONFIG_KEYS = frozenset({"gamma", "zero_success_potential"})
 
 
 def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
@@ -53,7 +53,6 @@ def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
     if reward_config.get("zero_success_potential", False):
         result["zero_success_potential"] = True
     result["rynnvalue"] = needs_rynnvalue(reward_config)
-    result["accumulate_primitive_steps"] = effective_cumulative(reward_config)
     # Preserve RynnValue's existing manifest/checkpoint identity exactly.
     if source != "rynnvalue":
         result["source"] = source
@@ -234,7 +233,6 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
                 value_lookup[int(chunk["end"])],
                 float(derivation_cfg["gamma"]),
                 float(derivation_cfg["shaping_weight"]),
-                bool(derivation_cfg["accumulate_primitive_steps"]),
                 bool(derivation_cfg["rynnvalue"]),
                 bool(derivation_cfg.get("zero_success_potential", False)),
             )
@@ -367,7 +365,8 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
     stored_recipe = payload.get("reward_config")
     composed = payload.get("binding_kind") == "global_trajectory_snapshots"
     if not isinstance(stored_recipe, dict) or (not composed and {
-        key: value for key, value in stored_recipe.items() if key not in TRAINING_REDUCTION_CONFIG_KEYS
+        key: value for key, value in current_reward_settings(stored_recipe).items()
+        if key not in TRAINING_REDUCTION_CONFIG_KEYS
     } != {
         key: value for key, value in requested_recipe.items() if key not in TRAINING_REDUCTION_CONFIG_KEYS
     }):
@@ -382,11 +381,6 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
     if (not isinstance(entries, list) or len(entries) != len(expected)
             or {str(item.get("run_id")) for item in entries} != set(expected)):
         raise ValueError("Pinned reward members do not match the prepared dataset")
-    if composed and requested_recipe["accumulate_primitive_steps"] and any(
-        entry.get("saved_reward_config", {}).get("source") == "final"
-        and entry["saved_reward_config"].get("fusion_mode") == "multiplicative" for entry in entries
-    ):
-        raise ValueError("Global Final Reward includes multiplication; cumulative reward must be Off for the entire run")
     for entry in entries:
         if composed and (not isinstance(entry.get("saved_reward_config"), dict)
                          or reward_source(entry["saved_reward_config"]) != reward_source(reward)):
@@ -422,15 +416,16 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
                 or stable_hash(json.loads(snapshot.read_text())) != payload.get("stage_annotations_sha256")):
             raise ValueError("Pinned Stage keyframe snapshot is missing or corrupted")
     if stored_recipe != requested_recipe or (composed and any(
-        any(entry["saved_reward_config"].get(key) != requested_recipe.get(key)
-            for key in TRAINING_REDUCTION_CONFIG_KEYS) for entry in entries)):
+        LEGACY_REWARD_KEYS & set(entry["saved_reward_config"])
+        or any(entry["saved_reward_config"].get(key) != requested_recipe.get(key)
+               for key in TRAINING_REDUCTION_CONFIG_KEYS) for entry in entries)):
         return _adapt_pinned_training_rewards(config, payload, manifest, requested_recipe)
     return payload
 
 
 def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
                                   prepared: dict[str, Any], recipe: dict[str, Any]) -> dict[str, Any]:
-    """Change gamma/cumulative using saved signals, never rerun a semantic evaluator."""
+    """Change gamma or terminal potentials using saved signals, never rerun a semantic evaluator."""
     from rewards.stage.reward import stage_chunk_reward
 
     work = Path(config.section("paths")["work_dir"]).resolve()
@@ -441,7 +436,6 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
     if any(target_root.is_relative_to(path) or path.is_relative_to(target_root) for path in protected):
         raise ValueError("Training reward adaptation output must be outside the sealed evaluation directory")
     source = reward_source(config.section("reward"))
-    gamma, cumulative = float(recipe["gamma"]), bool(recipe["accumulate_primitive_steps"])
     implementation = reward_implementation_fingerprint(source)
     entries = {str(item["run_id"]): item for item in pinned["episodes"]}
     generated = []
@@ -450,15 +444,16 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
         entry = entries[str(episode["run_id"])]
         effective = recipe
         if pinned.get("binding_kind") == "global_trajectory_snapshots":
-            effective = {**entry["saved_reward_config"], **{
+            effective = {**current_reward_settings(entry["saved_reward_config"]), **{
                 key: recipe.get(key, False) for key in TRAINING_REDUCTION_CONFIG_KEYS}}
             if not effective.get("zero_success_potential", False):
                 effective.pop("zero_success_potential", None)
-            if all(effective.get(key) == entry["saved_reward_config"].get(key)
-                   for key in TRAINING_REDUCTION_CONFIG_KEYS):
+            if not LEGACY_REWARD_KEYS & set(entry["saved_reward_config"]) and all(
+                    effective.get(key) == entry["saved_reward_config"].get(key)
+                    for key in TRAINING_REDUCTION_CONFIG_KEYS):
                 generated.append((entry, episode, None))
                 continue
-        gamma, cumulative = float(effective["gamma"]), bool(effective["accumulate_primitive_steps"])
+        gamma = float(effective["gamma"])
         with np.load(storage_path(entry["reward_path"]), allow_pickle=False) as values:
             arrays = {name: values[name] for name in values.files}
         chunks = episode.get("evaluation_chunks", episode["chunks"])
@@ -474,7 +469,7 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
             if scores is None or scores.shape != (len(done) + 1,) or not np.isfinite(scores).all():
                 raise ValueError(f"Pinned Stage score timeline is unavailable: {episode['run_id']}")
             final = np.asarray([
-                stage_chunk_reward(scores, int(chunk["start"]), int(chunk["length"]), gamma, cumulative)
+                stage_chunk_reward(scores, int(chunk["start"]), int(chunk["length"]), gamma)
                 for chunk in chunks
             ], dtype=np.float32)
             arrays["stage_chunk_reward"] = final
@@ -488,7 +483,7 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
             components = np.asarray([
                 chunk_reward_components(done, int(chunk["start"]), int(chunk["length"]),
                     lookup[int(chunk["start"])], lookup[int(chunk["end"])], gamma,
-                    float(effective["shaping_weight"]), cumulative, True,
+                    float(effective["shaping_weight"]), True,
                     bool(effective.get("zero_success_potential", False)))
                 for chunk in chunks
             ], dtype=np.float32)
@@ -497,7 +492,6 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
         else:
             final = np.asarray([
                 sparse_primitive_return(done, int(chunk["start"]), int(chunk["length"]), gamma)
-                if cumulative else sparse_macro_reward(done, int(chunk["start"]), int(chunk["length"]))
                 for chunk in chunks
             ], dtype=np.float32)
             arrays["sparse_reward"] = final
@@ -532,8 +526,8 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
                                      "description": "Training-local reduction of pinned model outputs"}
         result["episodes"].append(adapted)
     atomic_json(directory / "reward_manifest.json", result)
-    LOG.info("Adapted pinned %s rewards for training: gamma=%s, cumulative=%s; source version %s",
-             source, gamma, cumulative, result["source_reward_version_id"])
+    LOG.info("Adapted pinned %s rewards for training: gamma=%s; source version %s",
+             source, recipe["gamma"], result["source_reward_version_id"])
     return result
 
 
@@ -578,7 +572,6 @@ def _materialize_direct_rewards(config: LoadedConfig, *, force: bool) -> Path:
         atomic_json(snapshot_path, snapshot)
     index = []
     gamma = float(derivation["gamma"])
-    cumulative = bool(derivation["accumulate_primitive_steps"])
     for episode in manifest["episodes"]:
         chunks = episode.get("evaluation_chunks", episode["chunks"])
         done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
@@ -592,13 +585,12 @@ def _materialize_direct_rewards(config: LoadedConfig, *, force: bool) -> Path:
                     exponent=derivation["stage_exponent"])
             scores = stage_scores(context)
             final = np.asarray([stage_chunk_reward(scores, int(chunk["start"]),
-                int(chunk["length"]), gamma, cumulative) for chunk in chunks], dtype=np.float32)
+                int(chunk["length"]), gamma) for chunk in chunks], dtype=np.float32)
             arrays = {"stage_score": scores, "stage_chunk_reward": final}
             annotation_hash = annotation["annotation_sha256"]
         else:
             final = np.asarray([
-                (sparse_primitive_return(done, int(chunk["start"]), int(chunk["length"]), gamma)
-                 if cumulative else sparse_macro_reward(done, int(chunk["start"]), int(chunk["length"])))
+                sparse_primitive_return(done, int(chunk["start"]), int(chunk["length"]), gamma)
                 for chunk in chunks
             ], dtype=np.float32)
             arrays = {"sparse_reward": final}

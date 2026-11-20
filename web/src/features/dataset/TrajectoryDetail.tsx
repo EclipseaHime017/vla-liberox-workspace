@@ -9,6 +9,11 @@ import { rewardParameterLabels, rewardSourceLabels } from "./rewardVersions";
 
 const colors = ["#3775e8", "#e06c4f", "#3c9a70", "#9b63d4", "#c38b27", "#3c94a6", "#d14f86"];
 
+/** Versions saved before per-step accumulation record whether they used macro actions. */
+function legacyMacro(accumulated: unknown): string {
+  return accumulated === false ? " · 宏动作（旧版本）" : "";
+}
+
 type Plot = {
   title: string; unit: string; times: number[]; labels: string[]; values: number[][];
   interpolation?: "linear" | "step"; sampleLabels?: string[];
@@ -218,12 +223,12 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
       if (!saved || saved.source !== "final") continue;
       const series = chunkRewardSeries(saved.chunk_start_steps, saved.chunk_end_steps, saved.final_reward, detail.series.time_seconds);
       if (saved.original_final_reward && saved.sparse_reward && saved.dense_reward) {
-        values.push({ title: `Original Final Reward · ${saved.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
+        values.push({ title: `Original Final Reward${legacyMacro(saved.reward_config.accumulate_primitive_steps)}`,
           unit: "reward [-]", ...series, labels: ["sparse reward", "dense reward (κ × shape)", "original final reward"],
           values: saved.original_final_reward.map((value, i) => [saved.sparse_reward![i], saved.dense_reward![i], value]),
           interpolation: "linear" });
       }
-      values.push({ title: `Final Reward · ${saved.reward_config.accumulate_primitive_steps ? "逐步累计" : "宏动作"}`,
+      values.push({ title: `Final Reward${legacyMacro(saved.reward_config.accumulate_primitive_steps)}`,
         unit: "reward [-]", ...series, labels: ["final reward"], interpolation: "linear" });
     }
     const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
@@ -276,8 +281,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
         const shapeSeries = chunkRewardSeries(evaluation.pbrs_reward.chunk_start_steps,
           evaluation.pbrs_reward.chunk_end_steps, evaluation.pbrs_reward.shape_reward, detail.series.time_seconds);
         values.push({
-          title: `Original Final Reward · ${evaluation.pbrs_reward.accumulate_primitive_steps
-            ? "逐步累计" : "宏动作"}`,
+          title: `Original Final Reward${legacyMacro(evaluation.pbrs_reward.accumulate_primitive_steps)}`,
           unit: "reward [-]",
           times: shapeSeries.times,
           labels: ["sparse reward", "dense reward (κ × shape)", "original final reward"],

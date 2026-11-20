@@ -11,10 +11,10 @@ https://github.com/chongyi-zheng/value-flows/blob/01833354f547ad842bdaa21d2b761a
 - Inference: sample ``num_samples`` chunks and execute the one with the highest one-step
   flow Q (``train.methods.selectors``).
 
-Differences from the reference: action chunks with one discount per chunk (γ^L when rewards
-accumulate primitive steps); the critic's pixel encoder; the one-step distilled actor and its
-Q loss serve only the reference's online ``rpg`` extraction and are not ported; next chunks
-are scored over the variant's default executed steps.
+Differences from the reference: action chunks of L steps bootstrapping with γ^L; the critic's
+pixel encoder; the one-step distilled actor and its Q loss serve only the reference's online
+``rpg`` extraction and are not ported; next chunks are scored over the variant's default
+executed steps.
 """
 from __future__ import annotations
 
@@ -45,7 +45,6 @@ class ValueFlows:
             clip_flow_returns=cfg["clip_flow_returns"], critic_lr=cfg["critic_lr"],
             critic_optimizer=cfg["critic_optimizer"], critic_weight_decay=cfg["critic_weight_decay"],
             critic_max_grad_norm=cfg["critic_max_grad_norm"],
-            accumulate_primitive_steps=reward["accumulate_primitive_steps"],
         ).to(device)
         # Sampled next chunks execute as the trained child would by default.
         self.executed = min(execution_config(config.section("model"), trained=True)["open_loop_steps"],

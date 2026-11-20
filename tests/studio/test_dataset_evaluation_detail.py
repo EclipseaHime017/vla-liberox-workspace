@@ -28,8 +28,7 @@ def fixture(tmp_path):
         np.savez_compressed(arrays, boundary_steps=[0, 8, 16, 20],
                             final_reward=scores[[8, 16, 20]], stage_score=scores,
                             observation_steps=np.arange(21), time_seconds=times)
-        recipe = {"source": "stage", "stage_exponent": power, "gamma": .99,
-                  "accumulate_primitive_steps": False}
+        recipe = {"source": "stage", "stage_exponent": power, "gamma": .99}
         manifest_path = directory / "reward_manifest.json"
         manifest_path.write_text(json.dumps({"complete": True, "reward_config": recipe,
             "episodes": [{"run_id": "r", "reward_path": str(arrays), "reward_sha256": digest(arrays)}]}))

@@ -71,9 +71,6 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
         max_frames: next.rynnvalue.max_frames, batch_size: next.rynnvalue.batch_size,
         sampling_hz: next.robometer.sampling_hz, robometer_batch_size: next.robometer.batch_size,
         force_model: true };
-      for (const kind of ["final", "all"] as const) {
-        if (next[kind].fusion_mode === "multiplicative") next[kind].accumulate_primitive_steps = false;
-      }
       setConfigs(next); setConfigReady(true);
     }).catch((error) => { if (current) onError(String(error)); })
       .finally(() => { if (current) setBusy(false); });
@@ -105,7 +102,6 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
     const request: RewardParameters & { source: EvaluationOperation } = { source, overwrite_global: parameters.overwrite_global ?? false };
     if (source !== "robometer") {
       request.gamma = parameters.gamma;
-      request.accumulate_primitive_steps = multiplicative ? false : parameters.accumulate_primitive_steps;
     }
     if (finalMode) {
       request.stage_exponent = parameters.stage_exponent;
@@ -162,13 +158,12 @@ export function FrozenDatasetCard({ dataset, disabled, robometerUnavailable, onR
         <fieldset disabled={blocked} className={`parameter-grid ${source === "final" ? "final-reward-parameters" : ""}`}>
           <label>评价类型<select value={source} onChange={(event) => setSource(event.target.value as EvaluationOperation)}>
             {Object.entries(evaluationOperationLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          {finalMode && <><label>形式<select value={parameters.fusion_mode ?? "additive"} onChange={(event) => patch({ fusion_mode: event.target.value as "additive" | "multiplicative", ...(event.target.value === "multiplicative" ? { accumulate_primitive_steps: false } : {}) })}><option value="additive">相加</option><option value="multiplicative">相乘</option></select></label>
+          {finalMode && <><label>形式<select value={parameters.fusion_mode ?? "additive"} onChange={(event) => patch({ fusion_mode: event.target.value as "additive" | "multiplicative" })}><option value="additive">相加</option><option value="multiplicative">相乘</option></select></label>
             {numeric("stage_exponent", "Stage 指数 p", 1, "any")}
             {parameters.fusion_mode !== "multiplicative" && numeric("alpha", "Stage 系数 α", 0, "any", 1)}
             {numeric("shaping_weight", "塑形系数 κ", 0, "any")}</>}
           <label>同步覆盖全局评价<select value={String(parameters.overwrite_global ?? false)} onChange={(event) => patch({ overwrite_global: event.target.value === "true" })}><option value="false">Off</option><option value="true">On</option></select></label>
-          {source !== "robometer" && <>{numeric("gamma", "Discount γ", 0, "any", 1)}
-            {!multiplicative && <label>cumulative reward<select value={String(parameters.accumulate_primitive_steps ?? false)} onChange={(event) => patch({ accumulate_primitive_steps: event.target.value === "true" })}><option value="false">Off</option><option value="true">On</option></select></label>}</>}
+          {source !== "robometer" && numeric("gamma", "Discount γ", 0, "any", 1)}
           {(source === "rynnvalue" || source === "all") && numeric("max_frames", "RynnValue max_frames", 2, 1, 64)}
           {source === "rynnvalue" && numeric("shaping_weight", "Shape reward 系数 κ", 0, "any")}
           {(source === "robometer" || source === "all") && <>{numeric("sampling_hz", "Robometer fps", .01, "any", 20)}<label>前缀帧数<input value={4} disabled readOnly /></label></>}

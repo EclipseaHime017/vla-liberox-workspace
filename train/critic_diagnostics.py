@@ -85,7 +85,7 @@ def _batch(samples: list[dict], horizon: int, device: torch.device) -> dict:
     return {key: value.to(device) for key, value in default_collate(normalized).items()}
 
 
-def _finite_returns(dataset: ReplayDataset, discount: float, cumulative: bool) -> dict:
+def _finite_returns(dataset: ReplayDataset, discount: float) -> dict:
     result = {}
     episodes = {episode["run_id"]: (episode, annotation) for episode, _, annotation in dataset.items}
     for run_id, (episode, annotation) in episodes.items():
@@ -97,8 +97,7 @@ def _finite_returns(dataset: ReplayDataset, discount: float, cumulative: bool) -
             chunk = dataset.chunks[run_id][index]
             if int(chunk["end"]) > end:
                 continue
-            factor = discount ** (int(chunk["length"]) if cumulative else 1)
-            total = float(rewards[index]) + factor * total
+            total = float(rewards[index]) + discount ** int(chunk["length"]) * total
             result[(run_id, int(chunk["start"]))] = total
     return result
 
@@ -108,7 +107,7 @@ def _evaluate(agent: ExpectileCritic, dataset: ActionDataset, split: str, horizo
               batch_size: int, device: torch.device,
               stop_requested: Callable[[], bool] | None = None) -> list[dict]:
     has_rewards = isinstance(dataset, ReplayDataset)
-    returns = _finite_returns(dataset, agent.discount, agent.accumulate_primitive_steps) if has_rewards else {}
+    returns = _finite_returns(dataset, agent.discount) if has_rewards else {}
     order = sorted(range(len(dataset)), key=lambda index: (
         dataset.items[index][0]["run_id"],
         int(dataset.chunks[dataset.items[index][0]["run_id"]][dataset.items[index][1]]["start"])))
@@ -129,8 +128,7 @@ def _evaluate(agent: ExpectileCritic, dataset: ActionDataset, split: str, horizo
         targets = None
         if has_rewards:
             targets = chunk_bellman_target(batch["reward"], agent.value(batch["next_pixels"], batch["next_proprio"]),
-                batch["chunk_length"], batch["bootstrap_mask"], agent.discount,
-                agent.accumulate_primitive_steps).cpu().numpy()
+                batch["chunk_length"], batch["bootstrap_mask"], agent.discount).cpu().numpy()
         for index, sample in enumerate(samples):
             start, length = int(sample["start"]), int(sample["chunk_length"])
             row = {"split": split, "run_id": sample["run_id"], "start": start, "end": start + length,
@@ -249,7 +247,7 @@ def _run(training_config, probe_config, output, *, train_steps, batch_size, seed
                 torch.cuda.manual_seed(seed)
         agent = ExpectileCritic(horizon=horizon, action_dim=train_manifest["action_dim"],
             proprio_dim=train_manifest["proprio_dim"], discount=derivation["gamma"], expectile=cfg["expectile"],
-            tau=cfg["target_tau"], accumulate_primitive_steps=derivation["accumulate_primitive_steps"],
+            tau=cfg["target_tau"],
             **{key: cfg[key] for key in ("critic_lr", "value_lr", "critic_optimizer", "critic_weight_decay",
                 "value_optimizer", "value_weight_decay", "critic_max_grad_norm", "value_max_grad_norm")}).to(target)
         generator = torch.Generator(device="cpu").manual_seed(seed + 1)

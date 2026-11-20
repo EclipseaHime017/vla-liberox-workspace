@@ -106,10 +106,9 @@ def test_hash_and_foreign_trajectory_rejected_but_threshold_is_recipe_local():
             validate_stage_annotation(payload, **args)
 
 
-def test_chunk_endpoint_and_cumulative_actual_length():
+def test_stage_reward_accumulates_the_actual_length():
     scores = np.asarray([-1, -.9, -.8, -.7, -.6])
-    assert stage_chunk_reward(scores, 1, 3, .9, False) == -.6
-    assert stage_chunk_reward(scores, 1, 3, .9, True) == pytest.approx(-.8 - .9 * .7 - .9**2 * .6)
+    assert stage_chunk_reward(scores, 1, 3, .9) == pytest.approx(-.8 - .9 * .7 - .9**2 * .6)
 
 
 def _select(config, source):
@@ -262,7 +261,7 @@ def test_missing_stage_labels_stop_before_vla_components_load(configured, monkey
     assert not Path(configured.raw["paths"]["output_dir"]).exists()
 
 
-def test_stage_replay_uses_actual_chunk_endpoint_without_reward_model(configured):
+def test_stage_replay_accumulates_the_actual_chunk_without_reward_model(configured):
     from test_replay import _stats
     from train.replay import ReplayDataset
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
@@ -278,7 +277,9 @@ def test_stage_replay_uses_actual_chunk_endpoint_without_reward_model(configured
             context = stage_annotation_context(snapshot["annotations"][episode["run_id"]],
                 done=source["done"], success_consecutive_steps=5)
         score = stage_scores(context)
-        assert item["reward"].item() == pytest.approx(score[chunk["end"]])
+        gamma = configured.section("reward")["gamma"]
+        assert item["reward"].item() == pytest.approx(
+            float(np.dot(gamma ** np.arange(chunk["length"]), score[chunk["start"] + 1:chunk["end"] + 1])))
         assert item["action_mask"].sum().item() == chunk["length"]
         if episode["terminal_step"] is not None and chunk["start"] > episode["terminal_step"]:
             post_success.append(item)

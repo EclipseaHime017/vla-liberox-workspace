@@ -45,8 +45,7 @@ def full_reward(jobs, dataset, source="stage", exponent=2):
     scores = -1 + (np.arange(18)/17)**exponent
     np.savez(arrays, final_reward=scores[[8, 16, 17]], boundary_steps=[0, 8, 16, 17],
              stage_score=scores, time_seconds=np.arange(18)/20)
-    recipe = {"source": source, "rynnvalue": False, "gamma": raw["reward"]["gamma"],
-              "accumulate_primitive_steps": False}
+    recipe = {"source": source, "rynnvalue": False, "gamma": raw["reward"]["gamma"]}
     if source == "stage":
         recipe["stage_exponent"] = exponent
     index = {"schema_version": 1, "kind": "derived_iql_reward", "complete": True,
@@ -83,7 +82,7 @@ def test_each_dataset_source_remains_selectable_after_other_evaluations(tmp_path
 def test_rynnvalue_and_final_training_pin_the_selected_source(tmp_path, queued):
     jobs, dataset = setup_jobs(tmp_path)
     rynn = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="rynnvalue",
-                  gamma=.87, shaping_weight=.2, accumulate_primitive_steps=True))
+                  gamma=.87, shaping_weight=.2))
     final = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="final",
                    alpha=.5, shaping_weight=0., gamma=.92))
     train = jobs.enqueue_training if queued else jobs.start_training
@@ -100,7 +99,7 @@ def test_rynnvalue_and_final_training_pin_the_selected_source(tmp_path, queued):
         assert effective["manifest_path"] == version["reward_manifest_path"]
         assert effective["gamma"] == .95
         assert effective["shaping_weight"] == (.2 if source == "rynnvalue" else 0.)
-        assert effective["accumulate_primitive_steps"] == (source == "rynnvalue")
+        assert "accumulate_primitive_steps" not in effective
         assert jobs.datasets.get(dataset["id"])["reward_version_id"] == final["id"]
 
 
@@ -235,7 +234,7 @@ def test_legacy_global_stage_and_new_sparse_coexist_and_overwrite_independently(
     path.rename(legacy)
     before = legacy.read_bytes()
     sparse_index = json.loads(Path(stage["reward_manifest_path"]).read_text())
-    sparse_index["reward_config"] = {"source": "sparse", "gamma": .99, "accumulate_primitive_steps": False}
+    sparse_index["reward_config"] = {"source": "sparse", "gamma": .99}
     sparse = tmp_path / "sparse.json"
     sparse.write_text(json.dumps(sparse_index))
     bind_reward_snapshot(Path(stage["prepared_manifest_path"]), sparse)

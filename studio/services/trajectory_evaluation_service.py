@@ -425,9 +425,9 @@ class TrajectoryEvaluationService:
                         "chunk_start_steps": boundary_steps[:-1].tolist(),
                         "chunk_end_steps": boundary_steps[1:].tolist(),
                         "chunk_lengths": chunk_lengths.tolist(),
-                        "accumulate_primitive_steps": bool(
-                            reward_config.get("accumulate_primitive_steps", False)
-                        ),
+                        # Versions saved before per-step accumulation record their mode.
+                        **({"accumulate_primitive_steps": bool(reward_config["accumulate_primitive_steps"])}
+                           if "accumulate_primitive_steps" in reward_config else {}),
                         "description": (payload.get("pbrs_reward") or {}).get("description"),
                     },
                     "reward_config": reward_config,

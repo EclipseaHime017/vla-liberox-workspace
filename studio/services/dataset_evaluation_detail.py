@@ -180,7 +180,8 @@ def _reward_arrays_detail(version: dict, manifest: dict, item: dict,
                 "sparse_reward", "dense_reward", "shape_reward", "final_reward",
                 "chunk_start_steps", "chunk_end_steps", "chunk_lengths") if key in result},
         }
-        rynn["pbrs_reward"]["accumulate_primitive_steps"] = bool(recipe.get("accumulate_primitive_steps"))
+        if "accumulate_primitive_steps" in recipe:  # versions saved before per-step accumulation
+            rynn["pbrs_reward"]["accumulate_primitive_steps"] = bool(recipe["accumulate_primitive_steps"])
     return result, rynn
 
 

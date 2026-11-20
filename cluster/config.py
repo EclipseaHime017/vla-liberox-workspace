@@ -137,8 +137,8 @@ def load_server_config(path: Path) -> ServerConfig:
         raise ValueError("task_id must be null or a non-empty canonical task ID")
     overrides = validate_overrides(raw["overrides"])
     # Semantic evaluator parameters belong to each copied global evaluation.
-    if set(overrides["reward"]) - {"gamma", "accumulate_primitive_steps", "zero_success_potential"}:
-        raise ValueError("Server reward overrides only accept gamma, accumulate_primitive_steps and zero_success_potential")
+    if set(overrides["reward"]) - {"gamma", "zero_success_potential"}:
+        raise ValueError("Server reward overrides only accept gamma and zero_success_potential")
     if set(overrides["data"]) - {"include_post_success", "validation_fraction", "split_seed", "bootstrap_failed_end"}:
         raise ValueError("Server data overrides accept include_post_success, validation_fraction, split_seed and bootstrap_failed_end")
     if "device" in overrides["training"]:

@@ -17,12 +17,11 @@ from test_fusion_rewards import example, recipe
 from test_stage_rewards import _save_annotations
 
 
-@pytest.mark.parametrize("cumulative", [False, True])
 @pytest.mark.parametrize("alpha", [0., .5, 1.])
-def test_base_coefficient_is_independent_of_stage(cumulative, alpha):
+def test_base_coefficient_is_independent_of_stage(alpha):
     signals = {"stage_score": np.array([-1., -.8, -.4, -.2]),
                "absolute_temporal_distance_seconds": np.array([[3.], [1.]])}
-    settings = recipe(alpha=alpha, shaping_weight=.1, accumulate_primitive_steps=cumulative)
+    settings = recipe(alpha=alpha, shaping_weight=.1)
     legacy = fused_reward_arrays(example(), settings, signals)
     explicit_legacy = fused_reward_arrays(example(), {**settings, "base_coefficient": 1 - alpha}, signals)
     for key in legacy:

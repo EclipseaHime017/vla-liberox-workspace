@@ -119,7 +119,6 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
         "chunk_start_steps": [0],
             "chunk_end_steps": [2],
             "chunk_lengths": [2],
-            "accumulate_primitive_steps": False,
             "description": None,
     }
     assert service.exists(run)

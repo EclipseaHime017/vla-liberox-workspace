@@ -9,7 +9,7 @@
 | IFQL | 等权 flow BC | expectile 双 Q + V | 采样 N 个动作块，执行在线 critic `min(Q1, Q2)` 最高的一个 | π₀.₅ |
 | VF（Value Flows） | 等权 flow BC | 双 flow 回报分布 critic | 采样 N 个动作块，执行单步 flow Q 最高的一个 | π₀.₅ |
 
-IFQL 是 IDQL 的 flow 策略版本，参考 [seohongpark/fql](https://github.com/seohongpark/fql/blob/e8cd16eb490332924dfa2492097219f181765933/agents/ifql.py)（[value-flows](https://github.com/chongyi-zheng/value-flows) 中的副本相同）。与参考实现的差异：按动作块建模，每块一次折扣；critic 使用像素编码器；V 与 Q 依次更新、各用一个优化器。默认值见 `configs/methods/ifql.yaml`（expectile 0.9、tau 0.005、N=32）。
+IFQL 是 IDQL 的 flow 策略版本，参考 [seohongpark/fql](https://github.com/seohongpark/fql/blob/e8cd16eb490332924dfa2492097219f181765933/agents/ifql.py)（[value-flows](https://github.com/chongyi-zheng/value-flows) 中的副本相同）。与参考实现的差异：按动作块建模，L 步的转移用 γᴸ 自举；critic 使用像素编码器；V 与 Q 依次更新、各用一个优化器。默认值见 `configs/methods/ifql.yaml`（expectile 0.9、tau 0.005、N=32）。
 
 Value Flows 参考 [chongyi-zheng/value-flows](https://github.com/chongyi-zheng/value-flows/blob/01833354f547ad842bdaa21d2b761a16069f9724/agents/value_flows.py) 的离线设定（`'rs'` 策略提取）：critic 是两个回报向量场，用 BCFM 与 DCFM 损失训练，并按回报不确定度（flow 对噪声的 jvp）加置信度权重；下一状态的动作块在训练时由当前 actor 采样 `train_num_samples` 个、由在线 critic 选出最优的一个；回报裁剪到训练回放的奖励范围除以 (1−γ)。与参考实现的差异：按动作块建模；critic 使用像素编码器；参考实现中只服务在线 `rpg` 提取的单步蒸馏 actor 及其 Q 损失未移植；采样的下一动作块按该模型默认的执行步数打分。默认值见 `configs/methods/vf.yaml`（Adam 3e-4、tau 0.005、N=16、10 步积分）。训练时每个可自举的转移都要对 π₀.₅ 采样一次，单步耗时明显高于 IFQL。
 

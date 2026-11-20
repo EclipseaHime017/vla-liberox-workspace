@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from core.config import load_train_config, validate_train_config
+from core.config import current_reward_settings, load_train_config, validate_train_config
 from core.config_sources import merge_config
 from core.io import atomic_json
 from core.methods import training_method
@@ -65,7 +65,7 @@ def training_settings(server, task: GlobalTask, *, overrides=None, source=None) 
             saved = records[0]
             raw["reward"].pop("base_coefficient", None)
             raw["reward"].update(saved.get("annotation_config", {}))
-            raw["reward"].update(saved["reward_config"])
+            raw["reward"].update(current_reward_settings(saved["reward_config"]))
             raw["reward"]["final_normalization"] = saved["reward_config"].get("final_normalization", "none")
         raw["reward"].update(changes.get("reward", {}))
         if name == "stage":
@@ -74,11 +74,6 @@ def training_settings(server, task: GlobalTask, *, overrides=None, source=None) 
             raw["reward"]["stage_exponent"] = stage_exponent
         raw["reward"].update(source=name, rynnvalue=name == "rynnvalue" or (
             name == "final" and raw["reward"]["shaping_weight"] > 0))
-        macro_only = any(record["reward_config"].get("fusion_mode") == "multiplicative" for record in records)
-        if name == "final" and macro_only:
-            if changes.get("reward", {}).get("accumulate_primitive_steps") is True:
-                raise ValueError("Global Final Reward includes multiplication; cumulative reward must be Off")
-            raw["reward"]["accumulate_primitive_steps"] = False
     raw["model"]["contract"] = model_contract(raw["model"])
     return validate_train_config(raw, server.path).raw
 

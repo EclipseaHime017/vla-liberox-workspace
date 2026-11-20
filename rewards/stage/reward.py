@@ -34,10 +34,8 @@ def stage_scores(annotation: dict[str, Any], exponent: float | None = None) -> n
     return scores.astype(np.float32)
 
 
-def stage_chunk_reward(scores: np.ndarray, start: int, length: int,
-                       gamma: float, accumulate_primitive_steps: bool) -> float:
+def stage_chunk_reward(scores: np.ndarray, start: int, length: int, gamma: float) -> float:
+    """Discounted per-step Stage scores over [start, start + length)."""
     if length < 1 or start < 0 or start + length >= len(scores):
         raise ValueError("Invalid stage reward chunk bounds")
-    if accumulate_primitive_steps:
-        return float(np.dot(np.power(gamma, np.arange(length)), scores[start + 1:start + length + 1]))
-    return float(scores[start + length])
+    return float(np.dot(np.power(gamma, np.arange(length)), scores[start + 1:start + length + 1]))

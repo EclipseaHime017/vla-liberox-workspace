@@ -41,18 +41,17 @@ def test_failed_end_bootstraps_only_when_enabled(configured, include_post_succes
         np.testing.assert_array_equal(sample["next_pixels"], legacy[i]["next_pixels"])
 
 
-@pytest.mark.parametrize("primitive", [True, False])
-def test_success_potential_zero_after_confirming_action(primitive):
+def test_success_potential_zero_after_confirming_action():
     done = np.array([False, False, True, True])
-    before = chunk_reward_components(done, 0, 2, 8, 6, .9, .1, primitive, True, True)
-    legacy = chunk_reward_components(done, 0, 2, 8, 6, .9, .1, primitive, True)
+    before = chunk_reward_components(done, 0, 2, 8, 6, .9, .1, True, True)
+    legacy = chunk_reward_components(done, 0, 2, 8, 6, .9, .1, True)
     assert before == legacy
-    success = chunk_reward_components(done, 2, 1, 6, 4, .9, .1, primitive, True, True)
+    success = chunk_reward_components(done, 2, 1, 6, 4, .9, .1, True, True)
     assert success[1] == 6
-    tail = chunk_reward_components(done, 3, 1, 4, 2, .9, .1, primitive, True, True)
+    tail = chunk_reward_components(done, 3, 1, 4, 2, .9, .1, True, True)
     assert tail == (0, 0, 0)
     failure = np.zeros(4, bool)
-    assert chunk_reward_components(failure, 2, 2, 6, 4, .9, .1, primitive, True, True) == chunk_reward_components(failure, 2, 2, 6, 4, .9, .1, primitive, True)
+    assert chunk_reward_components(failure, 2, 2, 6, 4, .9, .1, True, True) == chunk_reward_components(failure, 2, 2, 6, 4, .9, .1, True)
 
 
 def test_false_preserves_recipe_and_config_accepts_boolean(configured):

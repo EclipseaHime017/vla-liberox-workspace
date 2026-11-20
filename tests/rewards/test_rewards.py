@@ -17,7 +17,7 @@ from core.io import sha256_file, stable_hash
 from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
 from rewards.rynnvalue.model import RynnValueAnnotator, validate_rynnvalue_config_contract, validate_rynnvalue_runtime_dtype
 from rewards.rynnvalue.annotate import annotate_manifest
-from rewards.pbrs import chunk_reward_components, shaped_chunk_reward
+from rewards.pbrs import chunk_reward_components
 from rewards.manifest import load_reward_index, materialize_reward_manifest
 from core.runtime import run_cuda_stage
 
@@ -52,39 +52,22 @@ class CountingAnnotator(FakeAnnotator):
         return super().predict(prompt, frames)
 
 
-def test_chunk_reward_treats_the_action_chunk_as_one_macro_transition():
+def test_chunk_reward_accumulates_primitive_step_costs():
     sparse, shaping, reward = chunk_reward_components(
         np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
         gamma=0.9, shaping_weight=0.1,
     )
-    assert np.isclose(sparse, -1.0)
-    assert np.isclose(shaping, 2.1)
-    assert np.isclose(reward, -0.79)
+    assert np.isclose(sparse, -(1.0 + 0.9 + 0.9**2))
+    assert np.isclose(shaping, 3.0 - 0.9**3)
+    assert np.isclose(reward, sparse + 0.1 * shaping)
 
     terminal_sparse, terminal_shaping, terminal_reward = chunk_reward_components(
         np.asarray([False, False, True]), 0, 3, value_start=3, value_end=0,
         gamma=0.9, shaping_weight=0.1,
     )
-    assert np.isclose(terminal_sparse, 0.0)
+    assert np.isclose(terminal_sparse, -(1.0 + 0.9))
     assert np.isclose(terminal_shaping, 3.0)
-    assert np.isclose(terminal_reward, 0.3)
-    assert np.isclose(
-        shaped_chunk_reward(
-            np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
-            gamma=0.9, shaping_weight=0.1,
-        ),
-        reward,
-    )
-
-
-def test_chunk_reward_can_accumulate_primitive_step_costs():
-    sparse, shaping, reward = chunk_reward_components(
-        np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
-        gamma=0.9, shaping_weight=0.1, accumulate_primitive_steps=True,
-    )
-    assert np.isclose(sparse, -(1.0 + 0.9 + 0.9**2))
-    assert np.isclose(shaping, 3.0 - 0.9**3)
-    assert np.isclose(reward, sparse + 0.1 * shaping)
+    assert np.isclose(terminal_reward, terminal_sparse + 0.3)
 
 
 def test_rynnvalue_switch_keeps_shape_for_diagnostics_but_trains_on_sparse_reward():
@@ -92,8 +75,8 @@ def test_rynnvalue_switch_keeps_shape_for_diagnostics_but_trains_on_sparse_rewar
         np.asarray([False, False, False]), 0, 3, value_start=3, value_end=1,
         gamma=0.9, shaping_weight=0.1, rynnvalue=False,
     )
-    assert np.isclose(sparse, -1.0)
-    assert np.isclose(shaping, 2.1)
+    assert np.isclose(sparse, -(1.0 + 0.9 + 0.9**2))
+    assert np.isclose(shaping, 3.0 - 0.9**3)
     assert np.isclose(reward, sparse)
 
 
@@ -159,13 +142,13 @@ def test_reward_cache_resumes_without_reannotation(configured):
     assert annotator.calls == first_calls
 
 
-def test_reward_mode_change_reuses_heads_and_rebuilds_manifest(
+def test_gamma_change_reuses_heads_and_rebuilds_manifest(
     configured, monkeypatch,
 ):
     prepare_dataset(configured)
     annotation_path = annotate_manifest(configured, FakeAnnotator())
     annotation_before = json.loads(annotation_path.read_text(encoding="utf-8"))
-    configured.raw["reward"]["accumulate_primitive_steps"] = True
+    configured.raw["reward"]["gamma"] = 0.95
 
     class UnexpectedModelLoad:
         def __init__(self, _config):
@@ -173,7 +156,7 @@ def test_reward_mode_change_reuses_heads_and_rebuilds_manifest(
 
     monkeypatch.setattr(rynnvalue_module, "RynnValueAnnotator", UnexpectedModelLoad)
     rebuilt = load_reward_index(configured)
-    assert rebuilt["reward_config"]["accumulate_primitive_steps"] is True
+    assert rebuilt["reward_config"]["gamma"] == 0.95
     annotation_after = json.loads(annotation_path.read_text(encoding="utf-8"))
     assert annotation_after == annotation_before
     with np.load(rebuilt["episodes"][0]["reward_path"], allow_pickle=False) as arrays:
@@ -202,12 +185,12 @@ def test_disabling_rynnvalue_reuses_evaluation_and_materializes_sparse_only(
         assert np.array_equal(arrays["pbrs_chunk_reward"], arrays["sparse_reward"])
 
 
-def test_manifest_without_explicit_reward_mode_is_rebuilt(configured, monkeypatch):
+def test_manifest_with_the_macro_flag_is_rebuilt(configured, monkeypatch):
     prepare_dataset(configured)
     annotate_manifest(configured, FakeAnnotator())
     manifest_path = materialize_reward_manifest(configured)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    del manifest["reward_config"]["accumulate_primitive_steps"]
+    manifest["reward_config"]["accumulate_primitive_steps"] = False
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     class UnexpectedModelLoad:
@@ -216,10 +199,10 @@ def test_manifest_without_explicit_reward_mode_is_rebuilt(configured, monkeypatc
 
     monkeypatch.setattr(rynnvalue_module, "RynnValueAnnotator", UnexpectedModelLoad)
     rebuilt = load_reward_index(configured)
-    assert rebuilt["reward_config"]["accumulate_primitive_steps"] is False
+    assert "accumulate_primitive_steps" not in rebuilt["reward_config"]
 
 
-def test_v4_sidecars_reuse_official_outputs_and_recompute_macro_rewards(
+def test_v4_sidecars_reuse_official_outputs_and_recompute_rewards(
     configured, monkeypatch,
 ):
     prepare_dataset(configured)
@@ -408,13 +391,14 @@ def test_sparse_reward_uses_only_debounced_terminal(configured):
     branch = next(item for item in index["episodes"] if item["run_id"] == "branch")
     with np.load(branch["reward_path"], allow_pickle=False) as annotation:
         rewards = annotation["pbrs_chunk_reward"]
-    # The chunk completing the confirmation streak receives the success reward,
-    # irrespective of its length or earlier transient done=True samples.
-    success_chunk = next(
-        index for index, chunk in enumerate(prepared_branch["evaluation_chunks"])
+    # Only the action completing the confirmation streak is free of the step cost,
+    # irrespective of earlier transient done=True samples.
+    gamma = configured.section("reward")["gamma"]
+    success_chunk, chunk = next(
+        (index, chunk) for index, chunk in enumerate(prepared_branch["evaluation_chunks"])
         if chunk["end"] == prepared_branch["terminal_step"] + 1
     )
-    assert np.isclose(rewards[success_chunk], 0.0)
+    assert np.isclose(rewards[success_chunk], -sum(gamma ** k for k in range(chunk["length"] - 1)))
     # Training also retains the recorded tail, whose saved sparse reward is zero.
     assert success_chunk < len(rewards) - 1
     assert np.isclose(rewards[-1], 0.0)

@@ -430,7 +430,7 @@ def test_dataset_annotation_completion_does_not_overwrite_trajectory_sidecar(
         "created_at": "2026-08-24T10:00:00+00:00",
         "completed_at": "2026-08-24T10:01:00+00:00",
         "output_path": str(tmp_path / "datasets" / "ds" / "annotations" / "ann"),
-        "parameters": {"max_frames": 16, "accumulate_primitive_steps": True},
+        "parameters": {"max_frames": 16},
     }
     (job_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
     jobs.repository = SimpleNamespace(upsert=lambda *_: None)
@@ -452,9 +452,7 @@ def test_dataset_annotation_completion_does_not_overwrite_trajectory_sidecar(
 
     jobs._reconcile("ann")
     assert updates == [(('ds', 'READY'), {
-        "annotation_id": "ann", "annotation_config": {
-            "max_frames": 16, "accumulate_primitive_steps": True,
-        },
+        "annotation_id": "ann", "annotation_config": {"max_frames": 16},
     })]
 
 

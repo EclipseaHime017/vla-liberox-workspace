@@ -61,7 +61,7 @@ TRAIN_SCHEMA = {
                "manifest_path": None, "manifest_sha256": None, "version_id": None,
                "gamma": None, "shaping_weight": None,
                "robot_description": None,
-               "camera_description": None, "accumulate_primitive_steps": None},
+               "camera_description": None},
     "bc": {},
     "iql": {"critic_image_size": None, "critic_lr": None, "value_lr": None,
             "critic_optimizer": None, "critic_weight_decay": None,
@@ -210,6 +210,16 @@ def reward_source(reward: dict[str, Any]) -> str:
     return source
 
 
+# Reward versions saved before per-step accumulation became the only mode record this
+# flag; it no longer changes any reward.
+LEGACY_REWARD_KEYS = frozenset({"accumulate_primitive_steps"})
+
+
+def current_reward_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Saved reward settings without keys that no longer have a meaning."""
+    return {key: value for key, value in settings.items() if key not in LEGACY_REWARD_KEYS}
+
+
 def needs_rynnvalue(reward: dict[str, Any]) -> bool:
     source = reward_source(reward)
     return source == "rynnvalue" or (source == "final" and reward["shaping_weight"] > 0)
@@ -219,12 +229,6 @@ def needs_stage(reward: dict[str, Any]) -> bool:
     source = reward_source(reward)
     return source == "stage" or (source == "final" and (
         reward.get("fusion_mode", "additive") == "multiplicative" or reward.get("alpha", 0) > 0))
-
-
-def effective_cumulative(reward: dict[str, Any]) -> bool:
-    """Multiplicative Final Reward is defined only on macro-action transitions."""
-    return bool(reward["accumulate_primitive_steps"]) and not (
-        reward_source(reward) == "final" and reward.get("fusion_mode") == "multiplicative")
 
 
 def load_train_config(path: Path = DEFAULT_TRAIN_CONFIG, *, method: str | None = None,
@@ -408,9 +412,6 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
                 raise ValueError("reward.base_coefficient requires additive Final Reward")
         if reward["final_normalization"] not in {"none", "initial_chunk_v1"}:
             raise ValueError("Unsupported reward.final_normalization")
-        if type(reward["accumulate_primitive_steps"]) is not bool:
-            raise TypeError("reward.accumulate_primitive_steps must be boolean")
-        reward["accumulate_primitive_steps"] = effective_cumulative(reward)
         if reward["dtype"] != "bfloat16":
             raise ValueError(
                 "Version 1 requires reward.dtype=bfloat16 to match the pinned RynnValue-4B "

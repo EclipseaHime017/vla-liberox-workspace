@@ -78,7 +78,7 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
     done = np.zeros(episode["recorded_action_count"], dtype=bool)
     if episode["terminal_step"] is not None:
         done[episode["terminal_step"]:] = True
-    gamma, cumulative = recipe["gamma"], recipe["accumulate_primitive_steps"]
+    gamma = recipe["gamma"]
     annotation = None
     if source == "stage":
         if use_dataset_labels:
@@ -97,13 +97,12 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
         context = stage_reward.stage_annotation_context(annotation, done=arrays["environment_done"],
             success_consecutive_steps=header["success_consecutive_steps"], exponent=recipe["stage_exponent"])
         scores = stage_reward.stage_scores(context)
-        final = [stage_reward.stage_chunk_reward(scores, c["start"], c["length"], gamma, cumulative)
+        final = [stage_reward.stage_chunk_reward(scores, c["start"], c["length"], gamma)
                  for c in episode["evaluation_chunks"]]
         arrays["stage_score"] = scores
         arrays["stage_chunk_reward"] = np.asarray(final, dtype=np.float32)
     else:
-        final = [(pbrs.sparse_primitive_return(done, c["start"], c["length"], gamma) if cumulative
-                  else pbrs.sparse_macro_reward(done, c["start"], c["length"]))
+        final = [pbrs.sparse_primitive_return(done, c["start"], c["length"], gamma)
                  for c in episode["evaluation_chunks"]]
         arrays["sparse_reward"] = np.asarray(final, dtype=np.float32)
     arrays.update(boundary_steps=np.asarray(episode["reward_boundaries"], dtype=np.int64),

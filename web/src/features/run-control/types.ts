@@ -210,6 +210,7 @@ export type EvaluationSourceContext = {
 export type RewardParameters = {
   alpha?: number; fusion_mode?: "additive" | "multiplicative"; robometer_batch_size?: number;
   gamma?: number; shaping_weight?: number; stage_exponent?: number;
+  /** Recorded only by versions saved before per-step accumulation. */
   accumulate_primitive_steps?: boolean; max_frames?: number; batch_size?: number;
   sampling_hz?: number; force_model?: boolean; checkpoint?: string; revision?: string;
   overwrite_global?: boolean;

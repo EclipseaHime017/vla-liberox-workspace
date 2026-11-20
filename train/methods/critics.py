@@ -92,14 +92,9 @@ def chunk_bellman_target(
     chunk_length: torch.Tensor,
     bootstrap_mask: torch.Tensor,
     discount: float,
-    accumulate_primitive_steps: bool = False,
 ) -> torch.Tensor:
-    """Bellman target matching the configured chunk reward semantics."""
-    if accumulate_primitive_steps:
-        bootstrap_discount = discount ** chunk_length.float()
-    else:
-        bootstrap_discount = torch.full_like(next_value, discount, dtype=torch.float32)
-    return reward.float() + bootstrap_discount * bootstrap_mask.float() * next_value
+    """r + gamma^L * V(s'): rewards accumulate the transition's L primitive steps."""
+    return reward.float() + discount ** chunk_length.float() * bootstrap_mask.float() * next_value
 
 
 @dataclass
@@ -124,7 +119,6 @@ class ExpectileCritic(nn.Module):
                  critic_optimizer: str = "adamw", critic_weight_decay: float = 0.01,
                  value_optimizer: str = "adamw", value_weight_decay: float = 0.01,
                  critic_max_grad_norm: float = 10.0, value_max_grad_norm: float = 10.0,
-                 accumulate_primitive_steps: bool = False,
                  encoder_factory: Callable[[int], nn.Module] = PixelEncoder):
         super().__init__()
         self.q1 = QNetwork(horizon, action_dim, proprio_dim, encoder_factory)
@@ -136,7 +130,6 @@ class ExpectileCritic(nn.Module):
         self.geometry = {"horizon": int(horizon), "action_dim": int(action_dim), "proprio_dim": int(proprio_dim)}
         self.critic_max_grad_norm = float(critic_max_grad_norm)
         self.value_max_grad_norm = float(value_max_grad_norm)
-        self.accumulate_primitive_steps = bool(accumulate_primitive_steps)
         if critic_optimizer not in _OPTIMIZERS or value_optimizer not in _OPTIMIZERS:
             raise ValueError("critic_optimizer and value_optimizer must be adam or adamw")
         self.optimizer_settings = {
@@ -207,7 +200,6 @@ class ExpectileCritic(nn.Module):
             target = chunk_bellman_target(
                 batch["reward"], next_value, batch["chunk_length"],
                 batch["bootstrap_mask"], self.discount,
-                self.accumulate_primitive_steps,
             )
         q1 = self.q1(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
         q2 = self.q2(batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
@@ -334,7 +326,7 @@ class ValueFlowCritic(nn.Module):
                  bcfm_lambda: float = 1.0, dcfm_lambda: float = 1.0, confidence_weight_temp: float = 0.3,
                  ret_agg: str = "mean", q_agg: str = "mean", clip_flow_returns: bool = True,
                  critic_lr: float = 3e-4, critic_optimizer: str = "adam", critic_weight_decay: float = 0.0,
-                 critic_max_grad_norm: float = 10.0, accumulate_primitive_steps: bool = False,
+                 critic_max_grad_norm: float = 10.0,
                  encoder_factory: Callable[[int], nn.Module] = PixelEncoder):
         super().__init__()
         self.flow1 = ValueVectorField(horizon, action_dim, proprio_dim, encoder_factory)
@@ -348,7 +340,6 @@ class ValueFlowCritic(nn.Module):
         self.bcfm_lambda, self.dcfm_lambda = float(bcfm_lambda), float(dcfm_lambda)
         self.temperature, self.ret_agg, self.q_agg = float(confidence_weight_temp), ret_agg, q_agg
         self.clip_flow_returns = bool(clip_flow_returns)
-        self.accumulate_primitive_steps = bool(accumulate_primitive_steps)
         self.max_grad_norm = float(critic_max_grad_norm)
         self.return_bounds: tuple[float, float] | None = None
         self.optimizer_settings = (_OPTIMIZERS[critic_optimizer],
@@ -408,11 +399,8 @@ class ValueFlowCritic(nn.Module):
         here = (batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
         there = (batch["next_pixels"], batch["next_proprio"], next_actions, next_mask)
         reward = batch["reward"].float().unsqueeze(-1)
-        if self.accumulate_primitive_steps:
-            discount = self.discount ** batch["chunk_length"].float()
-        else:
-            discount = torch.full_like(batch["reward"], self.discount, dtype=torch.float32)
-        discount = (discount * batch["bootstrap_mask"].float()).unsqueeze(-1)
+        discount = (self.discount ** batch["chunk_length"].float()
+                    * batch["bootstrap_mask"].float()).unsqueeze(-1)
         targets = (self.target_flow1, self.target_flow2)
         with torch.no_grad():
             target_here = [flow.condition(*here) for flow in targets]

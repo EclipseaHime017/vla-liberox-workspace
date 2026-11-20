@@ -24,7 +24,7 @@ from studio.services.inherited_reward_inputs import (
     reconstruct_episode,
     validate_global_values,
 )
-from studio.services.dataset_reward_versions import macro_only_reward
+from core.config import current_reward_settings
 
 
 def _json(path: Path) -> dict:
@@ -193,12 +193,9 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
         "source_dataset_id": dataset["id"], "source_dataset_sha256": dataset["dataset_sha256"],
         "episode_count": len(episodes), "success_count": sum(bool(ep["success"]) for ep in episodes)}
     raw["reward"].pop("base_coefficient", None)
-    raw["reward"].update(entries[0]["saved_reward_config"])
+    raw["reward"].update(current_reward_settings(entries[0]["saved_reward_config"]))
     raw["reward"]["final_normalization"] = entries[0]["saved_reward_config"].get("final_normalization", "none")
     raw["reward"].update(entries[0]["saved_annotation_config"])
-    macro_only = any(macro_only_reward(entry["saved_reward_config"]) for entry in entries)
-    if macro_only:
-        raw["reward"]["accumulate_primitive_steps"] = False
     raw["reward"].update(source=source, rynnvalue=source == "rynnvalue" or (
         source == "final" and raw["reward"]["shaping_weight"] > 0),
                           manifest_path=None, manifest_sha256=None, version_id=None)
@@ -214,7 +211,6 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
     atomic_write_json(reward_path, index)
     atomic_write_yaml(config_path, raw)
     return {"id": identifier, "evaluator": source, "status": "READY", "complete": True,
-        "macro_only": macro_only,
         "origin": "global", "work_dir": str(work), "config_path": str(config_path),
         "config_sha256": _hash(config_path), "prepared_manifest_path": str(prepared_path),
         "prepared_manifest_sha256": _hash(prepared_path), "reward_manifest_path": str(reward_path),

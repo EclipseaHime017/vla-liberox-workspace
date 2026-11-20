@@ -457,8 +457,6 @@ def train(config: LoadedConfig) -> Path:
     validate_training_manifest(manifest, config)
     reward_index = load_reward_index(config) if method.requires_rewards else None
     reward_hash = reward_manifest_digest(reward_index) if reward_index is not None else None
-    reward_mode = ("cumulative_primitive_steps" if config.section("reward")["accumulate_primitive_steps"]
-                   else "macro_action") if method.requires_rewards else "not_applicable"
     micro_batch_size = int(training_cfg["micro_batch_size"])
     _validate_single_task_micro_batch(manifest, micro_batch_size)
     backend = model_backend(config.raw)
@@ -548,8 +546,7 @@ def train(config: LoadedConfig) -> Path:
     )
     LOG.info(
         "Training started: run=%s, replay_chunks=%d, steps=%d->%d, warmup=%d, "
-        "micro_batch=%d, actor_effective_batch=%d, checkpoint_interval=%d, "
-        "reward_mode=%s, device=%s",
+        "micro_batch=%d, actor_effective_batch=%d, checkpoint_interval=%d, device=%s",
         run_id,
         len(dataset),
         start_step,
@@ -558,7 +555,6 @@ def train(config: LoadedConfig) -> Path:
         micro_batch_size,
         micro_batch_size * accumulation,
         int(training_cfg["checkpoint_interval"]),
-        reward_mode,
         device,
     )
     with ExitStack() as stack:
@@ -596,9 +592,7 @@ def train(config: LoadedConfig) -> Path:
             f"method={method.name} | run={run_id} | steps={start_step}->{total_steps} | "
             f"micro_batch={micro_batch_size} | "
             f"actor_batch={micro_batch_size * accumulation} | "
-            "reward_mode="
-            f"{reward_mode} "
-            f"| device={device}",
+            f"device={device}",
             flush=True,
         )
         for step in range(start_step, total_steps):

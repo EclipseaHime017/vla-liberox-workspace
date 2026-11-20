@@ -206,7 +206,6 @@ class RunTestLabelRequest(StrictModel):
 class DatasetAnnotationRequest(StrictModel):
     source: Literal["sparse", "stage", "rynnvalue", "robometer", "final", "all"] = "rynnvalue"
     max_frames: StrictInt | None = Field(default=None, ge=2, le=64)
-    accumulate_primitive_steps: StrictBool | None = None
     stage_exponent: StrictFloat | StrictInt | None = Field(default=None, ge=1)
     alpha: StrictFloat | StrictInt | None = Field(default=None, ge=0, le=1)
     base_coefficient: StrictFloat | StrictInt | None = Field(default=None, ge=0)

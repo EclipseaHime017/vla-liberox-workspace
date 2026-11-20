@@ -24,7 +24,6 @@ class ImplicitQLearning:
                 "critic_optimizer", "critic_weight_decay", "value_optimizer", "value_weight_decay",
                 "critic_max_grad_norm", "value_max_grad_norm",
             )},
-            accumulate_primitive_steps=reward["accumulate_primitive_steps"],
         ).to(device)
 
     def update(self, batch: dict, step: int) -> tuple[torch.Tensor, dict[str, float]]:

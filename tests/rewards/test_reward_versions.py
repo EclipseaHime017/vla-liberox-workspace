@@ -16,7 +16,7 @@ from core.data import action_source_segments, prepare_dataset, replay_chunks
 from core.io import atomic_json, sha256_file, stable_hash
 from train.replay import ReplayDataset
 from rewards.rynnvalue.annotate import annotate_manifest
-from rewards.pbrs import chunk_reward_components, sparse_macro_reward, sparse_primitive_return
+from rewards.pbrs import chunk_reward_components, sparse_primitive_return
 from rewards.manifest import load_reward_index, materialize_reward_manifest, reward_manifest_digest
 from rewards.stage.keyframes import build_stage_annotation, validate_stage_annotation
 from rewards.stage.reward import stage_annotation_context, stage_scores
@@ -287,7 +287,7 @@ def test_reward_config_change_reuses_rynn_outputs_and_preserves_previous_reward(
     old_bytes = old_path.read_bytes()
     monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator",
                         lambda _: pytest.fail("Reward recipe changes never load the model"))
-    configured.raw["reward"].update(gamma=.8, shaping_weight=.7, accumulate_primitive_steps=True)
+    configured.raw["reward"].update(gamma=.8, shaping_weight=.7)
     new = load_reward_index(configured)
     assert new["episodes"][0]["reward_path"] != str(old_path)
     assert old_path.read_bytes() == old_bytes
@@ -375,10 +375,9 @@ def test_real_backend_seal_to_pinned_training_interface(configured, tmp_path, mo
 
 
 @pytest.mark.parametrize("source", ["stage", "sparse", "rynnvalue"])
-@pytest.mark.parametrize("cumulative", [False, True])
 @pytest.mark.parametrize("legacy_prepared", [False, True], ids=["full-recording", "legacy-schema-4"])
 def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
-    configured, monkeypatch, source, cumulative, legacy_prepared,
+    configured, monkeypatch, source, legacy_prepared,
 ):
     prepared_path = prepare_dataset(configured).manifest
     prepared = (_legacy_prepared_snapshot(prepared_path) if legacy_prepared
@@ -414,12 +413,11 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
         _assert_replay_uses_saved_post_success_rewards(configured, original)
         assert not Path(configured.raw["paths"]["output_dir"]).exists()
     gamma = .87
-    configured.raw["reward"].update(gamma=gamma, accumulate_primitive_steps=cumulative)
+    configured.raw["reward"].update(gamma=gamma)
     adapted = load_reward_index(configured)
     assert adapted["source_reward_manifest_sha256"] == sha256_file(manifest_path)
     assert adapted["source_reward_version_id"] == "test-version"
     assert adapted["reward_config"]["gamma"] == gamma
-    assert adapted["reward_config"]["accumulate_primitive_steps"] is cumulative
     assert reward_manifest_digest(adapted) != reward_manifest_digest(original)
     _assert_replay_uses_saved_post_success_rewards(configured, adapted)
     for episode, old, new in zip(prepared["episodes"], original["episodes"], adapted["episodes"]):
@@ -434,19 +432,17 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
                 start, length, end = chunk["start"], chunk["length"], chunk["end"]
                 if source == "stage":
                     scores = original_values["stage_score"]
-                    expected.append(float(np.dot(gamma ** np.arange(length), scores[start + 1:end + 1]))
-                                    if cumulative else scores[end])
+                    expected.append(float(np.dot(gamma ** np.arange(length), scores[start + 1:end + 1])))
                     np.testing.assert_array_equal(values["stage_score"], scores)
                 elif source == "rynnvalue":
                     lookup = dict(zip(original_values["boundary_steps"],
                                       original_values["absolute_temporal_distance_seconds"][:, 0]))
                     expected.append(chunk_reward_components(done, start, length, lookup[start], lookup[end],
-                        gamma, configured.raw["reward"]["shaping_weight"], cumulative)[2])
+                        gamma, configured.raw["reward"]["shaping_weight"])[2])
                     np.testing.assert_array_equal(values["absolute_temporal_distance_seconds"],
                                                   original_values["absolute_temporal_distance_seconds"])
                 else:
-                    expected.append(sparse_primitive_return(done, start, length, gamma) if cumulative
-                                    else sparse_macro_reward(done, start, length))
+                    expected.append(sparse_primitive_return(done, start, length, gamma))
             np.testing.assert_allclose(values["final_reward"], expected, rtol=1e-6, atol=1e-6)
     assert {str(path): path.read_bytes() for path in frozen_root.rglob("*") if path.is_file()} == original_files
     assert all(Path(path).read_bytes() == content for path, content in official_files.items())
@@ -460,7 +456,7 @@ def test_training_reduction_does_not_unlock_stage_recipe(configured, field, valu
     _stage(configured)
     pinned = load_reward_index(configured)
     _pin(configured, pinned)
-    configured.raw["reward"].update(gamma=.8, accumulate_primitive_steps=True)
+    configured.raw["reward"].update(gamma=.8)
     configured.raw["reward"][field] = value
     with pytest.raises(ValueError, match="parameters conflict"):
         load_reward_index(configured)
@@ -484,16 +480,35 @@ def test_materialize_with_pinned_override_returns_training_local_manifest(config
     source_path = _pin(configured, pinned)
     original_bytes = source_path.read_bytes()
     assert materialize_reward_manifest(configured) == source_path
-    configured.raw["reward"].update(gamma=.8, accumulate_primitive_steps=True)
+    configured.raw["reward"].update(gamma=.8)
     monkeypatch.setattr("rewards.manifest.load_stage_annotations",
                         lambda *_: pytest.fail("Pinned materialization must not reload keyframes"))
     path = materialize_reward_manifest(configured)
     assert path != source_path
     adapted = json.loads(path.read_text())
     assert adapted["reward_config"]["gamma"] == .8
-    assert adapted["reward_config"]["accumulate_primitive_steps"] is True
     assert adapted["training_adaptation_manifest_path"] == str(path)
     assert source_path.read_bytes() == original_bytes
+
+
+def test_versions_saved_with_macro_actions_are_re_derived_per_step(configured):
+    prepared = _stage(configured)
+    pinned = load_reward_index(configured)
+    path = Path(pinned["episodes"][0]["reward_path"]).parent / "reward_manifest.json"
+    saved = json.loads(path.read_text())
+    saved["reward_config"]["accumulate_primitive_steps"] = False
+    path.write_text(json.dumps(saved))
+    _pin(configured, pinned)
+    adapted = load_reward_index(configured)
+    assert "accumulate_primitive_steps" not in adapted["reward_config"]
+    gamma = configured.raw["reward"]["gamma"]
+    for episode, entry in zip(prepared["episodes"], adapted["episodes"]):
+        with np.load(entry["reward_path"]) as values:
+            scores = values["stage_score"]
+            expected = [float(np.dot(gamma ** np.arange(chunk["length"]),
+                                     scores[chunk["start"] + 1:chunk["end"] + 1]))
+                        for chunk in episode["evaluation_chunks"]]
+            np.testing.assert_allclose(values["final_reward"], expected, rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.parametrize("field", ["trajectory_sha256", "observations_sha256", "prompt"])

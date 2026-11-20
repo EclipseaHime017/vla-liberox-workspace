@@ -8,7 +8,7 @@ from core.storage_paths import with_dataset_lease, storage_path
 
 import numpy as np
 
-from core.config import LoadedConfig, effective_cumulative, needs_rynnvalue, needs_stage
+from core.config import LoadedConfig, needs_rynnvalue, needs_stage
 from core.data import load_manifest
 from core.io import atomic_json, sha256_file, stable_hash
 from rewards.stage.reward import stage_annotation_context, stage_chunk_reward, stage_scores
@@ -53,7 +53,7 @@ def _validate_saved_model_inputs(payload: dict, prepared: dict) -> None:
 
 def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
     """Pure reduction; source model outputs and manual keyframes are never changed."""
-    from rewards.pbrs import chunk_reward_components, sparse_macro_reward, sparse_primitive_return
+    from rewards.pbrs import chunk_reward_components, sparse_primitive_return
 
     count = int(episode["recorded_action_count"])
     chunks = episode.get("evaluation_chunks", episode["chunks"])
@@ -62,7 +62,6 @@ def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
     if episode["terminal_step"] is not None:
         done[int(episode["terminal_step"]):] = True
     gamma = float(recipe["gamma"])
-    cumulative = effective_cumulative(recipe)
     kappa = float(recipe["shaping_weight"])
     alpha = float(recipe.get("alpha", 0))
     mode = recipe.get("fusion_mode", "additive")
@@ -94,13 +93,12 @@ def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
         start, length, end = int(chunk["start"]), int(chunk["length"]), int(chunk["end"])
         if lookup is not None:
             b, f, original = chunk_reward_components(
-                done, start, length, lookup[start], lookup[end], gamma, kappa, cumulative, True,
+                done, start, length, lookup[start], lookup[end], gamma, kappa, True,
                 bool(recipe.get("zero_success_potential", False)))
         else:
-            b = (sparse_primitive_return(done, start, length, gamma) if cumulative
-                 else sparse_macro_reward(done, start, length))
+            b = sparse_primitive_return(done, start, length, gamma)
             f, original = 0., b
-        s = stage_chunk_reward(scores, start, length, gamma, cumulative) if scores is not None else 0.
+        s = stage_chunk_reward(scores, start, length, gamma) if scores is not None else 0.
         if mode == "additive":
             value = base_coefficient * b + alpha * s + kappa * f
         else:
@@ -123,7 +121,7 @@ def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
         if reference >= 0:
             raise ValueError(f"Initial Final Reward must be negative for rescale: {episode['run_id']} (R0={reference})")
         # Use the full recorded first chunk, not the deduplicated replay suffix.
-        # Never reuse a previous scale after changing gamma or cumulative mode.
+        # Never reuse a previous scale after changing gamma.
         with np.errstate(over="ignore", invalid="ignore"):
             scale = np.divide(1., -reference)
             normalized = raw_final / -reference

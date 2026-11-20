@@ -21,14 +21,9 @@ from studio.storage.paths import storage_path
 REWARD_PARAMETERS = {
     "reward_source": "source", "reward_stage_exponent": "stage_exponent",
     "reward_gamma": "gamma", "reward_shaping_weight": "shaping_weight",
-    "reward_accumulate_primitive_steps": "accumulate_primitive_steps",
     "reward_alpha": "alpha", "reward_fusion_mode": "fusion_mode",
 }
-EDITABLE_REWARD_PARAMETERS = frozenset({"reward_gamma", "reward_accumulate_primitive_steps"})
-
-
-def macro_only_reward(settings: dict) -> bool:
-    return settings.get("source") in {"final", "all"} and settings.get("fusion_mode") == "multiplicative"
+EDITABLE_REWARD_PARAMETERS = frozenset({"reward_gamma"})
 
 
 class DatasetRewardVersions:
@@ -129,8 +124,7 @@ class DatasetRewardVersions:
     def reward_configuration(self, dataset_id: str) -> dict[str, Any]:
         self.datasets.get(dataset_id, quick_verify=False)
         reward = self._load_base_config()["reward"]
-        common = {"gamma": reward["gamma"],
-                  "accumulate_primitive_steps": reward["accumulate_primitive_steps"]}
+        common = {"gamma": reward["gamma"]}
         robo_path = self.ui_config.workspace_root / "configs" / "rewards" / "robometer.yaml"
         robo = yaml.safe_load(robo_path.read_text()) if robo_path.is_file() else {}
         configs = {
@@ -151,8 +145,6 @@ class DatasetRewardVersions:
                             "final_normalization": "initial_chunk_v1",
                             "fusion_mode": reward.get("fusion_mode", "additive"),
                             "shaping_weight": reward["shaping_weight"]}
-        if configs["final"]["fusion_mode"] == "multiplicative":
-            configs["final"]["accumulate_primitive_steps"] = False
         configs["all"] = {**configs["final"], "max_frames": configs["rynnvalue"]["max_frames"],
                           "batch_size": configs["rynnvalue"]["batch_size"],
                           "sampling_hz": configs["robometer"]["sampling_hz"],
@@ -171,7 +163,7 @@ class DatasetRewardVersions:
         parameters = {**defaults, **options, "source": source}
         parameters.setdefault("force_model", False)
         parameters.setdefault("overwrite_global", False)
-        for key in ("accumulate_primitive_steps", "force_model", "overwrite_global"):
+        for key in ("force_model", "overwrite_global"):
             if key in parameters and type(parameters[key]) is not bool:
                 raise ValueError(f"{key} must be boolean")
         for key in ("gamma", "stage_exponent", "shaping_weight", "sampling_hz", "alpha", "base_coefficient"):
@@ -200,8 +192,6 @@ class DatasetRewardVersions:
             raise ValueError("Unsupported final_normalization")
         if parameters.get("base_coefficient") is not None and parameters.get("fusion_mode") != "additive":
             raise ValueError("base_coefficient requires additive Final Reward")
-        if macro_only_reward(parameters):
-            parameters["accumulate_primitive_steps"] = False
         with self.lock:
             dataset = self.datasets.require_ready_for_annotation(dataset_id)
             if any(item["status"] == "RUNNING" for item in dataset.get("evaluation_versions", [])):
@@ -241,8 +231,7 @@ class DatasetRewardVersions:
             raw["reward"]["final_normalization"] = parameters.get("final_normalization", "initial_chunk_v1")
             if parameters.get("base_coefficient") is not None:
                 raw["reward"]["base_coefficient"] = parameters["base_coefficient"]
-        for key in ("gamma", "stage_exponent", "shaping_weight", "accumulate_primitive_steps", "max_frames",
-                    "alpha", "fusion_mode"):
+        for key in ("gamma", "stage_exponent", "shaping_weight", "max_frames", "alpha", "fusion_mode"):
             if key in parameters:
                 raw["reward"][key] = parameters[key]
         if source == "rynnvalue":
@@ -405,10 +394,7 @@ class DatasetRewardVersions:
                 raise ConflictError(f"{key} is locked to dataset reward version {version_id}", code="REWARD_CONFIG_LOCKED")
         # Omitted knobs retain the dataset defaults. Explicit values only affect
         # this training run's derived reward and Bellman discount.
-        selected = {**expected, **parameters, "reward_version_id": version_id}
-        if macro_only_reward(settings) or version.get("macro_only"):
-            selected["reward_accumulate_primitive_steps"] = False
-        return version, selected
+        return version, {**expected, **parameters, "reward_version_id": version_id}
 
     def _schedule_result_binding(self, job: dict) -> None:
         """Publish globals once on completion without doing disk work in polling."""

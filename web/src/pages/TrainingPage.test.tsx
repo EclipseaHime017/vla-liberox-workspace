@@ -42,17 +42,17 @@ const defaults: TrainingDefaults = {
     model_proprio_projector: "train", model_lora_rank: 32, model_lora_alpha: 64, model_lora_dropout: 0 },
   basic: { train_steps: 10000, micro_batch_size: 1 },
   advanced: { reward_source: "final", reward_stage_exponent: 4, reward_gamma: .92,
-    reward_shaping_weight: .1, reward_accumulate_primitive_steps: false, beta: 3 },
+    reward_shaping_weight: .1, beta: 3 },
   reward_version: { id: "version-p4", evaluator: "final", status: "COMPLETED", parameters: { stage_exponent: 4, gamma: .92 }, created_at: "" },
   reward_parameters_locked: false,
   reward_locked_parameters: ["reward_source", "reward_stage_exponent", "reward_shaping_weight", "reward_rynnvalue"],
-  reward_editable_parameters: ["reward_gamma", "reward_accumulate_primitive_steps"],
+  reward_editable_parameters: ["reward_gamma"],
   monitoring: {}, fixed: {}, environments: { training: "vla-liberox" }, checkpoints: [],
 };
 const rynnDefaults: TrainingDefaults = {
   ...defaults,
   advanced: { ...defaults.advanced, reward_source: "rynnvalue", reward_gamma: .87,
-    reward_shaping_weight: .2, reward_accumulate_primitive_steps: true },
+    reward_shaping_weight: .2 },
   reward_version: { id: "rynn-v1", evaluator: "rynnvalue", status: "COMPLETED",
     parameters: { gamma: .87, shaping_weight: .2 }, created_at: "" },
 };
@@ -198,7 +198,7 @@ describe("dataset-pinned training reward", () => {
     fireEvent.click(start);
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
       reward_source: "rynnvalue", reward_version_id: "rynn-v1", reward_gamma: .87,
-      reward_shaping_weight: .2, reward_accumulate_primitive_steps: true, train_steps: 77,
+      reward_shaping_weight: .2, train_steps: 77,
     })));
     await waitFor(() => expect(reward.disabled).toBe(false));
     fireEvent.change(reward, { target: { value: "final" } });
@@ -206,7 +206,7 @@ describe("dataset-pinned training reward", () => {
     fireEvent.click(start);
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenLastCalledWith("ready", expect.objectContaining({
       reward_source: "final", reward_version_id: "version-p4", reward_gamma: .92,
-      reward_shaping_weight: .1, reward_accumulate_primitive_steps: false, train_steps: 77,
+      reward_shaping_weight: .1, train_steps: 77,
     })));
   });
 
@@ -245,22 +245,21 @@ describe("dataset-pinned training reward", () => {
     })));
   });
 
-  it("keeps RynnValue cumulative editable when unused fusion settings are multiplicative", async () => {
+  it("offers only gamma as the training reward override for every source", async () => {
     vi.mocked(api.getTrainingDefaults).mockImplementation(async (_id, source) => source === "rynnvalue"
-      ? { ...rynnDefaults, advanced: { ...rynnDefaults.advanced, reward_fusion_mode: "multiplicative" } }
-      : { ...defaults, advanced: { ...defaults.advanced, reward_fusion_mode: "multiplicative" },
-          reward_editable_parameters: ["reward_gamma"] });
+      ? rynnDefaults : { ...defaults, advanced: { ...defaults.advanced, reward_fusion_mode: "multiplicative" } });
     render(<TrainingPage />);
     const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByLabelText("cumulative reward")).toBeNull();
     fireEvent.change(screen.getByLabelText("训练奖励"), { target: { value: "rynnvalue" } });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
-    expect((screen.getByLabelText("cumulative reward") as HTMLSelectElement).value).toBe("true");
+    expect(screen.queryByLabelText("cumulative reward")).toBeNull();
     fireEvent.click(start);
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
-      reward_source: "rynnvalue", reward_accumulate_primitive_steps: true,
+      reward_source: "rynnvalue", reward_gamma: .87,
     })));
+    expect(vi.mocked(api.enqueueTraining).mock.calls[0][1]).not.toHaveProperty("reward_accumulate_primitive_steps");
   });
 
   it("IFQL shows only its critic fields and sends its sample count", async () => {
@@ -383,18 +382,16 @@ describe("dataset-pinned training reward", () => {
     expect(screen.getByRole("button", { name: "跟随当前训练" })).toBeTruthy();
   });
 
-  it.each(["multiplicative", "mixed"])("%s results hide cumulative and submit macro even with a stale On default", async (mode) => {
+  it("multiplicative results train with the edited per-step gamma", async () => {
     vi.mocked(api.getTrainingDefaults).mockResolvedValue({ ...defaults,
-      advanced: { ...defaults.advanced, reward_fusion_mode: mode === "mixed" ? "additive" : mode,
-        reward_accumulate_primitive_steps: true }, reward_editable_parameters: ["reward_gamma"] });
+      advanced: { ...defaults.advanced, reward_fusion_mode: "multiplicative" } });
     render(<TrainingPage />);
     const start = await screen.findByRole("button", { name: "注册训练任务" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
-    expect(screen.queryByLabelText("cumulative reward")).toBeNull();
     fireEvent.change(screen.getByLabelText("Discount ratio γ"), { target: { value: ".95" } });
     fireEvent.click(start);
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
-      reward_accumulate_primitive_steps: false, reward_gamma: .95,
+      reward_fusion_mode: "multiplicative", reward_gamma: .95,
     })));
   });
 
@@ -488,30 +485,24 @@ describe("dataset-pinned training reward", () => {
     expect(await screen.findByLabelText("评价类型")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "删除数据集" })).toBeNull();
   });
-  it.each([false, true])("overrides cumulative reward=%s and gamma only for this training run", async (cumulative) => {
-    vi.mocked(api.getTrainingDefaults).mockResolvedValue({ ...defaults,
-      advanced: { ...defaults.advanced, reward_accumulate_primitive_steps: cumulative } });
+  it("overrides gamma only for this training run", async () => {
+    vi.mocked(api.getTrainingDefaults).mockResolvedValue(defaults);
     render(<TrainingPage />);
     await waitFor(() => expect((screen.getByRole("button", { name: "注册训练任务" }) as HTMLButtonElement).disabled).toBe(false));
     expect((screen.getByLabelText("训练奖励") as HTMLSelectElement).value).toBe("final");
     expect(screen.queryByLabelText("Shape reward 系数 κ")).toBeNull();
     expect(screen.queryByLabelText("Stage 插值指数 p")).toBeNull();
     expect(screen.queryByText(/version-p4/)).toBeNull();
-    const selector = screen.getByLabelText("cumulative reward") as HTMLSelectElement;
-    expect(selector.disabled).toBe(false);
-    expect(selector.value).toBe(String(cumulative));
-    expect(Array.from(selector.options, (option) => option.text)).toEqual(["Off", "On"]);
     const gamma = screen.getByLabelText("Discount ratio γ") as HTMLInputElement;
     expect(gamma.disabled).toBe(false);
     expect(gamma.value).toBe("0.92");
     fireEvent.change(gamma, { target: { value: "0.95" } });
-    fireEvent.change(selector, { target: { value: String(!cumulative) } });
     expect((screen.getByLabelText("训练步数") as HTMLInputElement).disabled).toBe(false);
     fireEvent.change(screen.getByLabelText("训练步数"), { target: { value: "20000" } });
     fireEvent.click(screen.getByRole("button", { name: "注册训练任务" }));
     await waitFor(() => expect(api.enqueueTraining).toHaveBeenCalledWith("ready", expect.objectContaining({
       reward_version_id: "version-p4", reward_source: "final", reward_stage_exponent: 4,
-      reward_gamma: .95, reward_accumulate_primitive_steps: !cumulative, train_steps: 20000,
+      reward_gamma: .95, train_steps: 20000,
     })));
     expect(defaults.reward_version?.parameters).toEqual({ stage_exponent: 4, gamma: .92 });
   });

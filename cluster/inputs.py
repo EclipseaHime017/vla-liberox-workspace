@@ -342,8 +342,8 @@ def _stage_from_labels(run: GlobalRun, episode: dict, directory: Path, raw: dict
     context = stage_annotation_context(annotation, done=arrays["environment_done"],
         success_consecutive_steps=threshold, exponent=recipe["stage_exponent"])
     scores = stage_scores(context)
-    final = np.asarray([stage_chunk_reward(scores, chunk["start"], chunk["length"],
-        recipe["gamma"], recipe["accumulate_primitive_steps"]) for chunk in episode["evaluation_chunks"]], dtype=np.float32)
+    final = np.asarray([stage_chunk_reward(scores, chunk["start"], chunk["length"], recipe["gamma"])
+                        for chunk in episode["evaluation_chunks"]], dtype=np.float32)
     arrays.update(stage_score=scores, stage_chunk_reward=final, final_reward=final,
                   pbrs_chunk_reward=final, boundary_steps=np.asarray(episode["reward_boundaries"], dtype=np.int64))
     path = directory / "label_rewards" / f"{stable_hash(run.run_id)}.npz"

@@ -309,7 +309,7 @@ def test_rollout_prepare_fit_combination_uses_saved_rewards_and_actual_cpu_criti
     raw["training"]["device"] = "cpu"
     raw["iql"]["critic_image_size"] = 16
     raw["data"].update(validation_fraction=0., task_ids=[spec["task_snapshot"]["task_id"]])
-    raw["reward"].update(source="sparse", rynnvalue=False, gamma=.8, accumulate_primitive_steps=False)
+    raw["reward"].update(source="sparse", rynnvalue=False, gamma=.8)
     source = directory / "training-source" / "runs" / "train-only"
     raw["paths"]["dataset_sources"] = [str(source)]
     train_simulator = FakeSimulator()

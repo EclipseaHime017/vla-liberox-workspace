@@ -2,18 +2,18 @@
 
 ## 1. 奖励来源
 
-训练奖励按动作块（chunk，一次推理执行的一段动作）计算，每个 chunk 一个奖励和一次折扣 γ。
+训练奖励按动作块（chunk，一次推理执行的一段动作）计算：块内 L 步按每步折扣 γ 累加成一个奖励，自举用 γᴸ。
 
 | 来源（`reward.source`） | 定义 | 依赖 |
 | --- | --- | --- |
-| `sparse` | chunk 最后一步环境判定成功（`done`）时为 0，否则为 −1 | 成功判定 |
+| `sparse` | 每步在环境判定成功（`done`）后为 0，之前为 −1 | 成功判定 |
 | `rynnvalue` | sparse + κ·PBRS，势函数为 RynnValue 的价值估计 | RynnValue 评价 |
 | `stage` | 关键帧插值的进度分数 xᵖ（p = `stage_exponent`），奖励就是分数本身，不取差分 | 人工关键帧 |
 | `final` | Final Reward：`(1−α)·sparse + α·stage + κ·PBRS`（`fusion_mode: additive`）；或乘性形式 `multiplicative` | 按 α、κ 需要 Stage 和/或 RynnValue |
 
 - `alpha=0, κ=0` 即 sparse；`alpha=0, κ>0` 即 RynnValue；`alpha=1, κ=0` 即 Stage。
 - Final Reward 默认除以 −R0（完整轨迹第一个 chunk 的奖励，要求 R0 < 0），即 `final_normalization: initial_chunk_v1`；`none` 只用于复现历史的未缩放结果。
-- `accumulate_primitive_steps: true` 时使用 chunk 内逐步折扣的原始回报和 γᴸ 自举，只对加性形式有效；乘性形式总是按宏动作计算。
+- γ 是 20 Hz 的每步折扣：一次转移的 L 步内逐步折扣累加奖励，自举用 γᴸ。乘性形式用区间终点的 Stage 分数缩放区间内的 sparse + κ·PBRS 回报。
 - 基于势函数的整形（PBRS）理论上不改变最优策略，也不改变优势 Q−V（Q 与 V 同减 Φ(s)），实际效果取决于 critic 的估计误差。
 
 Robometer 给出每条轨迹的进度和成功概率，用于评价展示和数据筛选，不是训练奖励来源。
@@ -34,7 +34,7 @@ Robometer 给出每条轨迹的进度和成功概率，用于评价展示和数�
 
 ## 4. 配置与命令
 
-`configs/rewards/reward.yaml`：前半部分决定 RynnValue 推理（`model`、`revision`、`max_frames`、`dtype`）；后半部分只用于从已有输出推导训练奖励（`fusion_mode`、`final_normalization`、`alpha`、`stage_exponent`、`gamma`、`shaping_weight`、`accumulate_primitive_steps`）。`configs/rewards/robometer.yaml` 配置 Robometer 评价。
+`configs/rewards/reward.yaml`：前半部分决定 RynnValue 推理（`model`、`revision`、`max_frames`、`dtype`）；后半部分只用于从已有输出推导训练奖励（`fusion_mode`、`final_normalization`、`alpha`、`stage_exponent`、`gamma`、`shaping_weight`）。`configs/rewards/robometer.yaml` 配置 Robometer 评价。
 
 平台在「数据集」页面完成全部操作。终端命令：
 

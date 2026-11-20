@@ -11,7 +11,7 @@ IDQL: Hansen-Estruch et al., arXiv:2304.10573.
 - Inference: sample ``num_samples`` chunks from the actor and execute the one with the
   highest online min(Q1, Q2) (``train.methods.selectors``).
 
-Differences from the reference: action chunks with one discount per chunk; the critic's
+Differences from the reference: action chunks of L steps bootstrapping with γ^L; the critic's
 pixel encoder; V and Q take sequential steps with separate optimizers (the repository's
 IQL critic order) instead of one joint gradient step.
 """
@@ -41,7 +41,6 @@ class ImplicitFlowQLearning:
                 "critic_optimizer", "critic_weight_decay", "value_optimizer", "value_weight_decay",
                 "critic_max_grad_norm", "value_max_grad_norm",
             )},
-            accumulate_primitive_steps=reward["accumulate_primitive_steps"],
         ).to(device)
 
     def update(self, batch: dict, step: int) -> tuple[None, dict[str, float]]:

@@ -165,10 +165,6 @@ export function TrainingPage() {
         const unrelated = { ...next.model, ...Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith("reward_"))) };
         if (rewardFree) return { ...unrelated, actor_lr_warmup_steps: unrelated.actor_lr_warmup_steps
           ?? next.basic.actor_lr_warmup_steps ?? next.basic.critic_warmup_steps ?? 0, resume_checkpoint: null };
-        if ((rewardSource === "final" && pinned.reward_fusion_mode === "multiplicative")
-          || next.reward_editable_parameters?.includes("reward_accumulate_primitive_steps") === false) {
-          pinned.reward_accumulate_primitive_steps = false;
-        }
         return { ...unrelated, ...pinned,
           reward_source: rewardSource,
           reward_version_id: next.reward_version?.id ?? null,
@@ -184,8 +180,6 @@ export function TrainingPage() {
       && defaults.reward_version.evaluator === rewardSource && !defaults.reward_version.legacy
       && ["READY", "COMPLETED"].includes(defaults.reward_version.status))
   ));
-  const cumulativeAllowed = (rewardSource !== "final" || parameters.reward_fusion_mode !== "multiplicative")
-    && defaults?.reward_editable_parameters?.includes("reward_accumulate_primitive_steps") !== false;
   useEffect(() => {
     if (rewardFree || defaultsLoading || !defaults?.reward_availability?.pending) return;
     const timer = window.setTimeout(() => setRewardRevision((value) => value + 1), 1000);
@@ -223,8 +217,7 @@ export function TrainingPage() {
         && !(rewardFree && key.startsWith("reward_")) && applies(key)));
       const next = await enqueueTraining(datasetId, rewardFree
         ? { ...accepted, algorithm, resume_checkpoint: null }
-        : { ...accepted, algorithm, resume_checkpoint: null, reward_source: rewardSource,
-          reward_accumulate_primitive_steps: cumulativeAllowed ? Boolean(parameters.reward_accumulate_primitive_steps) : false });
+        : { ...accepted, algorithm, resume_checkpoint: null, reward_source: rewardSource });
       setQueue((current) => ({ ...current, jobs: [...current.jobs.filter((item) => item.id !== next.id), next] }));
       if (followQueueRef.current && (!jobRef.current || !activeJobStates.has(jobRef.current.status))) setJob(next);
       try { setTensorboard(await startTensorBoard()); } catch (reason) { setError(`训练已注册，但 TensorBoard 启动失败：${String(reason)}`); }
@@ -293,7 +286,7 @@ export function TrainingPage() {
               <p className="error-banner">{defaults.reward_availability.message}</p>}
             {!rewardFree && !defaultsLoading && defaultsKey === requestedDefaultsKey && !rewardReady && defaults?.reward_availability?.errors?.map((item) =>
               <p key={item.run_id} className="error-banner">{item.run_id}：{item.error}</p>)}
-            {!rewardFree && <><p>按所选奖励读取数据集评价，缺少时继承同类型全局结果；不会回退到其他奖励。修改 γ 或可用的 cumulative reward 只影响本次训练。</p>
+            {!rewardFree && <><p>按所选奖励读取数据集评价，缺少时继承同类型全局结果；不会回退到其他奖励。修改 γ 只影响本次训练。</p>
             <button aria-expanded={showDatasetConfig} onClick={() => setShowDatasetConfig((value) => !value)}>配置数据集评价</button></>}</div>}
           {!rewardFree && dataset && showDatasetConfig && <FrozenDatasetCard key={dataset.id} dataset={dataset} initialExpanded
             disabled={busy || Boolean(job && activeJobStates.has(job.status))}
@@ -303,9 +296,7 @@ export function TrainingPage() {
           <div className="parameter-grid">{basicFields.filter(([name]) => applies(name)).map(([name, label, step]) => <label key={name}>{label}<input type="number" min={name.endsWith("warmup_steps") || name === "seed" ? 0 : 1} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}</div>
           <details><summary>{`高级 ${method?.label ?? algorithm.toUpperCase()} 参数`}</summary><div className="parameter-grid advanced-parameters">
             {!rewardFree && <><label>Discount ratio γ<input type="number" min={0} max={1} step="any" value={String(parameters.reward_gamma ?? "")} disabled={defaultsLoading || !rewardReady}
-              onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label>
-            {cumulativeAllowed && <label>cumulative reward<select disabled={defaultsLoading || !rewardReady} value={String(Boolean(parameters.reward_accumulate_primitive_steps))}
-              onChange={(event) => patchParameter("reward_accumulate_primitive_steps", event.target.value === "true")}><option value="false">Off</option><option value="true">On</option></select></label>}</>}
+              onChange={(event) => patchParameter("reward_gamma", Number(event.target.value))} /></label></>}
             {applies("critic_optimizer") && <label>Critic optimizer<select value={String(parameters.critic_optimizer ?? "adamw")} onChange={(event) => patchParameter("critic_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>}
             {applies("value_optimizer") && <label>Value optimizer<select value={String(parameters.value_optimizer ?? "adamw")} onChange={(event) => patchParameter("value_optimizer", event.target.value)}><option value="adam">Adam</option><option value="adamw">AdamW</option></select></label>}
             {advancedFields.filter(([name]) => applies(name)).map(([name, label, step]) => <label key={name}>{label}<input type="number" min={0} step={step} value={String(parameters[name] ?? "")} onChange={(event) => patchParameter(name, Number(event.target.value))} /></label>)}

@@ -43,4 +43,4 @@ overrides:
   # Other model/training/method-section/logging fields use the current shared configuration.
   # Copy complete run directories from the PC, including adjacent global evaluations.
   # Evaluator/fusion parameters come from each run's saved global reward.
-  reward: {}  # optional gamma / accumulate_primitive_steps overrides only
+  reward: {}  # optional gamma / zero_success_potential overrides only

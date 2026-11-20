@@ -39,7 +39,7 @@ def diagnostic_inputs(configured, tmp_path):
     (root / "dataset_statistics.json").write_text(json.dumps({"libero_object_no_noops": {
         "action": _stats(7), "proprio": _stats(8)}}))
     configured.raw["model"].update(base_checkpoint=str(root), stats_key="libero_object", base_revision=None)
-    configured.raw["reward"].update(source="sparse", gamma=.8, accumulate_primitive_steps=False)
+    configured.raw["reward"].update(source="sparse", gamma=.8)
     configured.raw["iql"]["critic_image_size"] = 16
     prepare_dataset(configured)
     index = load_reward_index(configured)
@@ -161,12 +161,11 @@ def test_padding_preserves_chunk_actions_and_masks():
         diagnostics._batch([sample], 2, torch.device("cpu"))
 
 
-@pytest.mark.parametrize("cumulative", [False, True])
-def test_finite_returns_use_the_same_chunk_discount_and_terminal_mask(diagnostic_inputs, cumulative):
+def test_finite_returns_use_the_same_chunk_discount_and_terminal_mask(diagnostic_inputs):
     config, _ = diagnostic_inputs
     action, proprio = replay_stats(config.section("model"))
     replay = ReplayDataset(config, action, proprio, reward_index=diagnostics._existing_rewards(config))
-    values = diagnostics._finite_returns(replay, .8, cumulative)
+    values = diagnostics._finite_returns(replay, .8)
     for episode, _, annotation in replay.items:
         run_id = episode["run_id"]
         with np.load(annotation) as source:
@@ -176,7 +175,7 @@ def test_finite_returns_use_the_same_chunk_discount_and_terminal_mask(diagnostic
             total, factor = 0., 1.
             for successor, reward in zip(chunks[index:], rewards[index:]):
                 total += factor * float(reward)
-                factor *= .8 ** (int(successor["length"]) if cumulative else 1)
+                factor *= .8 ** int(successor["length"])
             assert values[(run_id, chunk["start"])] == pytest.approx(total)
     last = max((replay[index] for index in range(len(replay))), key=lambda item: item["start"])
     assert last["bootstrap_mask"].item() == 0

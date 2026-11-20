@@ -39,12 +39,12 @@ beforeEach(() => {
     id: "annotation", kind: "annotation", status: "STARTING",
   } as Awaited<ReturnType<typeof api.annotateTrainingDataset>>);
   vi.mocked(api.getDatasetRewardConfig).mockResolvedValue({
-    final: { gamma: .99, stage_exponent: 2, alpha: .5, shaping_weight: .1, fusion_mode: "additive", accumulate_primitive_steps: false },
-    all: { gamma: .99, stage_exponent: 2, alpha: .5, shaping_weight: .1, fusion_mode: "additive", accumulate_primitive_steps: false,
+    final: { gamma: .99, stage_exponent: 2, alpha: .5, shaping_weight: .1, fusion_mode: "additive" },
+    all: { gamma: .99, stage_exponent: 2, alpha: .5, shaping_weight: .1, fusion_mode: "additive",
       max_frames: 4, batch_size: 1, sampling_hz: 3, robometer_batch_size: 8 },
-    sparse: { gamma: .99, accumulate_primitive_steps: false },
-    stage: { gamma: .99, stage_exponent: 2, accumulate_primitive_steps: false },
-    rynnvalue: { gamma: .99, shaping_weight: .1, max_frames: 4, batch_size: 1, accumulate_primitive_steps: false, checkpoint: "Rynn-4B", revision: "rynn-revision" },
+    sparse: { gamma: .99 },
+    stage: { gamma: .99, stage_exponent: 2 },
+    rynnvalue: { gamma: .99, shaping_weight: .1, max_frames: 4, batch_size: 1, checkpoint: "Rynn-4B", revision: "rynn-revision" },
     robometer: { sampling_hz: 3, batch_size: 1, prefix_frames: 4, checkpoint: "Robo-LIBERO", revision: "robo-revision" },
   });
 });
@@ -175,25 +175,21 @@ describe("dataset evaluation configuration", () => {
     await waitFor(() => expect(api.deleteTrainingDataset).toHaveBeenCalledExactlyOnceWith("dataset"));
   });
 
-  it.each(["final", "all"])("%s multiplication clears cumulative and does not restore hidden On state", async (source) => {
+  it.each(["final", "all"])("%s multiplication hides alpha and keeps the per-step discount", async (source) => {
     const dataset = { id: "dataset", name: "Dataset", integrity_status: "HEALTHY",
       annotation_status: "NOT_STARTED" } as TrainingDataset;
     render(<FrozenDatasetCard dataset={dataset} initialExpanded disabled={false} onRefresh={async () => {}}
       onJob={() => {}} onError={() => {}} />);
     fireEvent.change(await screen.findByLabelText("评价类型"), { target: { value: source } });
-    fireEvent.change(screen.getByLabelText("cumulative reward"), { target: { value: "true" } });
     fireEvent.change(screen.getByLabelText("形式"), { target: { value: "multiplicative" } });
-    expect(screen.queryByLabelText("cumulative reward")).toBeNull();
     expect(screen.queryByLabelText("Stage 系数 α")).toBeNull();
     expect(screen.getByLabelText("Discount γ")).toBeTruthy();
+    expect(screen.queryByLabelText("cumulative reward")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "开始评价" }));
     await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenCalledWith("dataset", expect.objectContaining({
-      source, fusion_mode: "multiplicative", accumulate_primitive_steps: false,
+      source, fusion_mode: "multiplicative", gamma: .99,
     })));
-    fireEvent.change(screen.getByLabelText("形式"), { target: { value: "additive" } });
-    expect((screen.getByLabelText("cumulative reward") as HTMLSelectElement).value).toBe("false");
-    fireEvent.change(screen.getByLabelText("评价类型"), { target: { value: "rynnvalue" } });
-    expect(screen.getByLabelText("cumulative reward")).toBeTruthy();
+    expect(vi.mocked(api.annotateTrainingDataset).mock.calls[0][1]).not.toHaveProperty("accumulate_primitive_steps");
   });
 
   it("hides alpha for multiplication and All inherits saved Final parameters", async () => {
@@ -262,7 +258,7 @@ describe("dataset evaluation configuration", () => {
     expect(api.evaluateTrajectories).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("submits cumulative reward as a boolean when changed from %s", async (initial) => {
+  it.each([false, true])("re-evaluates a version saved with cumulative=%s without a cumulative control", async (initial) => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([{
       id: "dataset", name: "Frozen dataset", member_count: 1, action_count: 16, chunk_count: 2,
       integrity_status: "HEALTHY", annotation_status: "READY",
@@ -272,20 +268,15 @@ describe("dataset evaluation configuration", () => {
     } as TrainingDataset]);
     render(<DatasetPage />);
     fireEvent.click(await screen.findByRole("button", { name: "打包训练数据集" }));
-    expect(screen.queryByRole("combobox", { name: "cumulative reward" })).toBeNull();
     expect(api.getDatasetRewardConfig).not.toHaveBeenCalled();
     fireEvent.click(await screen.findByRole("button", { name: "配置" }));
     fireEvent.change(await screen.findByLabelText("评价类型"), { target: { value: "rynnvalue" } });
-    const cumulative = await screen.findByRole("combobox", { name: "cumulative reward" }) as HTMLSelectElement;
-    expect(cumulative.value).toBe(String(initial));
-    expect(Array.from(cumulative.options, (option) => option.text)).toEqual(["Off", "On"]);
-    expect(screen.queryByRole("checkbox", { name: /cumulative reward|accumulate primitive steps|累计 chunk 内 20 Hz 奖励/ })).toBeNull();
-    expect(screen.queryByText("累计 chunk 内 20 Hz 奖励")).toBeNull();
-    fireEvent.change(cumulative, { target: { value: String(!initial) } });
+    expect(screen.queryByRole("combobox", { name: "cumulative reward" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "重新评价" }));
     await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenCalledWith("dataset", expect.objectContaining({
-      source: "rynnvalue", max_frames: 8, accumulate_primitive_steps: !initial, force_model: false,
+      source: "rynnvalue", max_frames: 8, force_model: false,
     })));
+    expect(vi.mocked(api.annotateTrainingDataset).mock.calls[0][1]).not.toHaveProperty("accumulate_primitive_steps");
   });
 
   it("offers Final/global overwrite and independent Robometer model-refresh settings", async () => {
@@ -302,7 +293,7 @@ describe("dataset evaluation configuration", () => {
     expect(screen.queryByLabelText("max_frames")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "开始评价" }));
     await waitFor(() => expect(api.annotateTrainingDataset).toHaveBeenCalledWith("dataset", {
-      source: "final", gamma: .99, stage_exponent: 4, accumulate_primitive_steps: false, overwrite_global: true,
+      source: "final", gamma: .99, stage_exponent: 4, overwrite_global: true,
       alpha: .5, shaping_weight: .1, fusion_mode: "additive",
     }));
     await waitFor(() => expect((source as HTMLSelectElement).disabled).toBe(false));

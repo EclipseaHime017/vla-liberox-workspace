@@ -28,7 +28,7 @@ def test_final_only_does_not_load_models_and_locks_semantics(tmp_path):
     assert settings["reward_availability"]["ready"]
     assert settings["advanced"]["reward_alpha"] == .5
     _, selected = jobs.pinned_reward(jobs.datasets.get(dataset["id"]), {
-        "reward_source": "final", "reward_gamma": .92, "reward_accumulate_primitive_steps": True})
+        "reward_source": "final", "reward_gamma": .92})
     assert selected["reward_gamma"] == .92
     assert selected["reward_version_id"] == version["id"]
     for key, value in {"reward_alpha": .2, "reward_stage_exponent": 2., "reward_shaping_weight": .1,
@@ -75,23 +75,21 @@ def test_new_final_normalizes_even_when_base_yaml_has_no_rule(tmp_path):
     assert yaml.safe_load(job["config_path"].read_text())["reward"]["final_normalization"] == "initial_chunk_v1"
 
 
-def test_multiplication_normalizes_evaluation_and_training_to_macro(tmp_path):
+def test_multiplication_trains_with_the_same_per_step_discount(tmp_path):
     jobs, dataset = setup_jobs(tmp_path)
-    job = jobs.start_annotation(dataset["id"], source="final", fusion_mode="multiplicative",
-                                shaping_weight=0., accumulate_primitive_steps=True)
-    assert job["parameters"]["accumulate_primitive_steps"] is False
-    assert yaml.safe_load(job["config_path"].read_text())["reward"]["accumulate_primitive_steps"] is False
+    job = jobs.start_annotation(dataset["id"], source="final", fusion_mode="multiplicative", shaping_weight=0.)
+    assert "accumulate_primitive_steps" not in job["parameters"]
+    assert "accumulate_primitive_steps" not in yaml.safe_load(job["config_path"].read_text())["reward"]
     finish(jobs, dataset, job)
     defaults = jobs.defaults(dataset["id"], "final")
-    assert defaults["advanced"]["reward_accumulate_primitive_steps"] is False
-    assert "reward_accumulate_primitive_steps" not in defaults["reward_editable_parameters"]
+    assert "reward_accumulate_primitive_steps" not in defaults["advanced"]
+    assert defaults["reward_editable_parameters"] == ["reward_gamma"]
     _, parameters = jobs.pinned_reward(jobs.datasets.get(dataset["id"]),
-        {"reward_source": "final", "reward_gamma": .92, "reward_accumulate_primitive_steps": True})
-    assert parameters["reward_accumulate_primitive_steps"] is False
+        {"reward_source": "final", "reward_gamma": .92})
     assert parameters["reward_gamma"] == .92
 
 
-def test_mixed_global_defaults_are_macro_even_when_first_member_is_additive(tmp_path, monkeypatch):
+def test_mixed_global_defaults_drop_the_saved_macro_flag(tmp_path, monkeypatch):
     jobs, dataset = setup_jobs(tmp_path)
     records = [(None, {"reward_config": {"source": "final", "fusion_mode": mode,
                  "accumulate_primitive_steps": True}}, None, None, None)
@@ -99,7 +97,7 @@ def test_mixed_global_defaults_are_macro_even_when_first_member_is_additive(tmp_
     monkeypatch.setattr("studio.services.global_reward_binding.global_members", lambda *_: (records, []))
     defaults = jobs.defaults(dataset["id"], "final")
     assert defaults["reward_availability"]["ready"]
-    assert defaults["advanced"]["reward_accumulate_primitive_steps"] is False
+    assert "reward_accumulate_primitive_steps" not in defaults["advanced"]
     assert defaults["reward_editable_parameters"] == ["reward_gamma"]
 
 
