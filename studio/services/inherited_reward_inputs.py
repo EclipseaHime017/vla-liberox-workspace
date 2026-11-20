@@ -5,9 +5,6 @@ import hashlib
 import importlib
 import importlib.util
 import io
-import json
-import sys
-import threading
 from pathlib import Path
 
 from studio.storage.paths import storage_path
@@ -59,9 +56,8 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
     data.add_episode_chunks(episode)
     header = {"schema_version": data.MANIFEST_SCHEMA_VERSION, "replay_policy": data.REPLAY_POLICY,
               "chunking": data.CHUNKING_RULE,
-              **{key: raw["data"][key] for key in ("action_horizon", "action_dim", "proprio_dim",
+              **{key: raw["data"][key] for key in ("action_dim", "proprio_dim",
                                                   "control_hz", "success_consecutive_steps")}}
-    header["action_horizon"] = max(chunk["length"] for chunk in episode["chunks"])
     return episode, header
 
 

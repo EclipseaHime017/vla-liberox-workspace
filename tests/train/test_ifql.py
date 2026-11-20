@@ -37,7 +37,7 @@ def transition_batch(size=3, horizon=10):
 
 def test_ifql_builds_from_the_catalog_and_trains_only_its_critic():
     config = ifql_config()
-    algorithm = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
+    algorithm = build_algorithm(config, torch.device("cpu"))
     assert isinstance(algorithm, ImplicitFlowQLearning)
     assert algorithm.agent.expectile == 0.9 and algorithm.agent.tau == 0.005
     context, metrics = algorithm.update(transition_batch(), step=0)
@@ -46,7 +46,7 @@ def test_ifql_builds_from_the_catalog_and_trains_only_its_critic():
     assert {"q_loss", "value_loss", "q_mean", "value_mean", "advantage_mean"} <= metrics.keys()
     losses = torch.tensor([1.0, 3.0], requires_grad=True)
     assert algorithm.weight_actor_losses(losses, context).item() == 2.0
-    restored = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
+    restored = build_algorithm(config, torch.device("cpu"))
     restored.restore(copy.deepcopy(algorithm.checkpoint()))
     for left, right in zip(algorithm.agent.parameters(), restored.agent.parameters()):
         torch.testing.assert_close(left, right)
@@ -54,7 +54,7 @@ def test_ifql_builds_from_the_catalog_and_trains_only_its_critic():
 
 def test_exported_critic_scores_with_the_online_min_q(tmp_path):
     config = ifql_config(tmp_path)
-    algorithm = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
+    algorithm = build_algorithm(config, torch.device("cpu"))
     algorithm.update(transition_batch(), step=0)
     save_critic(algorithm, config, tmp_path)
     scorer = load_critic(tmp_path / CRITIC_FILE, "cpu")
@@ -74,17 +74,18 @@ def test_candidate_batch_encodes_like_training_replay():
     agent, wrist = (rng.integers(0, 255, (256, 256, 3), dtype=np.uint8) for _ in range(2))
     raw_proprio = rng.normal(size=8).astype(np.float32)
     candidates = rng.uniform(-1, 1, size=(4, 10, 7)).astype(np.float32)
-    batch = candidate_batch(agent, wrist, raw_proprio, candidates, 5, image_size=128, horizon=10,
+    batch = candidate_batch(agent, wrist, raw_proprio, candidates, image_size=128, horizon=5,
                             action_stats=QUANTILE, proprio_stats=QUANTILE, process_action=lambda action: action)
     torch.testing.assert_close(batch["pixels"][2], critic_pixels(agent, wrist, 128))
     np.testing.assert_allclose(batch["proprio"][0].numpy(), encode_proprio(raw_proprio[None], QUANTILE, QUANTILE)[0])
     np.testing.assert_allclose(batch["actions"][3, :5].numpy(), encode_actions(candidates[3, :5], QUANTILE))
-    assert not batch["actions"][:, 5:].any()
+    # The critic sees the planned chunk's first `horizon` steps, as in training replay.
+    assert batch["actions"].shape == (4, 5, 7)
     assert batch["action_mask"].sum(1).tolist() == [5, 5, 5, 5]
 
 
 class RecordingScorer(torch.nn.Module):
-    """Scores a chunk by its first executed action's x; records what it was shown."""
+    """Scores a chunk by its first action's x; records what it was shown."""
 
     def __init__(self):
         super().__init__()
@@ -97,32 +98,30 @@ class RecordingScorer(torch.nn.Module):
         return batch["actions"][:, 0, 0] + self.anchor
 
 
-def test_selection_scores_only_the_executed_prefix_after_post_processing():
+def test_selection_scores_the_whole_planned_chunk_after_post_processing():
     candidates = np.zeros((3, 10, 7), dtype=np.float32)
     candidates[:, 0, 0] = [0.2, 3.0, 0.5]       # candidate 1 is clipped to 1.0 before scoring
-    candidates[0, 4:, 0] = 100.0                 # beyond the executed prefix: ignored
+    candidates[:, 9, 1] = [0.1, 0.2, 0.3]       # the last planned step reaches the critic
     scorer = RecordingScorer()
-    index, scores = choose(scorer, {"kind": "argmax", "num_samples": 3}, candidates,
-                           agent=np.zeros((8, 8, 3), np.uint8), wrist=np.zeros((8, 8, 3), np.uint8),
-                           raw_proprio=np.zeros(8, np.float32), executed=4,
-                           action_stats=QUANTILE, proprio_stats=QUANTILE,
-                           process_action=lambda action: np.clip(action, -1, 1))
+    kwargs = dict(agent=np.zeros((8, 8, 3), np.uint8), wrist=np.zeros((8, 8, 3), np.uint8),
+                  raw_proprio=np.zeros(8, np.float32), action_stats=QUANTILE, proprio_stats=QUANTILE,
+                  process_action=lambda action: np.clip(action, -1, 1))
+    index, scores = choose(scorer, {"kind": "argmax", "num_samples": 3}, candidates, **kwargs)
     assert index == 1
     assert scores.tolist() == pytest.approx([0.2, 1.0, 0.5], abs=1e-5)
-    assert scorer.seen["action_mask"].sum(1).tolist() == [4, 4, 4]
+    assert scorer.seen["action_mask"].sum(1).tolist() == [10, 10, 10]
+    np.testing.assert_allclose(scorer.seen["actions"][:, 9, 1].numpy(),
+                               encode_actions(candidates[:, 9], QUANTILE)[:, 1], atol=1e-6)
     assert scorer.seen["pixels"].shape == (3, 6, 16, 16)
-    # The critic never saw transitions longer than its horizon: refuse, do not truncate.
-    with pytest.raises(ValueError, match="1–10 executed steps"):
-        choose(scorer, {"kind": "argmax", "num_samples": 3}, np.zeros((3, 12, 7), np.float32),
-               agent=np.zeros((8, 8, 3), np.uint8), wrist=np.zeros((8, 8, 3), np.uint8),
-               raw_proprio=np.zeros(8, np.float32), executed=11, action_stats=QUANTILE,
-               proprio_stats=QUANTILE, process_action=lambda action: action)
+    # A planned chunk shorter than the critic's horizon is refused, never padded.
+    with pytest.raises(ValueError, match="at least `horizon` steps"):
+        choose(scorer, {"kind": "argmax", "num_samples": 3}, np.zeros((3, 8, 7), np.float32), **kwargs)
 
 
 def test_export_carries_critic_and_selector_and_validates(tmp_path):
     from test_policy_export import make_policy
     config = ifql_config(tmp_path)
-    algorithm = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
+    algorithm = build_algorithm(config, torch.device("cpu"))
     checkpoint = tmp_path / "checkpoints" / "step_00000002"
     checkpoint.mkdir(parents=True)
     save_critic(algorithm, config, checkpoint)
@@ -214,9 +213,9 @@ def test_distributed_ifql_matches_single_device_and_exports_unwrapped_critic(tmp
     try:
         config = ifql_config(tmp_path)
         torch.manual_seed(3)
-        single = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
+        single = build_algorithm(config, torch.device("cpu"))
         torch.manual_seed(3)
-        parallel = DistributedAlgorithm(config, torch.device("cpu"), transition_horizon=10)
+        parallel = DistributedAlgorithm(config, torch.device("cpu"))
         assert isinstance(parallel.inner.agent.q1, torch.nn.parallel.DistributedDataParallel)
         for step in range(2):
             single.update(transition_batch(), step)

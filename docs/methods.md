@@ -11,7 +11,7 @@
 
 IFQL 是 IDQL 的 flow 策略版本，参考 [seohongpark/fql](https://github.com/seohongpark/fql/blob/e8cd16eb490332924dfa2492097219f181765933/agents/ifql.py)（[value-flows](https://github.com/chongyi-zheng/value-flows) 中的副本相同）。与参考实现的差异：按动作块建模，L 步的转移用 γᴸ 自举；critic 使用像素编码器；V 与 Q 依次更新、各用一个优化器。默认值见 `configs/methods/ifql.yaml`（expectile 0.9、tau 0.005、N=32）。
 
-Value Flows 参考 [chongyi-zheng/value-flows](https://github.com/chongyi-zheng/value-flows/blob/01833354f547ad842bdaa21d2b761a16069f9724/agents/value_flows.py) 的离线设定（`'rs'` 策略提取）：critic 是两个回报向量场，用 BCFM 与 DCFM 损失训练，并按回报不确定度（flow 对噪声的 jvp）加置信度权重；下一状态的动作块在训练时由当前 actor 采样 `train_num_samples` 个、由在线 critic 选出最优的一个；回报裁剪到训练回放的奖励范围除以 (1−γ)。与参考实现的差异：按动作块建模；critic 使用像素编码器；参考实现中只服务在线 `rpg` 提取的单步蒸馏 actor 及其 Q 损失未移植；采样的下一动作块按该模型默认的执行步数打分。默认值见 `configs/methods/vf.yaml`（Adam 3e-4、tau 0.005、N=16、10 步积分）。训练时每个可自举的转移都要对 π₀.₅ 采样一次，单步耗时明显高于 IFQL。
+Value Flows 参考 [chongyi-zheng/value-flows](https://github.com/chongyi-zheng/value-flows/blob/01833354f547ad842bdaa21d2b761a16069f9724/agents/value_flows.py) 的离线设定（`'rs'` 策略提取）：critic 是两个回报向量场，用 BCFM 与 DCFM 损失训练，并按回报不确定度（flow 对噪声的 jvp）加置信度权重；下一状态的动作块在训练时由当前 actor 采样 `train_num_samples` 个、由在线 critic 选出最优的一个；回报裁剪到训练回放的奖励范围除以 (1−γ)。与参考实现的差异：按动作块建模，下一状态的动作块是 actor 规划的完整块；critic 使用像素编码器；参考实现中只服务在线 `rpg` 提取的单步蒸馏 actor 及其 Q 损失未移植。默认值见 `configs/methods/vf.yaml`（Adam 3e-4、tau 0.005、N=16、10 步积分）。训练时每个可自举的转移都要对 π₀.₅ 采样一次，单步耗时明显高于 IFQL。
 
 ## 一种方法由哪些部分组成
 
@@ -31,7 +31,7 @@ Value Flows 参考 [chongyi-zheng/value-flows](https://github.com/chongyi-zheng/
 | --- | --- |
 | `name`、`label`、`summary` | ID、页面名称和说明（训练页显示为 `label · summary`） |
 | `requires_rewards` | 是否需要数据集奖励。为否时平台不查奖励、不跑评价，并拒绝 `reward_*` 参数 |
-| `requires_transitions` | 是否需要 (s, a, r, s') 转移；为是时训练使用 `ReplayDataset`，并传入 `transition_horizon` |
+| `requires_transitions` | 是否需要 (s, a, r, s') 转移；为是时训练使用 `ReplayDataset`，转移跨越模型规划的完整动作块（`io.replay_horizon` 步） |
 | `config_section` | 方法自己的 YAML 段（例如 `iql`、`ifql`）；其他方法的段在有效配置中为空 |
 | `critic` | 与 actor 一起训练的价值模型类型（`"expectile"`），没有则为 `None` |
 | `critic_keys` | 平台共用 critic 表单中属于本方法的字段（优化器、学习率、expectile、warmup 等）；其他方法的 critic 字段被隐藏并拒绝 |
@@ -74,15 +74,9 @@ class TrainingAlgorithm(Protocol):
 
 `exports_critic` 的方法导出时，`policy.yaml` 额外包含 `critic: critic.pt` 和 `selector: {kind, num_samples}`，critic 文件计入 `component_sha256`；`selector` 也计入平台的模型内容身份。`critic.pt` 只含张量和普通设置，用 `weights_only=True` 加载。
 
-推理：actor 对同一观测采样 `num_samples` 个动作块（π₀.₅ 的图像与提示词前缀只编码一次，`train/models/pi05.py` 的 `sample_chunks`），每块取实际执行的前 `open_loop_steps` 步，经过与环境相同的动作后处理和训练时相同的编码后由 critic 打分，选择器选出要执行的块。三个入口共用这一流程：
+推理：actor 对同一观测采样 `num_samples` 个动作块（π₀.₅ 的图像与提示词前缀只编码一次，`train/models/pi05.py` 的 `sample_chunks`）。每块取规划的前 `replay_horizon` 步（与训练转移相同），经过与环境相同的动作后处理和训练时相同的编码后由 critic 打分，选择器选出要执行的块。打分与实际执行的 `open_loop_steps` 无关：规划 10 步、执行 5 步时，critic 仍评价完整的规划块。平台（`studio/policies/pi05.py` → `train/models/pi05_worker.py`）、无头评测（`sim/runtime.py` → `evaluation_policy`）和远程推理（`cluster/remote_inference.py`）共用 `choose_chunk`。
 
-| 入口 | 执行步数来源 |
-| --- | --- |
-| 平台（`studio/policies/pi05.py` → `train/models/pi05_worker.py`） | 本次仿真或测试的 `open_loop_steps` |
-| 无头评测（`sim/runtime.py` → `evaluation_policy`） | 评测配置解析出的 `open_loop_steps`，作为 `predict(observation, prompt, executed)` 的第三个参数 |
-| 远程推理（`cluster/remote_inference.py`） | 客户端随每次请求发送 `executed` |
-
-单次推理的耗时随 N 增长（前缀一次，去噪 N 份）。critic 只能为不超过其训练转移长度的执行步数打分，`open_loop_steps` 超出时在采样前报错。
+单次推理的耗时随 N 增长（前缀一次，去噪 N 份）。
 
 ## 新增一种方法
 

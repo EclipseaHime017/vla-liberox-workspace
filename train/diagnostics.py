@@ -100,7 +100,7 @@ def _validation_totals(backend, components, dataset, device, batch_size, rank, w
             for offset in range(0, len(indices), batch_size):
                 batch = default_collate([dataset[i] for i in indices[offset:offset + batch_size]])
                 losses, _ = backend.actor_losses(components, batch, device)
-                valid = batch.get("actor_action_mask", batch["action_mask"]).sum(1).to(losses.device)
+                valid = batch["action_mask"].sum(1).to(losses.device)
                 if losses.shape != valid.shape or not torch.isfinite(losses).all() or not (valid > 0).all():
                     raise ValueError("Invalid validation per-sample losses or masks")
                 total += float((losses.double() * valid).sum())

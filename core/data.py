@@ -36,6 +36,28 @@ def replay_end_step(episode: dict[str, Any], include_post_success: bool = True) 
             else int(terminal) + 1)
 
 
+def transition_end(episode: dict[str, Any], start: int, steps: int, include_post_success: bool = True) -> int:
+    """Exclusive end of the model chunk planned at ``start``: ``steps`` actions, cut at the replay
+    endpoint and at hard boundaries (source segments, handoffs, branch resume).
+
+    A training transition spans this chunk, so actor and critic share one action interval;
+    ordinary re-planning boundaries of the recording do not cut it. Chunks starting after the
+    replay endpoint (excluded post-success tails) end at the recording end instead.
+    """
+    if steps < 1:
+        raise ValueError("Transition length must be positive")
+    limit = replay_end_step(episode, include_post_success)
+    if start >= limit:
+        limit = int(episode["recorded_action_count"])
+    end = min(start + steps, limit)
+    hard = {int(segment["end"]) for segment in episode["recorded_action_source_segments"]}
+    hard.update(int(segment["end"]) for segment in (episode.get("trajectory_segments") or []))
+    hard.update(int(step) for step in episode.get("handoff_steps", []))
+    if episode.get("resume_step") is not None:
+        hard.add(int(episode["resume_step"]))
+    return min([end] + [point for point in hard if start < point < end])
+
+
 @dataclass(frozen=True)
 class PreparedPaths:
     manifest: Path
@@ -133,24 +155,15 @@ def build_semi_mdp_chunks(
             "length": stop - start,
             "end": stop,
             "action_source": segment["action_source"],
-            "transition_type": str(segment["action_source"]),
-            "interrupted": False,
             "copied_prefix": False,
         })
     return chunks
 
 
 def replay_chunks(episode: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return full-recording replay without changing prepared/cache identities.
-
-    Older schema-4 manifests kept the post-success tail in evaluation_chunks
-    and annotated its rewards at those same indices. Reuse that complete list
-    in memory, while retaining the manifest and its existing reward hash.
-    """
+    """Recorded execution intervals, which must tile the complete recording."""
     recorded_end = int(episode["recorded_action_count"])
-    prepared = episode["chunks"]
-    complete = bool(prepared) and int(prepared[-1]["end"]) == recorded_end
-    chunks = prepared if complete else episode.get("evaluation_chunks", [])
+    chunks = episode["chunks"]
     run_id = episode["run_id"]
     error = (
         f"Run {run_id} lacks aligned full-recording replay chunks; "
@@ -164,17 +177,6 @@ def replay_chunks(episode: dict[str, Any]) -> list[dict[str, Any]]:
         expected_start = end
     if expected_start != recorded_end or not chunks:
         raise ValueError(error)
-    if not complete:
-        if len(prepared) > len(chunks) or any(
-            any(original[key] != full[key] for key in ("start", "end", "length", "action_source"))
-            for original, full in zip(prepared, chunks)
-        ):
-            raise ValueError(error)
-        return [
-            {**chunk, "transition_type": chunk["action_source"]}
-            if chunk.get("transition_type") == "post_terminal_evaluation" else chunk
-            for chunk in chunks
-        ]
     return chunks
 
 
@@ -657,13 +659,13 @@ def _split(root_run_id: str, seed: int, validation_fraction: float) -> str:
 
 
 def transition_layout_summary(episodes: list[dict]) -> dict:
-    """Expose unusually wide critic inputs before a model or GPU is loaded."""
+    """Expose unusually wide recorded execution intervals before a model or GPU is loaded."""
     lengths = [int(c["length"]) for episode in episodes for c in episode["chunks"]]
     summary = {"max_steps": max(lengths), "p95_steps": float(np.percentile(lengths, 95))}
     if summary["max_steps"] > 128:
         largest = sorted(((int(c["length"]), ep["run_id"], int(c["start"]), int(c["end"]))
                           for ep in episodes for c in ep["chunks"]), reverse=True)[:5]
-        LOG.warning("Wide execution intervals: max=%s, p95=%.1f; all critic samples pad to this maximum. "
+        LOG.warning("Wide execution intervals: max=%s, p95=%.1f. "
                     "Check missing inference queries or recorded open_loop_steps. Largest intervals: %s",
                     summary["max_steps"], summary["p95_steps"], largest)
     return summary
@@ -713,29 +715,11 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int | None = None) -> N
         source_segments=split_sources(episode["recorded_action_source_segments"]),
         inference_steps=episode.get("inference_query_steps", []), extra_boundaries={success_end})
     for chunk in chunks:
-        producer_steps = execution_horizon
         if segments:
-            segment = next(s for s in segments if s["start"] <= chunk["start"] < s["end"])
-            producer_steps = int(segment.get("open_loop_steps", execution_horizon))
-            chunk["origin_run_id"] = segment["origin_run_id"]
-        if chunk["end"] in handoffs and chunk["length"] < producer_steps:
-            chunk["interrupted"] = True
-    if episode["kind"] == "branch":
-        for chunk in chunks:
-            if int(chunk["end"]) > resume_step:
-                continue
+            chunk["origin_run_id"] = next(s for s in segments if s["start"] <= chunk["start"] < s["end"])["origin_run_id"]
+        if episode["kind"] == "branch" and int(chunk["end"]) <= resume_step:
             chunk["copied_prefix"] = True
-            producer_steps = next((int(s.get("open_loop_steps", execution_horizon)) for s in (segments or [])
-                                   if s["start"] <= chunk["start"] < s["end"]), execution_horizon)
-            if int(chunk["end"]) == resume_step and int(chunk["length"]) < producer_steps:
-                chunk["transition_type"] = str(chunk["action_source"]) + "_interrupted"
-                chunk["interrupted"] = True
-            else:
-                chunk["transition_type"] = str(chunk["action_source"]) + "_prefix"
     episode["chunks"] = chunks
-    episode["evaluation_chunks"] = [
-        {**chunk, "transition_type": "post_terminal_evaluation"}
-        if int(chunk["start"]) >= success_end else dict(chunk) for chunk in chunks]
 
 
 @with_dataset_lease
@@ -832,11 +816,9 @@ def prepare_dataset(config: LoadedConfig) -> PreparedPaths:
             "trailing_action_count", "post_terminal_false_count", "recorded_success",
             "raw_done_true_count", "success_consecutive_steps", "success_streak_start",
             "action_source_segments", "recorded_action_source_segments", "chunks",
-            "evaluation_chunks", "split", "chunking", "open_loop_steps",
+            "split", "chunking", "open_loop_steps",
             "execution_steps_source", "inference_query_steps")}
             for ep in episodes]),
-        # Padding for the critic's transition actions, not actor supervision.
-        "action_horizon": max(c["length"] for ep in episodes for c in ep["chunks"]),
         "transition_layout": transition_layout_summary(episodes),
         "action_dim": config.section("data")["action_dim"],
         "proprio_dim": config.section("data")["proprio_dim"],

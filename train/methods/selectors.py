@@ -51,26 +51,17 @@ def load_critic(path: Path, device: torch.device | str) -> torch.nn.Module:
     return scorer.to(device).eval()
 
 
-def check_executed(scorer: torch.nn.Module, executed: Any) -> None:
-    """The critic only scores chunks as long as the transitions it was trained on."""
-    horizon = scorer.settings["horizon"]
-    if type(executed) is not int or not 1 <= executed <= horizon:
-        raise ValueError(f"This policy's critic scores 1–{horizon} executed steps per chunk "
-                         f"(its training transitions); got open_loop_steps={executed}")
-
-
 def choose(scorer: torch.nn.Module, selector: dict[str, Any], candidates: np.ndarray, *,
-           agent: np.ndarray, wrist: np.ndarray, raw_proprio: np.ndarray, executed: int,
+           agent: np.ndarray, wrist: np.ndarray, raw_proprio: np.ndarray,
            action_stats: dict[str, Any], proprio_stats: dict[str, Any],
            process_action: Callable[[np.ndarray], np.ndarray]) -> tuple[int, torch.Tensor]:
     """Index of the chunk to execute among ``candidates`` (N, native_horizon, action_dim).
 
-    The critic sees what the environment would execute: the first ``executed`` steps after
-    the policy's own action post-processing, encoded exactly as in training replay.
+    The critic scores each whole planned chunk, as in training, whatever number of steps the
+    caller then executes; actions get the policy's own post-processing and the training encoding.
     """
-    check_executed(scorer, executed)
     settings = scorer.settings
-    batch = candidate_batch(agent, wrist, raw_proprio, np.asarray(candidates), executed,
+    batch = candidate_batch(agent, wrist, raw_proprio, np.asarray(candidates),
                             image_size=settings["image_size"], horizon=settings["horizon"],
                             action_stats=action_stats, proprio_stats=proprio_stats,
                             process_action=process_action)

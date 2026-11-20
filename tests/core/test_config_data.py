@@ -184,16 +184,14 @@ def test_console_progress_interval_is_a_positive_integer(
         load_train_config(path)
 
 
-def test_branch_keeps_full_trajectory_and_marks_interrupted_policy_prefix(configured):
+def test_branch_keeps_full_trajectory_and_marks_its_copied_policy_prefix(configured):
     prepare_dataset(configured)
     manifest = load_manifest(configured)
     episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     assert [chunk["start"] for chunk in episodes["root"]["chunks"]] == [0, 8, 16]
     assert [chunk["start"] for chunk in episodes["branch"]["chunks"]] == [0, 5, 13, 18]
     assert episodes["branch"]["chunks"][0] == {
-        "start": 0, "length": 5, "end": 5, "action_source": "policy",
-        "transition_type": "policy_interrupted", "interrupted": True,
-        "copied_prefix": True,
+        "start": 0, "length": 5, "end": 5, "action_source": "policy", "copied_prefix": True,
     }
     assert episodes["branch"]["chunks"][1]["action_source"] == "human"
     assert "reward_boundaries" not in episodes["branch"]
@@ -220,13 +218,13 @@ def test_branch_chunks_include_natural_rollout_before_takeover(configured):
         if episode["run_id"] == "branch"
     )
     assert [
-        (chunk["start"], chunk["end"], chunk["transition_type"])
+        (chunk["start"], chunk["end"], chunk["action_source"], chunk["copied_prefix"])
         for chunk in branch["chunks"]
     ] == [
-        (0, 8, "policy_prefix"),
-        (8, 13, "policy_interrupted"),
-        (13, 18, "human"),
-        (18, 22, "human"),
+        (0, 8, "policy", True),
+        (8, 13, "policy", True),
+        (13, 18, "human", False),
+        (18, 22, "human", False),
     ]
 
 
@@ -265,12 +263,11 @@ def test_500_step_branch_evaluation_still_spans_full_25_seconds(configured):
         episode for episode in load_manifest(configured)["episodes"]
         if episode["run_id"] == "branch"
     )
-    assert branch["evaluation_chunks"][0]["start"] == 0
-    assert branch["evaluation_chunks"][-1]["end"] == 500
-    assert branch["evaluation_chunks"][-1]["end"] / 20.0 == 25.0
+    assert branch["chunks"][0]["start"] == 0
+    assert branch["chunks"][-1]["end"] == 500
+    assert branch["chunks"][-1]["end"] / 20.0 == 25.0
     assert any(
-        chunk["start"] == 208 and chunk["end"] == 210
-        and chunk["transition_type"] == "policy_interrupted"
+        chunk["start"] == 208 and chunk["end"] == 210 and chunk["copied_prefix"]
         for chunk in branch["chunks"]
     )
 
@@ -293,21 +290,12 @@ def test_latched_done_tail_is_trained_without_changing_source(configured):
     assert branch["trailing_action_count"] == 4
     assert branch["post_terminal_false_count"] == 0
     assert branch["chunks"][-2] == {
-        "start": 13, "length": 5, "end": 18, "action_source": "human",
-        "transition_type": "human", "interrupted": False,
-        "copied_prefix": False,
+        "start": 13, "length": 5, "end": 18, "action_source": "human", "copied_prefix": False,
     }
     assert branch["chunks"][-1] == {
-        "start": 18, "length": 4, "end": 22, "action_source": "human",
-        "transition_type": "human", "interrupted": False,
-        "copied_prefix": False,
+        "start": 18, "length": 4, "end": 22, "action_source": "human", "copied_prefix": False,
     }
-    assert branch["evaluation_chunks"][:-1] == branch["chunks"][:-1]
-    assert branch["evaluation_chunks"][-1] == {
-        "start": 18, "length": 4, "end": 22, "action_source": "human",
-        "transition_type": "post_terminal_evaluation", "interrupted": False,
-        "copied_prefix": False,
-    }
+    assert "evaluation_chunks" not in branch
     assert all(path.read_bytes() == content for path, content in original_bytes.items())
     manifest = load_manifest(configured)
     assert manifest["replay_policy"] == REPLAY_POLICY
@@ -358,7 +346,7 @@ def test_post_success_source_change_starts_a_new_training_chunk(configured):
     assert branch["success"] is True
     assert branch["terminal_step"] == 17
     assert branch["post_terminal_false_count"] == 3
-    assert [(c["start"], c["end"], c["transition_type"]) for c in branch["chunks"][-2:]] == [
+    assert [(c["start"], c["end"], c["action_source"]) for c in branch["chunks"][-2:]] == [
         (18, 20, "human"), (20, 22, "policy_requery"),
     ]
     assert branch["action_source_segments"][-1] == {
@@ -389,7 +377,7 @@ def test_branch_can_resume_after_success_confirmation(configured):
     assert branch["chunks"][-2]["copied_prefix"] is True
 
 
-def test_sibling_branches_keep_stable_interrupted_prefix_for_annotation(configured):
+def test_sibling_branches_keep_stable_copied_prefix_for_annotation(configured):
     source = Path(configured.section("paths")["dataset_sources"][0])
     branch_run = next(source.rglob("branch/run.json")).parent
     sibling_run = branch_run.parent / "branch-sibling"
@@ -404,12 +392,12 @@ def test_sibling_branches_keep_stable_interrupted_prefix_for_annotation(configur
         episode for episode in load_manifest(configured)["episodes"]
         if episode["kind"] == "branch"
     ]
-    interrupted = [
+    copied = [
         chunk for episode in branches for chunk in episode["chunks"]
-        if chunk["interrupted"]
+        if chunk["copied_prefix"]
     ]
-    assert len(interrupted) == 2
-    assert {(chunk["start"], chunk["end"]) for chunk in interrupted} == {(0, 5)}
+    assert len(copied) == 2
+    assert {(chunk["start"], chunk["end"]) for chunk in copied} == {(0, 5)}
 
 
 def test_transient_success_requires_a_new_complete_streak(configured):
@@ -513,7 +501,7 @@ def test_ui_selection_manifest_prepares_exact_members_and_split(configured, tmp_
     assert manifest["episodes"][0]["split"] == "validation"
     assert manifest["episodes"][0]["chunks"][0]["start"] == 0
     assert manifest["episodes"][0]["chunks"][0]["end"] == 5
-    assert manifest["episodes"][0]["chunks"][0]["transition_type"] == "policy_interrupted"
+    assert manifest["episodes"][0]["chunks"][0]["copied_prefix"] is True
 
 
 def test_npz_shapes_come_from_headers_without_decoding(tmp_path):

@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from studio.services.offline_job_service import OfflineJobService, _training_replay_counts
 from studio.storage.database import connect
@@ -27,21 +26,17 @@ def _full_recording_episode(run_id, chunks, *, terminal_step=None):
         "run_id": run_id, "root_run_id": "run", "kind": "original" if run_id == "run" else "branch",
         "split": "train", "recorded_action_count": values[-1]["end"],
         "action_count": values[-1]["end"] if terminal_step is None else terminal_step + 1,
-        "terminal_step": terminal_step,
-        "chunks": values if terminal_step is None else [
-            chunk for chunk in values if chunk["end"] <= terminal_step + 1
-        ],
-        "evaluation_chunks": values,
+        "terminal_step": terminal_step, "chunks": values,
     }
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_training_replay_counts_include_tail_and_deduplicate_copied_prefix(legacy):
+@pytest.mark.parametrize("terminal_step", [None, 9])
+def test_training_replay_counts_include_tail_and_deduplicate_copied_prefix(terminal_step):
     episodes = [
         _full_recording_episode("run", [(0, 8, False), (8, 10, False), (10, 17, False)],
-                                terminal_step=9 if legacy else None),
+                                terminal_step=terminal_step),
         _full_recording_episode("branch", [(0, 8, True), (8, 10, False), (10, 18, False), (18, 25, False)],
-                                terminal_step=9 if legacy else None),
+                                terminal_step=terminal_step),
     ]
     before = copy.deepcopy(episodes)
     assert _training_replay_counts({"episodes": episodes}) == {"action_count": 34, "chunk_count": 6}
@@ -50,7 +45,7 @@ def test_training_replay_counts_include_tail_and_deduplicate_copied_prefix(legac
 
 def test_training_replay_counts_reject_missing_recorded_tail():
     episode = _full_recording_episode("run", [(0, 5, False), (5, 17, False)], terminal_step=4)
-    del episode["evaluation_chunks"]
+    episode["chunks"] = episode["chunks"][:-1]
     with pytest.raises(ValueError, match="full-recording replay"):
         _training_replay_counts({"episodes": [episode]})
 
@@ -68,13 +63,13 @@ def test_new_training_job_counts_full_pinned_recording_without_changing_history(
     from test_dataset_reward_versions import setup_jobs, finish
 
     jobs, dataset = setup_jobs(tmp_path)
-    # Old replay stopped after action 5; success confirmation and a controller
-    # break at 7 make full replay contain more chunks than the frozen estimate.
+    # Success confirmation after action 5 and a controller break at 7 make the
+    # full replay contain more chunks than the frozen estimate.
     episode = _full_recording_episode(
         "run", [(0, 5, False), (5, 7, False), (7, 15, False), (15, 17, False)],
         terminal_step=4,
     )
-    for chunk in episode["evaluation_chunks"]:
+    for chunk in episode["chunks"]:
         if chunk["start"] >= 7:
             chunk["action_source"] = "human"
     version = finish(jobs, dataset, jobs.start_annotation(dataset["id"], source="sparse"),

@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from core.config import load_train_config
-from core.data import action_source_segments, prepare_dataset, replay_chunks
+from core.data import prepare_dataset, replay_chunks
 from core.io import atomic_json, sha256_file, stable_hash
 from train.replay import ReplayDataset
 from rewards.rynnvalue.annotate import annotate_manifest
@@ -96,47 +96,19 @@ def _pin(configured, index):
     return path
 
 
-def _legacy_prepared_snapshot(path):
-    """Reproduce a saved schema-4 manifest with the success-truncated replay."""
-    prepared = json.loads(path.read_text())
-    prepared.pop("replay_policy", None)
-    for episode in prepared["episodes"]:
-        endpoint = (episode["terminal_step"] + 1 if episode["terminal_step"] is not None
-                    else episode["recorded_action_count"])
-        episode["action_count"] = endpoint
-        episode["chunks"] = [copy.deepcopy(chunk) for chunk in episode["evaluation_chunks"]
-                             if chunk["end"] <= endpoint]
-        with np.load(episode["trajectory_path"], allow_pickle=False) as arrays:
-            episode["action_source_segments"] = action_source_segments(
-                arrays["action_source"].tolist(), endpoint)
-    # This is the dataset identity formula used by schema 4 before complete
-    # recorded trajectories became the replay policy.
-    prepared["dataset_sha256"] = stable_hash([{key: episode[key] for key in (
-        "run_id", "source_manifest_sha256", "trajectory_sha256", "observations_sha256",
-        "task_id", "prompt", "resume_step", "action_count", "recorded_action_count",
-        "terminal_step", "trailing_action_count", "post_terminal_false_count",
-        "recorded_success", "raw_done_true_count", "success_consecutive_steps",
-        "success_streak_start", "action_source_segments", "recorded_action_source_segments",
-        "chunks", "evaluation_chunks", "split",
-    )} for episode in prepared["episodes"]])
-    prepared["trajectory_chunk_count"] = sum(len(episode["chunks"]) for episode in prepared["episodes"])
-    # This fixture has no identical copied-prefix chunk in its parent trajectory.
-    prepared["chunk_count"] = prepared["trajectory_chunk_count"]
-    atomic_json(path, prepared)
-    return prepared
-
-
 def _assert_replay_uses_saved_post_success_rewards(configured, index):
     replay = ReplayDataset(configured, _stats(7), _stats(8), reward_index=index)
+    paths = {entry["run_id"]: entry["reward_path"] for entry in index["episodes"]}
     success_chunks, tail_chunks = [], []
-    for item_index, (episode, chunk_index, reward_path) in enumerate(replay.items):
+    for item_index, (episode, chunk_index, start) in enumerate(replay.items):
         item = replay[item_index]
         chunk = replay_chunks(episode)[chunk_index]
-        with np.load(reward_path, allow_pickle=False) as arrays:
-            expected = discounted_sum(arrays["final_reward"], chunk["start"], chunk["end"],
+        end = replay.transition_end(episode, start)
+        with np.load(paths[episode["run_id"]], allow_pickle=False) as arrays:
+            expected = discounted_sum(arrays["final_reward"], start, end,
                                       configured.section("reward")["gamma"])
             assert item["reward"].item() == pytest.approx(expected, rel=1e-6)
-        assert item["action_mask"].sum().item() == chunk["length"]
+        assert item["action_mask"].sum().item() == end - start
         if episode["terminal_step"] is None:
             continue
         if chunk["end"] == episode["terminal_step"] + 1:
@@ -387,15 +359,10 @@ def test_real_backend_seal_to_pinned_training_interface(configured, tmp_path, mo
 
 
 @pytest.mark.parametrize("source", ["stage", "sparse", "rynnvalue"])
-@pytest.mark.parametrize("legacy_prepared", [False, True], ids=["full-recording", "legacy-schema-4"])
-def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
-    configured, monkeypatch, source, legacy_prepared,
-):
-    prepared_path = prepare_dataset(configured).manifest
-    prepared = (_legacy_prepared_snapshot(prepared_path) if legacy_prepared
-                else json.loads(prepared_path.read_text()))
+def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(configured, monkeypatch, source):
+    prepared = json.loads(prepare_dataset(configured).manifest.read_text())
     branch = next(episode for episode in prepared["episodes"] if episode["run_id"] == "branch")
-    assert branch["action_count"] == (18 if legacy_prepared else 22)
+    assert branch["action_count"] == 22
     _select(configured, source)
     if source == "stage":
         _save_annotations(configured, prepared)

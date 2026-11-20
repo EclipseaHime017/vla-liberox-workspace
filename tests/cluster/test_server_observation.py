@@ -55,16 +55,16 @@ def test_actor_critic_and_mmap_share_variant_pixels(configured, tmp_path, family
     v, h = -1 if vertical else 1, -1 if horizontal else 1
     for index in range(len(replay)):
         sample, item = replay[index], cached[index]
-        episode, chunk_index, _ = replay.items[index]
-        chunk = replay.chunks[episode["run_id"]][chunk_index]
+        episode, _, start = replay.items[index]
         agent, wrist = frames[episode["observations_path"]]
-        expected = [array[chunk["start"], ::v, ::h].copy() for array in (agent, wrist)]
+        expected = [array[start, ::v, ::h].copy() for array in (agent, wrist)]
         np.testing.assert_array_equal(sample["agent_image"], expected[0])
         np.testing.assert_array_equal(sample["wrist_image"], expected[1])
         if method == "iql":
             pixels = torch.from_numpy(np.concatenate(expected, axis=-1)).permute(2, 0, 1)
+            end = replay.transition_end(episode, start)  # the planned chunk's last step
             next_pixels = torch.from_numpy(np.concatenate(
-                [array[chunk["end"], ::v, ::h] for array in (agent, wrist)], axis=-1).copy()).permute(2, 0, 1)
+                [array[end, ::v, ::h] for array in (agent, wrist)], axis=-1).copy()).permute(2, 0, 1)
             assert torch.equal(sample["pixels"], pixels)
             assert torch.equal(sample["next_pixels"], next_pixels)
         for key, value in sample.items():

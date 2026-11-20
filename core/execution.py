@@ -12,7 +12,7 @@ CHUNKING_RULE = "recorded_execution_v1"
 def validate_task_prompt(source: dict, prompt: str | None, *, context: str) -> None:
     """Reject old custom-language data rather than silently relabelling its actions."""
     records = [source]
-    for name in ("trajectory_segments", "chunks", "evaluation_chunks"):
+    for name in ("trajectory_segments", "chunks"):
         values = source.get(name)
         if isinstance(values, list):
             records.extend(value for value in values if isinstance(value, dict))

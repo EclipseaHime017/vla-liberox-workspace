@@ -130,7 +130,7 @@ def test_main_origin_segments_survive_portable_export_and_server_cache(configure
                     assert value == restored[key], key
             assert sample["prompt"] == "do the task"
             if sample["run_id"] == "branch":
-                masks[sample["start"]] = int(sample["actor_action_mask"].sum())
+                masks[sample["start"]] = int(sample["action_mask"].sum())
         assert masks[5] == 7 and masks[9] == 3 and masks[12] == 6 and masks[15] == 3
         assert imported_before == {str(path.relative_to(imported)): sha256_file(path)
                                    for path in imported.rglob("*") if path.is_file()}

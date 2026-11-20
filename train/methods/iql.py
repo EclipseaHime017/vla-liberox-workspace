@@ -12,11 +12,11 @@ from train.methods.critics import ExpectileCritic, advantage_weights
 
 
 class ImplicitQLearning:
-    def __init__(self, config: LoadedConfig, device: torch.device, *, transition_horizon: int | None = None):
+    def __init__(self, config: LoadedConfig, device: torch.device):
         cfg, reward, data = config.section("iql"), config.section("reward"), config.section("data")
         self.cfg = cfg
         self.agent = ExpectileCritic(
-            horizon=transition_horizon or data["action_horizon"], action_dim=data["action_dim"],
+            horizon=data["action_horizon"], action_dim=data["action_dim"],
             proprio_dim=data["proprio_dim"], discount=reward["gamma"],
             expectile=cfg["expectile"], tau=cfg["target_tau"],
             critic_lr=cfg["critic_lr"], value_lr=cfg["value_lr"],
@@ -38,8 +38,7 @@ class ImplicitQLearning:
         return weights, metrics
 
     def actor_loss(self, prediction: torch.Tensor, batch: dict, context: Any) -> torch.Tensor:
-        return weighted_masked_l1(prediction, batch.get("actor_actions", batch["actions"]),
-                                  batch.get("actor_action_mask", batch["action_mask"]), context)
+        return weighted_masked_l1(prediction, batch["actions"], batch["action_mask"], context)
 
     def distribute(self, wrap, zero_optimizer) -> list:
         return self.agent.distribute(wrap, zero_optimizer)

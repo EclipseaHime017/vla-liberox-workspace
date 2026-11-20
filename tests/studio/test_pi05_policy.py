@@ -288,16 +288,13 @@ def test_sampling_overlay_without_its_critic_is_rejected(tmp_path):
         catalog.select("pi-ifql")
 
 
-def test_sampling_policy_forwards_executed_steps_to_the_worker(monkeypatch):
+def test_sampling_policy_requests_only_the_observation_and_prompt(monkeypatch):
     selected = SimpleNamespace(family="pi05", policy_id="ifql", label="IFQL", content_sha256="a" * 64,
                                selector={"kind": "argmax", "num_samples": 4},
-                               settings=configured_models()["pi05-liberox-base"],
-                               resolve_open_loop_steps=lambda value: 10 if value is None else value)
+                               settings=configured_models()["pi05-liberox-base"])
     provider = Pi05PolicyProvider(None, None, SimpleNamespace(select=lambda _: selected))
     provider.process = SimpleNamespace(poll=lambda: None)
     provider.current_policy_entry = SimpleNamespace(content_sha256=selected.content_sha256)
-    provider.load(None, "ifql", expected_content_sha256=selected.content_sha256)
-    assert provider.executed == 10
     provider.load(6, "ifql", expected_content_sha256=selected.content_sha256)
     captured = {}
     def send(request):
@@ -307,4 +304,5 @@ def test_sampling_policy_forwards_executed_steps_to_the_worker(monkeypatch):
     obs = {"agentview_image": np.zeros((4, 4, 3), np.uint8), "robot0_eye_in_hand_image": np.zeros((4, 4, 3), np.uint8),
            "robot0_eef_pos": [0, 0, 0], "robot0_eef_quat": [0, 0, 0, 1], "robot0_gripper_qpos": [0, 0]}
     provider.predict(obs, "task")
-    assert captured["executed"] == 6
+    # The critic scores whole planned chunks: the executed length is not part of the request.
+    assert set(captured) == {"op", "arrays", "prompt"}

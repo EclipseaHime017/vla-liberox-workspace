@@ -65,13 +65,8 @@ def implementation(name: str) -> type:
     return getattr(importlib.import_module(module), attribute)
 
 
-def build_algorithm(config: LoadedConfig, device: torch.device, *,
-                    transition_horizon: int | None = None) -> TrainingAlgorithm:
-    method = training_method(config.raw)
-    cls = implementation(method.name)
-    if method.requires_transitions:
-        return cls(config, device, transition_horizon=transition_horizon)
-    return cls(config, device)
+def build_algorithm(config: LoadedConfig, device: torch.device) -> TrainingAlgorithm:
+    return implementation(training_method(config.raw).name)(config, device)
 
 
 def bind_training_inputs(algorithm: Any, config: LoadedConfig, backend: Any, components: Any, dataset: Any) -> None:

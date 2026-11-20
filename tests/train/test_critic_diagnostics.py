@@ -86,10 +86,11 @@ def test_critic_fit_is_actor_free_preserves_inputs_and_produces_real_plots(diagn
     assert summary["actor_loaded_for_training"] is False
     assert summary["actor_updated"] is False
     assert summary["reward_generated"] is False
-    assert summary["critic_horizon"] == 10
+    assert summary["critic_horizon"] == training.section("data")["action_horizon"]  # the model's chunk
     assert [item["train_step"] for item in progress] == [1, 2]
     assert summary["counts"]["train"] > 0
-    assert summary["counts"]["rollout"] == 2
+    # 10-step recorded intervals [0, 10) and [10, 19) tile into 8-step planned chunks at 0, 8, 10, 18.
+    assert summary["counts"]["rollout"] == 4
     for name in summary["artifacts"]:
         assert (output / name).stat().st_size > 0
     for name in ("training.png", "qv.png"):
@@ -135,8 +136,7 @@ def test_exact_batch_size_padding_and_cancel_at_each_boundary(diagnostic_inputs,
 
     def update(agent, batch):
         batches.append(batch["actions"].shape)
-        assert batch["action_mask"].shape == (4, 10)
-        assert not batch["action_mask"][:, 8:].any()
+        assert batch["action_mask"].shape == (4, training.section("data")["action_horizon"])
         return original(agent, batch)
 
     monkeypatch.setattr(diagnostics.ExpectileCritic, "update", update)
@@ -145,7 +145,7 @@ def test_exact_batch_size_padding_and_cancel_at_each_boundary(diagnostic_inputs,
         diagnostics.run_critic_diagnostic(training, probe, output,
             train_steps=10, batch_size=4, seed=4, device="cpu", progress=progress.append,
             stop_requested=lambda: len(progress) == 1)
-    assert batches == [torch.Size([4, 10, 7])]
+    assert batches == [torch.Size([4, training.section("data")["action_horizon"], 7])]
     assert len((output / "metrics.jsonl").read_text().splitlines()) == 1
     assert not (output / "summary.json").exists()
     assert not (output / "critic.pt").exists()
@@ -166,13 +166,14 @@ def test_padding_preserves_chunk_actions_and_masks():
 def test_finite_returns_use_the_per_step_discount_and_terminal_mask(diagnostic_inputs):
     config, _ = diagnostic_inputs
     action, proprio = replay_stats(config.section("model"))
-    replay = ReplayDataset(config, action, proprio, reward_index=diagnostics._existing_rewards(config))
+    index = diagnostics._existing_rewards(config)
+    paths = {entry["run_id"]: entry["reward_path"] for entry in index["episodes"]}
+    replay = ReplayDataset(config, action, proprio, reward_index=index)
     values = diagnostics._finite_returns(replay, .8)
-    for episode, chunk_index, annotation in replay.items:
+    for episode, _, start in replay.items:
         run_id = episode["run_id"]
-        with np.load(annotation) as source:
+        with np.load(paths[run_id]) as source:
             rewards = source["final_reward"]
-        start = replay.chunks[run_id][chunk_index]["start"]
         end = replay_end_step(episode, replay.include_post_success)
         expected = sum(.8 ** k * float(reward) for k, reward in enumerate(rewards[start:end]))
         assert values[(run_id, start)] == pytest.approx(expected)

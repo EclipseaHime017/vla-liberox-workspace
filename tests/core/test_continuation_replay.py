@@ -118,7 +118,7 @@ def test_old_recordings_never_silently_relabel_custom_actions(configured, source
     assert (path.read_bytes(), trajectory.read_bytes()) == before
 
 
-@pytest.mark.parametrize("section", ["chunks", "evaluation_chunks", "trajectory_segments"])
+@pytest.mark.parametrize("section", ["chunks", "trajectory_segments"])
 def test_prepared_data_rejects_old_custom_language(configured, section):
     prepared = prepare_dataset(configured)
     manifest = load_manifest(configured)

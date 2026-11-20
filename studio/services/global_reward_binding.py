@@ -190,7 +190,6 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
         entry.update(reward_path=str(destination), annotation_path=str(destination))
     digest = hashlib.sha256(json.dumps(episodes, sort_keys=True).encode()).hexdigest()
     prepared = {**records[0][4], "episodes": episodes, "dataset_sha256": digest,
-        "action_horizon": max(c["length"] for ep in episodes for c in ep["chunks"]),
         "source_dataset_id": dataset["id"], "source_dataset_sha256": dataset["dataset_sha256"],
         "episode_count": len(episodes), "success_count": sum(bool(ep["success"]) for ep in episodes)}
     raw["reward"].pop("base_coefficient", None)

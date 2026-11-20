@@ -63,7 +63,7 @@ def test_current_recorded_layout_is_valid_for_training(configured):
 
 
 @pytest.mark.parametrize("steps", [5, 8])
-def test_saved_rewards_reuse_recorded_layout_with_pi05_ten_step_actor(configured, tmp_path, steps):
+def test_saved_per_action_rewards_serve_pi05_ten_step_chunks(configured, tmp_path, steps):
     config, _, _ = recording(configured, tmp_path, family="vla_adapter", steps=steps)
     task, source, _ = global_runs(config)
     original = {path: sha256_file(path) for path in task.runs[0].path.parent.rglob("*") if path.is_file()}
@@ -71,8 +71,6 @@ def test_saved_rewards_reuse_recorded_layout_with_pi05_ten_step_actor(configured
     source.raw["data"]["action_horizon"] = 10
     raw = prepare_global_inputs(task, tmp_path / "server-inputs", source.raw, "final")
     loaded = LoadedConfig(tmp_path / "effective.yaml", raw)
-    manifest = load_manifest(loaded)
-    assert manifest["action_horizon"] == steps
     assert raw["data"]["action_horizon"] == 10
     assert original == {path: sha256_file(path) for path in original}
     stats, proprio = _stats(7), _stats(8)
@@ -81,9 +79,9 @@ def test_saved_rewards_reuse_recorded_layout_with_pi05_ten_step_actor(configured
     shared = ReplayDataset(loaded, stats, proprio, reward_index=reward)
     cached, _ = build_replay_cache(loaded, tmp_path / "cache", stats, proprio, reward)
     sample = CachedReplayDataset(cached)[0]
-    assert sample["actions"].shape == (steps, 7)
-    assert sample["actor_actions"].shape == (10, 7)
-    assert sample["actor_action_mask"].sum() == 10
+    assert sample["actions"].shape == (10, 7)
+    assert sample["action_mask"].sum() == 10
+    assert sample["chunk_length"] == 10
     assert sample["reward"] == shared[0]["reward"]
 
 
@@ -97,9 +95,8 @@ def test_saved_rewards_must_cover_every_recorded_action():
 @pytest.mark.parametrize("location", ["episode", "entry"])
 def test_saved_full_task_instructions_are_compatible(location):
     chunk = dict(start=0, end=5, length=5, action_source="policy", origin_run_id="origin")
-    episode = dict(run_id="run", prompt="pick the bowl", recorded_action_count=5,
-                   chunks=[chunk], evaluation_chunks=[chunk])
-    metadata = {location: {"policy_instruction": "pick the bowl", "evaluation_chunks": [
+    episode = dict(run_id="run", prompt="pick the bowl", recorded_action_count=5, chunks=[chunk])
+    metadata = {location: {"policy_instruction": "pick the bowl", "chunks": [
         {**chunk, "policy_instruction": " pick the bowl "}]}}
     before = copy.deepcopy(metadata)
     _validate_reward_layout(metadata, {"final_reward": -np.ones(5)}, episode)
@@ -110,10 +107,9 @@ def test_saved_full_task_instructions_are_compatible(location):
 @pytest.mark.parametrize("location", ["metadata", "episode", "entry", "chunk"])
 def test_saved_custom_instructions_are_rejected(location):
     chunk = dict(start=0, end=5, length=5, action_source="policy", origin_run_id="origin")
-    episode = dict(run_id="run", prompt="pick the bowl", recorded_action_count=5,
-                   chunks=[chunk], evaluation_chunks=[chunk])
-    metadata = {"entry": {"evaluation_chunks": [dict(chunk)]}}
-    target = (metadata if location == "metadata" else metadata["entry"]["evaluation_chunks"][0]
+    episode = dict(run_id="run", prompt="pick the bowl", recorded_action_count=5, chunks=[chunk])
+    metadata = {"entry": {"chunks": [dict(chunk)]}}
+    target = (metadata if location == "metadata" else metadata["entry"]["chunks"][0]
               if location == "chunk" else metadata.setdefault(location, {}))
     target["policy_instruction"] = "close the drawer"
     with pytest.raises(ValueError, match="custom instruction differs"):
@@ -171,4 +167,4 @@ def test_handoff_without_instruction_segments_still_bounds_actions(configured, t
     manifest = load_manifest(config)
     assert manifest["episodes"][0]["handoff_steps"] == [5]
     assert manifest["episodes"][0]["chunks"][0]["end"] == 5
-    assert ActionDataset(config, _stats(7), _stats(8))[0]["actor_action_mask"].sum() == 5
+    assert ActionDataset(config, _stats(7), _stats(8))[0]["action_mask"].sum() == 5

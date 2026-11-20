@@ -18,8 +18,7 @@ class BehaviorCloning:
 
     def actor_loss(self, prediction: torch.Tensor, batch: dict, context: Any) -> torch.Tensor:
         weights = torch.ones(prediction.shape[0], device=prediction.device)
-        return weighted_masked_l1(prediction, batch.get("actor_actions", batch["actions"]),
-                                  batch.get("actor_action_mask", batch["action_mask"]), weights)
+        return weighted_masked_l1(prediction, batch["actions"], batch["action_mask"], weights)
 
     def checkpoint(self) -> dict:
         return {}

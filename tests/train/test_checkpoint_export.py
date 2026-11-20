@@ -35,8 +35,7 @@ def make_checkpoint(tmp_path, monkeypatch, base_id="pi05-libero-base", step=2000
     backend.save_actor(original, settings, checkpoint)
     if method != "bc":
         from train.methods.base import build_algorithm, save_critic
-        save_critic(build_algorithm(config, torch.device("cpu"),
-                                    transition_horizon=config.section("data")["action_horizon"]), config, checkpoint)
+        save_critic(build_algorithm(config, torch.device("cpu")), config, checkpoint)
     metadata = {"schema_version": 2, "step": step, "config_sha256": config.digest,
                 "algorithm": method, "model_config": model_signature(config.raw),
                 "model_parent": parent, "model_identity": identity,

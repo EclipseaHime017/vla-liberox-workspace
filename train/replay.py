@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from core.storage_paths import storage_path
@@ -12,7 +11,7 @@ from torch.utils.data import Dataset
 
 from core.config import LoadedConfig
 from core.registry import model_observation, model_contract
-from core.data import iter_unique_replay_chunks, load_manifest, replay_chunks, replay_end_step
+from core.data import iter_unique_replay_chunks, load_manifest, replay_chunks, replay_end_step, transition_end
 from core.methods import training_method
 from core.frame_cache import FrameCache
 from core.image_transforms import policy_view, image_orientation
@@ -23,12 +22,22 @@ from train.models.vla_adapter import proprio_from_trajectory
 
 
 class ActionDataset(Dataset):
-    """All selected replay chunks, independent of rewards and critic inputs."""
+    """All selected replay chunks, independent of rewards and critic inputs.
+
+    Each sample is the model chunk planned at a re-planning point: ``horizon`` (the model's
+    replay horizon) actions from ``start``, cut at hard boundaries and the replay endpoint
+    (``core.data.transition_end``). The actor imitates it and, for RL methods, the critic
+    scores it as one action whose transition ends at its last step.
+
+    ``items`` are ``(episode, chunk_index, start)``. Starts are the recorded re-planning
+    points, plus every ``horizon`` steps inside a recorded interval longer than ``horizon``,
+    so every action belongs to a transition.
+    """
     def __init__(self, config: LoadedConfig, action_stats: dict[str, Any],
                  proprio_stats: dict[str, Any], split: str = "train"):
         self.config = config
         self.image_orientation = image_orientation(model_observation(config.section("model")))
-        self.actor_horizon = model_contract(config.section("model"))["io"]["replay_horizon"]
+        self.horizon = model_contract(config.section("model"))["io"]["replay_horizon"]
         self.include_post_success = config.section("data").get("include_post_success", True)
         self.manifest = load_manifest(config)
         self.action_stats, self.proprio_stats = action_stats, proprio_stats
@@ -38,21 +47,23 @@ class ActionDataset(Dataset):
             episode["run_id"]: replay_chunks(episode)
             for episode in self.manifest["episodes"]
         }
-        self.items = [(episode, index, None) for episode, index in
-                      iter_unique_replay_chunks(self.manifest["episodes"], split=split,
-                                               include_post_success=self.include_post_success)]
+        self.items: list[tuple[dict[str, Any], int, int]] = []
+        for episode, index in iter_unique_replay_chunks(self.manifest["episodes"], split=split,
+                                                        include_post_success=self.include_post_success):
+            chunk = self.chunks[episode["run_id"]][index]
+            self.items.extend((episode, index, start)
+                              for start in range(int(chunk["start"]), int(chunk["end"]), self.horizon))
         self.prompt_groups: dict[str, list[int]] = {}
-        for index, (episode, chunk_index, _) in enumerate(self.items):
+        for index, (episode, _, _) in enumerate(self.items):
             self.prompt_groups.setdefault(episode["prompt"], []).append(index)
         if split == "train" and not self.items:
             raise RuntimeError("Training replay is empty")
-        # Only chunk boundaries are ever read: the start frame for the actor
+        # Only transition boundaries are ever read: the start frame for both networks
         # and the end frame for the critic's next observation.
         self._frame_indices: dict[str, set[int]] = {}
-        for episode, chunk_index, _ in self.items:
-            chunk = self.chunks[episode["run_id"]][chunk_index]
+        for episode, _, start in self.items:
             self._frame_indices.setdefault(episode["run_id"], set()).update(
-                (int(chunk["start"]), int(chunk["end"])))
+                (start, self.transition_end(episode, start)))
         # Prepared work directories may be frozen dataset inputs; the decoded
         # frames belong to the shared, writable cache root instead.
         cache_root = config.section("paths").get("annotation_cache")
@@ -61,6 +72,9 @@ class ActionDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.items)
+
+    def transition_end(self, episode: dict[str, Any], start: int) -> int:
+        return transition_end(episode, start, self.horizon, self.include_post_success)
 
     def _pixels(self, agent: np.ndarray, wrist: np.ndarray) -> torch.Tensor:
         return critic_pixels(agent, wrist, self.image_size)
@@ -79,20 +93,11 @@ class ActionDataset(Dataset):
         return cached
 
     def _sample(self, item: int, *, transitions: bool) -> dict[str, Any]:
-        episode, chunk_index, annotation_path = self.items[item]
+        episode, chunk_index, start = self.items[item]
         chunk = self.chunks[episode["run_id"]][chunk_index]
-        start, end, length = int(chunk["start"]), int(chunk["end"]), int(chunk["length"])
+        end = self.transition_end(episode, start)
+        length = end - start
         trajectory = self._trajectory(episode)
-        # The actor learns a model-sized window from the same state. Ordinary
-        # re-planning boundaries end a critic transition, not actor supervision.
-        actor_end = min(start + self.actor_horizon, replay_end_step(episode, self.include_post_success))
-        hard_boundaries = {int(s["end"]) for s in episode["recorded_action_source_segments"]}
-        hard_boundaries.update(int(s["end"]) for s in (episode.get("trajectory_segments") or []))
-        hard_boundaries.update(int(step) for step in episode.get("handoff_steps", []))
-        if episode.get("resume_step") is not None:
-            hard_boundaries.add(int(episode["resume_step"]))
-        actor_end = min([actor_end] + [point for point in hard_boundaries if start < point < actor_end])
-        actor_length = actor_end - start
         frames = self._frames.episode(episode, self._frame_indices[episode["run_id"]])
         orientation = episode["observation_orientation"]
         agent = policy_view(frames.frame("agentview_image", start), orientation, self.image_orientation)
@@ -102,20 +107,12 @@ class ActionDataset(Dataset):
             next_wrist = policy_view(frames.frame("wrist_image", end), orientation, self.image_orientation)
         raw_proprio = proprio_from_trajectory(trajectory)
         proprio = encode_proprio(raw_proprio, self.action_stats, self.proprio_stats)
-        encoded_actions = encode_actions(trajectory["env_action"][start:end], self.action_stats)
-        actor_encoded = encode_actions(trajectory["env_action"][start:actor_end], self.action_stats)
-        actions = np.zeros((self.manifest["action_horizon"], self.manifest["action_dim"]), dtype=np.float32)
-        action_mask = np.zeros(self.manifest["action_horizon"], dtype=bool)
-        actions[:length] = encoded_actions
+        actions = np.zeros((self.horizon, self.manifest["action_dim"]), dtype=np.float32)
         raw_actions = np.zeros_like(actions)
+        action_mask = np.zeros(self.horizon, dtype=bool)
+        actions[:length] = encode_actions(trajectory["env_action"][start:end], self.action_stats)
         raw_actions[:length] = trajectory["env_action"][start:end]
         action_mask[:length] = True
-        actor_actions = np.zeros((self.actor_horizon, self.manifest["action_dim"]), dtype=np.float32)
-        actor_raw_actions = np.zeros_like(actor_actions)
-        actor_mask = np.zeros(self.actor_horizon, dtype=bool)
-        actor_actions[:actor_length] = actor_encoded
-        actor_raw_actions[:actor_length] = trajectory["env_action"][start:actor_end]
-        actor_mask[:actor_length] = True
         # The selected replay endpoint is terminal in either mode. Reward arrays
         # retain full-recording indices and never need a model re-evaluation.
         terminal = end == replay_end_step(episode, self.include_post_success)
@@ -127,18 +124,14 @@ class ActionDataset(Dataset):
             "proprio": torch.from_numpy(proprio[start]),
             "actions": torch.from_numpy(actions),
             "action_mask": torch.from_numpy(action_mask),
-            "actor_actions": torch.from_numpy(actor_actions),
-            "actor_raw_actions": torch.from_numpy(actor_raw_actions),
-            "actor_action_mask": torch.from_numpy(actor_mask),
             "chunk_length": torch.tensor(length, dtype=torch.int64),
             "agent_image": torch.from_numpy(agent.copy()),
             "wrist_image": torch.from_numpy(wrist.copy()),
             "prompt": episode["prompt"],
             "run_id": episode["run_id"],
             "start": start,
+            # Hard boundaries end every transition at a source change.
             "action_source": str(chunk["action_source"]),
-            "transition_type": str(chunk["transition_type"]),
-            "interrupted": bool(chunk["interrupted"]),
         }
         if transitions:
             sample.update(
@@ -154,7 +147,7 @@ class ActionDataset(Dataset):
 
 
 class ReplayDataset(ActionDataset):
-    """RL view of the same samples, with validated rewards and next observations."""
+    """RL view of the same samples, with rewards and next observations of each transition."""
     def __init__(self, config: LoadedConfig, action_stats: dict[str, Any],
                  proprio_stats: dict[str, Any], split: str = "train",
                  reward_index: dict[str, Any] | None = None):
@@ -165,31 +158,26 @@ class ReplayDataset(ActionDataset):
             raise ValueError("Reward annotation manifest is incomplete")
         if index["dataset_sha256"] != self.manifest["dataset_sha256"]:
             raise ValueError("Reward annotations were generated for a different dataset manifest")
-        annotations = {item["run_id"]: storage_path(item["annotation_path"]) for item in index["episodes"]}
+        paths = {item["run_id"]: storage_path(item["annotation_path"]) for item in index["episodes"]}
         self.gamma = float(config.section("reward")["gamma"])
-        self._rewards: dict[Path, np.ndarray] = {}
+        # Per-action rewards of each recording in this split.
+        self.action_rewards: dict[str, np.ndarray] = {}
         for episode, _, _ in self.items:
-            rewards = self._action_rewards(annotations[episode["run_id"]])
-            if rewards.shape != (int(episode["recorded_action_count"]),) or not np.isfinite(rewards).all():
-                raise ValueError(f"Run {episode['run_id']} rewards do not cover every recorded action; "
-                                 "rematerialize rewards for the complete recording")
-        self.items = [(episode, chunk_index, annotations[episode["run_id"]])
-                      for episode, chunk_index, _ in self.items]
-
-    def _action_rewards(self, annotation: Path) -> np.ndarray:
-        rewards = self._rewards.get(annotation)
-        if rewards is None:
-            with np.load(annotation, allow_pickle=False) as source:
+            run_id = episode["run_id"]
+            if run_id in self.action_rewards:
+                continue
+            with np.load(paths[run_id], allow_pickle=False) as source:
                 rewards = np.asarray(source["final_reward"], dtype=np.float64)
-            self._rewards[annotation] = rewards
-        return rewards
+            if rewards.shape != (int(episode["recorded_action_count"]),) or not np.isfinite(rewards).all():
+                raise ValueError(f"Run {run_id} rewards do not cover every recorded action; "
+                                 "rematerialize rewards for the complete recording")
+            self.action_rewards[run_id] = rewards
 
     def transition_reward(self, item: int) -> float:
-        """Per-action rewards of the transition, summed with the per-step discount (float32, as stored)."""
-        episode, chunk_index, annotation = self.items[item]
-        chunk = self.chunks[episode["run_id"]][chunk_index]
-        return float(np.float32(discounted_sum(self._action_rewards(annotation), int(chunk["start"]),
-                                               int(chunk["end"]), self.gamma)))
+        """Per-action rewards over the planned chunk, summed with the per-step discount (float32, as stored)."""
+        episode, _, start = self.items[item]
+        return float(np.float32(discounted_sum(self.action_rewards[episode["run_id"]], start,
+                                               self.transition_end(episode, start), self.gamma)))
 
     def __getitem__(self, item: int) -> dict[str, Any]:
         sample = self._sample(item, transitions=True)

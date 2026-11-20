@@ -137,7 +137,6 @@ def test_post_success_actions_images_and_masks_are_sampled(configured):
     assert item["pixels"][:3].unique().tolist() == [18]
     assert item["next_pixels"][:3].unique().tolist() == [22]
     assert item["next_pixels"][3:].unique().tolist() == [72]
-    assert item["transition_type"] == "human"
     assert item["bootstrap_mask"].item() == 0.0
 
 
@@ -164,7 +163,12 @@ def test_post_success_setting_filters_samples_without_changing_data_or_rewards(c
     old = next(full[i] for i, (ep, n, _) in enumerate(full.items)
                if ep["run_id"] == "branch" and full.chunks["branch"][n]["start"] == 13)
     assert old["bootstrap_mask"].item() == 1
-    assert old["reward"].item() == branch[-1]["reward"].item()
+    # The same saved per-action rewards; the full replay's planned chunk runs into the tail.
+    assert old["chunk_length"].item() == 8
+    rewards = full.action_rewards["branch"]
+    gamma = configured.section("reward")["gamma"]
+    assert old["reward"].item() == pytest.approx(sum(gamma ** k * rewards[13 + k] for k in range(8)), rel=1e-6)
+    assert branch[-1]["reward"].item() == pytest.approx(sum(gamma ** k * rewards[13 + k] for k in range(5)), rel=1e-6)
     # The failed parent is unaffected, including its final partial chunk.
     assert [(ep["run_id"], i) for ep, i, _ in full.items if ep["run_id"] == "root"] == [
         (ep["run_id"], i) for ep, i, _ in truncated.items if ep["run_id"] == "root"]
@@ -198,7 +202,6 @@ def test_replay_rejects_legacy_manifest_missing_full_tail(configured):
     branch = next(ep for ep in manifest["episodes"] if ep["run_id"] == "branch")
     branch["chunks"] = branch["chunks"][:-1]
     branch["action_count"] = 18
-    branch.pop("evaluation_chunks")
     manifest.pop("replay_policy")
     prepared.manifest.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="full-recording replay chunks"):
@@ -219,19 +222,17 @@ def test_replay_rejects_rewards_that_omit_post_success_tail(configured):
         ReplayDataset(configured, _stats(7), _stats(8), reward_index=rewards)
 
 
-def test_replay_exposes_variable_duration_transition_metadata(configured):
+def test_planned_chunk_is_cut_at_the_branch_handoff(configured):
     prepare_dataset(configured)
     annotate_manifest(configured, FakeAnnotator())
     replay = ReplayDataset(configured, _stats(7), _stats(8), split="train")
     item = next(
-        replay[index] for index, (episode, chunk_index, _) in enumerate(replay.items)
-        if episode["run_id"] == "branch"
-        and episode["chunks"][chunk_index]["interrupted"]
+        replay[index] for index, (episode, chunk_index, start) in enumerate(replay.items)
+        if episode["run_id"] == "branch" and start == 0
     )
     assert item["chunk_length"].item() == 5
     assert item["action_mask"].tolist() == [True] * 5 + [False] * 3
     assert item["action_source"] == "policy"
-    assert item["transition_type"] == "policy_interrupted"
     assert item["bootstrap_mask"].item() == 1.0
 
 
@@ -247,13 +248,13 @@ def test_replay_deduplicates_sibling_interrupted_prefixes(configured):
     prepare_dataset(configured)
     annotate_manifest(configured, FakeAnnotator())
     replay = ReplayDataset(configured, _stats(7), _stats(8), split="train")
-    interrupted = [
+    copied = [
         (episode["root_run_id"], episode["chunks"][chunk_index]["start"],
          episode["chunks"][chunk_index]["end"])
         for episode, chunk_index, _ in replay.items
-        if episode["chunks"][chunk_index]["interrupted"]
+        if episode["chunks"][chunk_index]["copied_prefix"]
     ]
-    assert interrupted == [("root", 0, 5)]
+    assert copied == [("root", 0, 5)]
 
 
 def test_replay_deduplicates_full_copied_prefix_against_parent(configured):
@@ -309,11 +310,9 @@ def test_replay_frames_are_decoded_once_per_episode_and_reused_from_disk(configu
     samples = [first[index] for index in range(len(first))] * 2
     assert len(decoded) == len({episode["run_id"] for episode, _, _ in first.items})
 
-    for episode, chunk_index, _ in first.items[:3]:
-        start = int(first.chunks[episode["run_id"]][chunk_index]["start"])
+    for item, (episode, _, start) in enumerate(first.items[:3]):
         with original(episode["observations_path"], allow_pickle=False) as source:
             expected = source["agentview_image"][start]
-        item = first.items.index((episode, chunk_index, None))
         np.testing.assert_array_equal(
             first[item]["agent_image"].numpy(),
             expected[::-1, ::-1])

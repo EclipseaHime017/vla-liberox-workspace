@@ -1,4 +1,5 @@
-"""Actor supervision and recorded semi-MDP intervals are independent."""
+"""Samples start at recorded re-planning points; each is the model's planned chunk, shared by
+actor and critic."""
 from __future__ import annotations
 
 import json
@@ -48,34 +49,32 @@ def intervals(episode):
     return [(c["start"], c["end"]) for c in episode["chunks"]]
 
 
-def test_actor_ten_steps_crosses_queries_without_changing_critic_transition(configured, tmp_path):
+def test_planned_chunk_crosses_queries_and_is_shared_by_actor_and_critic(configured, tmp_path):
     config, _, _ = recording(configured, tmp_path, steps=5, queries=[0, 3, 8, 13, 17])
     manifest = prepared(config)
     assert manifest["chunking"] == CHUNKING_RULE
-    assert manifest["action_horizon"] == 5
+    assert "action_horizon" not in manifest
     assert intervals(manifest["episodes"][0]) == [(0, 3), (3, 8), (8, 13), (13, 17)]
     dataset = ActionDataset(config, _stats(7), _stats(8))
     first = dataset[0]
-    assert first["actions"].shape == (5, 7)
-    assert first["action_mask"].sum() == 3
-    assert first["actor_actions"].shape == (10, 7)
-    assert first["actor_action_mask"].all()
-    np.testing.assert_allclose(first["actor_raw_actions"][:, 0], np.arange(10) / 17)
-    assert dataset[-1]["actor_action_mask"].sum() == 4
+    assert first["actions"].shape == (10, 7)
+    assert first["action_mask"].all()
+    assert first["chunk_length"] == 10
+    np.testing.assert_allclose(first["raw_actions"][:, 0], np.arange(10) / 17)
+    assert dataset[-1]["action_mask"].sum() == 4
 
 
 @pytest.mark.parametrize("supervision", [4, 8])
-def test_transition_can_be_longer_than_supervision(configured, tmp_path, supervision):
+def test_planned_chunk_follows_the_model_horizon_not_the_recording(configured, tmp_path, supervision):
     config, _, _ = recording(configured, tmp_path, family="vla_adapter", steps=10, count=23)
     contract = model_contract(config.raw["model"])
     contract["io"]["replay_horizon"] = supervision
     config.raw["model"]["contract"] = contract
     manifest = prepared(config)
-    assert manifest["action_horizon"] == 10
     assert intervals(manifest["episodes"][0]) == [(0, 10), (10, 20), (20, 23)]
     sample = ActionDataset(config, _stats(7), _stats(8))[0]
-    assert sample["action_mask"].sum() == 10
-    assert sample["actor_action_mask"].sum() == supervision
+    assert sample["action_mask"].sum() == supervision
+    assert sample["chunk_length"] == supervision
 
 
 def test_layout_and_prepare_cache_do_not_depend_on_target_supervision(configured, tmp_path):
@@ -90,10 +89,10 @@ def test_layout_and_prepare_cache_do_not_depend_on_target_supervision(configured
     second = prepared(config)
     assert second["dataset_sha256"] == first["dataset_sha256"]
     assert prepare_fingerprint(selection, config.raw) == fingerprint
-    assert ActionDataset(config, _stats(7), _stats(8))[0]["actor_actions"].shape == (50, 7)
+    assert ActionDataset(config, _stats(7), _stats(8))[0]["actions"].shape == (50, 7)
 
 
-def test_actor_stops_at_producer_boundary_not_at_query(configured, tmp_path):
+def test_planned_chunk_stops_at_producer_boundary_not_at_query(configured, tmp_path):
     config, path, trajectory = recording(configured, tmp_path, steps=5, queries=[0, 5, 10, 15])
     with np.load(trajectory) as source:
         arrays = dict(source)
@@ -104,10 +103,10 @@ def test_actor_stops_at_producer_boundary_not_at_query(configured, tmp_path):
     np.savez(trajectory, **arrays)
     prepared(config)
     dataset = ActionDataset(config, _stats(7), _stats(8))
-    assert dataset[0]["actor_action_mask"].sum() == 7
-    assert dataset[1]["actor_action_mask"].sum() == 2
+    assert dataset[0]["action_mask"].sum() == 7
+    assert dataset[1]["action_mask"].sum() == 2
     assert dataset[2]["prompt"] == "do the task"
-    assert dataset[2]["actor_action_mask"].sum() == 10
+    assert dataset[2]["action_mask"].sum() == 10
 
 
 def test_success_boundary_does_not_restart_policy_queries(configured, tmp_path):
@@ -123,9 +122,9 @@ def test_success_boundary_does_not_restart_policy_queries(configured, tmp_path):
     manifest = prepared(config)
     assert intervals(manifest["episodes"][0]) == [(0, 5), (5, 10), (10, 13), (13, 15), (15, 17)]
     dataset = ActionDataset(config, _stats(7), _stats(8))
-    assert dataset[1]["actor_action_mask"].sum() == 10
+    assert dataset[1]["action_mask"].sum() == 10
     config.raw["data"]["include_post_success"] = False
-    assert ActionDataset(config, _stats(7), _stats(8))[1]["actor_action_mask"].sum() == 8
+    assert ActionDataset(config, _stats(7), _stats(8))[1]["action_mask"].sum() == 8
 
 
 def test_legacy_uses_source_model_default_and_rejects_unknown_source():
@@ -190,7 +189,7 @@ def test_old_branch_recovers_parent_cadence(configured, tmp_path):
     episode = _load_run(path, config)
     add_episode_chunks(episode)
     assert intervals(episode) == [(0, 5), (5, 10), (10, 13), (13, 20), (20, 23)]
-    assert episode["chunks"][2]["interrupted"]
+    assert [chunk["copied_prefix"] for chunk in episode["chunks"]] == [True, True, True, False, False]
 
 
 def test_query_validation_allows_unexecuted_last_proposal():
@@ -231,11 +230,10 @@ def test_moved_legacy_prefix_uses_local_saved_source_and_never_child_cadence(tmp
         _execution_segments(run, metadata, 23, 7, trajectory_path=tmp_path / "trajectory.npz")
 
 
-def test_vla_loss_uses_actor_window_not_critic_padding(monkeypatch):
+def test_vla_loss_uses_only_the_sample_window(monkeypatch):
     prediction = torch.ones(1, 8, 7, requires_grad=True)
     monkeypatch.setattr(vla_adapter, "predict_batch", lambda *args: prediction)
-    batch = {"actions": torch.zeros(1, 10, 7), "action_mask": torch.ones(1, 10, dtype=torch.bool),
-             "actor_actions": torch.zeros(1, 4, 7), "actor_action_mask": torch.ones(1, 4, dtype=torch.bool)}
+    batch = {"actions": torch.zeros(1, 4, 7), "action_mask": torch.ones(1, 4, dtype=torch.bool)}
     losses, _ = vla_adapter.actor_losses(SimpleNamespace(), batch, "cpu")
     losses.mean().backward()
     assert losses.item() == 1
@@ -243,27 +241,25 @@ def test_vla_loss_uses_actor_window_not_critic_padding(monkeypatch):
     assert not prediction.grad[:, 4:].any()
 
 
-def test_critic_capacity_follows_transitions_while_actor_loss_uses_model_window(configured):
+def test_critic_and_actor_use_the_same_planned_chunk(configured):
     from train.methods.bc import BehaviorCloning
     from train.methods.iql import ImplicitQLearning
 
-    algorithm = ImplicitQLearning(configured, torch.device("cpu"), transition_horizon=5)
+    algorithm = ImplicitQLearning(configured, torch.device("cpu"))
+    horizon = configured.section("data")["action_horizon"]
     pixels = torch.zeros(1, 6, 32, 32)
-    actions = torch.zeros(1, 5, 7)
-    mask = torch.ones(1, 5, dtype=torch.bool)
-    batch = {"actions": actions, "action_mask": mask,
-             "actor_actions": torch.ones(1, 8, 7), "actor_action_mask": torch.ones(1, 8, dtype=torch.bool)}
-    assert algorithm.agent.q1(pixels, torch.zeros(1, 8), actions, mask).shape == (1,)
-    prediction = torch.zeros(1, 8, 7, requires_grad=True)
+    batch = {"actions": torch.ones(1, horizon, 7), "action_mask": torch.ones(1, horizon, dtype=torch.bool)}
+    assert algorithm.agent.q1(pixels, torch.zeros(1, 8), batch["actions"], batch["action_mask"]).shape == (1,)
+    prediction = torch.zeros(1, horizon, 7, requires_grad=True)
     assert BehaviorCloning().actor_loss(prediction, batch, None).item() == 1
     assert algorithm.actor_loss(prediction, batch, torch.ones(1)).item() == 1
 
 
-def test_wide_critic_layout_warns_without_changing_recorded_chunks(caplog):
+def test_wide_execution_intervals_warn_without_changing_recorded_chunks(caplog):
     from core.data import transition_layout_summary
 
     episodes = [{"run_id": "missing-query", "chunks": [{"start": 0, "end": 200, "length": 200}]}]
     assert transition_layout_summary(episodes) == {"max_steps": 200, "p95_steps": 200.0}
-    assert "all critic samples pad" in caplog.text
+    assert "Wide execution intervals" in caplog.text
     assert "missing-query" in caplog.text
     assert episodes[0]["chunks"][0]["length"] == 200

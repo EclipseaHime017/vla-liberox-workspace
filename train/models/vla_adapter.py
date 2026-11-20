@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,8 +245,7 @@ def evaluation_policy(config, manifest, parent):
     resize = get_image_resize_size(cfg)
     orientation = image_orientation(model_observation(model_config(config.raw)))
 
-    def predict(observation, prompt, executed=None):
-        # A deterministic actor: the executed length does not change its single chunk.
+    def predict(observation, prompt):
         prepared, _ = prepare_observation(vla_adapter_observation(observation, orientation), resize)
         return get_action(cfg, components.model, prepared, prompt,
                           processor=components.processor, action_head=components.action_head,
@@ -328,7 +326,7 @@ def processor_inputs(
 def extract_action_hidden_states(components: VLAComponents, inputs: Any):
     """Differentiable Pro conditioning; frozen backbones retain the no-grad path."""
     import torch
-    from prismatic.vla.constants import IGNORE_INDEX, NUM_TOKENS, STOP_INDEX
+    from prismatic.vla.constants import IGNORE_INDEX, NUM_TOKENS
 
     model = components.model
     input_ids = inputs["input_ids"]
@@ -499,8 +497,7 @@ def overlay_public(path: Path) -> dict[str, Any]:
 
 def actor_losses(components, batch, device):
     prediction = predict_batch(components, batch, device)
-    target = batch.get("actor_actions", batch["actions"])
-    mask = batch.get("actor_action_mask", batch["action_mask"])
+    target, mask = batch["actions"], batch["action_mask"]
     if prediction.shape[1] != target.shape[1]:
         prediction = prediction[:, :target.shape[1]]
     error = (prediction.float() - target.to(device).float()).abs()

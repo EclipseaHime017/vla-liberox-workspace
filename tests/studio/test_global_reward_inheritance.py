@@ -107,7 +107,7 @@ def test_new_dataset_trains_from_global_inputs_without_any_evaluation_job(tmp_pa
     reference_path = prepare_dataset(reference_config).manifest
     reference = json.loads(reference_path.read_text())["episodes"][0]
     inherited = json.loads((Path(config.raw["paths"]["work_dir"])/"dataset_manifest.json").read_text())["episodes"][0]
-    for key in ("chunks", "evaluation_chunks", "terminal_step", "recorded_action_count"):
+    for key in ("chunks", "terminal_step", "recorded_action_count"):
         assert inherited[key] == reference[key]
     assert inherited["chunks"][0]["length"] == 3
     assert inherited["chunks"][-1]["end"] == 17

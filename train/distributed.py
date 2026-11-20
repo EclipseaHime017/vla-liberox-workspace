@@ -13,7 +13,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.distributed as dist
-import yaml
 from torch.utils.data import DataLoader
 
 from core.config import LoadedConfig
@@ -29,7 +28,6 @@ from train.methods.distributed import (
 from core.io import atomic_json
 from core.methods import actor_lr_warmup, critic_warmup_steps, training_method
 from core.model_config import model_backend, model_signature
-from core.registry import model_contract
 from train.monitoring import TrainingProgressReporter, log_tensorboard_metric, log_wandb_metric
 from rewards.manifest import load_reward_index, reward_manifest_digest
 from core.config import validate_global_batch
@@ -42,11 +40,12 @@ from train.trainer import (
     _restore_checkpoint,
     _save_checkpoint,
     _validate_single_task_micro_batch,
+    training_layout,
 )
 
 
 # Actor targets used for per-step action diagnostics alongside the critic fields.
-ACTOR_DIAGNOSTIC_KEYS = frozenset({"actor_actions", "actor_action_mask"})
+ACTOR_DIAGNOSTIC_KEYS = frozenset({"actions", "action_mask"})
 
 
 def rank_zero_call(function):
@@ -204,7 +203,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
                   if config.section("logging").get("diagnostics", {}).get("enabled", False) else None)
     diagnostic_episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     meter = CommunicationMeter()
-    algorithm = DistributedAlgorithm(config, device, meter, transition_horizon=manifest["action_horizon"])
+    algorithm = DistributedAlgorithm(config, device, meter)
     bind_training_inputs(algorithm, config, backend, components, dataset)
     # Pro retains a legacy FiLM block not used by every prediction path, even
     # when the backbone is frozen. Never assume all registered parameters fire.
@@ -248,8 +247,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
         atomic_json(run_dir / "provenance.json", {"algorithm": method.name, "world_size": world,
             "global_micro_batch_size": global_batch, "local_micro_batch_size": local_batch,
             "actor_effective_batch_size": global_batch * accumulation,
-            "actor_horizon": model_contract(raw["model"])["io"]["replay_horizon"],
-            "transition_horizon": manifest["action_horizon"],
+            "training_layout": training_layout(config, manifest),
             "model_config": model_signature(raw), "model_parameters": backend.parameter_counts(components),
             "model_identity": getattr(components, "identity", None),
             "model_parent": getattr(components, "parent", None),
@@ -297,8 +295,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
             torch.cuda.synchronize(device)
             actor_time = time.perf_counter() - tick
             if prediction is not None:
-                metrics.update(_action_diagnostics(prediction, tensors.get("actor_actions", tensors["actions"]),
-                                                  tensors.get("actor_action_mask", tensors["action_mask"])))
+                metrics.update(_action_diagnostics(prediction, tensors["actions"], tensors["action_mask"]))
             else:
                 metrics["actor_flow_mse"] = float(losses.detach().mean())
             if boundary:
@@ -315,7 +312,7 @@ def _train(config, distributed, cache_root, run_dir, device, stopping):
             metrics.update(actor_loss=float(loss.detach()), actor_learning_rate=optimizer.param_groups[0]["lr"],
                 data_wait_seconds=data_time, critic_seconds=critic_time, actor_seconds=actor_time,
                 gradient_communication_seconds=meter.seconds - communication_before)
-            metrics = _reduce_metrics(metrics, device, float(tensors.get("actor_action_mask", tensors["action_mask"]).sum()))
+            metrics = _reduce_metrics(metrics, device, float(tensors["action_mask"].sum()))
             if diagnostics_due(logs, step + 1):
                 if context is not None:
                     metrics.update(weight_statistics(context, batch, diagnostic_episodes, distributed=True))

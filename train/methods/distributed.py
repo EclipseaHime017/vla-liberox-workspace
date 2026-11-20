@@ -83,8 +83,8 @@ def wrap(module, device, *, unused=False, meter=None, move_inputs=True):
 
 class DistributedAlgorithm:
     """Run a training method under DDP; the method wraps its own critic through ``distribute``."""
-    def __init__(self, config, device, meter=None, *, transition_horizon=None):
-        self.inner = build_algorithm(config, device, transition_horizon=transition_horizon)
+    def __init__(self, config, device, meter=None):
+        self.inner = build_algorithm(config, device)
         distribute = getattr(self.inner, "distribute", None)
         # BC has no critic: nothing to wrap and no optimizer to consolidate.
         self.optimizers = [] if distribute is None else distribute(

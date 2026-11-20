@@ -61,13 +61,13 @@ def test_resume_checks_changed_training_sample_policy(
         reject = policy != training_replay_policy(include)
     rewards = {}
     metadata = {
-        "training_layout": {"chunking": None, "actor_horizon": 8, "transition_horizon": 8},
+        "training_layout": {"chunking": None, "transitions": "planned_model_chunk", "horizon": 8},
         "dataset_sha256": "dataset", "reward_sha256": reward_manifest_digest(rewards),
         "base_checkpoint": configured.section("model")["base_checkpoint"],
         "stats_key": "test", "replay_policy": policy,
     }
     (tmp_path / "checkpoint.json").write_text(json.dumps(metadata))
-    manifest = {"dataset_sha256": "dataset", "action_horizon": 8, "episodes": [{
+    manifest = {"dataset_sha256": "dataset", "episodes": [{
         "split": split, "terminal_step": terminal, "recorded_action_count": recorded,
     }]}
     components = SimpleNamespace(action_head=torch.nn.Linear(1, 1), stats_key="test")
@@ -88,10 +88,10 @@ def test_resume_checks_changed_training_sample_policy(
 # Server-branch coverage merged into main.
 from core.registry import model_contract  # noqa: E402
 
-@pytest.mark.parametrize("changed", ["actor_horizon", "transition_horizon", "chunking", "missing", "contract"])
+@pytest.mark.parametrize("changed", ["horizon", "transitions", "chunking", "missing", "contract"])
 def test_resume_rejects_changed_training_geometry(configured, tmp_path, monkeypatch, changed):
-    manifest = {"dataset_sha256": "dataset", "action_horizon": 8, "episodes": []}
-    layout = {"chunking": None, "actor_horizon": 8, "transition_horizon": 8}
+    manifest = {"dataset_sha256": "dataset", "episodes": []}
+    layout = {"chunking": None, "transitions": "planned_model_chunk", "horizon": 8}
     contract = model_contract(configured.section("model"))
     metadata = {
         "dataset_sha256": "dataset", "reward_sha256": reward_manifest_digest({}),
@@ -103,7 +103,7 @@ def test_resume_rejects_changed_training_geometry(configured, tmp_path, monkeypa
     elif changed == "contract":
         contract["io"]["replay_horizon"] = 5
     else:
-        layout[changed] = "old" if changed == "chunking" else 5
+        layout[changed] = 5 if changed == "horizon" else "old"
     (tmp_path / "checkpoint.json").write_text(json.dumps(metadata))
     components = SimpleNamespace(stats_key="test")
 

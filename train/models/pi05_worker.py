@@ -87,7 +87,7 @@ def main():
             observation["prompt"] = request["prompt"]
             with contextlib.redirect_stdout(sys.stderr):
                 actions = (policy.infer(observation)["actions"] if selection is None else
-                           pi05.choose_chunk(components, *selection, observation, request.get("executed")))
+                           pi05.choose_chunk(components, *selection, observation))
             if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
                 raise ValueError(f"π₀.₅ returned invalid actions: {actions.shape}")
             reply({"actions": actions.tolist()})

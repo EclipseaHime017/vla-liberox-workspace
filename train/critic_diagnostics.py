@@ -5,7 +5,7 @@ import csv
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 import torch
@@ -89,10 +89,10 @@ def _batch(samples: list[dict], horizon: int, device: torch.device) -> dict:
 def _finite_returns(dataset: ReplayDataset, discount: float) -> dict:
     """Discounted per-action reward from each sample start to the replay endpoint."""
     result = {}
-    for episode, chunk_index, annotation in dataset.items:
-        start = int(dataset.chunks[episode["run_id"]][chunk_index]["start"])
+    for episode, _, start in dataset.items:
         end = replay_end_step(episode, dataset.include_post_success)
-        result[(episode["run_id"], start)] = discounted_sum(dataset._action_rewards(annotation), start, end, discount)
+        result[(episode["run_id"], start)] = discounted_sum(dataset.action_rewards[episode["run_id"]],
+                                                            start, end, discount)
     return result
 
 
@@ -103,8 +103,7 @@ def _evaluate(agent: ExpectileCritic, dataset: ActionDataset, split: str, horizo
     has_rewards = isinstance(dataset, ReplayDataset)
     returns = _finite_returns(dataset, agent.discount) if has_rewards else {}
     order = sorted(range(len(dataset)), key=lambda index: (
-        dataset.items[index][0]["run_id"],
-        int(dataset.chunks[dataset.items[index][0]["run_id"]][dataset.items[index][1]]["start"])))
+        dataset.items[index][0]["run_id"], dataset.items[index][2]))
     rows = []
     for offset in range(0, len(order), batch_size):
         if stop_requested is not None and stop_requested():
@@ -224,7 +223,7 @@ def _run(training_config, probe_config, output, *, train_steps, batch_size, seed
     rollout = ActionDataset(probe_config, action_stats, proprio_stats, "train")
     if not len(rollout):
         raise ValueError("Rollout probe contains no action chunks")
-    horizon = max(train_manifest["action_horizon"], probe_manifest["action_horizon"])
+    horizon = train_contract["io"]["replay_horizon"]
     cfg, recipe = training_config.section("iql"), training_config.section("reward")
     derivation = reward_derivation_config(recipe)
     rollout.image_size = int(cfg["critic_image_size"])
@@ -283,7 +282,7 @@ def _run(training_config, probe_config, output, *, train_steps, batch_size, seed
     training_hashes = {episode["trajectory_sha256"] for episode in training_episodes.values()}
     overlapping = [episode["run_id"] for episode in probe_manifest["episodes"]
                    if episode["run_id"] in training_episodes or episode["trajectory_sha256"] in training_hashes]
-    lengths = {int(train.chunks[episode["run_id"]][index]["length"]) for episode, index, _ in train.items}
+    lengths = {train.transition_end(episode, start) - start for episode, _, start in train.items}
     summary = {"schema_version": 1, "kind": "iql_critic_diagnostic", "actor_loaded_for_training": False,
         "actor_updated": False, "reward_generated": False, "train_steps": train_steps,
         "batch_size": batch_size, "seed": seed, "device": str(target), "critic_horizon": horizon,

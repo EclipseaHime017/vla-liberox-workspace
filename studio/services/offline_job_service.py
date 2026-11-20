@@ -58,16 +58,12 @@ def _sha256(path: Path) -> str:
 def _training_replay_counts(prepared: dict[str, Any], include_post_success: bool = True) -> dict[str, int]:
     """Count the selected training interval without rewriting the job's reward pin.
 
-    Older schema-4 manifests keep post-confirmation actions in evaluation_chunks.
-    Count those complete boundaries, including their actual controller breaks,
-    and count physically copied branch prefixes once, as the replay loader does.
+    Physically copied branch prefixes count once, as the replay loader does.
     """
     episodes = []
     for episode in prepared["episodes"]:
         chunks = episode["chunks"]
         recorded_end = int(episode["recorded_action_count"])
-        if not chunks or int(chunks[-1]["end"]) != recorded_end:
-            chunks = episode.get("evaluation_chunks", [])
         if not chunks or int(chunks[-1]["end"]) != recorded_end:
             raise ValueError(f"Run {episode['run_id']} lacks full-recording replay chunks")
         if not include_post_success and episode.get("terminal_step") is not None:

@@ -22,7 +22,6 @@ class Pi05PolicyProvider:
         self.process = None
         self.current_policy_entry = None
         self.current_policy_id = None
-        self.executed = None
         self._lock = threading.RLock()
 
     @property
@@ -55,9 +54,6 @@ class Pi05PolicyProvider:
             if (model_module("base_models").family_adapter(entry.family).POLICY_ADAPTER != "studio.policies.pi05_catalog"
                     or (expected_content_sha256 is not None and entry.content_sha256 != expected_content_sha256)):
                 raise ValueError("Selected π₀.₅ identity changed; select the model again")
-            # Critic-selected policies score candidates over the steps this run executes.
-            self.executed = (entry.resolve_open_loop_steps(open_loop_steps)
-                             if getattr(entry, "selector", None) else None)
             if self.loaded and self.current_policy_entry.content_sha256 == entry.content_sha256:
                 self.current_policy_entry, self.current_policy_id = entry, policy_id
                 return
@@ -122,7 +118,7 @@ class Pi05PolicyProvider:
             buffer = io.BytesIO()
             np.savez(buffer, **images)
             result = self._send({"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(),
-                                 "prompt": prompt, "executed": self.executed})
+                                 "prompt": prompt})
             actions = np.asarray(result["actions"], dtype=np.float32)
             if actions.shape != (contract["io"]["native_action_horizon"], contract["io"]["action_dim"]) or not np.isfinite(actions).all():
                 self.unload()

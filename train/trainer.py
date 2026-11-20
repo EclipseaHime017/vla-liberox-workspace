@@ -26,7 +26,7 @@ from torch.utils.data import default_collate
 
 from core.config import LoadedConfig, reward_source
 from core.data import load_manifest, training_replay_policy, validate_training_manifest
-from core.io import atomic_json, sha256_file, stable_hash
+from core.io import atomic_json, stable_hash
 from train.methods.base import (TrainingAlgorithm, bind_training_inputs, build_algorithm, critic_artifacts,
                                 critic_batch, save_critic)
 from core.methods import METHODS, actor_lr_warmup, critic_warmup_steps, training_method
@@ -174,8 +174,7 @@ def _sample_batch(dataset: ActionDataset, batch_size: int, generator: torch.Gene
     groups = getattr(dataset, "prompt_groups", {})
     if batch_size > 1 and len(groups) > 1:
         anchor = int(torch.randint(len(dataset), (1,), generator=generator))
-        episode, chunk_index, _ = dataset.items[anchor]
-        prompt = episode["prompt"]
+        prompt = dataset.items[anchor][0]["prompt"]
         group = groups[prompt]
         indices = [group[index] for index in torch.randint(len(group), (batch_size,), generator=generator).tolist()]
         return default_collate([dataset[index] for index in indices])
@@ -200,6 +199,12 @@ def _validate_single_task_micro_batch(
             "training.micro_batch_size>1 requires a single-task prepared training split; "
             f"found task_ids={sorted(task_ids)} and {len(prompts)} prompts"
         )
+
+
+def training_layout(config: LoadedConfig, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Replay semantics a checkpoint was trained with; resuming requires the same layout."""
+    return {"chunking": manifest.get("chunking"), "transitions": "planned_model_chunk",
+            "horizon": model_contract(config.section("model"))["io"]["replay_horizon"]}
 
 
 def _code_version() -> dict[str, Any]:
@@ -265,9 +270,7 @@ def _save_checkpoint(
         "model_contract": model_contract(config.section("model")),
         "model_identity": getattr(components, "identity", None),
         "model_parent": getattr(components, "parent", None),
-        "training_layout": {"chunking": manifest.get("chunking"),
-                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
-                            "transition_horizon": manifest["action_horizon"]},
+        "training_layout": training_layout(config, manifest),
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "reward_version_id": config.section("reward").get("version_id") if reward_index is not None else None,
@@ -407,9 +410,7 @@ def _restore_checkpoint(
             "existing complete reward evaluations can still be reused."
         )
     expected = {
-        "training_layout": {"chunking": manifest.get("chunking"),
-                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
-                            "transition_horizon": manifest["action_horizon"]},
+        "training_layout": training_layout(config, manifest),
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_manifest_digest(reward_index) if reward_index is not None else None,
         "base_checkpoint": config.section("model")["base_checkpoint"],
@@ -472,7 +473,7 @@ def train(config: LoadedConfig) -> Path:
     diagnostic_episodes = {episode["run_id"]: episode for episode in manifest["episodes"]}
     data_generator = torch.Generator(device="cpu")
     data_generator.manual_seed(seed + 1)
-    agent = build_algorithm(config, device, transition_horizon=manifest["action_horizon"])
+    agent = build_algorithm(config, device)
     bind_training_inputs(agent, config, backend, components, dataset)
     actor_parameters = backend.trainable_parameters(components)
     counts = backend.parameter_counts(components)
@@ -523,9 +524,7 @@ def train(config: LoadedConfig) -> Path:
         "model_identity": getattr(components, "identity", None),
         "model_parent": getattr(components, "parent", None),
         "code_version": _code_version(),
-        "training_layout": {"chunking": manifest["chunking"],
-                            "actor_horizon": model_contract(config.section("model"))["io"]["replay_horizon"],
-                            "transition_horizon": manifest["action_horizon"]},
+        "training_layout": training_layout(config, manifest),
         "config_sha256": config.digest,
         "dataset_sha256": manifest["dataset_sha256"],
         "reward_sha256": reward_hash,
@@ -604,8 +603,8 @@ def train(config: LoadedConfig) -> Path:
             actor_loss = agent.weight_actor_losses(losses, context)
             action_metrics = _action_diagnostics(
                 prediction,
-                batch.get("actor_actions", batch["actions"]).to(device),
-                batch.get("actor_action_mask", batch["action_mask"]).to(device),
+                batch["actions"].to(device),
+                batch["action_mask"].to(device),
             ) if prediction is not None else {"actor_flow_mse": float(losses.detach().mean())}
             (actor_loss / accumulation).backward()
             actor_loss_value = float(actor_loss.detach())

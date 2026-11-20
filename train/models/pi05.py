@@ -134,7 +134,7 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
 
     samples = []
     io = model_contract(components.settings)["io"]
-    raw_actions = batch.get("actor_raw_actions", batch["raw_actions"])
+    raw_actions = batch["raw_actions"]
     for index, prompt in enumerate(batch["prompt"]):
         actions = np.zeros((io["native_action_horizon"], io["action_dim"]), dtype=np.float32)
         actions[:raw_actions.shape[1]] = raw_actions[index].numpy()
@@ -148,7 +148,7 @@ def actor_losses(components: Components, batch: dict, device: torch.device):
     # Quantile statistics can promote NumPy actions to float64; OpenPI trains with float32 actions.
     inputs["actions"] = inputs["actions"].to(dtype=torch.float32)
     errors = components.model(Observation.from_dict(inputs), inputs["actions"])
-    return masked_flow_losses(errors, batch.get("actor_action_mask", batch["action_mask"]), io["action_dim"]), None
+    return masked_flow_losses(errors, batch["action_mask"], io["action_dim"]), None
 
 
 def trainable_parameters(components):
@@ -277,14 +277,13 @@ def next_action_sampler(components) -> NextActionSampler:
     return NextActionSampler(components)
 
 
-def choose_chunk(components, critic, selector: dict, observation: dict, executed: int) -> np.ndarray:
+def choose_chunk(components, critic, selector: dict, observation: dict) -> np.ndarray:
     """Sample ``selector['num_samples']`` chunks and return the one the exported critic prefers."""
-    from train.methods.selectors import check_executed, choose
-    check_executed(critic, executed)  # before sampling: fail fast on an unscoreable length
+    from train.methods.selectors import choose
     candidates = sample_chunks(components, [observation], selector["num_samples"])[0]
     index, _ = choose(critic, selector, candidates, agent=observation["observation/image"],
                       wrist=observation["observation/wrist_image"], raw_proprio=observation["observation/state"],
-                      executed=executed, action_stats=components.action_stats,
+                      action_stats=components.action_stats,
                       proprio_stats=components.proprio_stats, process_action=process_action)
     return candidates[index]
 
@@ -303,8 +302,8 @@ def load_selection(manifest: Path, device="cuda:0"):
 def evaluation_policy(config, manifest, parent):
     """Load a validated export with the same inference transforms as main.
 
-    ``predict(observation, prompt, executed)``: policies exported with a critic sample
-    several chunks and return the one their critic prefers for the ``executed`` steps.
+    ``predict(observation, prompt)``: policies exported with a critic sample several
+    chunks and return the one their critic prefers.
     """
     from openpi.policies.policy import Policy
     from core.image_transforms import image_orientation, observation_config, orient_image
@@ -319,7 +318,7 @@ def evaluation_policy(config, manifest, parent):
     orientation = image_orientation(observation_config(model_contract(settings)))
     selection = load_selection(manifest)
 
-    def predict(observation, prompt, executed=None):
+    def predict(observation, prompt):
         inputs = {
             "observation/image": orient_image(observation["agentview_image"], orientation),
             "observation/wrist_image": orient_image(observation["robot0_eye_in_hand_image"], orientation),
@@ -327,6 +326,6 @@ def evaluation_policy(config, manifest, parent):
         }
         if selection is None:
             return policy.infer(inputs)["actions"]
-        return choose_chunk(components, *selection, inputs, executed)
+        return choose_chunk(components, *selection, inputs)
 
     return predict, process_action

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,7 +10,7 @@ import torch
 
 from core.config import LoadedConfig, load_train_config
 from train.methods.base import build_algorithm, save_critic
-from train.methods.critics import ValueFlowCritic, ValueFlowScorer, ValueVectorField
+from train.methods.critics import ValueFlowCritic, ValueFlowScorer
 from train.methods.selectors import CRITIC_FILE, load_critic
 from train.methods.vf import ValueFlows
 
@@ -92,8 +91,8 @@ def test_returns_are_clipped_to_the_discounted_reward_range():
 
 def test_update_samples_next_chunks_only_where_returns_bootstrap():
     config = vf_config()
-    algorithm = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
-    assert isinstance(algorithm, ValueFlows) and algorithm.executed == 5
+    algorithm = build_algorithm(config, torch.device("cpu"))
+    assert isinstance(algorithm, ValueFlows) and algorithm.horizon == 10
     sampler = FakeSampler()
     algorithm.bind_actor_sampler(sampler)
     algorithm.bind_reward_range(-1.0, 0.0)
@@ -110,13 +109,13 @@ def test_update_samples_next_chunks_only_where_returns_bootstrap():
     torch.testing.assert_close(after["target_flow1.head.0.weight"], expected)
     actions, mask = algorithm.next_actions(transition_batch(bootstrap=(0.0, 0.0, 0.0)))
     # Terminal transitions never bootstrap: no actor sampling at all.
-    assert not actions.any() and mask.sum(1).tolist() == [5, 5, 5] and len(sampler.calls) == 1
+    assert not actions.any() and mask.sum(1).tolist() == [10, 10, 10] and len(sampler.calls) == 1
 
 
 def test_next_chunk_is_the_best_candidate_under_the_online_flows(monkeypatch):
-    algorithm = build_algorithm(vf_config(), torch.device("cpu"), transition_horizon=10)
+    algorithm = build_algorithm(vf_config(), torch.device("cpu"))
     algorithm.bind_actor_sampler(FakeSampler())
-    # Score each candidate by its first executed action's x (after clipping and encoding).
+    # Score each candidate by its first action's x (after clipping and encoding).
     monkeypatch.setattr(algorithm.agent, "one_step_q",
                         lambda flows, conditions, noise: torch.cat([c[:, -140] for c in conditions[:1]]))
     batch = transition_batch()
@@ -128,7 +127,7 @@ def test_next_chunk_is_the_best_candidate_under_the_online_flows(monkeypatch):
 
 def test_exported_flow_critic_scores_like_the_online_flows(tmp_path):
     config = vf_config(tmp_path)
-    algorithm = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
+    algorithm = build_algorithm(config, torch.device("cpu"))
     algorithm.bind_reward_range(-1.0, 0.0)
     save_critic(algorithm, config, tmp_path)
     scorer = load_critic(tmp_path / CRITIC_FILE, "cpu")
@@ -170,9 +169,9 @@ def test_distributed_value_flows_match_single_device(tmp_path):
     try:
         config = vf_config(tmp_path)
         torch.manual_seed(3)
-        single = build_algorithm(config, torch.device("cpu"), transition_horizon=10)
+        single = build_algorithm(config, torch.device("cpu"))
         torch.manual_seed(3)
-        parallel = DistributedAlgorithm(config, torch.device("cpu"), transition_horizon=10)
+        parallel = DistributedAlgorithm(config, torch.device("cpu"))
         assert isinstance(parallel.inner.agent.flow1, torch.nn.parallel.DistributedDataParallel)
         for algorithm in (single, parallel):
             algorithm.bind_actor_sampler(FakeSampler())

@@ -1,5 +1,4 @@
 """W-5 opt-in endpoint semantics, without models or remote access."""
-import copy
 import json
 from pathlib import Path
 
@@ -24,8 +23,8 @@ def test_failed_end_bootstraps_only_when_enabled(configured, include_post_succes
     legacy = ReplayDataset(configured, _stats(7), _stats(8))
     index = load_reward_index(configured)
     records = []
-    for i, (episode, chunk_index, _) in enumerate(legacy.items):
-        end = legacy.chunks[episode["run_id"]][chunk_index]["end"]
+    for i, (episode, _, start) in enumerate(legacy.items):
+        end = legacy.transition_end(episode, start)
         endpoint = (episode["terminal_step"] + 1 if not include_post_success and episode["terminal_step"] is not None
                     else episode["recorded_action_count"])
         if end == endpoint:

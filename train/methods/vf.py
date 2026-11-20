@@ -13,8 +13,7 @@ https://github.com/chongyi-zheng/value-flows/blob/01833354f547ad842bdaa21d2b761a
 
 Differences from the reference: action chunks of L steps bootstrapping with γ^L; the critic's
 pixel encoder; the one-step distilled actor and its Q loss serve only the reference's online
-``rpg`` extraction and are not ported; next chunks are scored over the variant's default
-executed steps.
+``rpg`` extraction and are not ported.
 """
 from __future__ import annotations
 
@@ -23,7 +22,6 @@ from typing import Any
 import torch
 
 from core.config import LoadedConfig
-from core.registry import execution_config
 from train.methods.base import CRITIC_BATCH_KEYS, NEXT_ACTOR_KEYS, weighted_masked_l1
 from train.encoding import encode_chunks
 from train.methods.critics import ValueFlowCritic
@@ -33,10 +31,10 @@ from train.methods.selectors import CRITIC_SCHEMA_VERSION
 class ValueFlows:
     critic_batch_keys = CRITIC_BATCH_KEYS | NEXT_ACTOR_KEYS
 
-    def __init__(self, config: LoadedConfig, device: torch.device, *, transition_horizon: int | None = None):
+    def __init__(self, config: LoadedConfig, device: torch.device):
         cfg, reward, data = config.section("vf"), config.section("reward"), config.section("data")
         self.cfg = cfg
-        self.horizon, self.action_dim = transition_horizon or data["action_horizon"], data["action_dim"]
+        self.horizon, self.action_dim = data["action_horizon"], data["action_dim"]
         self.agent = ValueFlowCritic(
             horizon=self.horizon, action_dim=self.action_dim, proprio_dim=data["proprio_dim"],
             discount=reward["gamma"], tau=cfg["target_tau"], num_flow_steps=cfg["num_flow_steps"],
@@ -46,9 +44,6 @@ class ValueFlows:
             critic_optimizer=cfg["critic_optimizer"], critic_weight_decay=cfg["critic_weight_decay"],
             critic_max_grad_norm=cfg["critic_max_grad_norm"],
         ).to(device)
-        # Sampled next chunks execute as the trained child would by default.
-        self.executed = min(execution_config(config.section("model"), trained=True)["open_loop_steps"],
-                            self.horizon)
         self.sampler = None
 
     def bind_actor_sampler(self, sampler) -> None:
@@ -60,11 +55,10 @@ class ValueFlows:
         self.agent.set_reward_range(low, high)
 
     def next_actions(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        """Best of ``train_num_samples`` actor chunks at each bootstrapped next observation."""
+        """Best of ``train_num_samples`` planned actor chunks at each bootstrapped next observation."""
         size, device = len(batch["reward"]), batch["actions"].device
         actions = torch.zeros(size, self.horizon, self.action_dim, device=device)
-        mask = torch.zeros(size, self.horizon, dtype=torch.bool, device=device)
-        mask[:, :self.executed] = True
+        mask = torch.ones(size, self.horizon, dtype=torch.bool, device=device)
         rows = torch.nonzero(batch["bootstrap_mask"] > 0).flatten()
         if len(rows) == 0:  # terminal transitions never bootstrap
             return actions, mask
@@ -72,7 +66,7 @@ class ValueFlows:
             raise RuntimeError("Value Flows needs the actor sampler before training")
         count = int(self.cfg["train_num_samples"])
         chunks = self.sampler(batch, rows.tolist(), count)
-        encoded, masks = encode_chunks(chunks.reshape(-1, *chunks.shape[2:]), self.executed, self.horizon,
+        encoded, masks = encode_chunks(chunks.reshape(-1, *chunks.shape[2:]), self.horizon,
                                        self.sampler.action_stats, self.sampler.process_action)
         encoded = encoded.to(device).view(len(rows), count, self.horizon, self.action_dim)
         masks = masks.to(device).view(len(rows), count, self.horizon)
@@ -87,8 +81,7 @@ class ValueFlows:
 
     def actor_loss(self, prediction: torch.Tensor, batch: dict, context: Any) -> torch.Tensor:
         weights = torch.ones(prediction.shape[0], device=prediction.device)
-        return weighted_masked_l1(prediction, batch.get("actor_actions", batch["actions"]),
-                                  batch.get("actor_action_mask", batch["action_mask"]), weights)
+        return weighted_masked_l1(prediction, batch["actions"], batch["action_mask"], weights)
 
     def weight_actor_losses(self, losses: torch.Tensor, context: Any) -> torch.Tensor:
         return losses.mean()

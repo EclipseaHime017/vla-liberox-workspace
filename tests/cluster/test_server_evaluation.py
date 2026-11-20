@@ -115,11 +115,11 @@ def run_episode(monkeypatch, predict, process=lambda x: x):
 
 def test_closed_loop_queries_new_state_and_runs_full_horizon(monkeypatch):
     seen = []
-    def predict(obs, prompt, executed):
-        seen.append((obs["step"], executed))
+    def predict(obs, prompt):
+        seen.append(obs["step"])
         return np.zeros((10, 7))
     result = run_episode(monkeypatch, predict)
-    assert seen == [(0, 3), (3, 3), (6, 3)]
+    assert seen == [0, 3, 6]
     assert result["success"] and result["first_success_step"] == 5
     assert result["steps"] == 8 and not result["final_done"]
     assert result["policy_queries"] == 3
