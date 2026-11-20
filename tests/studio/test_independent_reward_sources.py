@@ -100,7 +100,6 @@ def test_rynnvalue_and_final_training_pin_the_selected_source(tmp_path, queued):
         assert effective["manifest_path"] == version["reward_manifest_path"]
         assert effective["gamma"] == .95
         assert effective["shaping_weight"] == (.2 if source == "rynnvalue" else 0.)
-        assert "accumulate_primitive_steps" not in effective
         assert jobs.datasets.get(dataset["id"])["reward_version_id"] == final["id"]
 
 

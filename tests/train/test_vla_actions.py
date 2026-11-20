@@ -8,7 +8,6 @@ import types
 from types import SimpleNamespace
 
 from train.models.vla_adapter import (
-    dataset_to_env_actions,
     env_to_dataset_actions,
     extract_action_hidden_states,
     predict_normalized,
@@ -132,15 +131,17 @@ class FakeActionHead:
         return torch.zeros((len(hidden), 8, 7), dtype=torch.float32)
 
 
-def test_action_round_trip_preserves_motion_and_binary_gripper():
+def test_env_actions_keep_motion_and_map_the_gripper_to_model_convention():
     stats = {
         "q01": [-1.0] * 6 + [0.0], "q99": [1.0] * 6 + [1.0],
         "mask": [True] * 6 + [False],
     }
-    actions = np.asarray([[0.2, -0.3, 0.1, 0.0, 0.5, -0.2, -1.0]], dtype=np.float32)
+    # Execution uses +1=close, -1=open; the model uses 0=close, 1=open.
+    actions = np.asarray([[0.2, -0.3, 0.1, 0.0, 0.5, -0.2, -1.0],
+                          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
     normalized = env_to_dataset_actions(actions, stats)
-    restored = dataset_to_env_actions(normalized, stats)
-    np.testing.assert_allclose(restored, actions, atol=1e-6)
+    np.testing.assert_allclose(normalized[:, :6], actions[:, :6], atol=1e-6)
+    assert normalized[:, 6].tolist() == [1.0, 0.0]
 
 
 def test_processor_inputs_batches_two_views_without_changing_sample_order():

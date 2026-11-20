@@ -7,13 +7,24 @@ import numpy as np
 import pytest
 
 from core import run_layout
-from core.data import load_manifest, prepare_dataset, iter_episode_arrays
-from core.io import atomic_json, sha256_file, stable_hash
+from core.data import load_manifest, prepare_dataset
+from core.io import atomic_json
 from train.replay import ReplayDataset
 from rewards.rynnvalue.annotate import annotate_manifest
 from rewards.manifest import load_reward_index, reward_manifest_digest
 from core.storage_paths import JOURNAL, REGISTRY, clear_storage_cache, storage_lease, storage_path
 from test_replay import FakeAnnotator, _stats
+
+
+def _episode_arrays(manifest):
+    """(episode, trajectory arrays, observation arrays), read through the storage mapping."""
+    result = []
+    for episode in manifest["episodes"]:
+        with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as trajectory, \
+                np.load(storage_path(episode["observations_path"]), allow_pickle=False) as observations:
+            result.append((episode, {key: trajectory[key] for key in trajectory.files},
+                           {key: observations[key] for key in observations.files}))
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +48,7 @@ def test_migration_preserves_bytes_replay_and_legacy_reward_identity(configured,
     index = load_reward_index(configured)
     digest = reward_manifest_digest(index)
     before = {p: p.read_bytes() for p in (root / "projects").rglob("*") if p.is_file()}
-    arrays = list(iter_episode_arrays(prepared))
+    arrays = _episode_arrays(prepared)
     replay = ReplayDataset(configured, _stats(7), _stats(8), reward_index=index)
     sample = replay[0]
     # A negative discovery cache must not hide the mapping after apply.
@@ -53,7 +64,7 @@ def test_migration_preserves_bytes_replay_and_legacy_reward_identity(configured,
     assert load_manifest(configured) == prepared
     assert reward_manifest_digest(load_reward_index(configured)) == digest
     assert all(not (root / move["old"]).parent.exists() for move in result["moves"])
-    after_arrays = list(iter_episode_arrays(prepared))
+    after_arrays = _episode_arrays(prepared)
     for (_, old, _), (_, new, _) in zip(arrays, after_arrays):
         for key in old:
             np.testing.assert_array_equal(old[key], new[key])

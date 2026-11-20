@@ -2,7 +2,6 @@ import copy
 import json
 import signal
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 import yaml
@@ -114,7 +113,6 @@ def test_config_preserves_global_final_and_overrides_training_only(configured, t
     assert raw["training"]["micro_batch_size"] == 64
     assert raw["data"]["include_post_success"] == configured.raw["data"]["include_post_success"]
     assert raw["reward"]["source"] == "final"
-    assert "final_normalization" not in raw["reward"]
     assert validate_global_batch(raw, server.distributed) == (64, 8)
     raw["training"]["micro_batch_size"] = 7
     with pytest.raises(ValueError, match="divisible"):

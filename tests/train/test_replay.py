@@ -194,7 +194,7 @@ def test_truncation_ignores_unconfirmed_success(configured):
     assert bc.chunks["branch"][indices[-1]]["end"] == 22
 
 
-def test_replay_rejects_legacy_manifest_missing_full_tail(configured):
+def test_replay_rejects_manifest_missing_recorded_tail(configured):
     prepared = prepare_dataset(configured)
     annotate_manifest(configured, FakeAnnotator())
     rewards = load_reward_index(configured)
@@ -202,7 +202,6 @@ def test_replay_rejects_legacy_manifest_missing_full_tail(configured):
     branch = next(ep for ep in manifest["episodes"] if ep["run_id"] == "branch")
     branch["chunks"] = branch["chunks"][:-1]
     branch["action_count"] = 18
-    manifest.pop("replay_policy")
     prepared.manifest.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="full-recording replay chunks"):
         ReplayDataset(configured, _stats(7), _stats(8), reward_index=rewards)
@@ -236,7 +235,7 @@ def test_planned_chunk_is_cut_at_the_branch_handoff(configured):
     assert item["bootstrap_mask"].item() == 1.0
 
 
-def test_replay_deduplicates_sibling_interrupted_prefixes(configured):
+def test_replay_deduplicates_sibling_copied_prefixes(configured):
     source = Path(configured.section("paths")["dataset_sources"][0])
     branch_run = next(source.rglob("branch/run.json")).parent
     sibling_run = branch_run.parent / "branch-sibling"

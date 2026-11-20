@@ -38,7 +38,6 @@ def test_generation_export_and_optional_server_import(tmp_path, tmp_path_factory
     local_stage(jobs, dataset)
     defaults = jobs.reward_configuration(dataset["id"])["final"]
     assert defaults["base_coefficient"] is None
-    assert "final_normalization" not in defaults
     request = DatasetAnnotationRequest(source="final", base_coefficient=coefficient, alpha=alpha,
                                        shaping_weight=.1)
     job = jobs.start_annotation(dataset["id"], **request.model_dump(exclude_none=True))

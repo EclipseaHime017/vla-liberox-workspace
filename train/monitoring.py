@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from core.methods import DEFAULT_METHOD, METHODS
 
@@ -188,66 +186,3 @@ def log_wandb_metric(run: Any, metric: dict[str, Any]) -> None:
     payload = grouped_scalar_metrics(metric)
     payload["train/step"] = step
     run.log(payload, step=step)
-
-
-def read_metrics_jsonl(path: Path) -> Iterable[dict[str, Any]]:
-    """Yield validated records from a trainer metrics.jsonl file."""
-    path = path.expanduser().resolve()
-    with path.open("r", encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
-            if not line.strip():
-                continue
-            try:
-                metric = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON at {path}:{line_number}: {exc}") from exc
-            if not isinstance(metric, dict) or type(metric.get("step")) is not int:
-                raise ValueError(
-                    f"Metric at {path}:{line_number} must be an object with integer step"
-                )
-            if "steps_per_second" not in metric:
-                elapsed = metric.get("elapsed_seconds")
-                if isinstance(elapsed, (int, float)) and elapsed > 0:
-                    metric["steps_per_second"] = metric["step"] / float(elapsed)
-            if "cuda_peak_memory_gib" not in metric:
-                memory = metric.get("cuda_peak_memory_bytes")
-                if isinstance(memory, (int, float)):
-                    metric["cuda_peak_memory_gib"] = float(memory) / (1024.0 ** 3)
-            yield metric
-
-
-def write_metrics_to_tensorboard(
-    metrics_path: Path,
-    writer: Any,
-) -> int:
-    count = 0
-    for metric in read_metrics_jsonl(metrics_path):
-        log_tensorboard_metric(writer, metric)
-        count += 1
-    return count
-
-
-def convert_run_metrics(run_dir: Path, log_dir: Path | None = None) -> tuple[Path, int]:
-    """Convert a completed legacy run's JSONL metrics into TensorBoard events."""
-    run_dir = run_dir.expanduser().resolve()
-    metrics_path = run_dir / "metrics.jsonl"
-    if not metrics_path.is_file():
-        raise FileNotFoundError(f"Training metrics do not exist: {metrics_path}")
-    target = (log_dir or (run_dir / "tensorboard-imported")).expanduser().resolve()
-    if target.exists() and any(target.iterdir()):
-        raise FileExistsError(
-            f"TensorBoard import directory is not empty: {target}; choose another --log-dir"
-        )
-    try:
-        from torch.utils.tensorboard import SummaryWriter
-    except ImportError as exc:
-        raise RuntimeError(
-            "tensorboard is not installed; install envs/layers/vla.txt"
-        ) from exc
-    writer = SummaryWriter(log_dir=str(target))
-    try:
-        count = write_metrics_to_tensorboard(metrics_path, writer)
-        writer.flush()
-    finally:
-        writer.close()
-    return target, count

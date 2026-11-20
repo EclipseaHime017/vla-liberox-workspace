@@ -44,26 +44,6 @@ def test_reward_dtype_must_match_pinned_bfloat16_checkpoint(configured, tmp_path
         load_train_config(path)
 
 
-def test_macro_action_reward_mode_no_longer_exists(configured, tmp_path: Path):
-    from rewards.manifest import reward_derivation_config
-    raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
-    raw["reward"]["accumulate_primitive_steps"] = False
-    path = tmp_path / "macro-reward.yaml"
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    with pytest.raises(ValueError, match="accumulate_primitive_steps"):
-        load_train_config(path)
-    assert "accumulate_primitive_steps" not in reward_derivation_config(configured.section("reward"))
-
-
-def test_final_reward_has_no_normalization_setting(configured, tmp_path):
-    raw = yaml.safe_load(configured.path.read_text())
-    raw["reward"]["final_normalization"] = "initial_chunk_v1"
-    path = tmp_path / "normalization.yaml"
-    path.write_text(yaml.safe_dump(raw))
-    with pytest.raises(ValueError, match="final_normalization"):
-        load_train_config(path)
-
-
 def test_rynnvalue_reward_switch_must_be_boolean(configured, tmp_path: Path):
     raw = yaml.safe_load(configured.path.read_text(encoding="utf-8"))
     raw["reward"]["rynnvalue"] = "false"
@@ -194,7 +174,6 @@ def test_branch_keeps_full_trajectory_and_marks_its_copied_policy_prefix(configu
         "start": 0, "length": 5, "end": 5, "action_source": "policy", "copied_prefix": True,
     }
     assert episodes["branch"]["chunks"][1]["action_source"] == "human"
-    assert "reward_boundaries" not in episodes["branch"]
     assert episodes["root"]["split"] == episodes["branch"]["split"]
 
 
@@ -295,7 +274,6 @@ def test_latched_done_tail_is_trained_without_changing_source(configured):
     assert branch["chunks"][-1] == {
         "start": 18, "length": 4, "end": 22, "action_source": "human", "copied_prefix": False,
     }
-    assert "evaluation_chunks" not in branch
     assert all(path.read_bytes() == content for path, content in original_bytes.items())
     manifest = load_manifest(configured)
     assert manifest["replay_policy"] == REPLAY_POLICY
@@ -506,12 +484,13 @@ def test_ui_selection_manifest_prepares_exact_members_and_split(configured, tmp_
 
 def test_npz_shapes_come_from_headers_without_decoding(tmp_path):
     import numpy as np
-    from core.data import npz_array_shapes
+    from core.data import npz_array_headers
 
     path = tmp_path / "observations.npz"
     np.savez_compressed(path, agentview_image=np.zeros((5, 4, 6, 3), np.uint8),
                         wrist_image=np.zeros((5, 4, 6, 3), np.uint8))
-    assert npz_array_shapes(path) == {"agentview_image": (5, 4, 6, 3), "wrist_image": (5, 4, 6, 3)}
+    assert npz_array_headers(path) == {"agentview_image": ((5, 4, 6, 3), np.dtype(np.uint8)),
+                                       "wrist_image": ((5, 4, 6, 3), np.dtype(np.uint8))}
 
 
 def test_prepare_rejects_float_images_with_valid_shapes(configured):

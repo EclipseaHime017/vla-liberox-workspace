@@ -20,7 +20,6 @@ def test_final_only_does_not_load_models_and_locks_semantics(tmp_path):
     assert [step["id"] for step in job["stages"]] == ["prepare", "rewards", "seal"]
     raw = yaml.safe_load(job["config_path"].read_text())
     assert raw["reward"]["source"] == "final"
-    assert "final_normalization" not in raw["reward"]
     assert raw["reward"]["alpha"] == .5
     assert raw["reward"]["rynnvalue"] is False
     version = finish(jobs, dataset, job)
@@ -49,11 +48,8 @@ def test_sparse_final_needs_no_labels_and_force_model_rejected(tmp_path):
 def test_multiplication_trains_with_the_same_per_step_discount(tmp_path):
     jobs, dataset = setup_jobs(tmp_path)
     job = jobs.start_annotation(dataset["id"], source="final", fusion_mode="multiplicative", shaping_weight=0.)
-    assert "accumulate_primitive_steps" not in job["parameters"]
-    assert "accumulate_primitive_steps" not in yaml.safe_load(job["config_path"].read_text())["reward"]
     finish(jobs, dataset, job)
     defaults = jobs.defaults(dataset["id"], "final")
-    assert "reward_accumulate_primitive_steps" not in defaults["advanced"]
     assert defaults["reward_editable_parameters"] == ["reward_gamma"]
     _, parameters = jobs.pinned_reward(jobs.datasets.get(dataset["id"]),
         {"reward_source": "final", "reward_gamma": .92})

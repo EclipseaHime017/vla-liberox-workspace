@@ -266,7 +266,6 @@ def test_training_discount_overrides_do_not_mutate_evaluation(tmp_path, source, 
     assert raw["reward"]["version_id"] == version["id"]
     assert raw["reward"]["manifest_path"] == version["reward_manifest_path"]
     assert raw["reward"]["gamma"] == overrides.get("reward_gamma", .99)
-    assert "accumulate_primitive_steps" not in raw["reward"]
     assert train["parameters"]["reward"]["gamma"] == raw["reward"]["gamma"]
     assert original == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
     assert jobs.datasets.get(dataset["id"])["reward_version_id"] == version["id"]
@@ -284,7 +283,6 @@ def test_other_reward_recipe_fields_remain_locked(tmp_path, override):
 
 @pytest.mark.parametrize("override", [
     {"reward_gamma": float("nan")}, {"reward_gamma": None}, {"reward_gamma": 1.1},
-    {"reward_accumulate_primitive_steps": True},
 ])
 def test_training_discount_overrides_are_strict(override):
     with pytest.raises(ValueError):

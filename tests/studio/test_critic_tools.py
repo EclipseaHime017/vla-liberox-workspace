@@ -68,7 +68,6 @@ def test_start_freezes_data_rewards_model_and_task_without_training_registration
     train = yaml.safe_load(Path(raw["training_config"]).read_text())
     sealed = yaml.safe_load(Path(version["config_path"]).read_text())
     assert train["reward"]["gamma"] == .92
-    assert "accumulate_primitive_steps" not in train["reward"]
     assert Path(train["paths"]["annotation_cache"]).is_relative_to(directory)
     assert raw["rollout"]["success_consecutive_steps"] == sealed["data"]["success_consecutive_steps"]
     assert train["reward"]["version_id"] == version["id"]

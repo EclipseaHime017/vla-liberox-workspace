@@ -6,11 +6,9 @@ import torch
 
 from train.monitoring import (
     TrainingProgressReporter,
-    convert_run_metrics,
     format_duration,
     log_wandb_metric,
     log_tensorboard_metric,
-    write_metrics_to_tensorboard,
 )
 from train.trainer import _action_diagnostics, _module_parameter_norm, _validate_single_task_micro_batch
 
@@ -143,28 +141,3 @@ def test_format_duration_handles_hours_days_and_unknown_values():
     assert format_duration(65) == "00:01:05"
     assert format_duration(90061) == "1d 01:01:01"
     assert format_duration(None) == "--:--:--"
-
-
-def test_existing_jsonl_metrics_can_be_imported(tmp_path):
-    metrics = tmp_path / "metrics.jsonl"
-    metrics.write_text(
-        '{"step": 2, "q_loss": 1.5, "elapsed_seconds": 4.0, '
-        '"cuda_peak_memory_bytes": 1073741824}\n',
-        encoding="utf-8",
-    )
-    writer = FakeWriter()
-    assert write_metrics_to_tensorboard(metrics, writer) == 1
-    assert ("loss/q_loss", 1.5, 2) in writer.scalars
-    assert ("system/steps_per_second", 0.5, 2) in writer.scalars
-    assert ("system/cuda_peak_memory_gib", 1.0, 2) in writer.scalars
-
-
-def test_legacy_conversion_creates_a_real_tensorboard_event(tmp_path):
-    run_dir = tmp_path / "completed-run"
-    run_dir.mkdir()
-    (run_dir / "metrics.jsonl").write_text(
-        '{"step": 1, "actor_loss": 0.25}\n', encoding="utf-8"
-    )
-    log_dir, count = convert_run_metrics(run_dir)
-    assert count == 1
-    assert any(path.name.startswith("events.out.tfevents") for path in log_dir.iterdir())

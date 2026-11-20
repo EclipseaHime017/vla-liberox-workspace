@@ -44,14 +44,6 @@ def normalize_with_stats(values: np.ndarray, stats: dict[str, Any]) -> np.ndarra
     return np.clip(normalized, -1.0, 1.0).astype(np.float32)
 
 
-def denormalize_with_stats(values: np.ndarray, stats: dict[str, Any]) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float32)
-    low = np.asarray(stats["q01"], dtype=np.float32)
-    high = np.asarray(stats["q99"], dtype=np.float32)
-    mask = np.asarray(stats.get("mask", np.ones_like(low, dtype=bool)), dtype=bool)
-    return np.where(mask, 0.5 * (values + 1.0) * (high - low + 1e-8) + low, values).astype(np.float32)
-
-
 def env_to_dataset_actions(env_actions: np.ndarray, action_stats: dict[str, Any]) -> np.ndarray:
     """Invert LIBERO execution conversion, then apply VLA training normalization."""
     actions = np.asarray(env_actions, dtype=np.float32).copy()
@@ -60,12 +52,6 @@ def env_to_dataset_actions(env_actions: np.ndarray, action_stats: dict[str, Any]
     # Execution maps model gripper 0=close, 1=open to +1=close, -1=open.
     actions[..., -1] = (1.0 - actions[..., -1]) * 0.5
     return normalize_with_stats(actions, action_stats)
-
-
-def dataset_to_env_actions(normalized: np.ndarray, action_stats: dict[str, Any]) -> np.ndarray:
-    actions = denormalize_with_stats(normalized, action_stats)
-    actions[..., -1] = np.where(actions[..., -1] >= 0.5, -1.0, 1.0)
-    return actions.astype(np.float32)
 
 
 def proprio_from_trajectory(trajectory: dict[str, np.ndarray]) -> np.ndarray:

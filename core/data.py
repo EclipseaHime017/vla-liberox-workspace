@@ -245,10 +245,6 @@ def npz_array_headers(path: Path) -> dict[str, tuple[tuple[int, ...], np.dtype]]
     return headers
 
 
-def npz_array_shapes(path: Path) -> dict[str, tuple[int, ...]]:
-    return {name: shape for name, (shape, _) in npz_array_headers(path).items()}
-
-
 def _safe_extract(archive: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
@@ -857,13 +853,3 @@ def validate_training_manifest(manifest: dict[str, Any], config: LoadedConfig) -
     for key in ("action_dim", "proprio_dim"):
         if key in manifest and manifest[key] != config.section("data")[key]:
             raise ValueError(f"Prepared replay {key} does not match the selected model configuration")
-
-
-def iter_episode_arrays(manifest: dict[str, Any]) -> Iterator[tuple[dict[str, Any], dict[str, np.ndarray], dict[str, np.ndarray]]]:
-    for episode in manifest["episodes"]:
-        with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as trajectory, np.load(
-            storage_path(episode["observations_path"]), allow_pickle=False
-        ) as observations:
-            yield episode, {key: trajectory[key] for key in trajectory.files}, {
-                key: observations[key] for key in observations.files
-            }
