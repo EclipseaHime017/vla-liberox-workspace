@@ -22,8 +22,10 @@ from core.data import load_manifest, prepare_dataset
 from core.execution import validate_task_prompt
 from core.io import atomic_json, sha256_file, stable_hash
 from core.methods import training_method
-from rewards.manifest import _episode_reward_metadata, _episode_timeline_arrays, load_pinned_reward_index, materialize_reward_manifest, reward_derivation_config
-from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS, validate_official_outputs
+from rewards.manifest import (REWARD_SCHEMA_VERSION, _episode_reward_metadata, _episode_timeline_arrays,
+                              load_pinned_reward_index, materialize_reward_manifest, reward_derivation_config)
+from rewards.evaluation_store import SNAPSHOT_SCHEMA_VERSION
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION, OFFICIAL_OUTPUT_KEYS, validate_official_outputs
 
 REWARD_SOURCES = ("final", "rynnvalue", "stage", "sparse")
 
@@ -286,7 +288,7 @@ def saved_reward(run: GlobalRun, source: str) -> tuple[dict, Path]:
     path = run.rewards[source]
     metadata = _json(path)
     native = path.name == "rynnvalue_evaluation.json"
-    if metadata.get("schema_version") not in ((5, 6) if native else (1,)):
+    if metadata.get("schema_version") != (ANNOTATION_SCHEMA_VERSION if native else SNAPSHOT_SCHEMA_VERSION):
         raise ValueError(f"Unsupported saved {source} evaluation: {path}")
     recipe = metadata.get("reward_config")
     if (metadata.get("run_id") != run.run_id or not isinstance(recipe, dict)
@@ -300,38 +302,21 @@ def saved_reward(run: GlobalRun, source: str) -> tuple[dict, Path]:
 
 
 def _validate_reward_layout(metadata: dict, arrays, episode: dict) -> None:
-    """Reuse exact recorded intervals, allowing only absent legacy provenance."""
+    """Saved rewards must cover every recorded action of the same recording."""
     context = f"Global evaluation {episode['run_id']}"
     validate_task_prompt(metadata, episode.get("prompt"), context=context)
-    expected = episode["reward_boundaries"]
-    if "boundary_steps" not in arrays or not np.array_equal(arrays["boundary_steps"], expected):
-        saved = set(np.asarray(arrays["boundary_steps"]).tolist()) if "boundary_steps" in arrays else set()
-        missing = sorted(set(expected) - saved)
-        raise ValueError(f"Global evaluation reward_boundaries mismatch: {episode['run_id']}; "
-                         f"missing recorded boundaries={missing[:20]}. Regenerate rewards on main; "
-                         "server never interpolates or runs an evaluator")
-    chunks = episode.get("evaluation_chunks", episode["chunks"])
-    for key in ("final_reward", "pbrs_chunk_reward"):
-        if key in arrays and (arrays[key].shape != (len(chunks),) or not np.isfinite(arrays[key]).all()):
-            raise ValueError(f"Global evaluation {key} does not match recorded chunks: {episode['run_id']}")
     for previous in (metadata.get("episode", {}), metadata.get("entry", {})):
         validate_task_prompt(previous, episode.get("prompt"), context=context)
-        saved_chunks = previous.get("evaluation_chunks")
-        if saved_chunks is None:
-            continue
-        if not isinstance(saved_chunks, list) or len(saved_chunks) != len(chunks):
-            raise ValueError(f"Global evaluation chunk count mismatch: {episode['run_id']}")
-        for saved, current in zip(saved_chunks, chunks):
-            if (not isinstance(saved, dict)
-                    or any(saved.get(key) != current.get(key) for key in ("start", "end", "length", "action_source"))
-                    or any(saved[key] != current.get(key) for key in (
-                        "transition_type", "interrupted", "copied_prefix", "origin_run_id") if key in saved)):
-                raise ValueError(f"Global evaluation chunk semantics mismatch: {episode['run_id']}")
+    final = arrays["final_reward"] if "final_reward" in arrays else None
+    if final is None or final.shape != (int(episode["recorded_action_count"]),) or not np.isfinite(final).all():
+        raise ValueError(f"Global evaluation rewards do not cover every action of {episode['run_id']}. "
+                         "Regenerate rewards on main; the server never runs an evaluator")
 
 
 def _stage_from_labels(run: GlobalRun, episode: dict, directory: Path, raw: dict) -> tuple[dict, Path]:
     """Same implicit global Stage semantics as the PC: labels + configured p."""
-    from rewards.stage.reward import stage_annotation_context, stage_chunk_reward, stage_scores
+    from rewards.fusion import step_reward_arrays
+    from rewards.stage.reward import stage_annotation_context, stage_scores
     from rewards.stage.keyframes import validate_stage_annotation
     arrays = _episode_timeline_arrays(episode)
     threshold = raw["data"]["success_consecutive_steps"]
@@ -341,11 +326,8 @@ def _stage_from_labels(run: GlobalRun, episode: dict, directory: Path, raw: dict
     recipe = reward_derivation_config(raw["reward"])
     context = stage_annotation_context(annotation, done=arrays["environment_done"],
         success_consecutive_steps=threshold, exponent=recipe["stage_exponent"])
-    scores = stage_scores(context)
-    final = np.asarray([stage_chunk_reward(scores, chunk["start"], chunk["length"], recipe["gamma"])
-                        for chunk in episode["evaluation_chunks"]], dtype=np.float32)
-    arrays.update(stage_score=scores, stage_chunk_reward=final, final_reward=final,
-                  pbrs_chunk_reward=final, boundary_steps=np.asarray(episode["reward_boundaries"], dtype=np.int64))
+    arrays["stage_score"] = stage_scores(context)
+    arrays.update(step_reward_arrays(episode, recipe, arrays))
     path = directory / "label_rewards" / f"{stable_hash(run.run_id)}.npz"
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **arrays)
@@ -428,7 +410,7 @@ def prepare_global_inputs(task: GlobalTask, directory: Path, raw: dict, source: 
             _validate_reward_layout(metadata, arrays, episode)
             if needs_rynnvalue(recipe):
                 validate_official_outputs({key: arrays[key] for key in OFFICIAL_OUTPUT_KEYS},
-                                          len(episode["reward_boundaries"]))
+                                          int(episode["recorded_action_count"]) + 1)
             if needs_stage(recipe):
                 scores = arrays["stage_score"]
                 if scores.shape != (episode["recorded_action_count"] + 1,) or not np.isfinite(scores).all():
@@ -441,7 +423,7 @@ def prepare_global_inputs(task: GlobalTask, directory: Path, raw: dict, source: 
         # Validate the original indices too, not just our freshly rebuilt metadata.
         for key, expected in _episode_reward_metadata(episode).items():
             previous = metadata.get("entry", {})
-            if key != "evaluation_chunks" and key in previous and previous[key] != expected:
+            if key in previous and previous[key] != expected:
                 raise ValueError(f"Global evaluation {key} mismatch: {run.run_id}")
         entry = {"run_id": run.run_id, **_episode_reward_metadata(episode),
                  "reward_path": str(destination), "annotation_path": str(destination),
@@ -457,13 +439,13 @@ def prepare_global_inputs(task: GlobalTask, directory: Path, raw: dict, source: 
         entries.append(entry)
         atomic_json(directory / "metadata" / f"{stable_hash(run.run_id)}.json", metadata)
     identifier = "global_" + stable_hash(entries)[:16]
-    index = {"schema_version": 1, "kind": "derived_iql_reward", "complete": True,
+    index = {"schema_version": REWARD_SCHEMA_VERSION, "kind": "derived_iql_reward", "complete": True,
              "binding_kind": "global_trajectory_snapshots", "version_id": identifier,
              "dataset_sha256": prepared["dataset_sha256"],
              "reward_config": reward_derivation_config(raw["reward"]), "episodes": entries}
     path = directory / "reward_manifest.json"
     atomic_json(path, index)
     raw["reward"].update(manifest_path=str(path), manifest_sha256=sha256_file(path), version_id=identifier)
-    # This verifies chunk order/length and reuses the normal private gamma adapter.
+    # This verifies per-action coverage and reuses the normal private gamma adapter.
     load_pinned_reward_index(config)
     return raw

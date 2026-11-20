@@ -16,7 +16,7 @@ from core.data import action_source_segments, prepare_dataset, replay_chunks
 from core.io import atomic_json, sha256_file, stable_hash
 from train.replay import ReplayDataset
 from rewards.rynnvalue.annotate import annotate_manifest
-from rewards.pbrs import chunk_reward_components, sparse_primitive_return
+from rewards.pbrs import discounted_sum, shaping_rewards, sparse_rewards, success_mask
 from rewards.manifest import load_reward_index, materialize_reward_manifest, reward_manifest_digest
 from rewards.stage.keyframes import build_stage_annotation, validate_stage_annotation
 from rewards.stage.reward import stage_annotation_context, stage_scores
@@ -133,7 +133,9 @@ def _assert_replay_uses_saved_post_success_rewards(configured, index):
         item = replay[item_index]
         chunk = replay_chunks(episode)[chunk_index]
         with np.load(reward_path, allow_pickle=False) as arrays:
-            assert item["reward"].item() == float(arrays["final_reward"][chunk_index])
+            expected = discounted_sum(arrays["final_reward"], chunk["start"], chunk["end"],
+                                      configured.section("reward")["gamma"])
+            assert item["reward"].item() == pytest.approx(expected, rel=1e-6)
         assert item["action_mask"].sum().item() == chunk["length"]
         if episode["terminal_step"] is None:
             continue
@@ -229,14 +231,24 @@ def test_pinned_version_rejects_manifest_and_arrays_corruption(configured):
         load_reward_index(configured)
 
 
-def test_pinned_version_checks_chunk_alignment_not_only_array_length(configured):
+def test_pinned_version_checks_recording_identity_not_only_array_length(configured):
     _stage(configured)
     index = load_reward_index(configured)
     path = _pin(configured, index)
-    index["episodes"][0]["evaluation_chunks"][0]["start"] += 1
+    index["episodes"][0]["terminal_step"] = 0
     atomic_json(path, index)
     configured.raw["reward"]["manifest_sha256"] = sha256_file(path)
-    with pytest.raises(ValueError, match="evaluation_chunks mismatch"):
+    with pytest.raises(ValueError, match="terminal_step mismatch"):
+        load_reward_index(configured)
+
+
+def test_pinned_versions_before_per_action_rewards_are_rejected(configured):
+    _stage(configured)
+    index = load_reward_index(configured)
+    path = _pin(configured, index)
+    atomic_json(path, {**index, "schema_version": 1})
+    configured.raw["reward"]["manifest_sha256"] = sha256_file(path)
+    with pytest.raises(ValueError, match="predates per-action rewards"):
         load_reward_index(configured)
 
 
@@ -250,7 +262,7 @@ def test_direct_versions_include_complete_recorded_timeline(configured):
             np.testing.assert_allclose(arrays["time_seconds"], np.arange(count + 1) / 20)
             assert len(arrays["stage_score"]) == count + 1
             assert len(arrays["environment_done"]) == count
-            assert len(arrays["final_reward"]) == len(episode["evaluation_chunks"])
+            assert len(arrays["final_reward"]) == count
 
 
 def test_forced_model_evaluation_keeps_previous_official_outputs(configured):
@@ -384,7 +396,6 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
                 else json.loads(prepared_path.read_text()))
     branch = next(episode for episode in prepared["episodes"] if episode["run_id"] == "branch")
     assert branch["action_count"] == (18 if legacy_prepared else 22)
-    assert branch["reward_boundaries"] == [0, 5, 13, 18, 22]
     _select(configured, source)
     if source == "stage":
         _save_annotations(configured, prepared)
@@ -423,26 +434,18 @@ def test_training_local_gamma_reduction_keeps_dataset_and_semantics_pinned(
     for episode, old, new in zip(prepared["episodes"], original["episodes"], adapted["episodes"]):
         assert Path(new["reward_path"]).is_relative_to(
             Path(configured.raw["paths"]["output_dir"]) / "reward_adaptations")
-        done = np.zeros(episode["recorded_action_count"], dtype=bool)
-        if episode["terminal_step"] is not None:
-            done[episode["terminal_step"]:] = True
+        done = success_mask(episode)
         with np.load(old["reward_path"]) as original_values, np.load(new["reward_path"]) as values:
-            expected = []
-            for chunk in episode["evaluation_chunks"]:
-                start, length, end = chunk["start"], chunk["length"], chunk["end"]
-                if source == "stage":
-                    scores = original_values["stage_score"]
-                    expected.append(float(np.dot(gamma ** np.arange(length), scores[start + 1:end + 1])))
-                    np.testing.assert_array_equal(values["stage_score"], scores)
-                elif source == "rynnvalue":
-                    lookup = dict(zip(original_values["boundary_steps"],
-                                      original_values["absolute_temporal_distance_seconds"][:, 0]))
-                    expected.append(chunk_reward_components(done, start, length, lookup[start], lookup[end],
-                        gamma, configured.raw["reward"]["shaping_weight"])[2])
-                    np.testing.assert_array_equal(values["absolute_temporal_distance_seconds"],
-                                                  original_values["absolute_temporal_distance_seconds"])
-                else:
-                    expected.append(sparse_primitive_return(done, start, length, gamma))
+            if source == "stage":
+                expected = original_values["stage_score"][1:]
+                np.testing.assert_array_equal(values["stage_score"], original_values["stage_score"])
+            elif source == "rynnvalue":
+                distances = original_values["absolute_temporal_distance_seconds"]
+                expected = sparse_rewards(done) + configured.raw["reward"]["shaping_weight"] * shaping_rewards(
+                    -distances[:, 0], done, gamma)
+                np.testing.assert_array_equal(values["absolute_temporal_distance_seconds"], distances)
+            else:
+                expected = sparse_rewards(done)
             np.testing.assert_allclose(values["final_reward"], expected, rtol=1e-6, atol=1e-6)
     assert {str(path): path.read_bytes() for path in frozen_root.rglob("*") if path.is_file()} == original_files
     assert all(Path(path).read_bytes() == content for path, content in official_files.items())
@@ -491,28 +494,8 @@ def test_materialize_with_pinned_override_returns_training_local_manifest(config
     assert source_path.read_bytes() == original_bytes
 
 
-def test_versions_saved_with_macro_actions_are_re_derived_per_step(configured):
-    prepared = _stage(configured)
-    pinned = load_reward_index(configured)
-    path = Path(pinned["episodes"][0]["reward_path"]).parent / "reward_manifest.json"
-    saved = json.loads(path.read_text())
-    saved["reward_config"]["accumulate_primitive_steps"] = False
-    path.write_text(json.dumps(saved))
-    _pin(configured, pinned)
-    adapted = load_reward_index(configured)
-    assert "accumulate_primitive_steps" not in adapted["reward_config"]
-    gamma = configured.raw["reward"]["gamma"]
-    for episode, entry in zip(prepared["episodes"], adapted["episodes"]):
-        with np.load(entry["reward_path"]) as values:
-            scores = values["stage_score"]
-            expected = [float(np.dot(gamma ** np.arange(chunk["length"]),
-                                     scores[chunk["start"] + 1:chunk["end"] + 1]))
-                        for chunk in episode["evaluation_chunks"]]
-            np.testing.assert_allclose(values["final_reward"], expected, rtol=1e-6, atol=1e-6)
-
-
 @pytest.mark.parametrize("field", ["trajectory_sha256", "observations_sha256", "prompt"])
-def test_shared_annotation_manifest_rejects_different_source_with_equal_run_and_boundaries(configured, field):
+def test_shared_annotation_manifest_rejects_different_source_with_equal_run(configured, field):
     from rewards.rynnvalue.outputs import reusable_manifest_entry
     prepared = json.loads(prepare_dataset(configured).manifest.read_text())
     manifest = json.loads(annotate_manifest(configured, CountingAnnotator()).read_text())

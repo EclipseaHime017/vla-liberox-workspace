@@ -17,6 +17,7 @@ from core.methods import training_method
 from core.frame_cache import FrameCache
 from core.image_transforms import policy_view, image_orientation
 from rewards.manifest import load_reward_index
+from rewards.pbrs import discounted_sum
 from train.encoding import critic_pixels, encode_actions, encode_proprio
 from train.models.vla_adapter import proprio_from_trajectory
 
@@ -165,39 +166,37 @@ class ReplayDataset(ActionDataset):
         if index["dataset_sha256"] != self.manifest["dataset_sha256"]:
             raise ValueError("Reward annotations were generated for a different dataset manifest")
         annotations = {item["run_id"]: storage_path(item["annotation_path"]) for item in index["episodes"]}
-        checked = set()
+        self.gamma = float(config.section("reward")["gamma"])
+        self._rewards: dict[Path, np.ndarray] = {}
         for episode, _, _ in self.items:
-            run_id = episode["run_id"]
-            if run_id not in checked:
-                with np.load(annotations[run_id], allow_pickle=False) as rewards:
-                    key = "final_reward" if "final_reward" in rewards else "pbrs_chunk_reward"
-                    expected = len(self.chunks[run_id])
-                    if rewards[key].shape != (expected,):
-                        raise ValueError(
-                            f"Run {run_id} reward array does not cover all {expected} "
-                            "full-recording replay chunks; rematerialize rewards for the complete recording"
-                        )
-                checked.add(run_id)
+            rewards = self._action_rewards(annotations[episode["run_id"]])
+            if rewards.shape != (int(episode["recorded_action_count"]),) or not np.isfinite(rewards).all():
+                raise ValueError(f"Run {episode['run_id']} rewards do not cover every recorded action; "
+                                 "rematerialize rewards for the complete recording")
         self.items = [(episode, chunk_index, annotations[episode["run_id"]])
                       for episode, chunk_index, _ in self.items]
-        self._rewards: dict[Path, np.ndarray] = {}
 
-    def _chunk_rewards(self, annotation: Path) -> np.ndarray:
+    def _action_rewards(self, annotation: Path) -> np.ndarray:
         rewards = self._rewards.get(annotation)
         if rewards is None:
             with np.load(annotation, allow_pickle=False) as source:
-                key = "final_reward" if "final_reward" in source else "pbrs_chunk_reward"
-                rewards = np.asarray(source[key], dtype=np.float32)
+                rewards = np.asarray(source["final_reward"], dtype=np.float64)
             self._rewards[annotation] = rewards
         return rewards
 
+    def transition_reward(self, item: int) -> float:
+        """Per-action rewards of the transition, summed with the per-step discount (float32, as stored)."""
+        episode, chunk_index, annotation = self.items[item]
+        chunk = self.chunks[episode["run_id"]][chunk_index]
+        return float(np.float32(discounted_sum(self._action_rewards(annotation), int(chunk["start"]),
+                                               int(chunk["end"]), self.gamma)))
+
     def __getitem__(self, item: int) -> dict[str, Any]:
         sample = self._sample(item, transitions=True)
-        _, chunk_index, annotation = self.items[item]
-        sample["reward"] = torch.tensor(float(self._chunk_rewards(annotation)[chunk_index]), dtype=torch.float32)
+        sample["reward"] = torch.tensor(self.transition_reward(item), dtype=torch.float32)
         return sample
 
     def reward_range(self) -> tuple[float, float]:
-        """Lowest and highest chunk reward of this split's transitions."""
-        values = [self._chunk_rewards(annotation)[chunk_index] for _, chunk_index, annotation in self.items]
+        """Lowest and highest transition reward of this split."""
+        values = [self.transition_reward(item) for item in range(len(self.items))]
         return float(min(values)), float(max(values))

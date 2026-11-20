@@ -7,7 +7,7 @@ from pathlib import Path
 
 from studio.storage.paths import storage_path
 
-from studio.services.trajectory_reward_snapshot import snapshot_path
+from studio.services.trajectory_reward_snapshot import SNAPSHOT_SCHEMA_VERSION, snapshot_path
 
 
 def _json(path: Path) -> dict:
@@ -66,7 +66,7 @@ class MemberEvaluationStatus:
             path = snapshot_path(run, source)
             if path is not None and path.exists():
                 payload = _json(path)
-                if (payload.get("schema_version") != 1 or payload.get("run_id") != run["id"]
+                if (payload.get("schema_version") != SNAPSHOT_SCHEMA_VERSION or payload.get("run_id") != run["id"]
                         or payload.get("source") != source):
                     raise ValueError("Global evaluation identity mismatch")
                 name = payload["values_file"]

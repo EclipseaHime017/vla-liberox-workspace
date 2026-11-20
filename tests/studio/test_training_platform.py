@@ -192,25 +192,23 @@ def test_failed_reannotation_preserves_previous_ready_version(tmp_path: Path):
     )
     current.update_annotation(
         dataset["id"], "RUNNING", annotation_id="ann-good",
-        annotation_config={"max_frames": 4, "accumulate_primitive_steps": False},
+        annotation_config={"max_frames": 4},
     )
     current.update_annotation(
         dataset["id"], "READY", annotation_id="ann-good",
-        annotation_config={"max_frames": 4, "accumulate_primitive_steps": False},
+        annotation_config={"max_frames": 4},
     )
     current.update_annotation(
         dataset["id"], "RUNNING", annotation_id="ann-bad",
-        annotation_config={"max_frames": 16, "accumulate_primitive_steps": True},
+        annotation_config={"max_frames": 16},
     )
     result = current.update_annotation(
         dataset["id"], "ERROR", annotation_id="ann-bad",
-        annotation_config={"max_frames": 16, "accumulate_primitive_steps": True},
+        annotation_config={"max_frames": 16},
     )
     assert result["annotation_status"] == "READY"
     assert result["annotation_id"] == "ann-good"
-    assert result["annotation_config"] == {
-        "max_frames": 4, "accumulate_primitive_steps": False,
-    }
+    assert result["annotation_config"] == {"max_frames": 4}
     assert result["last_annotation_status"] == "ERROR"
     assert len(result["annotation_history"]) == 2
 
@@ -555,14 +553,14 @@ def test_training_revalidates_completed_annotation_hashes(tmp_path: Path):
     dataset = {
         "id": "ds", "annotation_id": "ann", "dataset_sha256": "frozen",
         "annotation_config": {
-            "max_frames": 4, "accumulate_primitive_steps": False,
+            "max_frames": 4,
         },
     }
     assert jobs._validated_annotation_work(dataset)[0] == work
     mismatched = {
         **dataset,
         "annotation_config": {
-            "max_frames": 8, "accumulate_primitive_steps": False,
+            "max_frames": 8,
         },
     }
     with pytest.raises(Exception, match="max_frames"):

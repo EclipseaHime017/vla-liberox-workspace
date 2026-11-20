@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from fastapi import FastAPI, Request
 
+from rewards.evaluation_store import SNAPSHOT_SCHEMA_VERSION
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
 from studio.api.training_datasets import members as members_endpoint
 from studio.services.robometer_evaluation_service import RobometerEvaluationService
 from studio.services.trajectory_evaluation_service import TrajectoryEvaluationService
@@ -24,8 +26,8 @@ def setup_dataset(tmp_path, count=1):
 
 def native(run, source):
     path = Path(run["trajectory"]).with_name(f"{source}_evaluation.json")
-    path.write_text(json.dumps({"schema_version": 6 if source == "rynnvalue" else 1,
-        "run_id": run["id"], "boundary_count": 3, "sample_count": 3,
+    path.write_text(json.dumps({"schema_version": ANNOTATION_SCHEMA_VERSION if source == "rynnvalue" else 1,
+        "run_id": run["id"], "observation_count": 3, "sample_count": 3,
         "annotator": {"model": f"global-{source}"}}))
     # Deliberately not an NPZ: a catalog request must never decode these arrays.
     path.with_suffix(".npz").write_bytes(b"values")
@@ -105,7 +107,7 @@ def test_global_reward_snapshot_and_legacy_dataset_outputs_are_visible(tmp_path)
     sidecar = Path(run["trajectory"]).with_name("trajectory_reward.rynnvalue.json")
     values = sidecar.with_suffix(".npz")
     values.write_bytes(b"reward snapshot")
-    sidecar.write_text(json.dumps({"schema_version": 1, "run_id": run["id"],
+    sidecar.write_text(json.dumps({"schema_version": SNAPSHOT_SCHEMA_VERSION, "run_id": run["id"],
                                   "source": "rynnvalue", "values_file": values.name}))
     old_dataset = datasets.create(name="legacy", task_id=dataset["task_id"],
                                   selection={"mode": "manual", "run_ids": [run["id"]]})

@@ -55,32 +55,12 @@ def test_macro_action_reward_mode_no_longer_exists(configured, tmp_path: Path):
     assert "accumulate_primitive_steps" not in reward_derivation_config(configured.section("reward"))
 
 
-@pytest.mark.parametrize("normalization", [None, "none", "initial_chunk_v1"])
-def test_final_normalization_preserves_legacy_recipe_identity(configured, tmp_path, normalization):
-    from rewards.manifest import reward_derivation_config
+def test_final_reward_has_no_normalization_setting(configured, tmp_path):
     raw = yaml.safe_load(configured.path.read_text())
-    raw["reward"].update(source="final")
-    raw["reward"].pop("final_normalization")
-    if normalization is not None:
-        raw["reward"]["final_normalization"] = normalization
+    raw["reward"]["final_normalization"] = "initial_chunk_v1"
     path = tmp_path / "normalization.yaml"
     path.write_text(yaml.safe_dump(raw))
-    reward = load_train_config(path).section("reward")
-    assert reward["final_normalization"] == (normalization or "none")
-    recipe = reward_derivation_config(reward)
-    if normalization == "initial_chunk_v1":
-        assert recipe["final_normalization"] == normalization
-    else:
-        assert "final_normalization" not in recipe
-
-
-def test_default_final_normalization_and_invalid_rule(configured, tmp_path):
-    assert configured.section("reward")["final_normalization"] == "initial_chunk_v1"
-    raw = yaml.safe_load(configured.path.read_text())
-    raw["reward"]["final_normalization"] = "clip"
-    path = tmp_path / "invalid-normalization.yaml"
-    path.write_text(yaml.safe_dump(raw))
-    with pytest.raises(ValueError, match="reward.final_normalization"):
+    with pytest.raises(ValueError, match="final_normalization"):
         load_train_config(path)
 
 
@@ -216,11 +196,11 @@ def test_branch_keeps_full_trajectory_and_marks_interrupted_policy_prefix(config
         "copied_prefix": True,
     }
     assert episodes["branch"]["chunks"][1]["action_source"] == "human"
-    assert episodes["branch"]["reward_boundaries"] == [0, 5, 13, 18, 22]
+    assert "reward_boundaries" not in episodes["branch"]
     assert episodes["root"]["split"] == episodes["branch"]["split"]
 
 
-def test_branch_reward_boundaries_include_natural_rollout_before_takeover(configured):
+def test_branch_chunks_include_natural_rollout_before_takeover(configured):
     source = Path(configured.section("paths")["dataset_sources"][0])
     run_json = next(source.rglob("branch/run.json"))
     run = json.loads(run_json.read_text(encoding="utf-8"))
@@ -248,7 +228,6 @@ def test_branch_reward_boundaries_include_natural_rollout_before_takeover(config
         (13, 18, "human"),
         (18, 22, "human"),
     ]
-    assert branch["reward_boundaries"] == [0, 8, 13, 18, 22]
 
 
 def test_500_step_branch_evaluation_still_spans_full_25_seconds(configured):
@@ -286,9 +265,9 @@ def test_500_step_branch_evaluation_still_spans_full_25_seconds(configured):
         episode for episode in load_manifest(configured)["episodes"]
         if episode["run_id"] == "branch"
     )
-    assert branch["reward_boundaries"][0] == 0
-    assert branch["reward_boundaries"][-1] == 500
-    assert branch["reward_boundaries"][-1] / 20.0 == 25.0
+    assert branch["evaluation_chunks"][0]["start"] == 0
+    assert branch["evaluation_chunks"][-1]["end"] == 500
+    assert branch["evaluation_chunks"][-1]["end"] / 20.0 == 25.0
     assert any(
         chunk["start"] == 208 and chunk["end"] == 210
         and chunk["transition_type"] == "policy_interrupted"
@@ -318,8 +297,6 @@ def test_latched_done_tail_is_trained_without_changing_source(configured):
         "transition_type": "human", "interrupted": False,
         "copied_prefix": False,
     }
-    assert branch["reward_boundaries"][0] == 0
-    assert branch["reward_boundaries"][-1] == 22
     assert branch["chunks"][-1] == {
         "start": 18, "length": 4, "end": 22, "action_source": "human",
         "transition_type": "human", "interrupted": False,

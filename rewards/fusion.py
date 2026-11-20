@@ -1,4 +1,4 @@
-"""Final Reward: Stage baseline plus RynnValue shaping, independent of inference."""
+"""Per-action training rewards from saved signals; Final Reward fuses Stage and RynnValue."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ import numpy as np
 from core.config import LoadedConfig, needs_rynnvalue, needs_stage
 from core.data import load_manifest
 from core.io import atomic_json, sha256_file, stable_hash
-from rewards.stage.reward import stage_annotation_context, stage_chunk_reward, stage_scores
+from rewards.stage.reward import stage_annotation_context, stage_rewards, stage_scores
 
 
 def import_saved_model_inputs(config: LoadedConfig, references: Path) -> None:
@@ -46,21 +46,72 @@ def _validate_saved_model_inputs(payload: dict, prepared: dict) -> None:
         if path.is_symlink() or sha256_file(path) != entry["annotation_sha256"]:
             raise ValueError(f"Saved RynnValue values changed: {episode['run_id']}")
         with np.load(path, allow_pickle=False) as arrays:
-            if not np.array_equal(arrays["boundary_steps"], episode["reward_boundaries"]):
-                raise ValueError(f"Saved RynnValue boundary mismatch: {episode['run_id']}")
-            validate_official_outputs({k: arrays[k] for k in OFFICIAL_OUTPUT_KEYS}, len(episode["reward_boundaries"]))
+            validate_official_outputs({k: arrays[k] for k in OFFICIAL_OUTPUT_KEYS},
+                                      int(episode["recorded_action_count"]) + 1)
+
+
+def step_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
+    """Per-action rewards of one recording from its saved signals; never runs an evaluator.
+
+    ``signals`` hold one value per observation: ``stage_score`` and the RynnValue outputs
+    (``absolute_temporal_distance_seconds``) as the source requires. Every returned reward
+    array has one value per action.
+    """
+    from core.config import reward_source
+    from rewards.pbrs import shaping_rewards, sparse_rewards, success_mask
+
+    count = int(episode["recorded_action_count"])
+    done = success_mask(episode)
+    gamma = float(recipe["gamma"])
+    source = reward_source(recipe)
+    if source == "final":
+        return fused_reward_arrays(episode, recipe, signals)
+    if source == "stage":
+        scores = _stage_signal(episode, signals)
+        final = stage_rewards(scores)
+        return {"stage_score": scores, "stage_reward": final, "final_reward": final.astype(np.float32)}
+    sparse = sparse_rewards(done)
+    if source == "sparse":
+        return {"sparse_reward": sparse.astype(np.float32), "final_reward": sparse.astype(np.float32)}
+    kappa = float(recipe["shaping_weight"])
+    shape = shaping_rewards(-_rynnvalue_signal(episode, signals), done, gamma,
+                            bool(recipe.get("zero_success_potential", False)))
+    if count != len(shape):
+        raise ValueError(f"RynnValue outputs do not cover {episode['run_id']}")
+    return {"sparse_reward": sparse.astype(np.float32), "pbrs_shaping_reward": shape.astype(np.float32),
+            "dense_reward": (kappa * shape).astype(np.float32),
+            "final_reward": (sparse + kappa * shape).astype(np.float32)}
+
+
+def _stage_signal(episode: dict, signals: dict) -> np.ndarray:
+    scores = signals.get("stage_score")
+    count = int(episode["recorded_action_count"])
+    if scores is None or scores.shape != (count + 1,) or not np.isfinite(scores).all():
+        raise ValueError(f"Required Stage timeline is missing or invalid: {episode['run_id']}")
+    if np.any(scores > 0):
+        raise ValueError(f"Stage score exceeds zero; check keyframes: {episode['run_id']}")
+    return np.asarray(scores, dtype=np.float64)
+
+
+def _rynnvalue_signal(episode: dict, signals: dict) -> np.ndarray:
+    """Remaining time per observation from the official absolute head."""
+    distances = signals.get("absolute_temporal_distance_seconds")
+    count = int(episode["recorded_action_count"])
+    if (distances is None or distances.shape != (count + 1, 1)
+            or not np.isfinite(distances).all()):
+        raise ValueError(f"Required RynnValue outputs are missing: {episode['run_id']}")
+    return np.asarray(distances[:, 0], dtype=np.float64)
 
 
 def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
-    """Pure reduction; source model outputs and manual keyframes are never changed."""
-    from rewards.pbrs import chunk_reward_components, sparse_primitive_return
+    """Final Reward per action; source model outputs and manual keyframes are never changed.
 
-    count = int(episode["recorded_action_count"])
-    chunks = episode.get("evaluation_chunks", episode["chunks"])
-    boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
-    done = np.zeros(count, dtype=bool)
-    if episode["terminal_step"] is not None:
-        done[int(episode["terminal_step"]):] = True
+    additive: base * sparse + alpha * stage + kappa * shaping; multiplicative:
+    -stage(t+1) * (sparse + kappa * shaping).
+    """
+    from rewards.pbrs import shaping_rewards, sparse_rewards, success_mask
+
+    done = success_mask(episode)
     gamma = float(recipe["gamma"])
     kappa = float(recipe["shaping_weight"])
     alpha = float(recipe.get("alpha", 0))
@@ -75,69 +126,20 @@ def fused_reward_arrays(episode: dict, recipe: dict, signals: dict) -> dict:
         raise ValueError("Unknown Final Reward fusion mode")
     if not all(np.isfinite(x) for x in (gamma, alpha, kappa)) or not 0 <= alpha <= 1:
         raise ValueError("Invalid Final Reward parameters")
-    scores = signals.get("stage_score") if needs_stage(recipe) else None
-    if needs_stage(recipe):
-        if scores is None or scores.shape != (count + 1,) or not np.isfinite(scores).all():
-            raise ValueError(f"Required Stage timeline is missing or invalid: {episode['run_id']}")
-        if np.any(scores > 0):
-            raise ValueError(f"Stage score exceeds zero; check keyframes: {episode['run_id']}")
-    lookup = None
-    if needs_rynnvalue(recipe):
-        distances = signals.get("absolute_temporal_distance_seconds")
-        if (distances is None or distances.shape != (len(boundaries), 1)
-                or not np.isfinite(distances).all()):
-            raise ValueError(f"Required RynnValue outputs are missing: {episode['run_id']}")
-        lookup = dict(zip(boundaries.tolist(), distances[:, 0].tolist()))
-    sparse, shape, stage, final = [], [], [], []
-    for chunk in chunks:
-        start, length, end = int(chunk["start"]), int(chunk["length"]), int(chunk["end"])
-        if lookup is not None:
-            b, f, original = chunk_reward_components(
-                done, start, length, lookup[start], lookup[end], gamma, kappa, True,
-                bool(recipe.get("zero_success_potential", False)))
-        else:
-            b = sparse_primitive_return(done, start, length, gamma)
-            f, original = 0., b
-        s = stage_chunk_reward(scores, start, length, gamma) if scores is not None else 0.
-        if mode == "additive":
-            value = base_coefficient * b + alpha * s + kappa * f
-        else:
-            value = -float(scores[end]) * original
-        sparse.append(b)
-        shape.append(f)
-        stage.append(s)
-        final.append(value)
-    b, f = np.asarray(sparse, dtype=np.float32), np.asarray(shape, dtype=np.float32)
-    raw_final = np.asarray(final, dtype=np.float64)
-    if not np.isfinite(raw_final).all():
-        raise ValueError(f"Non-finite Final Reward: {episode['run_id']}")
-    normalization = recipe.get("final_normalization", "none")
-    normalized = raw_final
-    normalization_arrays = {}
-    if normalization == "initial_chunk_v1":
-        if not chunks or int(chunks[0]["start"]) != 0:
-            raise ValueError(f"Final Reward rescale requires the full trajectory from step 0: {episode['run_id']}")
-        reference = float(raw_final[0])
-        if reference >= 0:
-            raise ValueError(f"Initial Final Reward must be negative for rescale: {episode['run_id']} (R0={reference})")
-        # Use the full recorded first chunk, not the deduplicated replay suffix.
-        # Never reuse a previous scale after changing gamma.
-        with np.errstate(over="ignore", invalid="ignore"):
-            scale = np.divide(1., -reference)
-            normalized = raw_final / -reference
-        normalization_arrays = {
-            "raw_final_reward": raw_final,
-            "final_reward_reference": np.asarray(reference, dtype=np.float64),
-            "final_reward_scale": np.asarray(scale, dtype=np.float64),
-        }
-    elif normalization != "none":
-        raise ValueError(f"Unknown Final Reward normalization: {normalization}")
-    result = dict(sparse_reward=b, pbrs_shaping_reward=f, dense_reward=kappa * f,
-                  original_final_reward=b + kappa * f,
-                  final_reward=np.asarray(normalized, dtype=np.float32), **normalization_arrays)
-    result["pbrs_chunk_reward"] = result["final_reward"]
+    scores = _stage_signal(episode, signals) if needs_stage(recipe) else None
+    b = sparse_rewards(done)
+    f = (shaping_rewards(-_rynnvalue_signal(episode, signals), done, gamma,
+                         bool(recipe.get("zero_success_potential", False)))
+         if needs_rynnvalue(recipe) else np.zeros_like(b))
+    s = stage_rewards(scores) if scores is not None else np.zeros_like(b)
+    original = b + kappa * f
+    final = base_coefficient * b + alpha * s + kappa * f if mode == "additive" else -s * original
+    result = dict(sparse_reward=b.astype(np.float32), pbrs_shaping_reward=f.astype(np.float32),
+                  dense_reward=(kappa * f).astype(np.float32),
+                  original_final_reward=original.astype(np.float32),
+                  final_reward=final.astype(np.float32))
     if scores is not None:
-        result.update(stage_score=scores, stage_chunk_reward=np.asarray(stage, dtype=np.float32))
+        result.update(stage_score=scores, stage_reward=s.astype(np.float32))
     if not all(np.isfinite(values).all() for values in result.values()):
         raise ValueError("Non-finite Final Reward")
     return result
@@ -164,10 +166,8 @@ def _valid_cached_result(payload: dict, prepared: dict, snapshot: dict | None) -
                 or entry["annotation_path"] != entry["reward_path"]):
             return False
         with np.load(path, allow_pickle=False) as arrays:
-            size = len(episode.get("evaluation_chunks", episode["chunks"]))
-            if (arrays["final_reward"].shape != (size,)
-                    or not np.isfinite(arrays["final_reward"]).all()
-                    or not np.array_equal(arrays["boundary_steps"], episode["reward_boundaries"])):
+            if (arrays["final_reward"].shape != (int(episode["recorded_action_count"]),)
+                    or not np.isfinite(arrays["final_reward"]).all()):
                 return False
     return True
 
@@ -219,8 +219,7 @@ def materialize_final_reward(config: LoadedConfig, *, force: bool = False) -> Pa
             pass
     pending = []
     for episode in manifest["episodes"]:
-        signals = {"boundary_steps": np.asarray(episode["reward_boundaries"], dtype=np.int64),
-                   **_episode_timeline_arrays(episode)}
+        signals = dict(_episode_timeline_arrays(episode))
         annotation_hash = None
         if snapshot:
             labels = snapshot["annotations"][episode["run_id"]]
@@ -232,10 +231,8 @@ def materialize_final_reward(config: LoadedConfig, *, force: bool = False) -> Pa
         if annotation:
             entry = by_run[episode["run_id"]]
             with np.load(storage_path(entry["annotation_path"]), allow_pickle=False) as data:
-                if not np.array_equal(data["boundary_steps"], episode["reward_boundaries"]):
-                    raise ValueError(f"RynnValue boundaries mismatch: {episode['run_id']}")
                 signals.update(validate_official_outputs({k: data[k] for k in OFFICIAL_OUTPUT_KEYS},
-                                                        len(episode["reward_boundaries"])))
+                                                        int(episode["recorded_action_count"]) + 1))
         signals.update(fused_reward_arrays(episode, recipe, signals))
         pending.append((episode, signals, annotation_hash))
     directory = _reward_generation_dir(root)

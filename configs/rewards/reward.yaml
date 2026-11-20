@@ -12,14 +12,10 @@ reward:
   # The fields above define expensive RynnValue inference and its reusable cache.
   # The fields below only derive training rewards from cached model outputs.
   # Changing them never requires another RynnValue forward pass.
-  # Final Reward: (1-alpha)*sparse + alpha*stage + shaping_weight*PBRS.
+  # Final Reward per action t: (1-alpha)*sparse + alpha*stage + shaping_weight*PBRS.
   # alpha=0,kappa=0: sparse; alpha=0,kappa>0: RynnValue; alpha=1,kappa=0: Stage.
-  # multiplicative scales the interval's sparse + shaping return by -stage at its end,
-  # with no positive floor.
+  # multiplicative: -stage(t+1) * (sparse + shaping_weight*PBRS), with no positive floor.
   fusion_mode: additive  # additive | multiplicative
-  # Divide Final Reward by -R0 from the full trajectory's first chunk; R0 must be < 0.
-  # "none" is reserved for reproducing historical unscaled results.
-  final_normalization: initial_chunk_v1
   alpha: 0.0
   # Stage interpolation: x^p, p >= 1. Reward is the score, not its difference.
   stage_exponent: 2.0

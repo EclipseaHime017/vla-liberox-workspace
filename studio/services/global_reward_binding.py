@@ -10,6 +10,8 @@ from pathlib import Path
 
 from studio.storage.paths import storage_path
 
+from rewards.manifest import REWARD_SCHEMA_VERSION, _episode_reward_metadata
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
 from studio.exceptions import ConflictError
 from studio.storage.files import atomic_write_json, atomic_write_yaml
 from studio.services.trajectory_reward_snapshot import (
@@ -24,7 +26,6 @@ from studio.services.inherited_reward_inputs import (
     reconstruct_episode,
     validate_global_values,
 )
-from core.config import current_reward_settings
 
 
 def _json(path: Path) -> dict:
@@ -77,8 +78,8 @@ def global_members(jobs, dataset: dict, source: str, *, validate: bool = False,
                 path = storage_path(run["trajectory"]).with_name("rynnvalue_evaluation.json")
                 metadata = _json(path)
                 values = path.with_name("rynnvalue_evaluation.npz")
-                if metadata.get("schema_version") not in (5, 6):
-                    raise ValueError("全局 RynnValue 评价需要升级")
+                if metadata.get("schema_version") != ANNOTATION_SCHEMA_VERSION:
+                    raise ValueError("全局 RynnValue 评价是旧版（按评价边界计算），请重新评价")
             elif has_implicit_global(run, source):
                 metadata, values = direct_global_reward(jobs, dataset, member, source,
                                                        use_dataset_labels=use_dataset_labels)
@@ -164,7 +165,7 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
                             ("manifest", "source_manifest")):
             episode[field] = member["artifacts"][name]["path"]
         episodes.append(episode)
-        entries.append({**metadata.get("entry", {}), "run_id": member["run_id"],
+        entries.append({**metadata.get("entry", {}), **_episode_reward_metadata(episode), "run_id": member["run_id"],
             "reward_path": str(values) if isinstance(values, Path) else "",
             "annotation_path": str(values) if isinstance(values, Path) else "",
             "reward_sha256": metadata["values_sha256"], "annotation_sha256": metadata["values_sha256"],
@@ -193,15 +194,14 @@ def bind_global_rewards(jobs, dataset: dict, source: str) -> dict:
         "source_dataset_id": dataset["id"], "source_dataset_sha256": dataset["dataset_sha256"],
         "episode_count": len(episodes), "success_count": sum(bool(ep["success"]) for ep in episodes)}
     raw["reward"].pop("base_coefficient", None)
-    raw["reward"].update(current_reward_settings(entries[0]["saved_reward_config"]))
-    raw["reward"]["final_normalization"] = entries[0]["saved_reward_config"].get("final_normalization", "none")
+    raw["reward"].update(entries[0]["saved_reward_config"])
     raw["reward"].update(entries[0]["saved_annotation_config"])
     raw["reward"].update(source=source, rynnvalue=source == "rynnvalue" or (
         source == "final" and raw["reward"]["shaping_weight"] > 0),
                           manifest_path=None, manifest_sha256=None, version_id=None)
     raw["data"]["stage_annotations_manifest"] = None
     raw["paths"]["work_dir"] = str(work)
-    index = {"schema_version": 1, "kind": "derived_iql_reward", "complete": True,
+    index = {"schema_version": REWARD_SCHEMA_VERSION, "kind": "derived_iql_reward", "complete": True,
         "binding_kind": "global_trajectory_snapshots", "version_id": identifier,
         "dataset_sha256": digest, "reward_config": entries[0]["saved_reward_config"],
         "annotation_config": entries[0]["saved_annotation_config"], "episodes": entries}

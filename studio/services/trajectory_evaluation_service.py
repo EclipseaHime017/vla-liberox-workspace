@@ -15,22 +15,11 @@ from typing import Any
 
 import numpy as np
 
+from rewards.evaluation_store import REQUIRED_ARRAY_KEYS, SIDECAR_NAME, VALUES_NAME, covers_recording
+from rewards.manifest import REWARD_SCHEMA_VERSION as DERIVED_REWARD_SCHEMA_VERSION
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION as EVALUATION_SCHEMA_VERSION
+from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS
 from studio.storage.files import atomic_write_json
-
-
-SIDECAR_NAME = "rynnvalue_evaluation.json"
-VALUES_NAME = "rynnvalue_evaluation.npz"
-EVALUATION_SCHEMA_VERSION = 6
-DERIVED_REWARD_SCHEMA_VERSION = 1
-COMPATIBLE_EVALUATION_SCHEMA_VERSIONS = frozenset({5, EVALUATION_SCHEMA_VERSION})
-OFFICIAL_ARRAY_KEYS = frozenset({
-    "absolute_temporal_distance_seconds",
-    "absolute_value_entropy_nats",
-    "absolute_value_logits",
-    "relative_temporal_distance_seconds",
-    "relative_value_logits",
-})
-PBRS_ARRAY_KEYS = frozenset({"pbrs_shaping_reward", "pbrs_chunk_reward"})
 
 
 def _utc_now() -> str:
@@ -90,7 +79,7 @@ class TrajectoryEvaluationService:
         except (OSError, json.JSONDecodeError):
             return None
         if (
-            payload.get("schema_version") not in COMPATIBLE_EVALUATION_SCHEMA_VERSIONS
+            payload.get("schema_version") != EVALUATION_SCHEMA_VERSION
             or payload.get("run_id") != run.get("id")
         ):
             return None
@@ -123,25 +112,12 @@ class TrajectoryEvaluationService:
             self._validation_cache[cache_key] = (fingerprint, None)
             return None
         try:
+            with np.load(trajectory, allow_pickle=False) as source:
+                recorded_action_count = len(source["env_action"])
             with np.load(values, allow_pickle=False) as arrays:
-                if not ({"boundary_steps"} | OFFICIAL_ARRAY_KEYS | PBRS_ARRAY_KEYS).issubset(
-                    arrays.files
-                ):
+                if not covers_recording(arrays, recorded_action_count):
                     payload = None
-                else:
-                    boundaries = arrays["boundary_steps"]
-            if payload is not None:
-                with np.load(trajectory, allow_pickle=False) as source:
-                    recorded_action_count = len(source["env_action"])
-                if (
-                    len(boundaries) < 2
-                    or int(boundaries[0]) != 0
-                    or int(boundaries[-1]) != recorded_action_count
-                ):
-                    # Older annotations stopped at the first confirmed terminal and
-                    # therefore hid the recorded post-success trajectory tail.
-                    payload = None
-        except (OSError, ValueError):
+        except (OSError, ValueError, KeyError):
             payload = None
         self._validation_cache[cache_key] = (fingerprint, payload)
         return payload
@@ -158,7 +134,7 @@ class TrajectoryEvaluationService:
             "revision": payload.get("annotator", {}).get("resolved_revision")
             or payload.get("annotator", {}).get("requested_revision")
             or payload.get("annotator", {}).get("revision"),
-            "boundary_count": payload.get("boundary_count", 0),
+            "observation_count": payload.get("observation_count", 0),
             "source_key": payload.get("source_key"),
         }
 
@@ -281,14 +257,14 @@ class TrajectoryEvaluationService:
                 raise FileNotFoundError(source)
             if _sha256(source) != reward["annotation_sha256"]:
                 raise ValueError(f"RynnValue annotation hash mismatch: {run_id}")
-            required = {"boundary_steps"} | OFFICIAL_ARRAY_KEYS | PBRS_ARRAY_KEYS
             with np.load(source, allow_pickle=False) as arrays:
-                missing = sorted(required - set(arrays.files))
+                missing = sorted(REQUIRED_ARRAY_KEYS - set(arrays.files))
                 if missing:
                     raise ValueError(
                         f"RynnValue annotation is missing official outputs for {run_id}: {missing}"
                     )
-                boundary_count = int(len(arrays["boundary_steps"]))
+                if not covers_recording(arrays, int(episode["recorded_action_count"])):
+                    raise ValueError(f"RynnValue annotation does not cover every step of {run_id}")
             descriptor, temporary_name = tempfile.mkstemp(
                 prefix=f".{VALUES_NAME}.", suffix=".tmp", dir=episode_dir,
             )
@@ -310,7 +286,7 @@ class TrajectoryEvaluationService:
                 "source_key": reward.get("source_key"),
                 "values_file": VALUES_NAME,
                 "values_sha256": _sha256(destination),
-                "boundary_count": boundary_count,
+                "observation_count": int(episode["recorded_action_count"]) + 1,
                 "annotator": reward.get("annotator") or rewards.get("annotator") or {},
                 "annotation_config": rewards.get("annotation_config") or {},
                 "reward_config": rewards.get("reward_config") or {},
@@ -353,84 +329,28 @@ class TrajectoryEvaluationService:
         evaluation: dict[str, Any] | None = None
         if payload is not None:
             with np.load(episode / VALUES_NAME, allow_pickle=False) as values:
-                boundary_steps = values["boundary_steps"].astype(int)
-                chunk_return = values["pbrs_chunk_reward"].astype(float)
-                if len(boundary_steps) != len(chunk_return) + 1:
-                    raise ValueError(
-                        "RynnValue boundary/chunk-return length mismatch: "
-                        f"{len(boundary_steps)} boundaries for {len(chunk_return)} chunks"
-                    )
-                chunk_lengths = np.diff(boundary_steps).astype(int)
-                reward_config = payload.get("reward_config") or {}
-                absolute_distance = values[
-                    "absolute_temporal_distance_seconds"
-                ].astype(float)
-                if absolute_distance.ndim != 2 or absolute_distance.shape[1] != 1:
+                if values["absolute_temporal_distance_seconds"].shape[1:] != (1,):
                     raise ValueError(
                         "PBRS detail requires exactly one RynnValue absolute temporal-distance head"
                     )
-                pbrs_shaping = values["pbrs_shaping_reward"].astype(float)
-                if len(pbrs_shaping) != len(chunk_return):
-                    raise ValueError(
-                        "RynnValue shape reward component length mismatch: "
-                        f"{len(pbrs_shaping)} for {len(chunk_return)} chunks"
-                    )
-                shaping_weight = float(reward_config.get("shaping_weight", 0.1))
-                dense_reward = shaping_weight * pbrs_shaping
-                sparse_reward = chunk_return - shaping_weight * pbrs_shaping
-                # Remove only exact macro-action reconstruction noise. Values
-                # from cumulative primitive-step mode remain unchanged.
-                sparse_reward = np.where(
-                    np.isclose(sparse_reward, -1.0, atol=1e-5), -1.0,
-                    np.where(np.isclose(sparse_reward, 0.0, atol=1e-5), 0.0, sparse_reward),
-                )
+                metadata = payload.get("official_outputs") or {}
                 evaluation = {
                     **self._public(payload),
-                    "boundary_steps": boundary_steps.tolist(),
+                    # One row per observation step, rewards one value per action.
                     "official_outputs": {
-                        "absolute_temporal_distance_seconds": values[
-                            "absolute_temporal_distance_seconds"
-                        ].astype(float).tolist(),
-                        "absolute_value_entropy_nats": values[
-                            "absolute_value_entropy_nats"
-                        ].astype(float).tolist(),
-                        "absolute_value_logits": values[
-                            "absolute_value_logits"
-                        ].astype(float).tolist(),
-                        "relative_temporal_distance_seconds": values[
-                            "relative_temporal_distance_seconds"
-                        ].astype(float).tolist(),
-                        "relative_value_logits": values[
-                            "relative_value_logits"
-                        ].astype(float).tolist(),
-                        "analysis": (payload.get("official_outputs") or {}).get("analysis"),
-                        "inference_method": (payload.get("official_outputs") or {}).get(
-                            "inference_method"
-                        ),
-                        "prefix_image_slots": (payload.get("official_outputs") or {}).get(
-                            "prefix_image_slots"
-                        ),
-                        "absolute_slot": (payload.get("official_outputs") or {}).get(
-                            "absolute_slot"
-                        ),
-                        "relative_slot": (payload.get("official_outputs") or {}).get(
-                            "relative_slot"
-                        ),
+                        **{key: values[key].astype(float).tolist() for key in OFFICIAL_OUTPUT_KEYS},
+                        **{key: metadata.get(key) for key in (
+                            "analysis", "inference_method", "evaluated_steps",
+                            "prefix_image_slots", "absolute_slot", "relative_slot")},
                     },
                     "pbrs_reward": {
-                        "sparse_reward": sparse_reward.tolist(),
-                        "dense_reward": dense_reward.tolist(),
-                        "shape_reward": pbrs_shaping.tolist(),
-                        "final_reward": chunk_return.tolist(),
-                        "chunk_start_steps": boundary_steps[:-1].tolist(),
-                        "chunk_end_steps": boundary_steps[1:].tolist(),
-                        "chunk_lengths": chunk_lengths.tolist(),
-                        # Versions saved before per-step accumulation record their mode.
-                        **({"accumulate_primitive_steps": bool(reward_config["accumulate_primitive_steps"])}
-                           if "accumulate_primitive_steps" in reward_config else {}),
+                        "sparse_reward": values["sparse_reward"].astype(float).tolist(),
+                        "dense_reward": values["dense_reward"].astype(float).tolist(),
+                        "shape_reward": values["pbrs_shaping_reward"].astype(float).tolist(),
+                        "final_reward": values["final_reward"].astype(float).tolist(),
                         "description": (payload.get("pbrs_reward") or {}).get("description"),
                     },
-                    "reward_config": reward_config,
+                    "reward_config": payload.get("reward_config") or {},
                 }
         return {
             "run": run,

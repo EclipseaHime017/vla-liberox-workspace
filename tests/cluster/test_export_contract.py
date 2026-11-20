@@ -13,6 +13,7 @@ from core.config import LoadedConfig
 from core.data import load_manifest
 from core.io import atomic_json, sha256_file
 from train.replay import ActionDataset, ReplayDataset
+from rewards.evaluation_store import SNAPSHOT_SCHEMA_VERSION
 from rewards.manifest import load_reward_index
 from cluster.inputs import discover_tasks, open_run_source, prepare_global_inputs
 from train.replay_cache import CachedReplayDataset, build_replay_cache
@@ -67,7 +68,7 @@ def _add_reward_source(root, config, source):
             destination = target / "rynnvalue_values.npz"
             shutil.copyfile(entry["reward_path"], destination)
             atomic_json(target / "trajectory_reward.rynnvalue.json", {
-                "schema_version": 1, "source": source, "run_id": episode["run_id"],
+                "schema_version": SNAPSHOT_SCHEMA_VERSION, "source": source, "run_id": episode["run_id"],
                 "trajectory_sha256": episode["trajectory_sha256"],
                 "observations_sha256": episode["observations_sha256"],
                 "values_file": destination.name, "values_sha256": sha256_file(destination),

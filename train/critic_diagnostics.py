@@ -15,6 +15,7 @@ from torch.utils.data import default_collate
 from core.registry import model_contract
 from core.config import LoadedConfig, reward_source
 from core.data import load_manifest, replay_end_step
+from rewards.pbrs import discounted_sum
 from train.methods.critics import ExpectileCritic as ExpectileCritic, chunk_bellman_target
 from core.io import atomic_json, sha256_file
 from core.model_config import model_config, replay_stats
@@ -86,19 +87,12 @@ def _batch(samples: list[dict], horizon: int, device: torch.device) -> dict:
 
 
 def _finite_returns(dataset: ReplayDataset, discount: float) -> dict:
+    """Discounted per-action reward from each sample start to the replay endpoint."""
     result = {}
-    episodes = {episode["run_id"]: (episode, annotation) for episode, _, annotation in dataset.items}
-    for run_id, (episode, annotation) in episodes.items():
-        with np.load(annotation, allow_pickle=False) as source:
-            rewards = source["final_reward"] if "final_reward" in source else source["pbrs_chunk_reward"]
+    for episode, chunk_index, annotation in dataset.items:
+        start = int(dataset.chunks[episode["run_id"]][chunk_index]["start"])
         end = replay_end_step(episode, dataset.include_post_success)
-        total = 0.0
-        for index in reversed(range(len(dataset.chunks[run_id]))):
-            chunk = dataset.chunks[run_id][index]
-            if int(chunk["end"]) > end:
-                continue
-            total = float(rewards[index]) + discount ** int(chunk["length"]) * total
-            result[(run_id, int(chunk["start"]))] = total
+        result[(episode["run_id"], start)] = discounted_sum(dataset._action_rewards(annotation), start, end, discount)
     return result
 
 

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 
 import numpy as np
+
+from core.data import replay_end_step
 import pytest
 import torch
 from PIL import Image
@@ -161,22 +163,19 @@ def test_padding_preserves_chunk_actions_and_masks():
         diagnostics._batch([sample], 2, torch.device("cpu"))
 
 
-def test_finite_returns_use_the_same_chunk_discount_and_terminal_mask(diagnostic_inputs):
+def test_finite_returns_use_the_per_step_discount_and_terminal_mask(diagnostic_inputs):
     config, _ = diagnostic_inputs
     action, proprio = replay_stats(config.section("model"))
     replay = ReplayDataset(config, action, proprio, reward_index=diagnostics._existing_rewards(config))
     values = diagnostics._finite_returns(replay, .8)
-    for episode, _, annotation in replay.items:
+    for episode, chunk_index, annotation in replay.items:
         run_id = episode["run_id"]
         with np.load(annotation) as source:
             rewards = source["final_reward"]
-        chunks = replay.chunks[run_id]
-        for index, chunk in enumerate(chunks):
-            total, factor = 0., 1.
-            for successor, reward in zip(chunks[index:], rewards[index:]):
-                total += factor * float(reward)
-                factor *= .8 ** int(successor["length"])
-            assert values[(run_id, chunk["start"])] == pytest.approx(total)
+        start = replay.chunks[run_id][chunk_index]["start"]
+        end = replay_end_step(episode, replay.include_post_success)
+        expected = sum(.8 ** k * float(reward) for k, reward in enumerate(rewards[start:end]))
+        assert values[(run_id, start)] == pytest.approx(expected)
     last = max((replay[index] for index in range(len(replay))), key=lambda item: item["start"])
     assert last["bootstrap_mask"].item() == 0
 

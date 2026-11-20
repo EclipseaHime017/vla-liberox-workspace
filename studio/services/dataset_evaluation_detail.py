@@ -108,44 +108,27 @@ def _reward_detail(version: dict, run_id: str, times: list[float],
 
 def _reward_arrays_detail(version: dict, manifest: dict, item: dict,
                           arrays: dict, times: list[float]) -> tuple[dict, dict | None]:
-    """Format saved signals for plots, shared by dataset and global results."""
-    boundaries = np.asarray(arrays["boundary_steps"], dtype=int)
-    final = np.asarray(arrays.get("final_reward", arrays.get("pbrs_chunk_reward")))
-    if (boundaries.ndim != 1 or final.ndim != 1 or len(boundaries) != len(final) + 1
-            or len(final) < 1 or boundaries[0] != 0 or boundaries[-1] != len(times) - 1
-            or np.any(np.diff(boundaries) <= 0) or not np.isfinite(final).all()):
-        raise ValueError("Reward version does not cover the complete recorded trajectory")
+    """Format saved signals for plots, shared by dataset and global results.
+
+    Rewards have one value per action; Stage scores and RynnValue outputs one per observation.
+    """
+    from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS
+
+    final = np.asarray(arrays["final_reward"])
+    if final.shape != (len(times) - 1,) or not np.isfinite(final).all():
+        raise ValueError("Reward version does not cover every action of the recorded trajectory")
     recipe = manifest["reward_config"]
     source = version["evaluator"]
-    result = {
-        "status": "READY", "source": source, "version_id": version["id"],
-        "reward_config": recipe, "boundary_steps": boundaries.tolist(),
-        "chunk_start_steps": boundaries[:-1].tolist(),
-        "chunk_end_steps": boundaries[1:].tolist(),
-        "chunk_lengths": np.diff(boundaries).tolist(), "final_reward": final.tolist(),
-    }
+    result = {"status": "READY", "source": source, "version_id": version["id"],
+              "reward_config": recipe, "final_reward": final.tolist()}
     for stored, public in (("sparse_reward", "sparse_reward"), ("dense_reward", "dense_reward"),
-                           ("pbrs_shaping_reward", "shape_reward"),
-                           ("raw_final_reward", "raw_final_reward"),
+                           ("pbrs_shaping_reward", "shape_reward"), ("stage_reward", "stage_reward"),
                            ("original_final_reward", "original_final_reward")):
         if stored in arrays:
             values = arrays[stored]
             if values.shape != final.shape or not np.isfinite(values).all():
                 raise ValueError(f"Invalid reward component: {stored}")
             result[public] = values.tolist()
-    for key in ("final_reward_reference", "final_reward_scale"):
-        if key in arrays:
-            value = np.asarray(arrays[key])
-            if value.shape != () or not np.isfinite(value):
-                raise ValueError(f"Invalid Final Reward rescale metadata: {key}")
-            result[key] = float(value)
-    if source == "rynnvalue" and "shape_reward" in result:
-        # Old combined files stored Shape/Final only. Recover the displayed
-        # components from those stored values, never from today's formula.
-        dense = np.asarray(result.get("dense_reward", float(recipe.get("shaping_weight", .1))
-                                      * np.asarray(result["shape_reward"])))
-        result.setdefault("dense_reward", dense.tolist())
-        result.setdefault("sparse_reward", (final - dense).tolist())
     if source == "stage" or (source == "final" and "stage_score" in arrays):
         scores = np.asarray(arrays["stage_score"])
         stored_times = arrays.get("time_seconds", np.asarray(times))
@@ -157,11 +140,9 @@ def _reward_arrays_detail(version: dict, manifest: dict, item: dict,
                       stage_scores=scores.tolist())
     rynn = None
     if source == "rynnvalue":
-        keys = ("absolute_temporal_distance_seconds", "absolute_value_entropy_nats",
-                "absolute_value_logits", "relative_temporal_distance_seconds", "relative_value_logits")
-        outputs = {key: arrays[key].astype(float).tolist() for key in keys}
-        if any(len(outputs[key]) != len(boundaries) for key in keys):
-            raise ValueError("RynnValue output boundary length mismatch")
+        outputs = {key: arrays[key].astype(float).tolist() for key in OFFICIAL_OUTPUT_KEYS}
+        if any(len(outputs[key]) != len(times) for key in OFFICIAL_OUTPUT_KEYS):
+            raise ValueError("RynnValue outputs do not cover every observation")
         metadata = item.get("official_outputs") or {}
         # The pure annotation metadata retains analysis and official slot semantics.
         if version.get("annotation_manifest_path") and version.get("annotation_manifest_sha256"):
@@ -174,14 +155,10 @@ def _reward_arrays_detail(version: dict, manifest: dict, item: dict,
                      or version.get("parameters", {}).get("checkpoint"),
             "revision": (item.get("annotator") or manifest.get("annotator") or {}).get("resolved_revision")
                         or version.get("parameters", {}).get("revision"),
-            "boundary_steps": result["boundary_steps"],
             "official_outputs": {**metadata, **outputs}, "reward_config": recipe,
             "pbrs_reward": {key: result[key] for key in (
-                "sparse_reward", "dense_reward", "shape_reward", "final_reward",
-                "chunk_start_steps", "chunk_end_steps", "chunk_lengths") if key in result},
+                "sparse_reward", "dense_reward", "shape_reward", "final_reward") if key in result},
         }
-        if "accumulate_primitive_steps" in recipe:  # versions saved before per-step accumulation
-            rynn["pbrs_reward"]["accumulate_primitive_steps"] = bool(recipe["accumulate_primitive_steps"])
     return result, rynn
 
 

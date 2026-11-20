@@ -20,15 +20,14 @@ from test_stage_rewards import _save_annotations
 @pytest.mark.parametrize("alpha", [0., .5, 1.])
 def test_base_coefficient_is_independent_of_stage(alpha):
     signals = {"stage_score": np.array([-1., -.8, -.4, -.2]),
-               "absolute_temporal_distance_seconds": np.array([[3.], [1.]])}
+               "absolute_temporal_distance_seconds": np.array([[3.], [2.], [1.5], [1.]])}
     settings = recipe(alpha=alpha, shaping_weight=.1)
     legacy = fused_reward_arrays(example(), settings, signals)
     explicit_legacy = fused_reward_arrays(example(), {**settings, "base_coefficient": 1 - alpha}, signals)
     for key in legacy:
         np.testing.assert_array_equal(legacy[key], explicit_legacy[key])
-    independent = fused_reward_arrays(example(), {**settings, "base_coefficient": 1., "final_normalization": "none"}, signals)
+    independent = fused_reward_arrays(example(), {**settings, "base_coefficient": 1.}, signals)
     np.testing.assert_allclose(independent["final_reward"], legacy["final_reward"] + alpha * legacy["sparse_reward"], rtol=1e-6)
-    assert "final_reward_scale" not in independent
     np.testing.assert_array_equal(independent["dense_reward"], legacy["dense_reward"])
 
 
@@ -61,7 +60,7 @@ def test_coefficient_cannot_silently_affect_other_reward_modes(configured, mode,
 def test_materialized_and_pinned_gamma_reduction_keep_coefficient(configured):
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
-    configured.raw["reward"].update(recipe(alpha=.5, base_coefficient=1., final_normalization="none"), stage_exponent=2.)
+    configured.raw["reward"].update(recipe(alpha=.5, base_coefficient=1.), stage_exponent=2.)
     index = load_reward_index(configured)
     assert index["reward_config"]["base_coefficient"] == 1.
     path = Path(configured.raw["paths"]["work_dir"]) / "rewards/reward_manifest.json"
@@ -70,12 +69,10 @@ def test_materialized_and_pinned_gamma_reduction_keep_coefficient(configured):
     training.raw["reward"].update(manifest_path=str(path), manifest_sha256=sha256_file(path), version_id="fixed", gamma=.92)
     adapted = load_reward_index(training)
     assert adapted["reward_config"]["base_coefficient"] == 1.
-    assert adapted["reward_config"].get("final_normalization", "none") == "none"
     for episode, entry in zip(manifest["episodes"], adapted["episodes"]):
         with np.load(entry["reward_path"]) as arrays:
             expected = fused_reward_arrays(episode, adapted["reward_config"], {k: arrays[k] for k in arrays.files})
             np.testing.assert_array_equal(arrays["final_reward"], expected["final_reward"])
-            assert "final_reward_scale" not in arrays
     assert all(p.read_bytes() == data for p, data in protected.items())
     training.raw["reward"]["base_coefficient"] = .5
     with pytest.raises(ValueError, match="conflict"):
@@ -88,8 +85,7 @@ def test_w1_reads_generated_independent_base_reward(configured):
     from rewards.rynnvalue.annotate import annotate_manifest
     prepared = prepare_dataset(configured).manifest
     _save_annotations(configured, json.loads(prepared.read_text()))
-    configured.raw["reward"].update(recipe(alpha=.5, base_coefficient=1., shaping_weight=.1,
-                                          final_normalization="none"), stage_exponent=2.)
+    configured.raw["reward"].update(recipe(alpha=.5, base_coefficient=1., shaping_weight=.1), stage_exponent=2.)
     annotate_manifest(configured, FakeAnnotator())
     load_reward_index(configured)
     work = Path(configured.raw["paths"]["work_dir"])

@@ -213,10 +213,9 @@ def test_replay_rejects_rewards_that_omit_post_success_tail(configured):
     path = Path(branch["annotation_path"])
     with np.load(path, allow_pickle=False) as archive:
         arrays = {key: archive[key] for key in archive.files}
-    key = "final_reward" if "final_reward" in arrays else "pbrs_chunk_reward"
-    arrays[key] = arrays[key][:-1]
+    arrays["final_reward"] = arrays["final_reward"][:-1]
     np.savez_compressed(path, **arrays)
-    with pytest.raises(ValueError, match="reward array does not cover all 4"):
+    with pytest.raises(ValueError, match="do not cover every recorded action"):
         ReplayDataset(configured, _stats(7), _stats(8), reward_index=rewards)
 
 

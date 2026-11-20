@@ -10,7 +10,7 @@ from core.config import load_train_config
 from core.data import prepare_dataset
 from train.replay import ReplayDataset
 from rewards.rynnvalue.annotate import annotate_manifest
-from rewards.pbrs import chunk_reward_components
+from rewards.pbrs import shaping_rewards
 from rewards.manifest import load_reward_index, reward_derivation_config
 from core.io import sha256_file
 from test_replay import FakeAnnotator, _stats
@@ -43,15 +43,15 @@ def test_failed_end_bootstraps_only_when_enabled(configured, include_post_succes
 
 def test_success_potential_zero_after_confirming_action():
     done = np.array([False, False, True, True])
-    before = chunk_reward_components(done, 0, 2, 8, 6, .9, .1, True, True)
-    legacy = chunk_reward_components(done, 0, 2, 8, 6, .9, .1, True)
-    assert before == legacy
-    success = chunk_reward_components(done, 2, 1, 6, 4, .9, .1, True, True)
-    assert success[1] == 6
-    tail = chunk_reward_components(done, 3, 1, 4, 2, .9, .1, True, True)
-    assert tail == (0, 0, 0)
+    potential = -np.array([8., 6., 4., 2., 0.])
+    zeroed = shaping_rewards(potential, done, .9, zero_success_potential=True)
+    plain = shaping_rewards(potential, done, .9)
+    np.testing.assert_array_equal(zeroed[:2], plain[:2])
+    assert zeroed[2] == 4  # the observation after the confirming action has phi = 0
+    assert zeroed[3] == 0
     failure = np.zeros(4, bool)
-    assert chunk_reward_components(failure, 2, 2, 6, 4, .9, .1, True, True) == chunk_reward_components(failure, 2, 2, 6, 4, .9, .1, True)
+    np.testing.assert_array_equal(shaping_rewards(potential, failure, .9, zero_success_potential=True),
+                                  shaping_rewards(potential, failure, .9))
 
 
 def test_false_preserves_recipe_and_config_accepts_boolean(configured):
@@ -83,10 +83,9 @@ def test_pinned_reward_adapts_success_potential_without_touching_source(configur
             if episode["terminal_step"] is None:
                 np.testing.assert_array_equal(new["final_reward"], old["final_reward"])
             else:
-                chunks = episode.get("evaluation_chunks", episode["chunks"])
-                tail = [i for i, c in enumerate(chunks) if c["start"] >= episode["terminal_step"] + 1]
-                assert tail
-                np.testing.assert_array_equal(new["pbrs_shaping_reward"][tail], 0)
+                tail = new["pbrs_shaping_reward"][episode["terminal_step"] + 1:]
+                assert len(tail)
+                np.testing.assert_array_equal(tail, 0)
     assert all(Path(path).read_bytes() == content for path, content in originals.items())
 
 
@@ -94,14 +93,12 @@ def test_fusion_success_potential_matches_rynnvalue_zero_alpha(configured):
     from rewards.fusion import fused_reward_arrays
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     episode = next(ep for ep in manifest["episodes"] if ep["terminal_step"] is not None)
-    boundaries = episode["reward_boundaries"]
-    signals = {"absolute_temporal_distance_seconds": np.ones((len(boundaries), 1), dtype=np.float32) * 4}
+    observations = episode["recorded_action_count"] + 1
+    signals = {"absolute_temporal_distance_seconds": np.ones((observations, 1), dtype=np.float32) * 4}
     recipe = dict(reward_derivation_config(configured.raw["reward"]), source="final",
-                  alpha=0., fusion_mode="additive", final_normalization="none", zero_success_potential=True)
+                  alpha=0., fusion_mode="additive", zero_success_potential=True)
     arrays = fused_reward_arrays(episode, recipe, signals)
-    for i, chunk in enumerate(episode.get("evaluation_chunks", episode["chunks"])):
-        if chunk["start"] >= episode["terminal_step"] + 1:
-            assert arrays["pbrs_shaping_reward"][i] == 0
+    np.testing.assert_array_equal(arrays["pbrs_shaping_reward"][episode["terminal_step"] + 1:], 0)
 
 
 def test_resume_rejects_changed_failed_bootstrap(configured, tmp_path, monkeypatch):

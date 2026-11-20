@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import yaml
 
+from rewards.manifest import REWARD_SCHEMA_VERSION
 from studio.exceptions import ConflictError
 from studio.services.offline_job_service import OfflineJobService
 from studio.storage.repositories import OfflineJobRepository
@@ -68,7 +69,8 @@ def finish(jobs, dataset, job, *, prepared_episodes=None):
     values = rewards / "values.npz"
     np.savez(values, final_reward=np.array([-1., 0.]))
     digest = hashlib.sha256(values.read_bytes()).hexdigest()
-    manifest = {"complete": True, "dataset_sha256": "prepared", "episodes": [{
+    manifest = {"schema_version": REWARD_SCHEMA_VERSION, "kind": "derived_iql_reward",
+                "complete": True, "dataset_sha256": "prepared", "episodes": [{
         "run_id": "run", "reward_path": str(values), "reward_sha256": digest,
         "annotation_path": str(values), "annotation_sha256": digest}]}
     if job["parameters"]["source"] == "rynnvalue":

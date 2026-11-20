@@ -102,9 +102,8 @@ describe("trajectory detail stage integration", () => {
       dataset_context: { dataset_id: "data-a", dataset_name: "Dataset A", version_id: id, source: "stage", config: { stage_exponent: exponent } },
       available_dataset_contexts: [{ dataset_id: "data-a", dataset_name: "Dataset A", reward_version_id: "v2", robometer_version_id: null,
         versions: ["v1", "v2"].map((value) => ({ id: value, evaluator: "stage", status: "COMPLETED", parameters: {}, created_at: "" })) }],
-      reward_evaluation: { status: "READY", source: "stage", version_id: id, reward_config: { stage_exponent: exponent }, boundary_steps: [0, 2],
-        chunk_lengths: [2], chunk_start_steps: [0], chunk_end_steps: [2], final_reward: [scores[2]],
-        time_seconds: [0, .05, .1], stage_scores: scores },
+      reward_evaluation: { status: "READY", source: "stage", version_id: id, reward_config: { stage_exponent: exponent },
+        final_reward: scores.slice(1), time_seconds: [0, .05, .1], stage_scores: scores },
     });
     const rendered = render(<TrajectoryDetail detail={version("v1", 2, [-1, -.5, 0])} onBack={() => {}} onContextChange={onContextChange} />);
     await screen.findByText("尚未保存阶段标注");
@@ -151,14 +150,15 @@ describe("trajectory detail stage integration", () => {
 
   it("keeps Rynn diagnostics and rewards alongside Stage rewards", async () => {
     const rynn = {
-      status: "READY", boundary_steps: [0, 2],
-      official_outputs: { absolute_temporal_distance_seconds: [[2], [0]], relative_temporal_distance_seconds: [0, -2], absolute_value_entropy_nats: [[.4], [.2]] },
-      pbrs_reward: { chunk_start_steps: [0], chunk_end_steps: [2], shape_reward: [2], sparse_reward: [-1], dense_reward: [.2], final_reward: [-.8] },
+      status: "READY",
+      official_outputs: { absolute_temporal_distance_seconds: [[2], [1], [0]], relative_temporal_distance_seconds: [0, -1, -2],
+        absolute_value_entropy_nats: [[.4], [.3], [.2]] },
+      pbrs_reward: { shape_reward: [1, 1], sparse_reward: [-1, -1], dense_reward: [.1, .1], final_reward: [-.9, -.9] },
     } as NonNullable<Detail["rynnvalue_evaluation"]>;
     render(<TrajectoryDetail detail={{ ...detail, rynnvalue_evaluation: rynn,
       global_evaluation: { source: "stage", config: { stage_exponent: 2 } },
-      reward_evaluation: { status: "READY", source: "stage", version_id: "internal-id", reward_config: {}, boundary_steps: [0, 2],
-        chunk_start_steps: [0], chunk_end_steps: [2], chunk_lengths: [2], final_reward: [0], stage_scores: [-1, -.5, 0] },
+      reward_evaluation: { status: "READY", source: "stage", version_id: "internal-id", reward_config: {},
+        final_reward: [-.5, 0], stage_scores: [-1, -.5, 0] },
     }} onBack={() => {}} />);
     await screen.findByText("尚未保存阶段标注");
     expect(screen.getByText("Stage-based Reward")).toBeTruthy();
@@ -171,24 +171,12 @@ describe("trajectory detail stage integration", () => {
   it("plots generated Final separately from its three original components", async () => {
     render(<TrajectoryDetail detail={{ ...detail,
       reward_evaluations: { final: { status: "READY", source: "final", version_id: "f", reward_config: { alpha: .5 },
-        boundary_steps: [0, 1, 2], chunk_start_steps: [0, 1], chunk_end_steps: [1, 2], chunk_lengths: [1, 1],
         original_final_reward: [-.8, -.3], sparse_reward: [-1, -.5], dense_reward: [.2, .2], final_reward: [-.6, -.1] } },
     }} onBack={() => {}} />);
     expect(screen.getByText("Original Final Reward")).toBeTruthy();
     expect(screen.getByText("Final Reward")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "查看Final Reward逐时间点数据" }));
     expect(screen.getByText("-0.60000")).toBeTruthy();
-  });
-
-  it("labels Final rewards saved with macro actions", async () => {
-    render(<TrajectoryDetail detail={{ ...detail,
-      reward_evaluations: { final: { status: "READY", source: "final", version_id: "f",
-        reward_config: { alpha: .5, accumulate_primitive_steps: false },
-        boundary_steps: [0, 1, 2], chunk_start_steps: [0, 1], chunk_end_steps: [1, 2], chunk_lengths: [1, 1],
-        original_final_reward: [-.8, -.3], sparse_reward: [-1, -.5], dense_reward: [.2, .2], final_reward: [-.6, -.1] } },
-    }} onBack={() => {}} />);
-    expect(screen.getByText("Original Final Reward · 宏动作（旧版本）")).toBeTruthy();
-    expect(screen.getByText("Final Reward · 宏动作（旧版本）")).toBeTruthy();
   });
 
   it("reports an invalid global evaluation instead of substituting a fresh Stage preview", async () => {

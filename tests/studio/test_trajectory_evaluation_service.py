@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from studio.services.trajectory_evaluation_service import (
+    DERIVED_REWARD_SCHEMA_VERSION,
     EVALUATION_SCHEMA_VERSION,
     SIDECAR_NAME,
     TrajectoryEvaluationService,
@@ -49,15 +50,17 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
     annotation = tmp_path / "cache.npz"
     np.savez_compressed(
         annotation,
-        boundary_steps=np.asarray([0, 2]),
-        absolute_temporal_distance_seconds=np.asarray([[2.0], [0.0]]),
-        absolute_value_entropy_nats=np.asarray([[0.1], [0.2]]),
-        absolute_value_logits=np.zeros((2, 1, 256), np.float32),
-        relative_temporal_distance_seconds=np.asarray([0.0, 0.1]),
-        relative_value_logits=np.zeros((2, 256), np.float32),
+        # One RynnValue output per observation (3), one reward per action (2).
+        absolute_temporal_distance_seconds=np.asarray([[2.0], [1.0], [0.0]]),
+        absolute_value_entropy_nats=np.asarray([[0.1], [0.2], [0.3]]),
+        absolute_value_logits=np.zeros((3, 1, 256), np.float32),
+        relative_temporal_distance_seconds=np.asarray([0.0, 0.1, 0.2]),
+        relative_value_logits=np.zeros((3, 256), np.float32),
         # Raw shape +2.0; sparse -1.0 plus kappa=0.1 gives final -0.8.
-        pbrs_shaping_reward=np.asarray([2.0]),
-        pbrs_chunk_reward=np.asarray([-0.8]),
+        sparse_reward=np.asarray([-1.0, -1.0]),
+        pbrs_shaping_reward=np.asarray([2.0, 2.0]),
+        dense_reward=np.asarray([0.2, 0.2]),
+        final_reward=np.asarray([-0.8, -0.8]),
     )
     prepared = tmp_path / "prepared.json"
     prepared.write_text(json.dumps({
@@ -68,11 +71,12 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
             "observations_sha256": sha(observations),
             "observations_path": str(observations), "source_manifest": str(source_manifest),
             "source_manifest_sha256": sha(source_manifest), "prompt": "pick",
+            "recorded_action_count": 2,
         }],
     }), encoding="utf-8")
     rewards = tmp_path / "rewards.json"
     rewards.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": DERIVED_REWARD_SCHEMA_VERSION,
         "kind": "derived_iql_reward",
         "complete": True, "dataset_sha256": "dataset",
         "annotator": {"model": "RynnValue-4B", "revision": "fixed"},
@@ -92,7 +96,7 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
                 },
             },
             "pbrs_reward": {
-                "array_keys": ["pbrs_shaping_reward", "pbrs_chunk_reward"],
+                "array_keys": ["dense_reward", "final_reward", "pbrs_shaping_reward", "sparse_reward"],
             },
         }],
     }), encoding="utf-8")
@@ -108,18 +112,15 @@ def test_reward_values_are_copied_and_bound_to_trajectory(tmp_path: Path):
     assert service.bind(prepared, rewards, overwrite=False)["skipped"] == ["run-1"]
     detail = service.detail("run-1")["evaluation"]
     np.testing.assert_allclose(
-        detail["official_outputs"]["relative_temporal_distance_seconds"], [0.0, 0.1]
+        detail["official_outputs"]["relative_temporal_distance_seconds"], [0.0, 0.1, 0.2]
     )
     assert detail["official_outputs"]["analysis"]["parsed_for_display"]["match"] == "Yes"
     assert detail["pbrs_reward"] == {
-        "sparse_reward": [-1.0],
-        "dense_reward": [0.2],
-        "shape_reward": [2.0],
-        "final_reward": [-0.8],
-        "chunk_start_steps": [0],
-            "chunk_end_steps": [2],
-            "chunk_lengths": [2],
-            "description": None,
+        "sparse_reward": [-1.0, -1.0],
+        "dense_reward": [0.2, 0.2],
+        "shape_reward": [2.0, 2.0],
+        "final_reward": [-0.8, -0.8],
+        "description": None,
     }
     assert service.exists(run)
     original = observations.read_bytes()

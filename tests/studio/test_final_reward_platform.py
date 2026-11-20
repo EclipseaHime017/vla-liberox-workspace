@@ -20,7 +20,7 @@ def test_final_only_does_not_load_models_and_locks_semantics(tmp_path):
     assert [step["id"] for step in job["stages"]] == ["prepare", "rewards", "seal"]
     raw = yaml.safe_load(job["config_path"].read_text())
     assert raw["reward"]["source"] == "final"
-    assert raw["reward"]["final_normalization"] == "initial_chunk_v1"
+    assert "final_normalization" not in raw["reward"]
     assert raw["reward"]["alpha"] == .5
     assert raw["reward"]["rynnvalue"] is False
     version = finish(jobs, dataset, job)
@@ -46,35 +46,6 @@ def test_sparse_final_needs_no_labels_and_force_model_rejected(tmp_path):
         jobs.start_annotation(dataset["id"], source="final", force_model=True)
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_training_preserves_saved_normalization_not_base_defaults(tmp_path, legacy):
-    jobs, dataset = setup_jobs(tmp_path)
-    job = jobs.start_annotation(dataset["id"], source="final", alpha=0., shaping_weight=0.)
-    if legacy:
-        saved = yaml.safe_load(job["config_path"].read_text())
-        saved["reward"].pop("final_normalization")
-        job["config_path"].write_text(yaml.safe_dump(saved))
-    finish(jobs, dataset, job)
-    train = jobs.start_training(dataset["id"], {"reward_gamma": .92})
-    effective = yaml.safe_load(train["config_path"].read_text())
-    assert effective["reward"]["final_normalization"] == ("none" if legacy else "initial_chunk_v1")
-    assert effective["reward"]["gamma"] == .92
-
-
-def test_new_final_normalizes_even_when_base_yaml_has_no_rule(tmp_path):
-    jobs, dataset = setup_jobs(tmp_path)
-    effective_config = jobs._effective_config
-
-    def legacy_base(value):
-        raw = effective_config(value)
-        raw["reward"].pop("final_normalization", None)
-        return raw
-
-    jobs._effective_config = legacy_base
-    job = jobs.start_annotation(dataset["id"], source="final", alpha=0., shaping_weight=0.)
-    assert yaml.safe_load(job["config_path"].read_text())["reward"]["final_normalization"] == "initial_chunk_v1"
-
-
 def test_multiplication_trains_with_the_same_per_step_discount(tmp_path):
     jobs, dataset = setup_jobs(tmp_path)
     job = jobs.start_annotation(dataset["id"], source="final", fusion_mode="multiplicative", shaping_weight=0.)
@@ -89,15 +60,13 @@ def test_multiplication_trains_with_the_same_per_step_discount(tmp_path):
     assert parameters["reward_gamma"] == .92
 
 
-def test_mixed_global_defaults_drop_the_saved_macro_flag(tmp_path, monkeypatch):
+def test_mixed_global_defaults_train_additive_and_multiplicative_members(tmp_path, monkeypatch):
     jobs, dataset = setup_jobs(tmp_path)
-    records = [(None, {"reward_config": {"source": "final", "fusion_mode": mode,
-                 "accumulate_primitive_steps": True}}, None, None, None)
+    records = [(None, {"reward_config": {"source": "final", "fusion_mode": mode}}, None, None, None)
                for mode in ("additive", "multiplicative")]
     monkeypatch.setattr("studio.services.global_reward_binding.global_members", lambda *_: (records, []))
     defaults = jobs.defaults(dataset["id"], "final")
     assert defaults["reward_availability"]["ready"]
-    assert "reward_accumulate_primitive_steps" not in defaults["advanced"]
     assert defaults["reward_editable_parameters"] == ["reward_gamma"]
 
 
@@ -118,7 +87,6 @@ def test_all_runs_serial_models_then_final_and_publishes_atomically(tmp_path):
     (root / "configs" / "rewards" / "robometer.yaml").write_text(yaml.safe_dump(settings))
     jobs.ui_config.workspace_root = root
     job = jobs.start_annotation(dataset["id"], source="all", alpha=.5, batch_size=2, robometer_batch_size=3)
-    assert yaml.safe_load(job["config_path"].read_text())["reward"]["final_normalization"] == "initial_chunk_v1"
     ids = job["parameters"]["related_version_ids"]
     assert len(ids) == 3 and ids[-1] == job["config_path"].parent.name
     stages = [s["id"] for s in job["stages"]]
@@ -170,20 +138,20 @@ def test_final_prefers_dataset_rynn_and_rejects_corruption_instead_of_global_fal
 
 
 def test_final_detail_exposes_independent_original_and_fused_curves():
-    arrays = dict(boundary_steps=np.array([0, 2]), final_reward=np.array([-1.]),
-                  raw_final_reward=np.array([-.4]), final_reward_reference=np.array(-.4),
-                  final_reward_scale=np.array(2.5),
-                  original_final_reward=np.array([-.8]), sparse_reward=np.array([-1.]),
-                  pbrs_shaping_reward=np.array([2.]), dense_reward=np.array([.2]),
+    arrays = dict(final_reward=np.array([-1., -.6]),
+                  original_final_reward=np.array([-.8, -.9]), sparse_reward=np.array([-1., -1.]),
+                  pbrs_shaping_reward=np.array([2., 1.]), dense_reward=np.array([.2, .1]),
+                  stage_reward=np.array([-.7, -.5]),
                   stage_score=np.array([-1., -.7, -.5]), time_seconds=np.array([0., .05, .1]))
     saved = copy.deepcopy(arrays)
     result, model = _reward_arrays_detail({"id": "final", "evaluator": "final"},
         {"reward_config": {"source": "final", "alpha": .5}}, {}, arrays, [0., .05, .1])
-    assert result["final_reward"] == [-1.]
-    assert result["raw_final_reward"] == [-.4]
-    assert result["final_reward_reference"] == -.4
-    assert result["final_reward_scale"] == 2.5
-    assert result["original_final_reward"] == [-.8]
+    assert result["final_reward"] == [-1., -.6]
+    assert result["original_final_reward"] == [-.8, -.9]
+    assert result["stage_reward"] == [-.7, -.5]
+    with pytest.raises(ValueError, match="every action"):
+        _reward_arrays_detail({"id": "final", "evaluator": "final"}, {"reward_config": {}}, {},
+                              {**arrays, "final_reward": np.array([-1.])}, [0., .05, .1])
     assert result["stage_scores"] == [-1., -.7, -.5]
     assert model is None  # A fusion is not a new RynnValue model evaluation.
     for key in arrays:

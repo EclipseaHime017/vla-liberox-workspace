@@ -142,7 +142,6 @@ class DatasetRewardVersions:
         configs["final"] = {**common, "stage_exponent": reward.get("stage_exponent", 2.0),
                             "alpha": reward.get("alpha", 0.0),
                             "base_coefficient": reward.get("base_coefficient"),
-                            "final_normalization": "initial_chunk_v1",
                             "fusion_mode": reward.get("fusion_mode", "additive"),
                             "shaping_weight": reward["shaping_weight"]}
         configs["all"] = {**configs["final"], "max_frames": configs["rynnvalue"]["max_frames"],
@@ -188,8 +187,6 @@ class DatasetRewardVersions:
             raise ValueError("This reward source does not run a model")
         if parameters.get("fusion_mode", "additive") not in {"additive", "multiplicative"}:
             raise ValueError("Unsupported fusion_mode")
-        if parameters.get("final_normalization", "none") not in {"none", "initial_chunk_v1"}:
-            raise ValueError("Unsupported final_normalization")
         if parameters.get("base_coefficient") is not None and parameters.get("fusion_mode") != "additive":
             raise ValueError("base_coefficient requires additive Final Reward")
         with self.lock:
@@ -227,10 +224,8 @@ class DatasetRewardVersions:
         raw["reward"].update(source=source if source != "robometer" else "sparse",
                              rynnvalue=source == "rynnvalue" or (
                                  source == "final" and parameters["shaping_weight"] > 0))
-        if source == "final":
-            raw["reward"]["final_normalization"] = parameters.get("final_normalization", "initial_chunk_v1")
-            if parameters.get("base_coefficient") is not None:
-                raw["reward"]["base_coefficient"] = parameters["base_coefficient"]
+        if source == "final" and parameters.get("base_coefficient") is not None:
+            raw["reward"]["base_coefficient"] = parameters["base_coefficient"]
         for key in ("gamma", "stage_exponent", "shaping_weight", "max_frames", "alpha", "fusion_mode"):
             if key in parameters:
                 raw["reward"][key] = parameters[key]

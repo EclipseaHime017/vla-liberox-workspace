@@ -149,7 +149,7 @@ export type Session = {
     status: "NOT_EVALUATED" | "READY" | "ERROR";
     origin?: "dataset" | "global"; error?: string;
     evaluated_at?: string | null; model?: string | null; revision?: string | null;
-    boundary_count?: number; source_key?: string | null;
+    observation_count?: number; source_key?: string | null;
   };
   robometer_evaluation?: {
     status: "NOT_EVALUATED" | "READY" | "ERROR";
@@ -210,8 +210,7 @@ export type EvaluationSourceContext = {
 export type RewardParameters = {
   alpha?: number; fusion_mode?: "additive" | "multiplicative"; robometer_batch_size?: number;
   gamma?: number; shaping_weight?: number; stage_exponent?: number;
-  /** Recorded only by versions saved before per-step accumulation. */
-  accumulate_primitive_steps?: boolean; max_frames?: number; batch_size?: number;
+  max_frames?: number; batch_size?: number;
   sampling_hz?: number; force_model?: boolean; checkpoint?: string; revision?: string;
   overwrite_global?: boolean;
   prefix_frames?: number;
@@ -224,17 +223,13 @@ export type DatasetDetailContext = {
   dataset_id: string; dataset_name: string; version_id: string | null;
   source?: RewardSource | null; config?: RewardParameters; status?: string;
 };
+/** Rewards have one value per action step; Stage scores one per observation step. */
 export type DatasetRewardEvaluation = {
   status: "READY"; version_id: string; reward_config: RewardParameters;
   source: TrainingRewardSource;
   time_seconds?: number[]; stage_scores?: number[]; observation_steps?: number[];
-  boundary_steps: number[]; chunk_lengths: number[];
-  chunk_start_steps: number[]; chunk_end_steps: number[];
-  sparse_reward?: number[]; dense_reward?: number[]; shape_reward?: number[]; final_reward: number[];
-  original_final_reward?: number[];
-  raw_final_reward?: number[];
-  final_reward_reference?: number;
-  final_reward_scale?: number;
+  sparse_reward?: number[]; dense_reward?: number[]; shape_reward?: number[]; stage_reward?: number[];
+  final_reward: number[]; original_final_reward?: number[];
 };
 
 export type StageKeyframe = { step: number; kind: "positive" | "negative" };
@@ -249,16 +244,16 @@ export type StageAnnotation = {
   scores: number[]; revision: string | null;
 };
 
+/** Official outputs have one row per observation step; rewards one value per action step. */
 export type RynnValueEvaluation = {
     status: "READY"; evaluated_at: string; model: string | null;
-    boundary_steps: number[];
     official_outputs: {
       absolute_temporal_distance_seconds: number[][];
       absolute_value_entropy_nats: number[][];
       absolute_value_logits: number[][][];
       relative_temporal_distance_seconds: number[];
       relative_value_logits: number[][];
-      inference_method: string | null; prefix_image_slots: number | null;
+      inference_method: string | null; evaluated_steps?: string | null; prefix_image_slots: number | null;
       absolute_slot: string | null; relative_slot: string | null;
       analysis: null | {
         generated_text?: string; generated_token_ids?: number[];
@@ -270,9 +265,6 @@ export type RynnValueEvaluation = {
     pbrs_reward: {
       sparse_reward: number[]; dense_reward: number[]; shape_reward: number[];
       final_reward: number[];
-      chunk_start_steps: number[];
-      chunk_end_steps: number[]; chunk_lengths: number[];
-      accumulate_primitive_steps?: boolean;
       description?: string | null;
     };
     reward_config: Record<string, unknown>;
@@ -308,12 +300,12 @@ export type TrainingDataset = {
   integrity_error: string | null; annotation_status: "NOT_STARTED" | "RUNNING" | "READY" | "ERROR" | "CANCELED";
   annotation_id: string | null; parent_dataset_id: string | null;
   annotation_config?: {
-    max_frames?: number | null; accumulate_primitive_steps?: boolean | null;
+    max_frames?: number | null;
   } | null;
   annotation_history?: Array<{
     annotation_id: string; status: string; completed_at: string;
     config?: {
-      max_frames?: number | null; accumulate_primitive_steps?: boolean | null;
+      max_frames?: number | null;
     } | null;
   }>;
   created_at: string; updated_at: string; member_count: number;

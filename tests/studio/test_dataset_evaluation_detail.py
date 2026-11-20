@@ -25,8 +25,7 @@ def fixture(tmp_path):
         directory.mkdir()
         scores = -1 + (np.arange(21) / 20) ** power
         arrays = directory / "reward.npz"
-        np.savez_compressed(arrays, boundary_steps=[0, 8, 16, 20],
-                            final_reward=scores[[8, 16, 20]], stage_score=scores,
+        np.savez_compressed(arrays, final_reward=scores[1:], stage_reward=scores[1:], stage_score=scores,
                             observation_steps=np.arange(21), time_seconds=times)
         recipe = {"source": "stage", "stage_exponent": power, "gamma": .99}
         manifest_path = directory / "reward_manifest.json"
@@ -51,7 +50,7 @@ def test_same_trajectory_has_independent_dataset_curves(tmp_path):
     assert a["dataset_context"]["config"]["stage_exponent"] == 2
     assert b["dataset_context"]["config"]["stage_exponent"] == 4
     assert len(a["reward_evaluation"]["stage_scores"]) == 21
-    assert a["reward_evaluation"]["chunk_end_steps"][-1] == 20
+    assert len(a["reward_evaluation"]["final_reward"]) == 20  # one reward per action
     assert a["rynnvalue_evaluation"] == {"global": True}
     assert a["evaluation_sources"]["rynnvalue"]["origin"] == "global"
     assert a["evaluation_sources"]["stage"]["origin"] == "dataset"

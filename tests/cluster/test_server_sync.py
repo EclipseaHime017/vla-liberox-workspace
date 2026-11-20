@@ -87,34 +87,22 @@ def test_saved_rewards_reuse_recorded_layout_with_pi05_ten_step_actor(configured
     assert sample["reward"] == shared[0]["reward"]
 
 
-def test_legacy_reward_chunks_allow_only_absent_optional_provenance():
-    chunk = dict(start=0, end=5, length=5, action_source="policy", interrupted=False,
-                 origin_run_id="origin")
-    episode = dict(run_id="run", prompt="pick", reward_boundaries=[0, 5], chunks=[chunk], evaluation_chunks=[chunk])
-    saved = {key: value for key, value in chunk.items() if key not in {"origin_run_id", "policy_instruction"}}
-    metadata = {"entry": {"evaluation_chunks": [saved]}}
-    arrays = {"boundary_steps": np.array([0, 5]), "final_reward": np.array([-1.])}
-    _validate_reward_layout(metadata, arrays, episode)
-    for key, value in (("end", 4), ("length", 4), ("action_source", "human"),
-                       ("origin_run_id", "other"), ("interrupted", True)):
-        bad = copy.deepcopy(metadata)
-        bad["entry"]["evaluation_chunks"][0][key] = value
-        with pytest.raises(ValueError, match="chunk semantics"):
-            _validate_reward_layout(bad, arrays, episode)
+def test_saved_rewards_must_cover_every_recorded_action():
+    episode = dict(run_id="run", prompt="pick", recorded_action_count=5)
+    _validate_reward_layout({}, {"final_reward": -np.ones(5)}, episode)
     with pytest.raises(ValueError, match="Regenerate rewards on main"):
-        _validate_reward_layout({}, {"boundary_steps": np.array([0, 6])}, episode)
+        _validate_reward_layout({}, {"final_reward": -np.ones(4)}, episode)
 
 
 @pytest.mark.parametrize("location", ["episode", "entry"])
-def test_saved_full_task_instructions_are_compatible_with_current_reward_chunks(location):
+def test_saved_full_task_instructions_are_compatible(location):
     chunk = dict(start=0, end=5, length=5, action_source="policy", origin_run_id="origin")
-    episode = dict(run_id="run", prompt="pick the bowl", reward_boundaries=[0, 5],
+    episode = dict(run_id="run", prompt="pick the bowl", recorded_action_count=5,
                    chunks=[chunk], evaluation_chunks=[chunk])
     metadata = {location: {"policy_instruction": "pick the bowl", "evaluation_chunks": [
         {**chunk, "policy_instruction": " pick the bowl "}]}}
-    arrays = {"boundary_steps": np.array([0, 5]), "final_reward": np.array([-1.])}
     before = copy.deepcopy(metadata)
-    _validate_reward_layout(metadata, arrays, episode)
+    _validate_reward_layout(metadata, {"final_reward": -np.ones(5)}, episode)
     assert metadata == before
     assert "policy_instruction" not in chunk
 
@@ -122,25 +110,21 @@ def test_saved_full_task_instructions_are_compatible_with_current_reward_chunks(
 @pytest.mark.parametrize("location", ["metadata", "episode", "entry", "chunk"])
 def test_saved_custom_instructions_are_rejected(location):
     chunk = dict(start=0, end=5, length=5, action_source="policy", origin_run_id="origin")
-    episode = dict(run_id="run", prompt="pick the bowl", reward_boundaries=[0, 5],
+    episode = dict(run_id="run", prompt="pick the bowl", recorded_action_count=5,
                    chunks=[chunk], evaluation_chunks=[chunk])
     metadata = {"entry": {"evaluation_chunks": [dict(chunk)]}}
     target = (metadata if location == "metadata" else metadata["entry"]["evaluation_chunks"][0]
               if location == "chunk" else metadata.setdefault(location, {}))
     target["policy_instruction"] = "close the drawer"
-    arrays = {"boundary_steps": np.array([0, 5]), "final_reward": np.array([-1.])}
     with pytest.raises(ValueError, match="custom instruction differs"):
-        _validate_reward_layout(metadata, arrays, episode)
+        _validate_reward_layout(metadata, {"final_reward": -np.ones(5)}, episode)
 
 
-@pytest.mark.parametrize("key", ["final_reward", "pbrs_chunk_reward"])
-@pytest.mark.parametrize("values", [np.array([-1., 0.]), np.array([np.nan]), np.array([np.inf])])
-def test_saved_reward_arrays_still_require_exact_finite_chunk_values(key, values):
-    chunk = dict(start=0, end=5, length=5, action_source="policy")
-    episode = dict(run_id="run", prompt="pick", reward_boundaries=[0, 5], chunks=[chunk])
-    arrays = {"boundary_steps": np.array([0, 5]), key: values}
-    with pytest.raises(ValueError, match=f"{key} does not match recorded chunks"):
-        _validate_reward_layout({}, arrays, episode)
+@pytest.mark.parametrize("values", [np.array([-1., 0.]), np.array([np.nan] * 5), np.array([np.inf] * 5)])
+def test_saved_reward_arrays_still_require_finite_per_action_values(values):
+    episode = dict(run_id="run", prompt="pick", recorded_action_count=5)
+    with pytest.raises(ValueError, match="do not cover every action"):
+        _validate_reward_layout({}, {"final_reward": values}, episode)
 
 
 @pytest.mark.parametrize("location", ["run", "trajectory"])

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from core.config import current_reward_settings, load_train_config, validate_train_config
+from core.config import load_train_config, validate_train_config
 from core.config_sources import merge_config
 from core.io import atomic_json
 from core.methods import training_method
@@ -65,8 +65,7 @@ def training_settings(server, task: GlobalTask, *, overrides=None, source=None) 
             saved = records[0]
             raw["reward"].pop("base_coefficient", None)
             raw["reward"].update(saved.get("annotation_config", {}))
-            raw["reward"].update(current_reward_settings(saved["reward_config"]))
-            raw["reward"]["final_normalization"] = saved["reward_config"].get("final_normalization", "none")
+            raw["reward"].update(saved["reward_config"])
         raw["reward"].update(changes.get("reward", {}))
         if name == "stage":
             # Bare labels use the configured global default, never a neighbour's

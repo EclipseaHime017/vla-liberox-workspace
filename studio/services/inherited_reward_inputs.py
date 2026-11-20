@@ -68,17 +68,14 @@ def reconstruct_episode(jobs, dataset: dict, member: dict) -> tuple[dict, dict]:
 def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
                          use_dataset_labels: bool = True) -> tuple[dict, bytes]:
     """Global Stage labels and environment outcomes need no evaluation job."""
-    from rewards import manifest as rewards, pbrs
+    from rewards import manifest as rewards
+    from rewards.fusion import step_reward_arrays
     from rewards.stage import keyframes, reward as stage_reward
     episode, header = reconstruct_episode(jobs, dataset, member)
     raw = jobs._load_base_config()["reward"]
     raw.update(source=source, rynnvalue=False)
     recipe = rewards.reward_derivation_config(raw)
     arrays = rewards._episode_timeline_arrays(episode)
-    done = np.zeros(episode["recorded_action_count"], dtype=bool)
-    if episode["terminal_step"] is not None:
-        done[episode["terminal_step"]:] = True
-    gamma = recipe["gamma"]
     annotation = None
     if source == "stage":
         if use_dataset_labels:
@@ -96,17 +93,8 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
             done=arrays["environment_done"], success_consecutive_steps=header["success_consecutive_steps"])
         context = stage_reward.stage_annotation_context(annotation, done=arrays["environment_done"],
             success_consecutive_steps=header["success_consecutive_steps"], exponent=recipe["stage_exponent"])
-        scores = stage_reward.stage_scores(context)
-        final = [stage_reward.stage_chunk_reward(scores, c["start"], c["length"], gamma)
-                 for c in episode["evaluation_chunks"]]
-        arrays["stage_score"] = scores
-        arrays["stage_chunk_reward"] = np.asarray(final, dtype=np.float32)
-    else:
-        final = [pbrs.sparse_primitive_return(done, c["start"], c["length"], gamma)
-                 for c in episode["evaluation_chunks"]]
-        arrays["sparse_reward"] = np.asarray(final, dtype=np.float32)
-    arrays.update(boundary_steps=np.asarray(episode["reward_boundaries"], dtype=np.int64),
-                  final_reward=np.asarray(final, dtype=np.float32), pbrs_chunk_reward=np.asarray(final, dtype=np.float32))
+        arrays["stage_score"] = stage_reward.stage_scores(context)
+    arrays.update(step_reward_arrays(episode, recipe, arrays))
     stream = io.BytesIO()
     np.savez_compressed(stream, **arrays)
     values = stream.getvalue()
@@ -122,17 +110,14 @@ def direct_global_reward(jobs, dataset: dict, member: dict, source: str, *,
 
 
 def validate_global_values(values: Path | bytes, episode: dict, source: str, offline_root: Path) -> None:
+    count = int(episode["recorded_action_count"])
     with np.load(io.BytesIO(values) if isinstance(values, bytes) else values, allow_pickle=False) as arrays:
-        boundaries = arrays["boundary_steps"]
-        if not np.array_equal(boundaries, episode["reward_boundaries"]):
-            raise ValueError("全局评价时间点与当前执行区间／成功边界不一致，请在数据集配置中重新生成评价／奖励；不会自动重跑模型")
-        final = arrays["final_reward"] if "final_reward" in arrays else arrays["pbrs_chunk_reward"]
-        if final.shape != (len(boundaries) - 1,) or not np.isfinite(final).all():
-            raise ValueError("全局奖励数组不完整或包含无效数值")
+        final = arrays["final_reward"]
+        if final.shape != (count,) or not np.isfinite(final).all():
+            raise ValueError("全局奖励未逐步覆盖完整轨迹或包含无效数值，请在数据集配置中重新生成评价／奖励；不会自动重跑模型")
         if source == "stage" and (arrays["stage_score"].shape != (episode["recorded_action_count"] + 1,)
                                    or not np.isfinite(arrays["stage_score"]).all()):
             raise ValueError("全局 Stage 奖励未覆盖完整轨迹")
         if source == "rynnvalue":
             from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS, validate_official_outputs
-            validate_official_outputs({name: arrays[name] for name in OFFICIAL_OUTPUT_KEYS},
-                                                len(boundaries))
+            validate_official_outputs({name: arrays[name] for name in OFFICIAL_OUTPUT_KEYS}, count + 1)

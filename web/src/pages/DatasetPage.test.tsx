@@ -258,13 +258,12 @@ describe("dataset evaluation configuration", () => {
     expect(api.evaluateTrajectories).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("re-evaluates a version saved with cumulative=%s without a cumulative control", async (initial) => {
+  it("re-evaluates RynnValue without a cumulative control", async () => {
     vi.mocked(api.listTrainingDatasets).mockResolvedValue([{
       id: "dataset", name: "Frozen dataset", member_count: 1, action_count: 16, chunk_count: 2,
-      integrity_status: "HEALTHY", annotation_status: "READY",
-      annotation_config: { max_frames: 8, accumulate_primitive_steps: initial },
+      integrity_status: "HEALTHY", annotation_status: "READY", annotation_config: { max_frames: 8 },
       reward_version_id: "old-version", evaluation_versions: [{ id: "old-version", evaluator: "rynnvalue", status: "COMPLETED",
-        parameters: { max_frames: 8, accumulate_primitive_steps: initial }, created_at: "" }],
+        parameters: { max_frames: 8 }, created_at: "" }],
     } as TrainingDataset]);
     render(<DatasetPage />);
     fireEvent.click(await screen.findByRole("button", { name: "打包训练数据集" }));

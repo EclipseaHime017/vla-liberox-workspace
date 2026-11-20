@@ -17,7 +17,7 @@ from core.io import atomic_json
 from rewards.manifest import load_reward_index, reward_manifest_digest
 from rewards.stage.keyframes import load_stage_annotations
 from rewards.stage.keyframes import build_stage_annotation, stage_anchors, validate_stage_annotation
-from rewards.stage.reward import stage_chunk_reward, stage_scores, stage_annotation_context
+from rewards.stage.reward import stage_rewards, stage_scores, stage_annotation_context
 
 
 def annotation(frames, *, done=None, exponent=2):
@@ -106,9 +106,9 @@ def test_hash_and_foreign_trajectory_rejected_but_threshold_is_recipe_local():
             validate_stage_annotation(payload, **args)
 
 
-def test_stage_reward_accumulates_the_actual_length():
+def test_stage_reward_of_each_action_is_the_next_observation_score():
     scores = np.asarray([-1, -.9, -.8, -.7, -.6])
-    assert stage_chunk_reward(scores, 1, 3, .9) == pytest.approx(-.8 - .9 * .7 - .9**2 * .6)
+    np.testing.assert_allclose(stage_rewards(scores), [-.9, -.8, -.7, -.6])
 
 
 def _select(config, source):

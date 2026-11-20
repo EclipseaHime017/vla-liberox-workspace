@@ -209,7 +209,6 @@ class DatasetAnnotationRequest(StrictModel):
     stage_exponent: StrictFloat | StrictInt | None = Field(default=None, ge=1)
     alpha: StrictFloat | StrictInt | None = Field(default=None, ge=0, le=1)
     base_coefficient: StrictFloat | StrictInt | None = Field(default=None, ge=0)
-    final_normalization: Literal["none", "initial_chunk_v1"] | None = None
     fusion_mode: Literal["additive", "multiplicative"] | None = None
     robometer_batch_size: StrictInt | None = Field(default=None, ge=1)
     gamma: StrictFloat | StrictInt | None = Field(default=None, ge=0, le=1)

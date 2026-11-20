@@ -28,7 +28,6 @@ from studio.exceptions import ConflictError
 from studio.storage.files import atomic_write_json, atomic_write_yaml
 from studio.storage.repositories import EvaluationRepository, OfflineJobRepository
 from studio.services.dataset_reward_versions import DatasetRewardVersions
-from core.config import current_reward_settings
 from studio.services.work_queue import WorkQueue
 from studio.services.inherited_reward_inputs import core_module
 from core.methods import DEFAULT_METHOD, METHODS
@@ -244,8 +243,10 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         prepared = json.loads(Path(version["prepared_manifest_path"]).read_text(encoding="utf-8"))
                         if prepared.get("chunking") != core_module("execution").CHUNKING_RULE:
                             raise ValueError("旧切片布局，请重新生成评价／奖励")
-                        raw["reward"].update(current_reward_settings(settings))
-                        raw["reward"]["final_normalization"] = settings.get("final_normalization", "none")
+                        rewards = json.loads(Path(version["reward_manifest_path"]).read_text(encoding="utf-8"))
+                        if rewards.get("schema_version") != core_module("rewards").REWARD_SCHEMA_VERSION:
+                            raise ValueError("旧版奖励（按评价边界计算），请重新生成评价／奖励")
+                        raw["reward"].update(settings)
                         availability["ready"] = bool(version.get("complete") and version.get("status") == "READY")
                     except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
                         availability["message"] = (
@@ -270,8 +271,7 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                         availability["pending"] = True
                         self.schedule_first_reward_snapshot(run)
                 if records:
-                    raw["reward"].update(current_reward_settings(records[0][1]["reward_config"]))
-                    raw["reward"]["final_normalization"] = records[0][1]["reward_config"].get("final_normalization", "none")
+                    raw["reward"].update(records[0][1]["reward_config"])
         if reward_source is not None:
             raw["reward"].update(source=reward_source, rynnvalue=reward_source == "rynnvalue" or (
                 reward_source == "final" and raw["reward"]["shaping_weight"] > 0))
@@ -1252,7 +1252,6 @@ class OfflineJobService(WorkQueue, DatasetRewardVersions):
                             proprio_dim=model_io["proprio_dim"])
         source = None
         if method.requires_rewards:
-            raw["reward"].setdefault("final_normalization", "none")
             source = self._reward_source(raw, parameters)
             raw["reward"].update(source=source, rynnvalue=source == "rynnvalue" or (
                 source == "final" and raw["reward"]["shaping_weight"] > 0))

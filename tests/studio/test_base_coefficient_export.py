@@ -38,13 +38,12 @@ def test_generation_export_and_optional_server_import(tmp_path, tmp_path_factory
     local_stage(jobs, dataset)
     defaults = jobs.reward_configuration(dataset["id"])["final"]
     assert defaults["base_coefficient"] is None
-    assert defaults["final_normalization"] == "initial_chunk_v1"
+    assert "final_normalization" not in defaults
     request = DatasetAnnotationRequest(source="final", base_coefficient=coefficient, alpha=alpha,
-                                       shaping_weight=.1, final_normalization="none")
+                                       shaping_weight=.1)
     job = jobs.start_annotation(dataset["id"], **request.model_dump(exclude_none=True))
     config = load_train_config(job["config_path"])
     assert config.raw["reward"].get("base_coefficient") == coefficient
-    assert config.raw["reward"]["final_normalization"] == "none"
     prepare_dataset(config)
     import_saved_model_inputs(config, job["output_path"] / "model_inputs.json")
     materialize_reward_manifest(config)
@@ -59,13 +58,11 @@ def test_generation_export_and_optional_server_import(tmp_path, tmp_path_factory
     metadata_path = next(destination.rglob("trajectory_reward.final.json"))
     metadata = json.loads(metadata_path.read_text())
     assert metadata["reward_config"].get("base_coefficient") == coefficient
-    assert metadata["reward_config"].get("final_normalization", "none") == "none"
     protected = {p: digest(p) for p in destination.rglob("*") if p.is_file()}
     with np.load(metadata_path.parent / metadata["values_file"]) as arrays:
         a = 1 - alpha if coefficient is None else coefficient
         np.testing.assert_allclose(arrays["final_reward"], a * arrays["sparse_reward"] +
-                                   alpha * arrays["stage_chunk_reward"] + .1 * arrays["pbrs_shaping_reward"], atol=1e-6)
-        assert "final_reward_scale" not in arrays
+                                   alpha * arrays["stage_reward"] + .1 * arrays["pbrs_shaping_reward"], atol=1e-6)
     # Bind the real published snapshot while the platform base has conflicting
     # new settings. A legacy recipe must retain its own implicit (1-alpha).
     from studio.services.trajectory_reward_snapshot import bind_reward_snapshot
@@ -120,7 +117,6 @@ raw = training_settings(server, task)
 saved = json.loads(next(source.rglob('trajectory_reward.final.json')).read_text())['reward_config']
 assert raw['reward'].get('base_coefficient') == saved.get('base_coefficient')
 assert raw['reward']['alpha'] == saved['alpha']
-assert raw['reward']['final_normalization'] == 'none'
 # Project ID is test fixture metadata, not a production server override.
 raw['data']['project_id'] = 'test'
 for zero in (False, True):
@@ -140,6 +136,5 @@ for zero in (False, True):
             np.testing.assert_array_equal(values['final_reward'], expected['final_reward'])
             wrong = fused_reward_arrays(episode, {**recipe, 'base_coefficient': 9.}, signals)
             assert not np.array_equal(values['final_reward'], wrong['final_reward'])
-            assert 'final_reward_scale' not in values
 print('server import/gamma/success-potential PASS')
 '''

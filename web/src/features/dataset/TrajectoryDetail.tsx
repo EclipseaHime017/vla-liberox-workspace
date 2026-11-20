@@ -9,11 +9,6 @@ import { rewardParameterLabels, rewardSourceLabels } from "./rewardVersions";
 
 const colors = ["#3775e8", "#e06c4f", "#3c9a70", "#9b63d4", "#c38b27", "#3c94a6", "#d14f86"];
 
-/** Versions saved before per-step accumulation record whether they used macro actions. */
-function legacyMacro(accumulated: unknown): string {
-  return accumulated === false ? " · 宏动作（旧版本）" : "";
-}
-
 type Plot = {
   title: string; unit: string; times: number[]; labels: string[]; values: number[][];
   interpolation?: "linear" | "step"; sampleLabels?: string[];
@@ -24,25 +19,16 @@ type ChartGeometry = {
   width: number; height: number; left: number; right: number; top: number; bottom: number;
 };
 
-export function chunkRewardSeries(
-  starts: number[], ends: number[], rewards: number[], timeSeconds: number[],
-) {
-  if (starts.length !== ends.length || starts.length !== rewards.length) {
-    throw new Error("chunk reward metadata length mismatch");
+/** One reward per action step, placed at the time the action was taken. */
+export function actionRewardSeries(rewards: number[], actionTimeSeconds: number[]) {
+  if (rewards.length !== actionTimeSeconds.length) {
+    throw new Error("per-action reward length does not match the recorded actions");
   }
-  const times: number[] = [];
-  const values: number[][] = [];
-  const sampleLabels: string[] = [];
-  starts.forEach((start, chunk) => {
-    const end = ends[chunk];
-    if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) {
-      throw new Error(`invalid chunk interval [${start}, ${end})`);
-    }
-    times.push(timeSeconds[end] ?? end / 20);
-    values.push([rewards[chunk]]);
-    sampleLabels.push(`chunk ${chunk} · steps [${start}, ${end}) · L=${end - start}`);
-  });
-  return { times, values, sampleLabels };
+  return {
+    times: actionTimeSeconds,
+    values: rewards.map((reward) => [reward]),
+    sampleLabels: rewards.map((_, step) => `action step ${step}`),
+  };
 }
 
 export function observationPotentialSeries(remainingTimeSeconds: number[][]) {
@@ -221,22 +207,21 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
     }
     for (const saved of Object.values(rewards)) {
       if (!saved || saved.source !== "final") continue;
-      const series = chunkRewardSeries(saved.chunk_start_steps, saved.chunk_end_steps, saved.final_reward, detail.series.time_seconds);
+      const series = actionRewardSeries(saved.final_reward, detail.series.action_time_seconds);
       if (saved.original_final_reward && saved.sparse_reward && saved.dense_reward) {
-        values.push({ title: `Original Final Reward${legacyMacro(saved.reward_config.accumulate_primitive_steps)}`,
+        values.push({ title: "Original Final Reward",
           unit: "reward [-]", ...series, labels: ["sparse reward", "dense reward (κ × shape)", "original final reward"],
           values: saved.original_final_reward.map((value, i) => [saved.sparse_reward![i], saved.dense_reward![i], value]),
           interpolation: "linear" });
       }
-      values.push({ title: `Final Reward${legacyMacro(saved.reward_config.accumulate_primitive_steps)}`,
+      values.push({ title: "Final Reward",
         unit: "reward [-]", ...series, labels: ["final reward"], interpolation: "linear" });
     }
     const evaluation = detail.rynnvalue_evaluation ?? detail.evaluation;
     if (evaluation) {
       const official = evaluation.official_outputs;
-      const boundaryTimes = evaluation.boundary_steps.map(
-        (step) => detail.series.time_seconds[step] ?? step / 20,
-      );
+      // One RynnValue output per observation step.
+      const observationTimes = detail.series.time_seconds;
       const absoluteHeadCount = official.absolute_temporal_distance_seconds[0]?.length ?? 0;
       const absoluteHeadLabels = Array.from(
         { length: absoluteHeadCount },
@@ -251,22 +236,22 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
       values.push(
         {
           title: "RynnValue Absolute Remaining Time", unit: "s",
-          times: boundaryTimes, labels: absoluteHeadLabels,
+          times: observationTimes, labels: absoluteHeadLabels,
           values: official.absolute_temporal_distance_seconds,
         },
         {
           title: "RynnValue Observation Potential", unit: "s",
-          times: boundaryTimes, labels: potentialHeadLabels,
+          times: observationTimes, labels: potentialHeadLabels,
           values: observationPotentialSeries(official.absolute_temporal_distance_seconds),
         },
         {
           title: "RynnValue Relative Remaining Time", unit: "s",
-          times: boundaryTimes, labels: ["relative remaining time"],
+          times: observationTimes, labels: ["relative remaining time"],
           values: official.relative_temporal_distance_seconds.map((value) => [value]),
         },
         {
           title: "RynnValue Entropy", unit: "nats",
-          times: boundaryTimes,
+          times: observationTimes,
           labels: absoluteHeadLabels.map((label) => `${label} entropy`),
           values: official.absolute_value_entropy_nats,
         },
@@ -278,10 +263,9 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
           || sparseReward.length !== evaluation.pbrs_reward.final_reward.length) {
           throw new Error("reward component length mismatch");
         }
-        const shapeSeries = chunkRewardSeries(evaluation.pbrs_reward.chunk_start_steps,
-          evaluation.pbrs_reward.chunk_end_steps, evaluation.pbrs_reward.shape_reward, detail.series.time_seconds);
+        const shapeSeries = actionRewardSeries(evaluation.pbrs_reward.shape_reward, detail.series.action_time_seconds);
         values.push({
-          title: `Original Final Reward${legacyMacro(evaluation.pbrs_reward.accumulate_primitive_steps)}`,
+          title: "Original Final Reward",
           unit: "reward [-]",
           times: shapeSeries.times,
           labels: ["sparse reward", "dense reward (κ × shape)", "original final reward"],
@@ -313,11 +297,8 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
         .map((heads) => heads[0]);
       const d0 = distance[0];
       if (distance.length >= 2 && Number.isFinite(d0) && d0 > 1e-6) {
-        const boundaryTimes = evaluation.boundary_steps.map(
-          (step) => detail.series.time_seconds[step] ?? step / 20,
-        );
         const progress = distance.map((value) => Math.max(0, Math.min(1, 1 - value / d0)));
-        const aligned = interpolate(boundaryTimes, progress, robometer.time_seconds);
+        const aligned = interpolate(detail.series.time_seconds, progress, robometer.time_seconds);
         values.push({
           title: "RynnValue / Robometer · UI 派生归一化对比", unit: "normalized progress [-]",
           times: robometer.time_seconds, labels: ["Robometer progress", "Rynn normalized progress"],
@@ -339,7 +320,7 @@ export function TrajectoryDetail({ detail, onBack, onSetTest, onContextChange, c
     if (distance.length < 2 || robo.progress_pred.length < 2 || !Number.isFinite(d0) || d0 <= 1e-6) {
       return { available: false as const, reason: "初始距离过小或样本不足，无法计算相关性" };
     }
-    const times = rynn.boundary_steps.map((step) => detail.series.time_seconds[step] ?? step / 20);
+    const times = detail.series.time_seconds;
     const normalized = distance.map((value) => Math.max(0, Math.min(1, 1 - value / d0)));
     const aligned = interpolate(times, normalized, robo.time_seconds);
     const correlation = pearson(aligned, robo.progress_pred);

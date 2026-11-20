@@ -15,6 +15,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rewards.evaluation_store import SNAPSHOT_SCHEMA_VERSION
 from studio.storage.paths import storage_path
 from typing import Any
 
@@ -118,7 +119,7 @@ def _refresh_snapshot_identity(run: dict, source: str | None = None, *, publish:
             return None
         values = trajectory.with_name(values_name)
         observations = trajectory.with_name("trajectory_observations.npz")
-        if (payload.get("schema_version") != 1 or payload.get("run_id") != run["id"]
+        if (payload.get("schema_version") != SNAPSHOT_SCHEMA_VERSION or payload.get("run_id") != run["id"]
                 or sidecar.is_symlink() or values.is_symlink() or observations.is_symlink()
                 or _hash(trajectory) != payload["trajectory_sha256"]
                 or _hash(values) != payload["values_sha256"]
@@ -162,7 +163,7 @@ def read_reward_snapshot(run: dict, source: str | None = None) -> dict[str, Any]
         cached = _CACHE.get(str(sidecar))
         if cached and cached[0] == fingerprint:
             return cached[1]
-        if (payload.get("schema_version") != 1 or payload.get("run_id") != str(run.get("id"))
+        if (payload.get("schema_version") != SNAPSHOT_SCHEMA_VERSION or payload.get("run_id") != str(run.get("id"))
                 or (source is not None and payload.get("source") != source)
                 or values.is_symlink() or payload["trajectory_sha256"] != _hash(trajectory)
                 or payload["values_sha256"] != _hash(values)
@@ -185,11 +186,8 @@ def read_reward_snapshot(run: dict, source: str | None = None) -> dict[str, Any]
 
 def _existing_rynn(trajectory: Path, run_id: str) -> bool:
     """Existing valid global Rynn output predates this automatic initializer."""
-    from studio.services.trajectory_evaluation_service import (
-        COMPATIBLE_EVALUATION_SCHEMA_VERSIONS,
-        OFFICIAL_ARRAY_KEYS,
-        PBRS_ARRAY_KEYS,
-    )
+    from rewards.evaluation_store import covers_recording
+    from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
     sidecar = trajectory.with_name("rynnvalue_evaluation.json")
     values = trajectory.with_name("rynnvalue_evaluation.npz")
     observations = trajectory.with_name("trajectory_observations.npz")
@@ -199,7 +197,7 @@ def _existing_rynn(trajectory: Path, run_id: str) -> bool:
         return cached[1]
     try:
         payload = json.loads(sidecar.read_text(encoding="utf-8"))
-        valid = (payload.get("schema_version") in COMPATIBLE_EVALUATION_SCHEMA_VERSIONS
+        valid = (payload.get("schema_version") == ANNOTATION_SCHEMA_VERSION
                 and payload.get("run_id") == run_id
                 and not sidecar.is_symlink() and not values.is_symlink() and not observations.is_symlink()
                 and payload.get("trajectory_sha256") == _hash(trajectory)
@@ -207,11 +205,7 @@ def _existing_rynn(trajectory: Path, run_id: str) -> bool:
                 and payload.get("observations_sha256") == _hash(observations))
         if valid:
             with np.load(values, allow_pickle=False) as archive, np.load(trajectory, allow_pickle=False) as source:
-                required = {"boundary_steps"} | OFFICIAL_ARRAY_KEYS | PBRS_ARRAY_KEYS
-                boundaries = archive["boundary_steps"]
-                valid = (required.issubset(archive.files) and len(boundaries) >= 2
-                         and int(boundaries[0]) == 0
-                         and int(boundaries[-1]) == len(source["env_action"]))
+                valid = covers_recording(archive, len(source["env_action"]))
     except (OSError, ValueError, TypeError, KeyError):
         valid = False
     if len(_RYNN_CACHE) > 128:
@@ -284,7 +278,7 @@ def bind_reward_snapshot(prepared_path: Path, reward_manifest_path: Path, *,
             finally:
                 temporary.unlink(missing_ok=True)
             payload = {
-                "schema_version": 1, "run_id": run_id, "source": source,
+                "schema_version": SNAPSHOT_SCHEMA_VERSION, "run_id": run_id, "source": source,
                 "reward_config": recipe, "trajectory_sha256": episode["trajectory_sha256"],
                 "observations_sha256": episode["observations_sha256"],
                 "observations_fingerprint": list(_stat(observations)),

@@ -198,7 +198,9 @@ class ExportRewards:
             checked(episode / name, metadata["values_sha256"])
             metadata.update(values_file=name)
             if source != "robometer":
-                metadata.update(schema_version=1, observations_fingerprint=list(_stat(episode / "trajectory_observations.npz")))
+                from studio.services.trajectory_reward_snapshot import SNAPSHOT_SCHEMA_VERSION
+                metadata.update(schema_version=SNAPSHOT_SCHEMA_VERSION,
+                                observations_fingerprint=list(_stat(episode / "trajectory_observations.npz")))
                 # Retain independent official output arrays referenced by newer rewards.
                 entry = metadata.get("entry", {})
                 if entry.get("official_annotation_path"):
@@ -219,9 +221,9 @@ class ExportRewards:
                     from studio.services.trajectory_evaluation_service import EVALUATION_SCHEMA_VERSION
                     shutil.copyfile(episode / name, episode / "rynnvalue_evaluation.npz")
                     with np.load(values, allow_pickle=False) as arrays:
-                        count = len(arrays["boundary_steps"])
+                        count = len(arrays["absolute_temporal_distance_seconds"])
                     atomic_write_json(episode / "rynnvalue_evaluation.json", {**metadata,
-                        "schema_version": EVALUATION_SCHEMA_VERSION, "boundary_count": count,
+                        "schema_version": EVALUATION_SCHEMA_VERSION, "observation_count": count,
                         "values_file": "rynnvalue_evaluation.npz"})
             else:
                 atomic_write_json(episode / "robometer_evaluation.json", metadata)

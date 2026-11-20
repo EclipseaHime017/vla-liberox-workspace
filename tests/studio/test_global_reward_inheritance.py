@@ -11,6 +11,7 @@ from studio.services.dataset_evaluation_detail import attach_dataset_context, at
 from studio.services.inherited_reward_inputs import reconstruct_episode
 from core.config import load_train_config
 from core.data import prepare_dataset
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
 from rewards.manifest import load_pinned_reward_index, materialize_reward_manifest, reward_derivation_config
 from rewards.stage.keyframes import build_stage_annotation
 import test_dataset_reward_versions as fixture
@@ -51,17 +52,17 @@ def setup_recording(tmp_path, monkeypatch):
 def native_rynn(jobs, dataset, run):
     _, frozen = jobs.datasets._load(dataset["id"])
     episode, _ = reconstruct_episode(jobs, dataset, frozen["members"][0])
-    boundaries = episode["reward_boundaries"]
     path = Path(run["trajectory"]).with_name("rynnvalue_evaluation.npz")
-    n = len(boundaries)
-    np.savez_compressed(path, boundary_steps=np.asarray(boundaries),
+    n = episode["recorded_action_count"] + 1  # one RynnValue output per observation
+    np.savez_compressed(path,
         absolute_temporal_distance_seconds=np.arange(n, dtype=float)[::-1, None],
         absolute_value_entropy_nats=np.zeros((n, 1)), absolute_value_logits=np.zeros((n, 1, 256)),
         relative_temporal_distance_seconds=np.zeros(n), relative_value_logits=np.zeros((n, 256)),
-        pbrs_shaping_reward=np.ones(n-1), pbrs_chunk_reward=np.arange(n-1, dtype=np.float32))
+        sparse_reward=-np.ones(n-1), pbrs_shaping_reward=np.ones(n-1), dense_reward=np.full(n-1, .1),
+        final_reward=np.arange(n-1, dtype=np.float32))
     raw = jobs._load_base_config()["reward"]
     raw.update(source="rynnvalue", rynnvalue=True)
-    payload = {"schema_version": 6, "run_id": "run", "values_sha256": digest(path),
+    payload = {"schema_version": ANNOTATION_SCHEMA_VERSION, "run_id": "run", "values_sha256": digest(path),
         "trajectory_sha256": digest(Path(run["trajectory"])),
         "observations_sha256": frozen["members"][0]["artifacts"]["observations"]["sha256"],
         "reward_config": reward_derivation_config(raw),
@@ -106,7 +107,7 @@ def test_new_dataset_trains_from_global_inputs_without_any_evaluation_job(tmp_pa
     reference_path = prepare_dataset(reference_config).manifest
     reference = json.loads(reference_path.read_text())["episodes"][0]
     inherited = json.loads((Path(config.raw["paths"]["work_dir"])/"dataset_manifest.json").read_text())["episodes"][0]
-    for key in ("chunks", "evaluation_chunks", "reward_boundaries", "terminal_step", "recorded_action_count"):
+    for key in ("chunks", "evaluation_chunks", "terminal_step", "recorded_action_count"):
         assert inherited[key] == reference[key]
     assert inherited["chunks"][0]["length"] == 3
     assert inherited["chunks"][-1]["end"] == 17
@@ -150,7 +151,7 @@ def test_global_overwrite_affects_future_inheritance_not_existing_training_pin(t
     old_bytes = old_path.read_bytes()
     with np.load(values) as archive:
         arrays = {key: archive[key] for key in archive.files}
-    arrays["pbrs_chunk_reward"] += 1
+    arrays["final_reward"] += 1
     np.savez_compressed(values, **arrays)
     sidecar = values.with_suffix(".json")
     payload = json.loads(sidecar.read_text())

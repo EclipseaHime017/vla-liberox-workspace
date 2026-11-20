@@ -1,4 +1,4 @@
-"""Reward versions: derive, cache and pin per-chunk training rewards.
+"""Reward versions: derive, cache and pin per-action training rewards.
 
 Sources are sparse success, RynnValue potential shaping (rewards.rynnvalue outputs),
 keyframe Stage progress (rewards.stage) and their fusion (rewards.fusion). Derived caches are keyed
@@ -15,12 +15,10 @@ from typing import Any
 
 import numpy as np
 
-from core.config import (LEGACY_REWARD_KEYS, LoadedConfig, current_reward_settings, needs_rynnvalue,
-                         reward_source)
+from core.config import LoadedConfig, needs_rynnvalue, reward_source
 from core.data import load_manifest
 from core.io import atomic_json, sha256_file, stable_hash
 from core.storage_paths import storage_path, with_dataset_lease
-from rewards.pbrs import chunk_reward_components, sparse_primitive_return
 from rewards.rynnvalue.annotate import load_annotation_index
 from rewards.rynnvalue.outputs import (
     official_inference_config,
@@ -33,13 +31,12 @@ from rewards.stage.keyframes import load_stage_annotations
 LOG = logging.getLogger(__name__)
 
 
-REWARD_SCHEMA_VERSION = 1
+REWARD_SCHEMA_VERSION = 2
 
 
 REWARD_DERIVATION_CONFIG_KEYS = frozenset({"rynnvalue", "gamma", "shaping_weight"})
 
 
-# Saved versions recording LEGACY_REWARD_KEYS are always re-derived from their signals.
 TRAINING_REDUCTION_CONFIG_KEYS = frozenset({"gamma", "zero_success_potential"})
 
 
@@ -63,20 +60,15 @@ def reward_derivation_config(reward_config: dict[str, Any]) -> dict[str, Any]:
                       alpha=float(reward_config.get("alpha", 0.0)))
         if reward_config.get("base_coefficient") is not None:
             result["base_coefficient"] = float(reward_config["base_coefficient"])
-        normalization = reward_config.get("final_normalization", "none")
-        if normalization != "none":
-            result["final_normalization"] = normalization
     return result
 
 
 def reward_implementation_fingerprint(source: str) -> str:
     """Invalidate cheap derived caches when formula code changes, never raw VLM outputs."""
     root = Path(__file__).parent
-    files = ["manifest.py", "pbrs.py"]
+    files = ["manifest.py", "pbrs.py", "fusion.py"]
     if source in {"stage", "final"}:
         files += ["stage/keyframes.py", "stage/reward.py"]
-    if source == "final":
-        files.append("fusion.py")
     return stable_hash({name: sha256_file(root / name) for name in files})
 
 
@@ -92,8 +84,7 @@ def _episode_reward_metadata(episode: dict[str, Any]) -> dict[str, Any]:
         "trajectory_sha256": episode["trajectory_sha256"],
         "observations_sha256": episode["observations_sha256"],
         "recorded_action_count": episode["recorded_action_count"],
-        "reward_boundaries": episode["reward_boundaries"],
-        "evaluation_chunks": episode.get("evaluation_chunks", episode["chunks"]),
+        "terminal_step": episode["terminal_step"],
     }
 
 
@@ -200,15 +191,10 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
         if annotation is None:
             raise KeyError(f"RynnValue annotation is missing for {episode['run_id']}")
         annotation_path = storage_path(annotation["annotation_path"])
-        expected_boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
         with np.load(annotation_path, allow_pickle=False) as source:
-            boundaries = np.asarray(source["boundary_steps"], dtype=np.int64)
-            if not np.array_equal(boundaries, expected_boundaries):
-                raise ValueError(
-                    f"RynnValue annotation boundaries do not match {episode['run_id']}"
-                )
             official_outputs = validate_official_outputs(
-                {name: source[name] for name in OFFICIAL_OUTPUT_KEYS}, len(boundaries)
+                {name: source[name] for name in OFFICIAL_OUTPUT_KEYS},
+                int(episode["recorded_action_count"]) + 1,
             )
         absolute = official_outputs["absolute_temporal_distance_seconds"]
         if absolute.shape[1] != 1:
@@ -216,37 +202,13 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
                 "The pinned RynnValue reward path expects one official absolute value head; "
                 f"got {absolute.shape[1]}. Raw heads were not averaged."
             )
-        value_lookup = {
-            int(boundary): float(value)
-            for boundary, value in zip(boundaries, absolute[:, 0])
-        }
-        done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
-        if episode["terminal_step"] is not None:
-            done[int(episode["terminal_step"]):] = True
-        evaluation_chunks = episode.get("evaluation_chunks", episode["chunks"])
-        components = [
-            chunk_reward_components(
-                done,
-                int(chunk["start"]),
-                int(chunk["length"]),
-                value_lookup[int(chunk["start"])],
-                value_lookup[int(chunk["end"])],
-                float(derivation_cfg["gamma"]),
-                float(derivation_cfg["shaping_weight"]),
-                bool(derivation_cfg["rynnvalue"]),
-                bool(derivation_cfg.get("zero_success_potential", False)),
-            )
-            for chunk in evaluation_chunks
-        ]
-        sparse = np.asarray([item[0] for item in components], dtype=np.float32)
-        shaping = np.asarray([item[1] for item in components], dtype=np.float32)
-        final = np.asarray([item[2] for item in components], dtype=np.float32)
+        from rewards.fusion import step_reward_arrays
+        rewards = step_reward_arrays(episode, derivation_cfg, official_outputs)
         reward_key = stable_hash({
             "reward_schema_version": REWARD_SCHEMA_VERSION,
             "derivation_implementation_sha256": implementation,
             "run_id": episode["run_id"],
             "annotation_sha256": annotation["annotation_sha256"],
-            "chunks": evaluation_chunks,
             "terminal_step": episode["terminal_step"],
             "reward_config": derivation_cfg,
         })
@@ -257,18 +219,9 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
             # the canonical annotation cache remains reward-agnostic.
             np.savez_compressed(
                 temporary,
-                boundary_steps=boundaries,
                 **_episode_timeline_arrays(episode),
                 **official_outputs,
-                sparse_reward=sparse,
-                pbrs_shaping_reward=shaping,
-                dense_reward=(
-                    float(derivation_cfg["shaping_weight"]) * shaping
-                    if bool(derivation_cfg["rynnvalue"])
-                    else np.zeros_like(shaping)
-                ),
-                pbrs_chunk_reward=final,
-                final_reward=final,
+                **rewards,
             )
             os.replace(temporary, output)
         finally:
@@ -290,10 +243,7 @@ def materialize_reward_manifest(config: LoadedConfig, *, force: bool = False) ->
             "annotator": annotation.get("annotator") or annotation_index.get("annotator") or {},
             "official_outputs": annotation.get("official_outputs") or {},
             "pbrs_reward": {
-                "array_keys": [
-                    "sparse_reward", "pbrs_shaping_reward", "dense_reward",
-                    "pbrs_chunk_reward",
-                ],
+                "array_keys": sorted(rewards),
                 "description": "Deterministic reward cache derived without RynnValue forward",
                 **derivation_cfg,
             },
@@ -356,8 +306,9 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
         raise ValueError("Pinned reward manifest is missing or its hash does not match")
     payload = json.loads(path.read_text(encoding="utf-8"))
     manifest = load_manifest(config)
-    if (payload.get("schema_version") != REWARD_SCHEMA_VERSION
-            or payload.get("kind") != "derived_iql_reward" or payload.get("complete") is not True):
+    if payload.get("schema_version") != REWARD_SCHEMA_VERSION:
+        raise ValueError("Pinned reward version predates per-action rewards; regenerate the evaluation")
+    if payload.get("kind") != "derived_iql_reward" or payload.get("complete") is not True:
         raise ValueError("Pinned reward version is incomplete or unsupported")
     if payload.get("dataset_sha256") != manifest["dataset_sha256"]:
         raise ValueError("Pinned reward version belongs to a different prepared dataset")
@@ -365,8 +316,7 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
     stored_recipe = payload.get("reward_config")
     composed = payload.get("binding_kind") == "global_trajectory_snapshots"
     if not isinstance(stored_recipe, dict) or (not composed and {
-        key: value for key, value in current_reward_settings(stored_recipe).items()
-        if key not in TRAINING_REDUCTION_CONFIG_KEYS
+        key: value for key, value in stored_recipe.items() if key not in TRAINING_REDUCTION_CONFIG_KEYS
     } != {
         key: value for key, value in requested_recipe.items() if key not in TRAINING_REDUCTION_CONFIG_KEYS
     }):
@@ -395,18 +345,13 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
         if (values_path.is_symlink() or not values_path.is_file()
                 or sha256_file(values_path) != entry["reward_sha256"]):
             raise ValueError(f"Pinned reward arrays are missing or corrupted: {episode['run_id']}")
-        # Legacy manifest adapters may lack this metadata, but current versions
-        # record all indices so even equal-size, wrongly ordered chunks fail.
         for name, value in _episode_reward_metadata(episode).items():
-            if name in entry and entry[name] != value:
+            if entry.get(name) != value:
                 raise ValueError(f"Pinned reward {name} mismatch: {episode['run_id']}")
         with np.load(values_path, allow_pickle=False) as arrays:
-            final = arrays["final_reward"] if "final_reward" in arrays else arrays["pbrs_chunk_reward"]
-            chunks = episode.get("evaluation_chunks", episode["chunks"])
-            if final.shape != (len(chunks),) or not np.isfinite(final).all():
-                raise ValueError(f"Pinned reward chunk values are invalid: {episode['run_id']}")
-            if not np.array_equal(arrays["boundary_steps"], episode["reward_boundaries"]):
-                raise ValueError(f"Pinned reward boundary mismatch: {episode['run_id']}")
+            final = arrays["final_reward"]
+            if final.shape != (int(episode["recorded_action_count"]),) or not np.isfinite(final).all():
+                raise ValueError(f"Pinned per-action rewards are invalid: {episode['run_id']}")
         if entry.get("annotation_path") != entry["reward_path"]:
             raise ValueError("Pinned reward replay alias must reference the validated reward arrays")
     snapshot_path = payload.get("stage_annotations_path")
@@ -416,9 +361,8 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
                 or stable_hash(json.loads(snapshot.read_text())) != payload.get("stage_annotations_sha256")):
             raise ValueError("Pinned Stage keyframe snapshot is missing or corrupted")
     if stored_recipe != requested_recipe or (composed and any(
-        LEGACY_REWARD_KEYS & set(entry["saved_reward_config"])
-        or any(entry["saved_reward_config"].get(key) != requested_recipe.get(key)
-               for key in TRAINING_REDUCTION_CONFIG_KEYS) for entry in entries)):
+        any(entry["saved_reward_config"].get(key) != requested_recipe.get(key)
+            for key in TRAINING_REDUCTION_CONFIG_KEYS) for entry in entries)):
         return _adapt_pinned_training_rewards(config, payload, manifest, requested_recipe)
     return payload
 
@@ -426,7 +370,7 @@ def load_pinned_reward_index(config: LoadedConfig) -> dict[str, Any]:
 def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
                                   prepared: dict[str, Any], recipe: dict[str, Any]) -> dict[str, Any]:
     """Change gamma or terminal potentials using saved signals, never rerun a semantic evaluator."""
-    from rewards.stage.reward import stage_chunk_reward
+    from rewards.fusion import step_reward_arrays
 
     work = Path(config.section("paths")["work_dir"]).resolve()
     target_root = (Path(config.section("paths")["output_dir"]) / "reward_adaptations").resolve()
@@ -444,60 +388,17 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
         entry = entries[str(episode["run_id"])]
         effective = recipe
         if pinned.get("binding_kind") == "global_trajectory_snapshots":
-            effective = {**current_reward_settings(entry["saved_reward_config"]), **{
+            effective = {**entry["saved_reward_config"], **{
                 key: recipe.get(key, False) for key in TRAINING_REDUCTION_CONFIG_KEYS}}
             if not effective.get("zero_success_potential", False):
                 effective.pop("zero_success_potential", None)
-            if not LEGACY_REWARD_KEYS & set(entry["saved_reward_config"]) and all(
-                    effective.get(key) == entry["saved_reward_config"].get(key)
-                    for key in TRAINING_REDUCTION_CONFIG_KEYS):
+            if all(effective.get(key) == entry["saved_reward_config"].get(key)
+                   for key in TRAINING_REDUCTION_CONFIG_KEYS):
                 generated.append((entry, episode, None))
                 continue
-        gamma = float(effective["gamma"])
         with np.load(storage_path(entry["reward_path"]), allow_pickle=False) as values:
             arrays = {name: values[name] for name in values.files}
-        chunks = episode.get("evaluation_chunks", episode["chunks"])
-        done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
-        if episode["terminal_step"] is not None:
-            done[int(episode["terminal_step"]):] = True
-        if source == "final":
-            from rewards.fusion import fused_reward_arrays
-            arrays.update(fused_reward_arrays(episode, effective, arrays))
-            final = arrays["final_reward"]
-        elif source == "stage":
-            scores = arrays.get("stage_score")
-            if scores is None or scores.shape != (len(done) + 1,) or not np.isfinite(scores).all():
-                raise ValueError(f"Pinned Stage score timeline is unavailable: {episode['run_id']}")
-            final = np.asarray([
-                stage_chunk_reward(scores, int(chunk["start"]), int(chunk["length"]), gamma)
-                for chunk in chunks
-            ], dtype=np.float32)
-            arrays["stage_chunk_reward"] = final
-        elif source == "rynnvalue":
-            distances = arrays.get("absolute_temporal_distance_seconds")
-            boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
-            if (distances is None or distances.shape != (len(boundaries), 1)
-                    or not np.isfinite(distances).all()):
-                raise ValueError(f"Pinned RynnValue temporal-distance timeline is unavailable: {episode['run_id']}")
-            lookup = dict(zip(boundaries.tolist(), distances[:, 0].tolist()))
-            components = np.asarray([
-                chunk_reward_components(done, int(chunk["start"]), int(chunk["length"]),
-                    lookup[int(chunk["start"])], lookup[int(chunk["end"])], gamma,
-                    float(effective["shaping_weight"]), True,
-                    bool(effective.get("zero_success_potential", False)))
-                for chunk in chunks
-            ], dtype=np.float32)
-            arrays["sparse_reward"], arrays["pbrs_shaping_reward"], final = components.T
-            arrays["dense_reward"] = float(effective["shaping_weight"]) * arrays["pbrs_shaping_reward"]
-        else:
-            final = np.asarray([
-                sparse_primitive_return(done, int(chunk["start"]), int(chunk["length"]), gamma)
-                for chunk in chunks
-            ], dtype=np.float32)
-            arrays["sparse_reward"] = final
-        arrays.update(final_reward=final, pbrs_chunk_reward=final)
-        if not np.isfinite(final).all():
-            raise ValueError(f"Non-finite adapted reward: {episode['run_id']}")
+        arrays.update(step_reward_arrays(episode, {**effective, "source": source}, arrays))
         generated.append(({**entry, "training_reward_config": effective}, episode, arrays))
 
     directory = target_root / uuid.uuid4().hex
@@ -533,7 +434,8 @@ def _adapt_pinned_training_rewards(config: LoadedConfig, pinned: dict[str, Any],
 
 def _materialize_direct_rewards(config: LoadedConfig, *, force: bool) -> Path:
     """Sparse/Stage are independent reward sources and never need VLM evaluation."""
-    from rewards.stage.reward import stage_annotation_context, stage_chunk_reward, stage_scores
+    from rewards.fusion import step_reward_arrays
+    from rewards.stage.reward import stage_annotation_context, stage_scores
 
     manifest = load_manifest(config)
     derivation = reward_derivation_config(config.section("reward"))
@@ -571,39 +473,24 @@ def _materialize_direct_rewards(config: LoadedConfig, *, force: bool) -> Path:
     if snapshot_path is not None:
         atomic_json(snapshot_path, snapshot)
     index = []
-    gamma = float(derivation["gamma"])
     for episode in manifest["episodes"]:
-        chunks = episode.get("evaluation_chunks", episode["chunks"])
-        done = np.zeros(int(episode["recorded_action_count"]), dtype=bool)
-        if episode["terminal_step"] is not None:
-            done[int(episode["terminal_step"]):] = True
+        signals: dict[str, np.ndarray] = {}
+        annotation_hash = None
         if source == "stage":
             annotation = snapshot["annotations"][str(episode["run_id"])]
             with np.load(storage_path(episode["trajectory_path"]), allow_pickle=False) as trajectory:
                 context = stage_annotation_context(annotation, done=trajectory["done"],
                     success_consecutive_steps=int(config.section("data")["success_consecutive_steps"]),
                     exponent=derivation["stage_exponent"])
-            scores = stage_scores(context)
-            final = np.asarray([stage_chunk_reward(scores, int(chunk["start"]),
-                int(chunk["length"]), gamma) for chunk in chunks], dtype=np.float32)
-            arrays = {"stage_score": scores, "stage_chunk_reward": final}
+            signals["stage_score"] = stage_scores(context)
             annotation_hash = annotation["annotation_sha256"]
-        else:
-            final = np.asarray([
-                sparse_primitive_return(done, int(chunk["start"]), int(chunk["length"]), gamma)
-                for chunk in chunks
-            ], dtype=np.float32)
-            arrays = {"sparse_reward": final}
-            annotation_hash = None
-        key = stable_hash({**identity, "run_id": episode["run_id"], "chunks": chunks,
-                           "trajectory_sha256": episode["trajectory_sha256"],
+        arrays = step_reward_arrays(episode, derivation, signals)
+        key = stable_hash({**identity, "run_id": episode["run_id"], **_episode_reward_metadata(episode),
                            "annotation_sha256": annotation_hash})
         output = generation_dir / f"{key}.npz"
         temporary = generation_dir / f".{key}.{os.getpid()}.npz"
         try:
-            np.savez_compressed(temporary, boundary_steps=np.asarray(episode["reward_boundaries"]),
-                                **_episode_timeline_arrays(episode),
-                                final_reward=final, pbrs_chunk_reward=final, **arrays)
+            np.savez_compressed(temporary, **_episode_timeline_arrays(episode), **arrays)
             os.replace(temporary, output)
         finally:
             temporary.unlink(missing_ok=True)

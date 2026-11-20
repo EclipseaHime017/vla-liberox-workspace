@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import yaml
 
+from rewards.manifest import REWARD_SCHEMA_VERSION
 from studio.exceptions import ConflictError
 from studio.services.trajectory_reward_snapshot import (
     bind_reward_snapshot,
@@ -33,7 +34,7 @@ def full_reward(jobs, dataset, source="stage", exponent=2):
         "source_manifest": artifact["manifest"]["path"], "source_manifest_sha256": artifact["manifest"]["sha256"],
         "chunks": [{"start": a, "end": b, "length": b-a, "action_source": "policy",
                     "transition_type": "policy", "interrupted": False, "copied_prefix": False}
-                   for a, b in [(0, 8), (8, 16), (16, 17)]], "reward_boundaries": [0, 8, 16, 17]}
+                   for a, b in [(0, 8), (8, 16), (16, 17)]]}
     prepared = {"schema_version": 5, "chunking": "recorded_execution_v1",
         "dataset_sha256": "prepared", "source_dataset_id": dataset["id"],
         "source_dataset_sha256": dataset["dataset_sha256"], "episodes": [episode],
@@ -43,12 +44,12 @@ def full_reward(jobs, dataset, source="stage", exponent=2):
     rewards.mkdir()
     arrays = rewards / "values.npz"
     scores = -1 + (np.arange(18)/17)**exponent
-    np.savez(arrays, final_reward=scores[[8, 16, 17]], boundary_steps=[0, 8, 16, 17],
+    np.savez(arrays, final_reward=scores[1:], stage_reward=scores[1:],
              stage_score=scores, time_seconds=np.arange(18)/20)
     recipe = {"source": source, "rynnvalue": False, "gamma": raw["reward"]["gamma"]}
     if source == "stage":
         recipe["stage_exponent"] = exponent
-    index = {"schema_version": 1, "kind": "derived_iql_reward", "complete": True,
+    index = {"schema_version": REWARD_SCHEMA_VERSION, "kind": "derived_iql_reward", "complete": True,
         "dataset_sha256": "prepared", "reward_config": recipe, "episodes": [{
             "run_id": "run", "reward_path": str(arrays), "annotation_path": str(arrays),
             "reward_sha256": digest(arrays), "annotation_sha256": digest(arrays)}]}

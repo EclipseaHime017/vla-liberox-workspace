@@ -736,8 +736,6 @@ def add_episode_chunks(episode: dict[str, Any], horizon: int | None = None) -> N
     episode["evaluation_chunks"] = [
         {**chunk, "transition_type": "post_terminal_evaluation"}
         if int(chunk["start"]) >= success_end else dict(chunk) for chunk in chunks]
-    episode["reward_boundaries"] = sorted({
-        value for chunk in episode["evaluation_chunks"] for value in (chunk["start"], chunk["end"])})
 
 
 @with_dataset_lease

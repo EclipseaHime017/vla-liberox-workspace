@@ -18,7 +18,7 @@ from test_rewards import FakeAnnotator
 
 def example(length=3, *, terminal=None):
     return {"run_id": "sample", "recorded_action_count": length, "terminal_step": terminal,
-            "reward_boundaries": [0, length], "chunks": [{"start": 0, "end": length, "length": length}]}
+            "chunks": [{"start": 0, "end": length, "length": length}]}
 
 
 def recipe(**overrides):
@@ -26,59 +26,52 @@ def recipe(**overrides):
             "gamma": .9, **overrides}
 
 
+def signals(length):
+    return {"stage_score": np.linspace(-1., -.2, length + 1),
+            "absolute_temporal_distance_seconds": np.linspace(3., 1., length + 1)[:, None]}
+
+
 @pytest.mark.parametrize("length", [3, 8])
-def test_additive_three_existing_rewards(length):
-    episode = example(length)
-    scores = np.linspace(-1., -.2, length + 1)
-    signals = {"stage_score": scores, "absolute_temporal_distance_seconds": np.array([[3.], [1.]])}
-    settings = recipe()
-    b = -sum(.9 ** h for h in range(length))
-    f = 3 - .9 ** length
-    s = np.dot(.9 ** np.arange(length), scores[1:])
-    assert fused_reward_arrays(episode, settings, {})["final_reward"][0] == pytest.approx(b)
-    rynn = fused_reward_arrays(episode, {**settings, "shaping_weight": .1}, signals)
-    assert rynn["final_reward"][0] == pytest.approx(b + .1 * f)
-    stage = fused_reward_arrays(episode, {**settings, "alpha": 1.}, signals)
-    assert stage["final_reward"][0] == pytest.approx(s)
-    merged = fused_reward_arrays(episode, {**settings, "alpha": .5, "shaping_weight": .1}, signals)
-    assert merged["final_reward"][0] == pytest.approx(.5 * b + .5 * s + .1 * f)
-    assert merged["original_final_reward"][0] == pytest.approx(b + .1 * f)
+def test_additive_three_existing_rewards_per_action(length):
+    episode, saved = example(length), signals(length)
+    phi = -saved["absolute_temporal_distance_seconds"][:, 0]
+    b = np.full(length, -1.)
+    f = .9 * phi[1:] - phi[:-1]
+    s = saved["stage_score"][1:]
+    np.testing.assert_allclose(fused_reward_arrays(episode, recipe(), {})["final_reward"], b)
+    rynn = fused_reward_arrays(episode, recipe(shaping_weight=.1), saved)
+    np.testing.assert_allclose(rynn["final_reward"], b + .1 * f, rtol=1e-6)
+    stage = fused_reward_arrays(episode, recipe(alpha=1.), saved)
+    np.testing.assert_allclose(stage["final_reward"], s, rtol=1e-6)
+    merged = fused_reward_arrays(episode, recipe(alpha=.5, shaping_weight=.1), saved)
+    np.testing.assert_allclose(merged["final_reward"], .5 * b + .5 * s + .1 * f, rtol=1e-6)
+    np.testing.assert_allclose(merged["original_final_reward"], b + .1 * f, rtol=1e-6)
+    # Shaping summed over the recording telescopes to its two ends.
+    total = np.dot(.9 ** np.arange(length), merged["pbrs_shaping_reward"])
+    assert total == pytest.approx(.9 ** length * phi[-1] - phi[0], rel=1e-5)
 
 
-def test_multiplication_has_no_floor():
-    settings = recipe(fusion_mode="multiplicative")
-    scores = np.array([-1., -.8, -.4, 0.])
-    result = fused_reward_arrays(example(), settings, {"stage_score": scores})
-    assert result["final_reward"][0] == 0
-    assert result["sparse_reward"][0] == pytest.approx(-(1 + .9 + .81))
+def test_multiplication_scales_each_action_by_the_next_stage_score_without_floor():
+    saved = {"stage_score": np.array([-1., -.8, -.4, 0.]),
+             "absolute_temporal_distance_seconds": np.array([[3.], [2.], [1.], [0.]])}
+    result = fused_reward_arrays(example(), recipe(fusion_mode="multiplicative", shaping_weight=.2), saved)
+    original = result["sparse_reward"] + .2 * result["pbrs_shaping_reward"]
+    np.testing.assert_allclose(result["final_reward"], -saved["stage_score"][1:] * original, rtol=1e-6)
+    assert result["final_reward"][-1] == 0
 
 
 def test_negative_scores_are_not_clipped_and_positive_scores_rejected():
     settings = recipe(alpha=1.)
-    assert fused_reward_arrays(example(), settings, {"stage_score": np.full(4, -2.)})["final_reward"][0] == pytest.approx(
-        -2 * (1 + .9 + .81))
+    assert fused_reward_arrays(example(), settings, {"stage_score": np.full(4, -2.)})["final_reward"].tolist() == [-2.] * 3
     with pytest.raises(ValueError, match="exceeds zero"):
         fused_reward_arrays(example(), settings, {"stage_score": np.array([-1., .1, 0., 0.])})
     with pytest.raises(ValueError, match="Stage"):
         fused_reward_arrays(example(), settings, {})
     with pytest.raises(ValueError, match="RynnValue"):
         fused_reward_arrays(example(), recipe(shaping_weight=.1), {})
-
-
-@pytest.mark.parametrize("length", [3, 8])
-def test_multiplication_scales_the_interval_return_by_its_end_stage(length):
-    scores = np.linspace(-1., -.1, length + 1)
-    signals = {"stage_score": scores,
-               "absolute_temporal_distance_seconds": np.array([[3.], [1.]])}
-    settings = recipe(fusion_mode="multiplicative", shaping_weight=.2)
-    for gamma in [.9, .92]:
-        settings["gamma"] = gamma
-        result = fused_reward_arrays(example(length), settings, signals)
-        sparse = -sum(gamma ** h for h in range(length))
-        expected = .1 * (sparse + .2 * (3 - gamma ** length))
-        assert result["final_reward"][0] == pytest.approx(expected)
-        assert result["pbrs_shaping_reward"][0] == pytest.approx(3 - gamma ** length)
-        assert "primitive_potential" not in result
+    with pytest.raises(ValueError, match="RynnValue"):
+        fused_reward_arrays(example(), recipe(shaping_weight=.1),
+                            {"absolute_temporal_distance_seconds": np.ones((2, 1))})
 
 
 def test_mixed_global_results_bind_additive_and_multiplicative_rewards(configured):
@@ -98,46 +91,8 @@ def test_mixed_global_results_bind_additive_and_multiplicative_rewards(configure
 
 
 def test_preserves_post_success_zero_cost():
-    settings = recipe(alpha=.5)
-    data = fused_reward_arrays(example(8, terminal=0), settings, {"stage_score": np.zeros(9)})
-    assert data["final_reward"].tolist() == [0.]
-
-
-@pytest.mark.parametrize("mode", ["additive", "multiplicative"])
-def test_rescale_anchors_full_recording_and_preserves_original_components(mode):
-    chunks = [{"start": 0, "end": 3, "length": 3}, {"start": 3, "end": 6, "length": 3}]
-    episode = {**example(6, terminal=5), "reward_boundaries": [0, 3, 6],
-               "evaluation_chunks": chunks, "chunks": chunks[1:], "resume_step": 3}
-    signals = {"stage_score": np.array([-1., -.9, -.8, -.7, -.6, -.2, 0.]),
-               "absolute_temporal_distance_seconds": np.array([[6.], [4.], [0.]])}
-    settings = recipe(fusion_mode=mode, alpha=.5, shaping_weight=.1)
-    original = fused_reward_arrays(episode, settings, signals)
-    result = fused_reward_arrays(episode, {**settings, "final_normalization": "initial_chunk_v1"}, signals)
-    assert result["final_reward"][0] == -1.
-    np.testing.assert_allclose(result["final_reward"], original["final_reward"] / -original["final_reward"][0])
-    np.testing.assert_allclose(result["raw_final_reward"], original["final_reward"])
-    assert result["final_reward_reference"] == pytest.approx(original["final_reward"][0])
-    assert result["final_reward_scale"] == pytest.approx(1 / -original["final_reward"][0])
-    for key in ("sparse_reward", "pbrs_shaping_reward", "dense_reward", "original_final_reward", "stage_score"):
-        np.testing.assert_array_equal(result[key], original[key])
-    np.testing.assert_array_equal(result["pbrs_chunk_reward"], result["final_reward"])
-
-
-@pytest.mark.parametrize("distance", [3., 4.])
-def test_nonnegative_initial_final_is_rejected(distance):
-    with pytest.raises(ValueError, match="Initial Final Reward must be negative.*sample"):
-        fused_reward_arrays(example(), recipe(shaping_weight=1., final_normalization="initial_chunk_v1"),
-            {"absolute_temporal_distance_seconds": np.array([[distance], [0.]])})
-
-
-def test_negative_near_zero_is_not_clamped_and_missing_prefix_is_rejected():
-    settings = recipe(alpha=1., final_normalization="initial_chunk_v1")
-    result = fused_reward_arrays(example(1), settings, {"stage_score": np.array([-1., -1e-12])})
-    assert result["final_reward"][0] == -1
-    assert result["final_reward_reference"] == -1e-12
-    episode = {**example(), "chunks": [{"start": 1, "end": 3, "length": 2}]}
-    with pytest.raises(ValueError, match="full trajectory from step 0"):
-        fused_reward_arrays(episode, settings, {"stage_score": np.full(4, -.5)})
+    data = fused_reward_arrays(example(8, terminal=0), recipe(alpha=.5), {"stage_score": np.zeros(9)})
+    assert data["final_reward"].tolist() == [0.] * 8
 
 
 def test_final_cpu_materialization_and_pinned_training_reduction(configured, monkeypatch):
@@ -163,13 +118,12 @@ def test_final_cpu_materialization_and_pinned_training_reduction(configured, mon
     assert changed["episodes"][0]["reward_sha256"] != index["episodes"][0]["reward_sha256"]
 
 
-@pytest.mark.parametrize("normalization", ["none", "initial_chunk_v1"])
-def test_pinned_gamma_change_recomputes_reference_without_changing_saved_semantics(configured, normalization):
+def test_pinned_gamma_change_recomputes_rewards_without_changing_saved_semantics(configured):
     from rewards.rynnvalue.annotate import annotate_manifest
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
     annotate_manifest(configured, FakeAnnotator())
-    configured.raw["reward"].update(recipe(alpha=.5, shaping_weight=.1), final_normalization=normalization)
+    configured.raw["reward"].update(recipe(alpha=.5, shaping_weight=.1))
     index = load_reward_index(configured)
     path = Path(configured.raw["paths"]["work_dir"]) / "rewards" / "reward_manifest.json"
     before = {e["run_id"]: Path(e["reward_path"]).read_bytes() for e in index["episodes"]}
@@ -181,13 +135,7 @@ def test_pinned_gamma_change_recomputes_reference_without_changing_saved_semanti
         with np.load(entry["reward_path"]) as values, np.load(old["reward_path"]) as saved:
             expected = fused_reward_arrays(episode, adapted["reward_config"], {k: saved[k] for k in saved.files})
             np.testing.assert_array_equal(values["final_reward"], expected["final_reward"])
-            if normalization == "initial_chunk_v1":
-                assert values["final_reward"][0] == -1
-                assert values["final_reward_reference"] != saved["final_reward_reference"]
-                assert values["final_reward_reference"] == values["raw_final_reward"][0]
-            else:
-                assert "final_normalization" not in adapted["reward_config"]
-                assert "final_reward_scale" not in values
+            assert not np.array_equal(values["pbrs_shaping_reward"], saved["pbrs_shaping_reward"])
 
 
 def test_missing_rynn_is_error_not_a_model_forward(configured, monkeypatch):
@@ -198,33 +146,7 @@ def test_missing_rynn_is_error_not_a_model_forward(configured, monkeypatch):
         load_reward_index(configured)
 
 
-def test_regenerate_unscaled_final_reuses_inputs_and_keeps_old_arrays(configured, monkeypatch):
-    from rewards.rynnvalue.annotate import annotate_manifest
-    from rewards.rynnvalue.outputs import OFFICIAL_OUTPUT_KEYS
-    manifest = json.loads(prepare_dataset(configured).manifest.read_text())
-    _save_annotations(configured, manifest)
-    annotation_path = annotate_manifest(configured, FakeAnnotator())
-    annotations_before = annotation_path.read_bytes()
-    monkeypatch.setattr("rewards.rynnvalue.annotate.RynnValueAnnotator", lambda _: pytest.fail("model load"))
-    configured.raw["reward"].update(recipe(alpha=.5, shaping_weight=.1), final_normalization="none")
-    old = load_reward_index(configured)
-    before = {entry["reward_path"]: Path(entry["reward_path"]).read_bytes() for entry in old["episodes"]}
-    configured.raw["reward"]["final_normalization"] = "initial_chunk_v1"
-    new = load_reward_index(configured)
-    assert annotation_path.read_bytes() == annotations_before
-    assert old["stage_annotations_sha256"] == new["stage_annotations_sha256"]
-    assert new["reward_config"]["final_normalization"] == "initial_chunk_v1"
-    for old_entry, new_entry in zip(old["episodes"], new["episodes"]):
-        assert old_entry["reward_path"] != new_entry["reward_path"]
-        assert Path(old_entry["reward_path"]).read_bytes() == before[old_entry["reward_path"]]
-        with np.load(old_entry["reward_path"]) as old_values, np.load(new_entry["reward_path"]) as values:
-            assert values["final_reward"][0] == -1
-            for key in (*OFFICIAL_OUTPUT_KEYS, "stage_score", "original_final_reward"):
-                np.testing.assert_array_equal(values[key], old_values[key])
-    assert load_reward_index(configured) == new
-
-
-@pytest.mark.parametrize("damage", ["snapshot", "duplicate_member", "chunk_metadata", "symlink"])
+@pytest.mark.parametrize("damage", ["snapshot", "duplicate_member", "terminal_step", "symlink"])
 def test_bad_cache_is_rebuilt_without_overwriting_old_arrays(configured, damage):
     manifest = json.loads(prepare_dataset(configured).manifest.read_text())
     _save_annotations(configured, manifest)
@@ -239,8 +161,8 @@ def test_bad_cache_is_rebuilt_without_overwriting_old_arrays(configured, damage)
         Path(cached["stage_annotations_path"]).write_text("{}")
     elif damage == "duplicate_member":
         cached["episodes"][-1] = entry
-    elif damage == "chunk_metadata":
-        entry["evaluation_chunks"][0]["end"] += 1
+    elif damage == "terminal_step":
+        entry["terminal_step"] = 0
     else:
         link = old_values.with_name("linked.npz")
         link.symlink_to(old_values)

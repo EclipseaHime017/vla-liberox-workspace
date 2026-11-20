@@ -15,12 +15,14 @@ from train.replay import ReplayDataset
 from rewards.rynnvalue.annotate import annotate_manifest
 from rewards.manifest import load_reward_index, reward_manifest_digest
 from cluster.inputs import discover_tasks, prepare_global_inputs, saved_reward, open_run_source
+from rewards.evaluation_store import SNAPSHOT_SCHEMA_VERSION
+from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION
 
 
 def global_runs(configured):
     """PC-side global sidecars, independent of database/frozen dataset/cache paths."""
     config = copy.deepcopy(configured)
-    config.raw["reward"].update(source="final", alpha=0., final_normalization="initial_chunk_v1")
+    config.raw["reward"].update(source="final", alpha=0.)
     prepare_dataset(config)
     annotate_manifest(config, FakeAnnotator())
     index = load_reward_index(config)
@@ -30,7 +32,7 @@ def global_runs(configured):
         destination = directory / f"trajectory_reward.{entry['reward_sha256']}.npz"
         shutil.copyfile(entry["reward_path"], destination)
         atomic_json(directory / "trajectory_reward.final.json", {
-            "schema_version": 1, "source": "final", "run_id": episode["run_id"],
+            "schema_version": SNAPSHOT_SCHEMA_VERSION, "source": "final", "run_id": episode["run_id"],
             "trajectory_sha256": episode["trajectory_sha256"],
             "observations_sha256": episode["observations_sha256"],
             "values_file": destination.name, "values_sha256": sha256_file(destination),
@@ -214,7 +216,7 @@ def test_scan_is_lightweight_and_uses_all_marked_runs_not_a_quota(configured, tm
     assert len(task.selected(None)) == 2
 
 
-@pytest.mark.parametrize("mutation", ["values", "trajectory", "observations", "threshold", "unsafe", "boundaries"])
+@pytest.mark.parametrize("mutation", ["values", "trajectory", "observations", "threshold", "unsafe", "coverage"])
 def test_corrupt_evaluations_fail_without_fallback(configured, tmp_path, mutation):
     task, config, _ = global_runs(configured)
     run = task.runs[0]
@@ -230,7 +232,7 @@ def test_corrupt_evaluations_fail_without_fallback(configured, tmp_path, mutatio
     else:
         with np.load(values) as saved:
             arrays = {key: saved[key] for key in saved.files}
-        arrays["boundary_steps"][1] += 1
+        arrays["final_reward"] = arrays["final_reward"][:-1]
         np.savez_compressed(values, **arrays)
         metadata["values_sha256"] = sha256_file(values)
     atomic_json(run.rewards["final"], metadata)
@@ -246,7 +248,7 @@ def test_native_rynn_sidecar_without_old_cache_or_dataset_metadata(configured, t
         root = Path(episode["trajectory_path"]).parent
         shutil.copyfile(entry["reward_path"], root / "rynnvalue_evaluation.npz")
         atomic_json(root / "rynnvalue_evaluation.json", {
-            "schema_version": 6, "run_id": episode["run_id"],
+            "schema_version": ANNOTATION_SCHEMA_VERSION, "run_id": episode["run_id"],
             "trajectory_sha256": episode["trajectory_sha256"],
             "observations_sha256": episode["observations_sha256"],
             "values_sha256": sha256_file(root / "rynnvalue_evaluation.npz"),
@@ -310,7 +312,7 @@ def test_implicit_global_stage_reuses_keyframes_without_resaving(configured, tmp
     metadata = next(item for item in descriptors if item["run_id"] == first.run_id)
     destination = first.episode_dir / "saved-stage.npz"
     shutil.copyfile(p4_entry["reward_path"], destination)
-    metadata.update(schema_version=1, values_file=destination.name)
+    metadata.update(schema_version=SNAPSHOT_SCHEMA_VERSION, values_file=destination.name)
     atomic_json(first.episode_dir / "trajectory_reward.stage.json", metadata)
     task, = discover_tasks(Path(config.raw["paths"]["dataset_sources"][0]), "libero_x_vla")
     from test_server_pipeline import configuration

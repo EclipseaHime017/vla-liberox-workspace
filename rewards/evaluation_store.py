@@ -20,9 +20,18 @@ from rewards.manifest import REWARD_SCHEMA_VERSION
 
 SIDECAR_NAME = "rynnvalue_evaluation.json"
 VALUES_NAME = "rynnvalue_evaluation.npz"
-PBRS_ARRAY_KEYS = frozenset({"pbrs_shaping_reward", "pbrs_chunk_reward"})
-REQUIRED_ARRAY_KEYS = frozenset(OFFICIAL_OUTPUT_KEYS) | PBRS_ARRAY_KEYS | {"boundary_steps"}
-COMPATIBLE_SIDECAR_SCHEMA_VERSIONS = frozenset({5, ANNOTATION_SCHEMA_VERSION})
+# Per-source reward snapshots beside a trajectory (trajectory_reward.<source>.json) hold
+# per-action rewards.
+SNAPSHOT_SCHEMA_VERSION = 2
+REWARD_ARRAY_KEYS = frozenset({"sparse_reward", "pbrs_shaping_reward", "dense_reward", "final_reward"})
+REQUIRED_ARRAY_KEYS = frozenset(OFFICIAL_OUTPUT_KEYS) | REWARD_ARRAY_KEYS
+
+
+def covers_recording(arrays, action_count: int) -> bool:
+    """Official outputs per observation and rewards per action of the whole recording."""
+    return (REQUIRED_ARRAY_KEYS.issubset(arrays.files)
+            and all(arrays[key].shape[0] == action_count + 1 for key in OFFICIAL_OUTPUT_KEYS)
+            and all(arrays[key].shape == (action_count,) for key in REWARD_ARRAY_KEYS))
 
 
 def _utc_now() -> str:
@@ -64,7 +73,7 @@ def valid_bound_evaluation(episode: dict[str, Any]) -> dict[str, Any] | None:
         if path.is_symlink() or not path.is_file() or sha256_file(path) != episode.get(hash_key):
             return None
     if (
-        payload.get("schema_version") not in COMPATIBLE_SIDECAR_SCHEMA_VERSIONS
+        payload.get("schema_version") != ANNOTATION_SCHEMA_VERSION
         or payload.get("run_id") != episode.get("run_id")
         or payload.get("trajectory_sha256") != sha256_file(trajectory)
         or payload.get("observations_sha256") != episode.get("observations_sha256")
@@ -73,14 +82,7 @@ def valid_bound_evaluation(episode: dict[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         with np.load(values, allow_pickle=False) as arrays:
-            if not REQUIRED_ARRAY_KEYS.issubset(arrays.files):
-                return None
-            boundaries = np.asarray(arrays["boundary_steps"], dtype=np.int64)
-            if (
-                len(boundaries) < 2
-                or int(boundaries[0]) != 0
-                or int(boundaries[-1]) != int(episode["recorded_action_count"])
-            ):
+            if not covers_recording(arrays, int(episode["recorded_action_count"])):
                 return None
     except (KeyError, OSError, ValueError):
         return None
@@ -177,13 +179,8 @@ def bind_reward_manifest(
             missing = sorted(REQUIRED_ARRAY_KEYS - set(arrays.files))
             if missing:
                 raise ValueError(f"Annotation for {run_id} is missing arrays: {missing}")
-            boundaries = np.asarray(arrays["boundary_steps"], dtype=np.int64)
-            if (
-                len(boundaries) < 2
-                or int(boundaries[0]) != 0
-                or int(boundaries[-1]) != int(episode["recorded_action_count"])
-            ):
-                raise ValueError(f"Annotation boundaries do not cover {run_id}")
+            if not covers_recording(arrays, int(episode["recorded_action_count"])):
+                raise ValueError(f"Annotation does not cover every step of {run_id}")
 
         episode_dir = trajectory.parent
         destination = episode_dir / VALUES_NAME
@@ -200,7 +197,7 @@ def bind_reward_manifest(
             "source_key": reward.get("source_key"),
             "values_file": VALUES_NAME,
             "values_sha256": sha256_file(destination),
-            "boundary_count": int(len(boundaries)),
+            "observation_count": int(episode["recorded_action_count"]) + 1,
             "annotator": reward.get("annotator") or rewards.get("annotator") or {},
             "annotation_config": rewards.get("annotation_config") or {},
             "reward_config": rewards.get("reward_config") or {},

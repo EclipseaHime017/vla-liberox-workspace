@@ -32,14 +32,16 @@ def test_existing_first_snapshot_skips_observation_hashing(tmp_path, monkeypatch
 
 
 def test_existing_global_rynn_does_not_block_dataset_stage(tmp_path):
-    from studio.services.trajectory_evaluation_service import OFFICIAL_ARRAY_KEYS, PBRS_ARRAY_KEYS
+    from rewards.evaluation_store import REWARD_ARRAY_KEYS
+    from rewards.rynnvalue.outputs import ANNOTATION_SCHEMA_VERSION, OFFICIAL_OUTPUT_KEYS
 
     result, service, _, _ = global_fixture(tmp_path)
     trajectory = Path(result["run"]["trajectory"])
     values = trajectory.with_name("rynnvalue_evaluation.npz")
-    np.savez(values, boundary_steps=[0, 20], **{key: [0.] for key in OFFICIAL_ARRAY_KEYS | PBRS_ARRAY_KEYS})
+    np.savez(values, **{key: np.zeros((21, 1)) for key in OFFICIAL_OUTPUT_KEYS},
+             **{key: np.zeros(20) for key in REWARD_ARRAY_KEYS})
     trajectory.with_name("rynnvalue_evaluation.json").write_text(json.dumps({
-        "schema_version": 6, "run_id": "r",
+        "schema_version": ANNOTATION_SCHEMA_VERSION, "run_id": "r",
         "trajectory_sha256": digest(trajectory), "values_sha256": digest(values),
         "observations_sha256": digest(trajectory.with_name("trajectory_observations.npz")),
     }))

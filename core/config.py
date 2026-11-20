@@ -57,7 +57,7 @@ TRAIN_SCHEMA = {
     "reward": {"model": None, "revision": None, "device": None, "dtype": None,
                "max_frames": None, "annotation_batch_size": None,
                "rynnvalue": None, "source": None, "stage_exponent": None,
-               "fusion_mode": None, "alpha": None, "final_normalization": None,
+               "fusion_mode": None, "alpha": None,
                "manifest_path": None, "manifest_sha256": None, "version_id": None,
                "gamma": None, "shaping_weight": None,
                "robot_description": None,
@@ -210,16 +210,6 @@ def reward_source(reward: dict[str, Any]) -> str:
     return source
 
 
-# Reward versions saved before per-step accumulation became the only mode record this
-# flag; it no longer changes any reward.
-LEGACY_REWARD_KEYS = frozenset({"accumulate_primitive_steps"})
-
-
-def current_reward_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    """Saved reward settings without keys that no longer have a meaning."""
-    return {key: value for key, value in settings.items() if key not in LEGACY_REWARD_KEYS}
-
-
 def needs_rynnvalue(reward: dict[str, Any]) -> bool:
     source = reward_source(reward)
     return source == "rynnvalue" or (source == "final" and reward["shaping_weight"] > 0)
@@ -301,8 +291,6 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
         reward.setdefault("stage_exponent", 2.0)
         reward.setdefault("fusion_mode", "additive")
         reward.setdefault("alpha", 0.0)
-        # Absence denotes historical, unscaled Final Reward snapshots.
-        reward.setdefault("final_normalization", "none")
         for name in ("manifest_path", "manifest_sha256", "version_id"):
             reward.setdefault(name, None)
     if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
@@ -410,8 +398,6 @@ def validate_train_config(raw: dict[str, Any], path: Path) -> LoadedConfig:
                 raise ValueError("reward.base_coefficient must be finite")
             if reward_source(reward) != "final" or reward["fusion_mode"] != "additive":
                 raise ValueError("reward.base_coefficient requires additive Final Reward")
-        if reward["final_normalization"] not in {"none", "initial_chunk_v1"}:
-            raise ValueError("Unsupported reward.final_normalization")
         if reward["dtype"] != "bfloat16":
             raise ValueError(
                 "Version 1 requires reward.dtype=bfloat16 to match the pinned RynnValue-4B "

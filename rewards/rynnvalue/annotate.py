@@ -1,4 +1,9 @@
-"""Run RynnValue over a prepared dataset, reusing compatible saved outputs."""
+"""Run RynnValue over a prepared dataset, reusing compatible saved outputs.
+
+Like the official inference program, every observation step of a recording is evaluated
+and each prediction conditions on ``max_frames`` frames resampled uniformly in time from
+the recording's prefix up to that step.
+"""
 from __future__ import annotations
 
 import json
@@ -95,7 +100,6 @@ def annotate_manifest(
             "trajectory": episode["trajectory_sha256"],
             "observations": episode["observations_sha256"],
             "prompt": episode["prompt"],
-            "boundaries": episode["reward_boundaries"],
             "annotation_config": annotation_cfg,
             "model": episode_annotator_metadata,
         })
@@ -115,7 +119,6 @@ def annotate_manifest(
             ):
                 index.append(current)
                 continue
-        boundaries = np.asarray(episode["reward_boundaries"], dtype=np.int64)
         if reusable is not None:
             official_outputs, analysis, _ = reusable
             LOG.info("Reusing official RynnValue outputs for %s", episode["run_id"])
@@ -123,10 +126,9 @@ def annotate_manifest(
             current_annotator = live_annotator()
             with np.load(storage_path(episode["observations_path"]), allow_pickle=False) as images:
                 raw = images["agentview_image"]
-                frames = [
-                    reward_view(raw[int(index)], episode["observation_orientation"])
-                    for index in boundaries
-                ]
+                frames = [reward_view(frame, episode["observation_orientation"]) for frame in raw]
+            if len(frames) != int(episode["recorded_action_count"]) + 1:
+                raise ValueError(f"Observations do not cover every step of {episode['run_id']}")
             official_outputs = validate_official_outputs(
                 current_annotator.predict(episode["prompt"], frames), len(frames)
             )
@@ -135,11 +137,7 @@ def annotate_manifest(
         output = cache_dir / f"{source_key}-{uuid.uuid4().hex}.npz"
         temporary = cache_dir / f".{output.name}.{os.getpid()}.npz"
         try:
-            np.savez_compressed(
-                temporary,
-                boundary_steps=boundaries,
-                **official_outputs,
-            )
+            np.savez_compressed(temporary, **official_outputs)
             os.replace(temporary, output)
         finally:
             temporary.unlink(missing_ok=True)
@@ -151,17 +149,19 @@ def annotate_manifest(
             "annotator": episode_annotator_metadata,
             "official_outputs": {
                 "inference_method": "prefix_uniform_last_slot",
+                "evaluated_steps": "every_observation",
                 "prefix_image_slots": int(reward_cfg["max_frames"]),
                 "absolute_slot": "last_value_slot_of_each_uniformly_resampled_prefix",
                 "relative_slot": "between_last_two_slots_of_each_uniformly_resampled_prefix",
-                "boundary_count": len(boundaries),
+                "observation_count": len(official_outputs["absolute_temporal_distance_seconds"]),
                 "array_keys": sorted(official_outputs),
                 "analysis": analysis,
             },
         }
         atomic_json(meta_path, metadata)
         index.append(metadata)
-        LOG.info("Annotated %s (%d boundaries)", episode["run_id"], len(boundaries))
+        LOG.info("Annotated %s (%d observations)", episode["run_id"],
+                 len(official_outputs["absolute_temporal_distance_seconds"]))
         atomic_json(annotation_dir / "annotation_manifest.json", {
             "schema_version": ANNOTATION_SCHEMA_VERSION,
             "kind": "rynnvalue_annotation",
@@ -183,7 +183,7 @@ def annotate_manifest(
 
 
 def load_annotation_index(config: LoadedConfig) -> dict[str, Any]:
-    """Load official RynnValue outputs, migrating v4/v5 caches without a new forward."""
+    """Load official RynnValue outputs, reusing compatible saved ones without a new forward."""
     manifest = load_manifest(config)
     path = (
         Path(config.section("paths")["work_dir"])
