@@ -5,6 +5,7 @@ import dataclasses
 import json
 import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,22 @@ def export_actor(components, settings, directory, *, checkpoint=None):
                                  "base_identity": sha256_file(directory / IDENTITY_FILE)}}
 
 
+@contextmanager
+def _sampling_mode(model):
+    """Evaluation mode for sampling inside training, restored module by module afterwards.
+
+    With gradient checkpointing in training mode the language model returns no KV cache, which
+    the shared-prefix sampler needs (Value Flows samples next chunks while the actor trains).
+    """
+    modes = [(module, module.training) for module in model.modules()]
+    model.eval()
+    try:
+        yield
+    finally:
+        for module, training in modes:
+            module.training = training
+
+
 @torch.no_grad()
 def _sample_shared_prefix(model, device, observation, count: int, num_steps: int, noise=None) -> torch.Tensor:
     """OpenPI ``sample_actions`` with each observation's image/prompt prefix encoded once.
@@ -197,30 +214,32 @@ def _sample_shared_prefix(model, device, observation, count: int, num_steps: int
     Mirrors ``PI0Pytorch.sample_actions`` at the pinned OpenPI commit; the prefix KV cache,
     masks and state are repeated ``count`` times per observation (observation-major order)
     before the Euler denoising loop, so N candidates cost one prefix pass plus N suffixes.
+    The model samples in evaluation mode, as at inference, and keeps its own modes afterwards.
     """
-    from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
-    images, img_masks, lang_tokens, lang_masks, state = model._preprocess_observation(observation, train=False)
-    prefix_embs, prefix_pad_masks, prefix_att_masks = model.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-    prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-    prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-    prefix_att_2d_masks_4d = model._prepare_attention_masks_4d(prefix_att_2d_masks)
-    model.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
-    _, past_key_values = model.paligemma_with_expert.forward(
-        attention_mask=prefix_att_2d_masks_4d, position_ids=prefix_position_ids,
-        past_key_values=None, inputs_embeds=[prefix_embs, None], use_cache=True)
-    past_key_values.batch_repeat_interleave(count)
-    prefix_pad_masks = prefix_pad_masks.repeat_interleave(count, dim=0)
-    state = state.repeat_interleave(count, dim=0)
-    total = prefix_pad_masks.shape[0]
-    if noise is None:
-        noise = model.sample_noise((total, model.config.action_horizon, model.config.action_dim), device)
-    dt = torch.tensor(-1.0 / num_steps, dtype=torch.float32, device=device)
-    x_t, time = noise, torch.tensor(1.0, dtype=torch.float32, device=device)
-    while time >= -dt / 2:
-        v_t = model.denoise_step(state, prefix_pad_masks, past_key_values, x_t, time.expand(total))
-        x_t = x_t + dt * v_t
-        time += dt
-    return x_t
+    with _sampling_mode(model):
+        from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
+        images, img_masks, lang_tokens, lang_masks, state = model._preprocess_observation(observation, train=False)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = model.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        prefix_att_2d_masks_4d = model._prepare_attention_masks_4d(prefix_att_2d_masks)
+        model.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+        _, past_key_values = model.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d, position_ids=prefix_position_ids,
+            past_key_values=None, inputs_embeds=[prefix_embs, None], use_cache=True)
+        past_key_values.batch_repeat_interleave(count)
+        prefix_pad_masks = prefix_pad_masks.repeat_interleave(count, dim=0)
+        state = state.repeat_interleave(count, dim=0)
+        total = prefix_pad_masks.shape[0]
+        if noise is None:
+            noise = model.sample_noise((total, model.config.action_horizon, model.config.action_dim), device)
+        dt = torch.tensor(-1.0 / num_steps, dtype=torch.float32, device=device)
+        x_t, time = noise, torch.tensor(1.0, dtype=torch.float32, device=device)
+        while time >= -dt / 2:
+            v_t = model.denoise_step(state, prefix_pad_masks, past_key_values, x_t, time.expand(total))
+            x_t = x_t + dt * v_t
+            time += dt
+        return x_t
 
 
 def sample_chunks(components, observations: list[dict], count: int, *, noise=None) -> np.ndarray:

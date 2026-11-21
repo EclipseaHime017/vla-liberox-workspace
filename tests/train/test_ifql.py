@@ -151,12 +151,15 @@ class FakeCache:
         self.value = self.value.repeat_interleave(repeats, dim=0)
 
 
-class FakeFlowModel:
+class FakeFlowModel(torch.nn.Module):
     """Implements the OpenPI calls the shared-prefix sampler makes, with a toy vector field."""
 
     def __init__(self):
         from types import SimpleNamespace
+        super().__init__()
         self.config = SimpleNamespace(action_horizon=3, action_dim=2)
+        self.backbone = torch.nn.Linear(1, 1)
+        self.modes_during_prefix = []
         language = SimpleNamespace(config=SimpleNamespace(_attn_implementation=None))
         self.paligemma_with_expert = SimpleNamespace(
             paligemma=SimpleNamespace(language_model=language), forward=self._forward)
@@ -175,6 +178,7 @@ class FakeFlowModel:
 
     def _forward(self, **kwargs):
         self.prefix_passes += 1
+        self.modes_during_prefix.append((self.training, self.backbone.training))
         return None, FakeCache(kwargs["inputs_embeds"][0].sum(-1))
 
     def denoise_step(self, state, prefix_pad_masks, past_key_values, x_t, timestep):
@@ -204,6 +208,23 @@ def test_shared_prefix_sampling_matches_per_candidate_integration(monkeypatch):
     assert model.prefix_passes == 1
     expected = model.reference(state.repeat_interleave(3, dim=0), noise, 10)
     torch.testing.assert_close(result, expected)
+
+
+def test_shared_prefix_sampling_runs_in_eval_mode_and_restores_each_module(monkeypatch):
+    # Training with gradient checkpointing drops the prefix KV cache; Value Flows samples mid-training.
+    from types import SimpleNamespace
+    from train.models import pi05
+    install_module = __import__("test_evaluation_policies").install_module
+    install_module(monkeypatch, "openpi.models_pytorch.pi0_pytorch", make_att_2d_masks=lambda pad, att: pad)
+    model = FakeFlowModel()
+    model.train()
+    model.backbone.eval()  # A frozen backbone stays in eval mode while the rest trains.
+    state = torch.tensor([[1.0, 2.0]])
+    model._state = state
+    pi05._sample_shared_prefix(model, torch.device("cpu"), SimpleNamespace(state=state), 2, 4,
+                               noise=torch.zeros(2, 3, 2))
+    assert model.modes_during_prefix == [(False, False)]
+    assert model.training and not model.backbone.training
 
 
 def test_distributed_ifql_matches_single_device_and_exports_unwrapped_critic(tmp_path):
