@@ -9,7 +9,6 @@ from pathlib import Path
 import time
 from typing import Callable
 
-import numpy as np
 import yaml
 
 from studio.storage.files import atomic_write_json, atomic_write_yaml
@@ -43,8 +42,12 @@ def load_spec(path: Path) -> dict:
     return spec
 
 
+def _predict(provider, observation, prompt):
+    return provider.predict(observation, prompt, ())
+
+
 def collect_episode(*, simulator, provider, env, initial_state, prompt: str,
-                    settings: dict, stop_requested: Callable[[], bool], progress=None):
+                    settings: dict, stop_requested: Callable[[], bool], progress=None, query=_predict):
     import sim.env as direct
     from sim.control import run_control_loop
     from sim.recording import TrajectoryRecorder
@@ -60,9 +63,9 @@ def collect_episode(*, simulator, provider, env, initial_state, prompt: str,
     recorder.policy_action_codec = provider.metadata()["recording_action_codec"]
     recorder.record_initial(env, observation)
 
-    def query(observation, _step):
+    def policy_query(observation, _step):
         observation = simulator.observations(env, observation)
-        return observation, provider.predict(observation, prompt, ())
+        return observation, query(provider, observation, prompt)
 
     def transition(_observation, step, _success):
         if progress and (step == 1 or step % settings["open_loop_steps"] == 0 or step == settings["max_steps"]):
@@ -73,34 +76,32 @@ def collect_episode(*, simulator, provider, env, initial_state, prompt: str,
         target_action_count=settings["max_steps"],
         rate_limiter=direct.RealTimeControlLimiter(settings["control_hz"], False),
         action_source="policy", open_loop_steps=settings["open_loop_steps"],
-        policy_query=query, policy_action_transform=provider.process_action,
+        policy_query=policy_query, policy_action_transform=provider.process_action,
         stop_requested=stop_requested, on_transition=transition,
         stop_on_success=False,
     )
     if stop_requested() or result.stopped_reason == "user_stop":
-        raise InterruptedError("Critic diagnostic rollout canceled")
+        raise InterruptedError("Tool rollout canceled")
     return recorder, result
 
 
-def _catalog(spec: dict, directory: Path):
+def frozen_catalog(spec: dict, directory: Path):
     from studio.policies.snapshots import catalog_from_snapshot
     return catalog_from_snapshot(spec["policy_snapshot"], directory / ".empty-policy-registry")
 
 
-def rollout(spec: dict, directory: Path, *, stop_requested=lambda: False) -> Path:
+def simulate(spec: dict, directory: Path, *, stop_requested=lambda: False, query=_predict):
+    """One episode of the frozen policy and task in ``spec``; ``query(provider, observation,
+    prompt)`` returns each action chunk. Returns (recorder, loop result, provider metadata)."""
     import sim.env as direct
-    from sim.control import confirmed_success_step
-    from sim.recording import save_trajectory_bundle
     from studio.policies.router import PolicyProvider
     from studio.services.task_registry import TaskSnapshot
     from sim.simulator import LiberoXSimulator
-    from core.config import LoadedConfig, load_train_config
-    from core.data import prepare_dataset
 
     policy, task, settings = spec["policy_snapshot"], spec["task_snapshot"], spec["rollout"]
     if stop_requested():
-        raise InterruptedError("Critic diagnostic canceled before rollout")
-    catalog = _catalog(spec, directory)
+        raise InterruptedError("Tool canceled before rollout")
+    catalog = frozen_catalog(spec, directory)
     base = direct.load_config(direct.DEFAULT_CONFIG_PATH.resolve())
     config = replace(base, checkpoint=policy["base_checkpoint"], stats_key=policy["stats_key"],
         level=task["level"], task_name=task["task_name"], max_steps=settings["max_steps"],
@@ -114,15 +115,15 @@ def rollout(spec: dict, directory: Path, *, stop_requested=lambda: False) -> Pat
     if "task_revision_sha256" in task:
         frozen = TaskSnapshot.load(runtime, directory / "task_snapshot" / "task.json")
         if frozen.manifest["task_revision_sha256"] != task["task_revision_sha256"]:
-            raise ValueError("Diagnostic task snapshot changed after registration")
+            raise ValueError("Tool task snapshot changed after registration")
         bddl, init = frozen.paths(task["task_id"])
         if (Path(task["bddl_path"]), Path(task["init_path"])) != (bddl, init):
-            raise ValueError("Diagnostic task paths differ from their frozen snapshot")
+            raise ValueError("Tool task paths differ from their frozen snapshot")
     else:
         bddl, init = Path(task["bddl_path"]), Path(task["init_path"])
     states = direct.load_initial_states(runtime, init)
     if settings["init_state_index"] >= len(states):
-        raise ValueError("Diagnostic init state is out of range")
+        raise ValueError("Tool init state is out of range")
     simulator = LiberoXSimulator(runtime)
     provider = PolicyProvider(runtime, config, catalog)
     env = None
@@ -142,7 +143,7 @@ def rollout(spec: dict, directory: Path, *, stop_requested=lambda: False) -> Pat
         env = simulator.create(bddl, config, max_steps=settings["max_steps"], seed=settings["seed"])
         recorder, result = collect_episode(simulator=simulator, provider=provider, env=env,
             initial_state=states[settings["init_state_index"]], prompt=task["prompt"],
-            settings=settings, stop_requested=stop_requested, progress=progress)
+            settings=settings, stop_requested=stop_requested, progress=progress, query=query)
         metadata = provider.metadata()
     finally:
         try:
@@ -150,7 +151,19 @@ def rollout(spec: dict, directory: Path, *, stop_requested=lambda: False) -> Pat
         finally:
             if env is not None:
                 direct.close_env(env)
-    _catalog(spec, directory)  # No fallback if weights changed during rollout.
+    frozen_catalog(spec, directory)  # No fallback if weights changed during rollout.
+    return recorder, result, metadata
+
+
+def rollout(spec: dict, directory: Path, *, stop_requested=lambda: False) -> Path:
+    from sim.control import confirmed_success_step
+    from sim.recording import save_trajectory_bundle
+    from core.config import LoadedConfig, load_train_config
+    from core.data import prepare_dataset
+
+    policy, task, settings = spec["policy_snapshot"], spec["task_snapshot"], spec["rollout"]
+    recorder, result, metadata = simulate(spec, directory, stop_requested=stop_requested)
+    artifacts = Path(spec["artifacts_dir"])
     training = load_train_config(Path(spec["training_config"]))
     identifier = f"{spec['job_id']}_rollout"
     run_dir = directory / "probe" / "runs" / identifier
@@ -180,8 +193,8 @@ def rollout(spec: dict, directory: Path, *, stop_requested=lambda: False) -> Pat
     probe = directory / "probe" / "config.yaml"
     atomic_write_yaml(probe, raw)
     prepare_dataset(LoadedConfig(probe, raw))  # No reward materialization for the probe.
-    progress({"phase": "rollout_complete", "rollout_step": recorder.action_count,
-              "rollout_steps": settings["max_steps"]})
+    atomic_write_json(artifacts / "progress.json", {"phase": "rollout_complete",
+        "rollout_step": recorder.action_count, "rollout_steps": settings["max_steps"]})
     return probe
 
 
@@ -189,7 +202,7 @@ def fit(spec: dict, directory: Path, *, stop_requested=lambda: False) -> dict:
     from core.config import load_train_config
     from train.critic_diagnostics import run_critic_diagnostic
 
-    _catalog(spec, directory)
+    frozen_catalog(spec, directory)
     output = Path(spec["artifacts_dir"])
     os.environ.setdefault("MPLCONFIGDIR", str(directory / "matplotlib"))
     training = load_train_config(Path(spec["training_config"]))
@@ -206,7 +219,7 @@ def fit(spec: dict, directory: Path, *, stop_requested=lambda: False) -> dict:
     summary = run_critic_diagnostic(training, probe, output, **spec["critic"],
         device=training.section("training")["device"], stop_requested=stop_requested,
         progress=progress)
-    _catalog(spec, directory)
+    frozen_catalog(spec, directory)
     summary.update(policy_id=spec["policy_snapshot"]["policy_id"],
                    policy_content_sha256=spec["policy_snapshot"]["content_sha256"],
                    dataset_id=spec["dataset_id"], dataset_name=spec["dataset_name"],

@@ -36,5 +36,17 @@
 .tool-history tr.selected { background: var(--blue-soft); }
 .tool-history td strong, .tool-history td small { display: block; }
 .tool-history td small { margin-top: 5px; color: var(--muted); font: 10px ui-monospace, monospace; }
-@media (max-width: 1000px) { .tool-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tool-plots { grid-template-columns: 1fr; } }
+.return-replay { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 16px; align-items: start; }
+.return-replay video { display: block; width: 100%; border-radius: 11px; background: #000; }
+.return-charts { min-width: 0; display: grid; gap: 10px; }
+.return-charts svg { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+.return-charts svg[aria-label="选中块回报分布随时间变化"] { cursor: pointer; }
+.return-axis line { stroke: #8a94a3; }
+.return-axis text, .return-tick { font-size: 10px; fill: #6b7280; }
+.return-status { margin: 0; font-size: 13px; line-height: 1.6; }
+.return-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; color: var(--muted); font-size: 12px; }
+.return-legend i { display: inline-block; width: 14px; height: 8px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
+.return-legend i.dotted, .return-legend i.dashed { height: 0; border-top: 2px dotted; border-radius: 0; background: none; }
+.return-legend i.dashed { border-top-style: dashed; }
+@media (max-width: 1000px) { .tool-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tool-plots, .return-replay { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .tool-form { grid-template-columns: 1fr; } .tool-actions { align-items: stretch; flex-direction: column; } }

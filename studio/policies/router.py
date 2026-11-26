@@ -52,6 +52,13 @@ class PolicyProvider:
     def predict(self, *args, **kwargs):
         return self.provider.predict(*args, **kwargs)
 
+    def predict_with_selection(self, *args, **kwargs):
+        """Actions plus every critic-scored candidate; only critic-selected policies support it."""
+        method = getattr(self.provider, "predict_with_selection", None)
+        if method is None:
+            raise ValueError(f"{self.family} policies do not report critic selections")
+        return method(*args, **kwargs)
+
     def process_action(self, action):
         return self.provider.process_action(action)
 

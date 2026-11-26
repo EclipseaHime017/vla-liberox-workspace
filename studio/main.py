@@ -5,7 +5,6 @@ from __future__ import annotations
 from core.paths import WEB
 import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
@@ -33,6 +32,7 @@ from studio.services.run_service import RunService
 from studio.services.dataset_export_service import DatasetExportService
 from studio.services.offline_job_service import OfflineJobService
 from studio.services.critic_diagnostic_service import CriticDiagnosticService
+from studio.services.return_distribution_service import ReturnDistributionService
 from studio.services.training_dataset_service import TrainingDatasetService
 from studio.services.trajectory_evaluation_service import TrajectoryEvaluationService
 from studio.services.robometer_evaluation_service import RobometerEvaluationService
@@ -84,6 +84,7 @@ def create_app(
                     stage_annotations=app.state.stage_annotation_service,
                 )
                 app.state.critic_diagnostic_service = CriticDiagnosticService(app.state.offline_job_service)
+                app.state.return_distribution_service = ReturnDistributionService(app.state.offline_job_service)
                 worker.gpu_guard = app.state.offline_job_service.assert_simulation_allowed
                 worker.work_queue = app.state.offline_job_service
                 app.state.dataset_export_service = DatasetExportService(
@@ -96,6 +97,7 @@ def create_app(
                 app.state.robometer_evaluation_service = None
                 app.state.offline_job_service = None
                 app.state.critic_diagnostic_service = None
+                app.state.return_distribution_service = None
                 app.state.stage_annotation_service = None
             try:
                 yield
@@ -129,6 +131,7 @@ def create_app(
     app.include_router(offline_jobs.router)
     app.include_router(methods.router)
     app.include_router(tools.router)
+    app.include_router(tools.returns_router)
     app.include_router(policies.router)
     app.include_router(websocket.router)
 

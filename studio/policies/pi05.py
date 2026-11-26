@@ -99,6 +99,14 @@ class Pi05PolicyProvider:
             self._send({"op": "seed", "seed": int(seed)})
 
     def predict(self, observation, prompt, disabled_policy_cameras=()):
+        return self._infer(observation, prompt, disabled_policy_cameras, details=False)
+
+    def predict_with_selection(self, observation, prompt, disabled_policy_cameras=()):
+        """(actions, selection) of a critic-selected policy: every sampled candidate chunk,
+        its critic score and the index of the executed one."""
+        return self._infer(observation, prompt, disabled_policy_cameras, details=True)
+
+    def _infer(self, observation, prompt, disabled_policy_cameras, *, details):
         with self._lock:
             if not self.loaded:
                 raise RuntimeError("π₀.₅ is not loaded")
@@ -117,13 +125,33 @@ class Pi05PolicyProvider:
             ]).astype(np.float32)
             buffer = io.BytesIO()
             np.savez(buffer, **images)
-            result = self._send({"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(),
-                                 "prompt": prompt})
+            selector = getattr(self.current_policy_entry, "selector", None)
+            if details and not selector:
+                raise ValueError("The selected π₀.₅ policy has no critic selection to report")
+            request = {"op": "infer", "arrays": base64.b64encode(buffer.getvalue()).decode(), "prompt": prompt}
+            result = self._send({**request, "selection_details": True} if details else request)
+            shape = (contract["io"]["native_action_horizon"], contract["io"]["action_dim"])
             actions = np.asarray(result["actions"], dtype=np.float32)
-            if actions.shape != (contract["io"]["native_action_horizon"], contract["io"]["action_dim"]) or not np.isfinite(actions).all():
+            if actions.shape != shape or not np.isfinite(actions).all():
                 self.unload()
                 raise ValueError("Invalid π₀.₅ action chunk")
-            return actions
+            if not details:
+                return actions
+            try:
+                selection = {"candidates": np.asarray(result["selection"]["candidates"], dtype=np.float32),
+                             "scores": np.asarray(result["selection"]["scores"], dtype=np.float32),
+                             "chosen": result["selection"]["chosen"]}
+            except (KeyError, TypeError, ValueError) as exc:
+                self.unload()
+                raise ValueError("π₀.₅ worker returned no valid critic selection") from exc
+            count, chosen = selector["num_samples"], selection["chosen"]
+            if (selection["candidates"].shape != (count, *shape) or selection["scores"].shape != (count,)
+                    or type(chosen) is not int or not 0 <= chosen < count
+                    or not np.isfinite(selection["candidates"]).all() or not np.isfinite(selection["scores"]).all()
+                    or not np.array_equal(selection["candidates"][chosen], actions)):
+                self.unload()
+                raise ValueError("Invalid π₀.₅ critic selection")
+            return actions, selection
 
     def process_action(self, action):
         action = np.asarray(action, dtype=np.float32)

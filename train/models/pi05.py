@@ -296,14 +296,24 @@ def next_action_sampler(components) -> NextActionSampler:
     return NextActionSampler(components)
 
 
-def choose_chunk(components, critic, selector: dict, observation: dict) -> np.ndarray:
-    """Sample ``selector['num_samples']`` chunks and return the one the exported critic prefers."""
+def select_chunk(components, critic, selector: dict, observation: dict) -> tuple[np.ndarray, np.ndarray, int]:
+    """Sample ``selector['num_samples']`` chunks and score them with the exported critic.
+
+    Returns every candidate (N, native_horizon, action_dim), their scores (N,) and the index
+    of the chunk to execute.
+    """
     from train.methods.selectors import choose
     candidates = sample_chunks(components, [observation], selector["num_samples"])[0]
-    index, _ = choose(critic, selector, candidates, agent=observation["observation/image"],
-                      wrist=observation["observation/wrist_image"], raw_proprio=observation["observation/state"],
-                      action_stats=components.action_stats,
-                      proprio_stats=components.proprio_stats, process_action=process_action)
+    index, scores = choose(critic, selector, candidates, agent=observation["observation/image"],
+                           wrist=observation["observation/wrist_image"], raw_proprio=observation["observation/state"],
+                           action_stats=components.action_stats,
+                           proprio_stats=components.proprio_stats, process_action=process_action)
+    return candidates, scores.numpy(), index
+
+
+def choose_chunk(components, critic, selector: dict, observation: dict) -> np.ndarray:
+    """The chunk the exported critic prefers among ``selector['num_samples']`` samples."""
+    candidates, _, index = select_chunk(components, critic, selector, observation)
     return candidates[index]
 
 

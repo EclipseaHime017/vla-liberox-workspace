@@ -458,7 +458,8 @@ class ValueFlowCritic(nn.Module):
         bounds = None if self.return_bounds is None else list(self.return_bounds)
         return {"kind": "value_flow",
                 "settings": {**self.geometry, "image_size": int(image_size), "q_agg": self.q_agg,
-                             "return_bounds": bounds},
+                             "ret_agg": self.ret_agg, "num_flow_steps": self.steps,
+                             "discount": self.discount, "return_bounds": bounds},
                 "state": module_state(self, ("flow1", "flow2"))}
 
     def checkpoint(self) -> dict[str, Any]:
@@ -480,15 +481,36 @@ class ValueFlowScorer(nn.Module):
         bounds = settings["return_bounds"]
         self.bounds = None if bounds is None else tuple(bounds)
 
+    def _clip(self, returns: torch.Tensor) -> torch.Tensor:
+        return returns if self.bounds is None else returns.clamp(*self.bounds)
+
     @torch.no_grad()
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         inputs = (batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
         noise = torch.randn(len(batch["pixels"]), 1, device=batch["pixels"].device)
+        values = [self._clip(noise + flow.field(noise, torch.zeros_like(noise), flow.condition(*inputs)))
+                  for flow in (self.flow1, self.flow2)]
+        return _aggregate(*values, self.settings["q_agg"]).squeeze(-1)
+
+    @torch.no_grad()
+    def sample_returns(self, batch: dict[str, torch.Tensor], count: int,
+                       generator: torch.Generator | None = None) -> torch.Tensor:
+        """``count`` samples of each chunk's return distribution, shape (B, count).
+
+        Both flows integrate the same noise over ``num_flow_steps`` Euler steps (as
+        ``ValueFlowCritic.integrate``) and are aggregated per sample with ``ret_agg``.
+        """
+        inputs = (batch["pixels"], batch["proprio"], batch["actions"], batch["action_mask"])
+        noise = torch.randn(len(batch["pixels"]), count, generator=generator).to(batch["pixels"].device)
+        steps = int(self.settings["num_flow_steps"])
         values = []
         for flow in (self.flow1, self.flow2):
-            value = noise + flow.field(noise, torch.zeros_like(noise), flow.condition(*inputs))
-            values.append(value if self.bounds is None else value.clamp(*self.bounds))
-        return _aggregate(*values, self.settings["q_agg"]).squeeze(-1)
+            condition, returns = flow.condition(*inputs), noise
+            for index in range(steps):
+                times = torch.full_like(noise, index / steps)
+                returns = self._clip(returns + flow.field(returns, times, condition) / steps)
+            values.append(returns)
+        return _aggregate(*values, self.settings["ret_agg"])
 
 
 def advantage_weights(advantage: torch.Tensor, beta: float, maximum: float) -> torch.Tensor:

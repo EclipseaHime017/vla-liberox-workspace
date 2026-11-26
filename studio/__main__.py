@@ -5,6 +5,7 @@ COMMANDS = {
     "serve": ("studio.commands.serve", "Start the simulation, takeover and data Web UI (default)"),
     "evaluate-policies": ("studio.commands.evaluate_policies", "Run one batch policy evaluation"),
     "critic-diagnostic": ("studio.commands.critic_diagnostic", "Run one critic diagnostic phase"),
+    "return-distribution": ("studio.commands.return_distribution", "Run one return distribution tool phase"),
     "migrate-run-layout": ("studio.commands.migrate_run_layout", "Preview, apply or roll back the recording layout"),
     "setup-factr": ("studio.commands.setup_factr", "Install or check the pinned FACTR runtime"),
     "check-factr": ("studio.commands.check_factr", "Interactive FACTR calibration and control check"),

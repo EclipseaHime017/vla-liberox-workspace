@@ -16,6 +16,7 @@ import yaml
 from studio.storage.files import atomic_write_json, atomic_write_yaml
 from studio.storage.paths import storage_path
 from studio.services.offline_job_service import _sha256, _stable_hash
+from studio.services.tool_jobs import ToolJobService, read_json
 
 
 ARTIFACTS = frozenset({
@@ -23,15 +24,6 @@ ARTIFACTS = frozenset({
     "effective_config.yaml",
 })
 REWARD_SOURCES = ("final", "rynnvalue", "stage", "sparse")
-
-
-def _read_json(path: Path, *, limit: int = 2_000_000) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
-        raise ValueError(f"Missing, unsafe, or oversized diagnostic metadata: {path.name}")
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"Diagnostic metadata must be an object: {path.name}")
-    return value
 
 
 def _sealed_bytes(path: str | Path, expected: str) -> bytes:
@@ -44,9 +36,14 @@ def _sealed_bytes(path: str | Path, expected: str) -> bytes:
     return value
 
 
-class CriticDiagnosticService:
+class CriticDiagnosticService(ToolJobService):
+    KIND = "critic_diagnostic"
+    ROUTE = "/api/tools/critic"
+    ARTIFACTS = ARTIFACTS
+    DETAILS = {"summary.json": "diagnostic_summary", "progress.json": "critic_progress"}
+
     def __init__(self, jobs):
-        self.jobs = jobs
+        super().__init__(jobs)
         self.datasets = jobs.datasets
 
     def defaults(self, dataset_id: str | None = None) -> dict[str, Any]:
@@ -91,7 +88,7 @@ class CriticDiagnosticService:
                 entry[path_key] = str(target.resolve())
         if manifest.get("stage_annotations_path"):
             original = Path(manifest["stage_annotations_path"])
-            annotations = _read_json(original, limit=50_000_000)
+            annotations = read_json(original, limit=50_000_000)
             if _stable_hash(annotations) != manifest.get("stage_annotations_sha256"):
                 raise ValueError("Saved Stage annotations failed integrity validation")
             target = destination / "stage_annotations.json"
@@ -192,54 +189,3 @@ class CriticDiagnosticService:
             finally:
                 if not published and directory.exists():
                     shutil.rmtree(directory)
-
-    def _owned_job(self, job_id: str) -> tuple[Path, dict]:
-        path, job = self.jobs._load_job(job_id)
-        directory = self.jobs.jobs_root / job_id
-        if (job.get("kind") != "critic_diagnostic" or directory.is_symlink()
-                or directory.resolve().parent != self.jobs.jobs_root.resolve()):
-            raise ValueError("This is not an owned critic diagnostic job")
-        return path, job
-
-    def list(self) -> dict[str, list]:
-        return {"jobs": [job for job in self.jobs.list() if job.get("kind") == "critic_diagnostic"]}
-
-    def artifact(self, job_id: str, filename: str) -> Path:
-        self._owned_job(job_id)
-        if filename not in ARTIFACTS:
-            raise ValueError("Unknown critic diagnostic artifact")
-        directory = self.jobs.jobs_root / job_id
-        path = directory / filename if filename == "effective_config.yaml" else directory / "artifacts" / filename
-        if (path.is_symlink() or path.parent.is_symlink() or not path.is_file()
-                or not path.resolve().is_relative_to(directory.resolve())):
-            raise FileNotFoundError(f"Diagnostic artifact is missing or unsafe: {filename}")
-        return path
-
-    def get(self, job_id: str) -> dict[str, Any]:
-        self._owned_job(job_id)
-        result = self.jobs.get(job_id)
-        result["artifacts"] = {}
-        for filename in sorted(ARTIFACTS):
-            try:
-                self.artifact(job_id, filename)
-            except FileNotFoundError:
-                continue
-            result["artifacts"][filename] = f"/api/tools/critic/{job_id}/artifacts/{filename}"
-        for filename, key in (("summary.json", "diagnostic_summary"), ("progress.json", "critic_progress")):
-            path = self.jobs.jobs_root / job_id / "artifacts" / filename
-            if path.exists():
-                try:
-                    if path.parent.is_symlink():
-                        continue
-                    result[key] = _read_json(path)
-                except (ValueError, OSError, json.JSONDecodeError):
-                    continue
-        return result
-
-    def stop(self, job_id: str) -> dict:
-        self._owned_job(job_id)
-        return self.jobs.stop(job_id)
-
-    def delete(self, job_id: str, confirmation: str) -> dict:
-        self._owned_job(job_id)
-        return self.jobs.delete_job(job_id, confirmation)

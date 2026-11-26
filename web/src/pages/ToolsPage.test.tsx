@@ -1,12 +1,15 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bootstrap, OfflineJob, TrainingDataset } from "../features/run-control/types";
-import type { CriticDefaults, CriticDiagnostic } from "../features/tools/api";
+import type { CriticDefaults, CriticDiagnostic, ReturnData, ReturnDistribution } from "../features/tools/api";
 
 const mocks = vi.hoisted(() => ({
   getBootstrap: vi.fn(), listTrainingDatasets: vi.fn(), getCriticDefaults: vi.fn(),
   listCriticDiagnostics: vi.fn(), getCriticDiagnostic: vi.fn(), startCriticDiagnostic: vi.fn(),
   stopCriticDiagnostic: vi.fn(), deleteCriticDiagnostic: vi.fn(),
+  getReturnDefaults: vi.fn(), listReturnDistributions: vi.fn(), getReturnDistribution: vi.fn(),
+  startReturnDistribution: vi.fn(), stopReturnDistribution: vi.fn(), deleteReturnDistribution: vi.fn(),
+  getReturnData: vi.fn(),
 }));
 vi.mock("../features/run-control/api", () => ({ getBootstrap: mocks.getBootstrap, listTrainingDatasets: mocks.listTrainingDatasets }));
 vi.mock("../features/tools/api", () => mocks);
@@ -43,6 +46,8 @@ describe("critic diagnostic tools", () => {
     mocks.getCriticDiagnostic.mockResolvedValue(job);
     mocks.stopCriticDiagnostic.mockResolvedValue({ ...job, status: "CANCELED" });
     mocks.deleteCriticDiagnostic.mockResolvedValue({ deleted: job.id });
+    mocks.getReturnDefaults.mockResolvedValue({ return_samples: 256, policy_ids: ["vf"] });
+    mocks.listReturnDistributions.mockResolvedValue({ jobs: [] });
   });
 
   it("submits existing dataset rewards and model-owned execution settings without actor options", async () => {
@@ -224,5 +229,66 @@ describe("critic diagnostic tools", () => {
     await waitFor(() => expect(mocks.deleteCriticDiagnostic).toHaveBeenCalledExactlyOnceWith("critic-1"));
     await screen.findByText("暂无诊断记录。");
     expect(screen.queryByTestId("job-monitor")).toBeNull();
+  });
+
+  it("offers only models with a Value Flows critic and submits a rollout analysis", async () => {
+    const vf = { ...policy, policy_id: "vf", label: "VF model", algorithm: "vf",
+      inference: { open_loop_steps: 10, max_open_loop_steps: 50 } };
+    mocks.getBootstrap.mockResolvedValue({ ...bootstrap, policy_catalog: [policy, vf] });
+    const queued = { ...job, id: "returns-1", kind: "return_distribution" } as ReturnDistribution;
+    mocks.startReturnDistribution.mockResolvedValue(queued);
+    mocks.getReturnDistribution.mockResolvedValue(queued);
+    render(<ToolsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "VF 回报分布" }));
+    const start = screen.getByRole("button", { name: "开始分析" }) as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    const model = within(screen.getByRole("region", { name: "回报分布配置" })).getByLabelText("模型");
+    expect([...model.querySelectorAll("option")].map((option) => option.textContent)).toEqual(["VF model"]);
+    expect((screen.getByLabelText("每次预测执行步数") as HTMLInputElement).value).toBe("10");
+    fireEvent.change(screen.getByLabelText("每个分布采样数"), { target: { value: "8" } });
+    expect(start.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("每个分布采样数"), { target: { value: "128" } });
+    fireEvent.click(start);
+    await waitFor(() => expect(mocks.startReturnDistribution).toHaveBeenCalledWith({
+      task_id: "task-a", policy_id: "vf", max_steps: 300, open_loop_steps: 10, seed: 7,
+      init_state_index: 0, return_samples: 128,
+    }));
+    expect(mocks.startCriticDiagnostic).not.toHaveBeenCalled();
+  });
+
+  it("explains when no model has a Value Flows critic", async () => {
+    mocks.getReturnDefaults.mockResolvedValue({ return_samples: 256, policy_ids: [] });
+    render(<ToolsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "VF 回报分布" }));
+    await screen.findByText(/没有带 Value Flows critic 的已训练模型/);
+    expect((screen.getByRole("button", { name: "开始分析" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("replays a finished analysis in step with the rollout video", async () => {
+    const data: ReturnData = { schema_version: 1, fps: 20, action_count: 20, edges: [-2, -1, 0], samples: 4,
+      reference: { available: false, reason: "该奖励配方需要奖励模型的评价", values: null },
+      queries: [0, 10].map((step) => ({ step, chosen: 1, scores: [-1.5, -0.4], mean: [-1.5, -0.5],
+        q10: [-1.8, -0.9], median: [-1.5, -0.5], q90: [-1.2, -0.1], histograms: [[4, 0], [1, 3]] })) };
+    const finished = { ...job, id: "returns-1", kind: "return_distribution", status: "COMPLETED",
+      return_summary: { queries: 2, candidates: 2, discount: 0.99, reward_config: { source: "final" },
+        return_bounds: [-100, 0], success: false, chosen_best_mean_fraction: 1, analysis: { return_samples: 4 } },
+      artifacts: { "returns.json": "/returns.json", "rollout.mp4": "/rollout.mp4", "returns.mp4": "/returns.mp4" },
+    } as ReturnDistribution;
+    mocks.listReturnDistributions.mockResolvedValue({ jobs: [finished] });
+    mocks.getReturnDistribution.mockResolvedValue(finished);
+    mocks.getReturnData.mockResolvedValue(data);
+    render(<ToolsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "VF 回报分布" }));
+    const status = await screen.findByText(/查询/, { selector: ".return-status" });
+    expect(status.textContent).toContain("1 / 2");
+    expect(mocks.getReturnData).toHaveBeenCalledWith("/returns.json");
+    expect(screen.getByText(/未画实际回报/).textContent).toContain("奖励模型的评价");
+    expect(screen.getByRole("link", { name: "回报分布视频" }).getAttribute("href")).toBe("/returns.mp4");
+    expect(screen.getByText("100%")).toBeTruthy();
+    const video = document.querySelector(".return-replay video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { value: 0.6, configurable: true });
+    fireEvent.timeUpdate(video);
+    expect(status.textContent).toContain("2 / 2");
+    expect(status.textContent).toContain("第 10 步");
   });
 });

@@ -11,6 +11,9 @@ from pathlib import Path
 from studio.exceptions import ConflictError
 from studio.services.policy_management_service import PolicyManagementService
 
+# Queue-backed analysis tools whose job directory holds every result.
+TOOL_KINDS = frozenset({"critic_diagnostic", "return_distribution"})
+
 
 def _owned_directory(path: Path, root: Path, identifier: str) -> Path:
     if path.is_symlink() or path.name != identifier or path.resolve().parent != root.resolve():
@@ -92,8 +95,8 @@ def delete_job(service, job_id: str, confirmation: str, *, delete_exported_model
             raise ConflictError("Job must finish releasing its resources before deletion", code="JOB_ACTIVE")
         if job["kind"] == "evaluation":
             return service.delete_evaluation(job_id, confirmation)
-        if job["kind"] not in {"training", "critic_diagnostic"} and job.get("executor") != "local":
-            raise ValueError("Only training, critic diagnostics, and local task records can be deleted here")
+        if job["kind"] not in {"training", *TOOL_KINDS} and job.get("executor") != "local":
+            raise ValueError("Only training, analysis tool and local task records can be deleted here")
         if delete_exported_models and job["kind"] != "training":
             raise ValueError("Exported models can only be deleted with their training job")
         directory = _owned_directory(path.parent, service.jobs_root, job_id)

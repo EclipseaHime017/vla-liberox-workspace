@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  deleteCriticDiagnostic, getCriticDefaults, getCriticDiagnostic, listCriticDiagnostics,
-  startCriticDiagnostic, stopCriticDiagnostic,
+  deleteCriticDiagnostic, deleteReturnDistribution, getCriticDefaults, getCriticDiagnostic, getReturnDefaults,
+  getReturnDistribution, listCriticDiagnostics, listReturnDistributions, startCriticDiagnostic,
+  startReturnDistribution, stopCriticDiagnostic, stopReturnDistribution,
 } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -31,5 +32,25 @@ describe("critic diagnostic API", () => {
       max_steps: 300, open_loop_steps: 10, seed: 7, init_state_index: 0, train_steps: 3000, batch_size: 32 };
     expect(await startCriticDiagnostic(body)).toEqual({ id: "critic-1" });
     expect(fetch).toHaveBeenCalledWith("/api/tools/critic", expect.objectContaining({ method: "POST", body: JSON.stringify(body) }));
+  });
+
+  it("keeps return distribution jobs under their own tool endpoints", async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal("fetch", fetch);
+    const body = { task_id: "task", policy_id: "vf", max_steps: 300, open_loop_steps: 10, seed: 0,
+      init_state_index: 0, return_samples: 256 };
+    await getReturnDefaults();
+    await startReturnDistribution(body);
+    await listReturnDistributions();
+    await getReturnDistribution("returns / one");
+    await stopReturnDistribution("returns / one");
+    await deleteReturnDistribution("returns / one");
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      "/api/tools/returns/defaults", "/api/tools/returns", "/api/tools/returns",
+      "/api/tools/returns/returns%20%2F%20one", "/api/tools/returns/returns%20%2F%20one/stop",
+      "/api/tools/returns/returns%20%2F%20one",
+    ]);
+    expect(fetch.mock.calls[1][1]).toMatchObject({ method: "POST", body: JSON.stringify(body) });
+    expect(fetch.mock.calls[5][1]).toMatchObject({ method: "DELETE", body: JSON.stringify({ confirm_job_id: "returns / one" }) });
   });
 });

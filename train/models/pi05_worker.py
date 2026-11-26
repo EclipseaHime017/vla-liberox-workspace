@@ -85,12 +85,18 @@ def main():
             with np.load(io.BytesIO(base64.b64decode(request["arrays"])), allow_pickle=False) as arrays:
                 observation = {name: arrays[name] for name in arrays.files}
             observation["prompt"] = request["prompt"]
+            details = None
             with contextlib.redirect_stdout(sys.stderr):
-                actions = (policy.infer(observation)["actions"] if selection is None else
-                           pi05.choose_chunk(components, *selection, observation))
+                if selection is None:
+                    actions = policy.infer(observation)["actions"]
+                else:
+                    candidates, scores, index = pi05.select_chunk(components, *selection, observation)
+                    actions = candidates[index]
+                    if request.get("selection_details"):
+                        details = {"candidates": candidates.tolist(), "scores": scores.tolist(), "chosen": index}
             if actions.shape != (contract["native_action_horizon"], contract["action_dim"]) or not np.isfinite(actions).all():
                 raise ValueError(f"π₀.₅ returned invalid actions: {actions.shape}")
-            reply({"actions": actions.tolist()})
+            reply({"actions": actions.tolist()} if details is None else {"actions": actions.tolist(), "selection": details})
     except Exception as exc:
         reply({"error": f"{type(exc).__name__}: {exc}"})
         raise

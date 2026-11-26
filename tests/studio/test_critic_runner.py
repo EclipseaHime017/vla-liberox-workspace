@@ -168,7 +168,7 @@ def worker_spec(tmp_path, settings, monkeypatch):
     monkeypatch.setattr(tasks.TaskSnapshot, "load", lambda *_: SimpleNamespace(
         paths=lambda _: (bddl, init), manifest={"task_revision_sha256": task["task_revision_sha256"]}))
     catalog_calls = []
-    monkeypatch.setattr(runner, "_catalog", lambda *args: catalog_calls.append(args) or "catalog")
+    monkeypatch.setattr(runner, "frozen_catalog", lambda *args: catalog_calls.append(args) or "catalog")
     closed = []
     monkeypatch.setattr(direct, "close_env", closed.append)
     return spec, directory, simulator, provider, catalog_calls, closed
@@ -243,7 +243,7 @@ def test_rollout_rechecks_identity_before_publishing_probe(worker_spec, monkeypa
         if len(checks) == 2:
             raise ValueError("Selected policy weights changed after rollout")
         return "catalog"
-    monkeypatch.setattr(runner, "_catalog", check)
+    monkeypatch.setattr(runner, "frozen_catalog", check)
     with pytest.raises(ValueError, match="changed after rollout"):
         runner.rollout(spec, directory)
     assert provider.unloaded is True and closed == [simulator.env]
@@ -420,10 +420,10 @@ def test_catalog_rejects_changed_snapshot_content(tmp_path):
     settings, _ = checkpoint(tmp_path)
     catalog = PolicyCatalog(tmp_path / "registry", base_models={settings["base_id"]: settings})
     selected = snapshot(catalog.select(settings["base_id"]))
-    runner._catalog({"policy_snapshot": selected}, tmp_path)
+    runner.frozen_catalog({"policy_snapshot": selected}, tmp_path)
     selected["content_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="changed"):
-        runner._catalog({"policy_snapshot": selected}, tmp_path)
+        runner.frozen_catalog({"policy_snapshot": selected}, tmp_path)
 
 
 def test_cli_cancellation_returns_130_and_invokes_one_phase(worker_spec, monkeypatch):

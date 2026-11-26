@@ -72,7 +72,7 @@ class TrainingAlgorithm(Protocol):
 
 ## 带 critic 的导出与推理
 
-`exports_critic` 的方法导出时，`policy.yaml` 额外包含 `critic: critic.pt` 和 `selector: {kind, num_samples}`，critic 文件计入 `component_sha256`；`selector` 也计入平台的模型内容身份。`critic.pt` 只含张量和普通设置，用 `weights_only=True` 加载。
+`exports_critic` 的方法导出时，`policy.yaml` 额外包含 `critic: critic.pt` 和 `selector: {kind, num_samples}`，critic 文件计入 `component_sha256`；`selector` 也计入平台的模型内容身份。`critic.pt` 只含张量和普通设置，用 `weights_only=True` 加载。VF 的 critic 另外记录它建模的回报：折扣、奖励配方、成功判定步数、flow 积分步数和聚合方式，平台的「VF 回报分布」工具据此采样分布并对照实际回报。
 
 推理：actor 对同一观测采样 `num_samples` 个动作块（π₀.₅ 的图像与提示词前缀只编码一次，`train/models/pi05.py` 的 `sample_chunks`）。每块取规划的前 `replay_horizon` 步（与训练转移相同），经过与环境相同的动作后处理和训练时相同的编码后由 critic 打分，选择器选出要执行的块。打分与实际执行的 `open_loop_steps` 无关：规划 10 步、执行 5 步时，critic 仍评价完整的规划块。平台（`studio/policies/pi05.py` → `train/models/pi05_worker.py`）、无头评测（`sim/runtime.py` → `evaluation_policy`）和远程推理（`cluster/remote_inference.py`）共用 `choose_chunk`。
 

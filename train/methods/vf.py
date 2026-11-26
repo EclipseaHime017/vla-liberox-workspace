@@ -22,6 +22,7 @@ from typing import Any
 import torch
 
 from core.config import LoadedConfig
+from rewards.manifest import reward_derivation_config
 from train.methods.base import CRITIC_BATCH_KEYS, NEXT_ACTOR_KEYS, weighted_masked_l1
 from train.encoding import encode_chunks
 from train.methods.critics import ValueFlowCritic
@@ -44,6 +45,10 @@ class ValueFlows:
             critic_optimizer=cfg["critic_optimizer"], critic_weight_decay=cfg["critic_weight_decay"],
             critic_max_grad_norm=cfg["critic_max_grad_norm"],
         ).to(device)
+        # The returns this critic models; exported so its distribution can be compared with
+        # realized returns of the same reward recipe.
+        self.returns = {"reward_config": reward_derivation_config(reward),
+                        "success_consecutive_steps": int(data["success_consecutive_steps"])}
         self.sampler = None
 
     def bind_actor_sampler(self, sampler) -> None:
@@ -96,8 +101,9 @@ class ValueFlows:
         self.agent.restore(state)
 
     def export_critic(self) -> dict[str, Any]:
-        return {"schema_version": CRITIC_SCHEMA_VERSION,
-                **self.agent.inference_payload(self.cfg["critic_image_size"])}
+        payload = self.agent.inference_payload(self.cfg["critic_image_size"])
+        payload["settings"].update(self.returns)
+        return {"schema_version": CRITIC_SCHEMA_VERSION, **payload}
 
     @staticmethod
     def selector(config: LoadedConfig) -> dict[str, Any]:
